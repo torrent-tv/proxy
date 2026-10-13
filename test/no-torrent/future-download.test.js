@@ -111,3 +111,31 @@ test("equal priorities preserve required times instead of pricing the whole film
     urgency: 0, priority: 100, deadlineAt: 1000 + piece * 10000 });
   assert.deepEqual([...((await forecast(entry)).arrivals.values())], [2500, 4500, 6500]);
 });
+
+test("the nearest piece queued on a slow wire keeps its queue's time while a fast peer brings the next", async () => {
+  // Its blocks are reserved to the slow wire: the fast one cannot bring them
+  // sooner (torrent-tv/meta#178 review).
+  const entry = state();
+  entry.wire.downloadSpeed = () => BLOCK / 2;
+  entry.wire.peerPieces = { get: index => index === 0 };
+  entry.wire.requests.push({ piece: 0, offset: 0, length: 2 * BLOCK });
+  entry.torrent.wires.push({ requests: [], downloadSpeed: () => 10 * BLOCK, peerPieces: { get: () => true } });
+  const arrivals = (await forecast(entry)).arrivals;
+  assert.equal(arrivals.get(0), 4500);
+  assert.equal(arrivals.get(1), 700);
+  assert.equal(arrivals.get(2), 900);
+});
+
+test("a peer choking us brings nothing but the pieces it allows, whatever it carried before", async () => {
+  const entry = state();
+  entry.wire.downloadSpeed = () => 10 * BLOCK;
+  entry.wire.peerPieces = { get: () => true };
+  entry.wire.peerChoking = true;
+  assert.deepEqual([...(await forecast(entry)).arrivals.values()], [null, null, null]);
+  entry.wire.hasFast = true;
+  entry.wire.peerAllowedFastSet = [0];
+  const arrivals = (await forecast(entry)).arrivals;
+  assert.equal(arrivals.get(0), 700);
+  // The rest waits behind a piece nobody can be asked for.
+  assert.equal(arrivals.get(1), null);
+});

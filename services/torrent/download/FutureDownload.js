@@ -8,7 +8,10 @@ const BLOCK_BYTES = 16 * 1024;
 /** Estimate completion from observed queues and the public selection bands.
  * The native picker takes a band's pieces from its first up (the `sequential`
  * strategy), so an unqueued piece arrives after the band's pieces before it.
- * Pieces without a measured supplier remain unknown. No requests are changed.
+ * A piece whose every missing block is asked for arrives when its queues say,
+ * and is not the band's to share out. A supplier is a peer that can be asked
+ * for the piece now. Pieces without a measured supplier remain unknown. No
+ * requests are changed.
  * Times are conditional on the measured rate and successful verification.
  */
 export async function futureDownload(entries, { now = Date.now(), findStore = pieceStoreOf, isCurrent = () => true } = {}) {
@@ -78,9 +81,23 @@ export async function futureDownload(entries, { now = Date.now(), findStore = pi
         at = Math.max(at, arrival);
       }
       arrivals.set(index, at);
+      // EVERY MISSING BLOCK ASKED FOR: the queues holding them say when it
+      // arrives. Each block is reserved to the wire it was asked of, so a faster
+      // peer elsewhere does not bring it sooner, and its bytes are not the
+      // band's to share out (torrent-tv/meta#178 review, WebTorrent 2.8.5
+      // `_request`, torrent.js:1758).
+      if (at !== null) {
+        if (++steps % 256 === 0) {
+          await nextTurn();
+          if (!isCurrent()) return new Map();
+        }
+        continue;
+      }
       const remaining = piece?.missing;
       const speed = (torrent.wires ?? []).reduce((sum, wire) => {
-        if (wire.destroyed || !wire.peerPieces?.get(index)) return sum;
+        // Only a peer that can be asked for it now: one choking us is asked for
+        // nothing outside the pieces it allows, whatever it carried before.
+        if (wire.destroyed || !wire.peerPieces?.get(index) || !mayAsk(wire, index)) return sum;
         // What it carried with its queue kept full, where it has been seen so:
         // its speed while our selection gave it little measures our asking
         // (`SelectionLimit`, torrent-tv/meta#178).
@@ -107,8 +124,20 @@ export async function futureDownload(entries, { now = Date.now(), findStore = pi
   let finish = now;
   for (const { arrivals, index, seconds } of pending) {
     finish = finish === null || seconds === null ? null : finish + seconds * 1000;
-    const queuedAt = arrivals.get(index);
-    if (finish !== null) arrivals.set(index, queuedAt === null ? finish : Math.min(queuedAt, finish));
+    if (finish !== null) arrivals.set(index, finish);
   }
   return isCurrent() ? forecasts : new Map();
+}
+
+/**
+ * Whether this peer can be asked for this piece now: it is not choking us, or
+ * it allows this piece while it does (BEP 6, WebTorrent 2.8.5 `_updateWire`).
+ *
+ * @param {{ peerChoking?: boolean, hasFast?: boolean, peerAllowedFastSet?: number[] }} wire
+ * @param {number} index
+ * @returns {boolean}
+ */
+function mayAsk(wire, index) {
+  if (wire.peerChoking !== true) return true;
+  return wire.hasFast === true && Array.isArray(wire.peerAllowedFastSet) && wire.peerAllowedFastSet.includes(index);
 }

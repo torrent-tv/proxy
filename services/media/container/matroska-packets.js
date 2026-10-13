@@ -10,7 +10,7 @@ const CLUSTER = 0x1f43b675;
 const LEVEL_ONE = new Set([CLUSTER, 0x1c53bb6b, 0x114d9b74, 0x1549a966, 0x1654ae6b, 0x1043a770, 0x1941a469, 0x1254c367]);
 
 /** Index frame addresses by reading structural headers, never frame bodies. */
-export async function readMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, durationSeconds, interval, packetMemory, state = {} }) {
+export async function readMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, endSeconds, interval, packetMemory, state = {} }) {
   const reader = new ElementReader({ read: readRange, fileSize, portionBytes });
   const declared = new Map(tracks.filter(track => ["video", "audio", "subtitle"].includes(track.type)).map(track => [track.trackNumber, track]));
   if (!state.packets) {
@@ -18,7 +18,7 @@ export async function readMatroskaPackets({ readRange, fileSize, portionBytes, l
     state.at ??= layout.firstClusterAt ?? layout.segmentEnd;
   }
   const packets = state.packets;
-  if (intervalCovered(declared, packets, interval)) return buildIndex(declared, packets, durationSeconds, false, interval, packetMemory);
+  if (intervalCovered(declared, packets, interval)) return buildIndex(declared, packets, endSeconds, false, interval, packetMemory);
   let at = state.at;
   while (at < layout.segmentEnd) {
     const element = state.cluster?.element ?? await validHeader(reader, at, layout.segmentEnd);
@@ -80,14 +80,14 @@ export async function readMatroskaPackets({ readRange, fileSize, portionBytes, l
       cursor = child.end;
       state.cluster.cursor = cursor;
       state.cluster.clusterTicks = clusterTicks;
-      if (intervalCovered(declared, packets, interval)) return buildIndex(declared, packets, durationSeconds, false, interval, packetMemory);
+      if (intervalCovered(declared, packets, interval)) return buildIndex(declared, packets, endSeconds, false, interval, packetMemory);
     }
     if (cursor <= at) throw new Error("Matroska packet walk did not advance.");
     at = element.end ?? cursor;
     state.at = at;
     state.cluster = null;
   }
-  return buildIndex(declared, packets, durationSeconds, true, undefined, packetMemory);
+  return buildIndex(declared, packets, endSeconds, true, undefined, packetMemory);
 }
 
 function paddingForFrame(seconds, duration, count, frame) {
@@ -110,7 +110,7 @@ function intervalCovered(declared, packets, interval) {
   });
 }
 
-function buildIndex(declared, packets, durationSeconds, complete, interval, packetMemory) {
+function buildIndex(declared, packets, endSeconds, complete, interval, packetMemory) {
   const index = new PacketIndex();
   for (const [id, track] of declared) {
     index.declareTrack(id, { type: track.type, codecId: track.codecId, codecRanges: track.codecRanges ?? [], prerollSeconds: track.seekPrerollSeconds ?? 0, reorderDepth: track.reorderDepth ?? 0 });
@@ -120,7 +120,7 @@ function buildIndex(declared, packets, durationSeconds, complete, interval, pack
       if (stream.durationAt(position) === 0 || stream.derivedDurationAt(position)) { needsFollowing = true; break; }
     }
     if (needsFollowing) {
-      const endFor = followingPacketTime(stream, complete ? durationSeconds : null, packetMemory);
+      const endFor = followingPacketTime(stream, complete ? endSeconds : null, packetMemory);
       try { for (let position = 0; position < stream.length; position++) {
         if (stream.durationAt(position) !== 0 && !stream.derivedDurationAt(position)) continue;
         const pts = stream.ptsAt(position), end = endFor(pts);

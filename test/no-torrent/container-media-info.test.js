@@ -73,7 +73,7 @@ function readerOver(bytes) {
   return async (start, end) => bytes.subarray(start, Math.min(end + 1, bytes.length));
 }
 
-test("a Matroska file states its duration in ticks and its start in the first cluster", async () => {
+test("a Matroska file is shown from its first cluster, for as long as Duration says less what lies before it", async () => {
   const info = ebml(ID_INFO, Buffer.concat([
     ebml(ID_TIMESTAMP_SCALE, uint(1_000_000, 3)),
     // 2131 ticks of a millisecond each.
@@ -89,7 +89,8 @@ test("a Matroska file states its duration in ticks and its start in the first cl
   const read = await container.readMediaInfo();
 
   assert.equal(read.format, "matroska");
-  assert.ok(Math.abs(read.durationSeconds - 2.131) < 1e-9, `duration was ${read.durationSeconds}`);
+  // The plan's timeline begins at the first Cluster (torrent-tv/meta#178).
+  assert.ok(Math.abs(read.durationSeconds - 2.001) < 1e-9, `duration was ${read.durationSeconds}`);
   assert.ok(Math.abs(read.startTimeSeconds - 0.13) < 1e-9, `start was ${read.startTimeSeconds}`);
 });
 
@@ -149,7 +150,7 @@ function box(type, payload) {
   return Buffer.concat([header, payload]);
 }
 
-test("an MP4 states its duration in mvhd and its start in an empty edit", async () => {
+test("an MP4 is shown from the end of its empty edit, for as long as mvhd says less that edit", async () => {
   const mvhd = box("mvhd", Buffer.concat([
     Buffer.alloc(4), // version 0 + flags
     Buffer.alloc(8), // creation, modification
@@ -174,7 +175,8 @@ test("an MP4 states its duration in mvhd and its start in an empty edit", async 
   const read = await container.readMediaInfo();
 
   assert.equal(read.format, "mp4");
-  assert.ok(Math.abs(read.durationSeconds - 2) < 1e-9, `duration was ${read.durationSeconds}`);
+  // The plan's timeline begins where the empty edit ends (torrent-tv/meta#178).
+  assert.ok(Math.abs(read.durationSeconds - 1.87) < 1e-9, `duration was ${read.durationSeconds}`);
   assert.ok(Math.abs(read.startTimeSeconds - 0.13) < 1e-9, `start was ${read.startTimeSeconds}`);
 });
 
@@ -198,7 +200,61 @@ test("an MP4 with no edit list begins at zero, and that is an answer", async () 
   assert.equal(read.startTimeSeconds, 0);
 });
 
-test("an AVI states its length as microseconds per frame times the frame count", async () => {
+/** A RIFF chunk: id, little-endian size, body, and the pad byte an odd body takes. */
+function riff(id, body) {
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(body.length);
+  return Buffer.concat([Buffer.from(id, "latin1"), size, body, Buffer.alloc(body.length & 1)]);
+}
+
+/** An AVI stream's `strh`, with the fields its length is read from. */
+function streamHeader({ type, scale, rate, length, sampleSize }) {
+  const strh = Buffer.alloc(56);
+  strh.write(type, 0, "latin1");
+  strh.writeUInt32LE(scale, 20);
+  strh.writeUInt32LE(rate, 24);
+  strh.writeUInt32LE(length, 32);
+  strh.writeUInt32LE(sampleSize, 44);
+  return strh;
+}
+
+test("an AVI lasts as long as its longest stream of variable-size samples, as FFmpeg reads it", async () => {
+  // The main header says two seconds, as OpenDML has it count the first RIFF
+  // only; the streams say the film (torrent-tv/meta#178).
+  const avih = Buffer.alloc(56);
+  avih.writeUInt32LE(40_000, 0);
+  avih.writeUInt32LE(50, 16);
+  const bitmap = Buffer.alloc(40);
+  bitmap.writeUInt32LE(40, 0);
+  bitmap.writeInt32LE(320, 4);
+  bitmap.writeInt32LE(240, 8);
+  bitmap.write("XVID", 16, "latin1");
+  const wave = (tag, blockAlign) => {
+    const format = Buffer.alloc(16);
+    format.writeUInt16LE(tag, 0);
+    format.writeUInt16LE(2, 2);
+    format.writeUInt32LE(48_000, 4);
+    format.writeUInt32LE(192_000, 8);
+    format.writeUInt16LE(blockAlign, 12);
+    return format;
+  };
+  const stream = (strh, strf) => riff("LIST", Buffer.concat([Buffer.from("strl", "latin1"), riff("strh", strh), riff("strf", strf)]));
+  const hdrl = riff("LIST", Buffer.concat([Buffer.from("hdrl", "latin1"), riff("avih", avih),
+    // Picture: 75 frames at 25 fps.
+    stream(streamHeader({ type: "vids", scale: 1, rate: 25, length: 75, sampleSize: 0 }), bitmap),
+    // MP3 of variable-size frames: 130 frames of 1152 samples at 48 kHz, 3.12 s.
+    stream(streamHeader({ type: "auds", scale: 1152, rate: 48_000, length: 130, sampleSize: 0 }), wave(0x55, 1152)),
+    // PCM of fixed-size samples: FFmpeg gives it no length from its header.
+    stream(streamHeader({ type: "auds", scale: 4, rate: 192_000, length: 1_920_000, sampleSize: 4 }), wave(1, 4))]));
+  const file = riff("RIFF", Buffer.concat([Buffer.from("AVI ", "latin1"), hdrl]));
+  const container = new AviContainer({ readRange: readerOver(file), fileSize: file.length });
+  const read = await container.readMediaInfo();
+
+  assert.ok(Math.abs(read.durationSeconds - 3.12) < 1e-9, `duration was ${read.durationSeconds}`);
+  assert.equal(read.startTimeSeconds, 0);
+});
+
+test("an AVI whose streams state no length falls back to its main header", async () => {
   const avih = Buffer.concat([
     Buffer.from("avih", "latin1"),
     uint(56, 4),

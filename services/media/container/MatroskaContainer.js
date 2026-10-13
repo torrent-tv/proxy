@@ -363,10 +363,20 @@ export class MatroskaContainer extends Container {
    * Kept only once it has been read: a head that had not arrived used to leave
    * an empty answer here for the life of the container.
    *
+   * `Duration` is optional (RFC 9559 §5.1.2.4), and a file written as it was
+   * streamed states none. Such a film lasts to the end of its last frame, which
+   * the complete packet index knows: the plan asks for that index when no
+   * length is stated and then asks here again, and an answer kept from before
+   * the index ended the opening with `media-duration-unavailable`
+   * (torrent-tv/meta#178).
+   *
    * @returns {Promise<import("./Container.js").ContainerMediaInfo>}
    */
   async readMediaInfo() {
     if (this.mediaInfo) {
+      if (this.mediaInfo.durationSeconds === null && this.#packets) {
+        this.mediaInfo = { ...this.mediaInfo, durationSeconds: await this.#lastFrameEnd(this.mediaInfo.startTimeSeconds) };
+      }
       return this.mediaInfo;
     }
     /** @type {import("./Container.js").ContainerMediaInfo} */
@@ -394,8 +404,34 @@ export class MatroskaContainer extends Container {
     if (layout.firstClusterAt !== null) {
       info.startTimeSeconds = await clusterTimestampSeconds(reader, layout.firstClusterAt, layout);
     }
+    // `Duration` runs from the Segment's timestamp zero, and a muxer that keeps
+    // its source's timestamps (FFmpeg's does) puts the first Cluster later. The
+    // plan's timeline begins at that Cluster, as every other container states
+    // its length, so what lies before it is not the film's: counted in, a file
+    // starting at 5 s listed five seconds past its last frame
+    // (torrent-tv/meta#178).
+    if (info.durationSeconds !== null && info.startTimeSeconds > 0) {
+      const shown = info.durationSeconds - info.startTimeSeconds;
+      info.durationSeconds = shown > 0 ? shown : null;
+    }
+    if (info.durationSeconds === null && this.#packets) info.durationSeconds = await this.#lastFrameEnd(info.startTimeSeconds);
     this.mediaInfo = info;
     return info;
+  }
+
+  /**
+   * How long after the start of the timeline the last picture or sound frame
+   * of the complete packet index ends; null when none does.
+   *
+   * @param {number | null} startSeconds
+   */
+  async #lastFrameEnd(startSeconds) {
+    const ends = (await this.readTracks())
+      .filter(track => ["video", "audio"].includes(track.type))
+      .map(track => this.#packets.boundsOf(track.trackNumber)?.end)
+      .filter(Number.isFinite);
+    const length = ends.length > 0 ? Math.max(...ends) - (startSeconds ?? 0) : 0;
+    return length > 0 ? length : null;
   }
 
   /**
@@ -712,7 +748,9 @@ export class MatroskaContainer extends Container {
     }
     const index = await readMatroskaPackets({ readRange: this.readRange,
       fileSize: this.fileSize, portionBytes: this.portionBytes, layout, tracks,
-      durationSeconds: info.durationSeconds, interval, state, packetMemory: this.packetMemory });
+      // The last frame ends where the film does, on the packets' own clock.
+      endSeconds: info.durationSeconds === null ? null : info.durationSeconds + (info.startTimeSeconds ?? 0),
+      interval, state, packetMemory: this.packetMemory });
     if (index.isComplete() && state.startAt === layout.firstClusterAt) {
       this.#packets = index;
     }

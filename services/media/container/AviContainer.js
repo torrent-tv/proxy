@@ -304,9 +304,19 @@ export class AviContainer extends Container {
   }
 
   /**
-   * Duration from the main AVI header, per the RIFF AVI specification: the
-   * header states microseconds per frame and the total number of frames, and
-   * their product is the length.
+   * The length of the film, by the rule FFmpeg's AVI demuxer reads it with
+   * (libavformat/avidec.c n8.1, the `strh` case): a stream whose samples vary
+   * in size — every picture, and sound such as MP3 declared with
+   * `dwSampleSize` 0 — lasts `dwLength` units of its own `dwScale/dwRate`, and
+   * a stream of fixed-size samples is given no length by its header. The film
+   * lasts as long as the longest stream that has one.
+   *
+   * The main header's frame count is not that length. OpenDML has
+   * `avih.dwTotalFrames` count the first RIFF only, so a film with a second
+   * RIFF read as 8136.0 s of its 8998.1 and its last fourteen minutes were
+   * neither listed nor reachable (Home Assistant 2026-10-13,
+   * torrent-tv/meta#178). FFmpeg skips `dmlh` as well. The main header is
+   * read only when no stream states a length.
    *
    * An AVI has no edit list and no timeline offset of any kind, so its start is
    * zero — a declaration of the format itself, not an absence.
@@ -319,11 +329,17 @@ export class AviContainer extends Container {
     }
     /** @type {import("./Container.js").ContainerMediaInfo} */
     const info = { format: this.formatName, durationSeconds: null, startTimeSeconds: 0 };
-    const { avih } = await this.#readHeaders();
-    const microsecondsPerFrame = avih?.readUInt32LE(0) ?? 0;
-    const totalFrames = avih?.readUInt32LE(16) ?? 0;
-    if (microsecondsPerFrame > 0 && totalFrames > 0) {
-      info.durationSeconds = (microsecondsPerFrame * totalFrames) / 1e6;
+    const stated = (await this.readTracks())
+      .filter(track => ["video", "audio"].includes(track.type) && (track.type === "video" || track.sampleSize === 0))
+      .map(track => track.durationSeconds)
+      .filter(seconds => seconds > 0);
+    if (stated.length > 0) {
+      info.durationSeconds = Math.max(...stated);
+    } else {
+      const { avih } = await this.#readHeaders();
+      const microsecondsPerFrame = avih?.readUInt32LE(0) ?? 0;
+      const totalFrames = avih?.readUInt32LE(16) ?? 0;
+      if (microsecondsPerFrame > 0 && totalFrames > 0) info.durationSeconds = (microsecondsPerFrame * totalFrames) / 1e6;
     }
     this.mediaInfo = info;
     return info;

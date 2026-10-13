@@ -1,3 +1,10 @@
+## Unreleased
+
+- **Fix**: A large AVI plays to its end. Its length was taken from the main header, whose frame count covers only the first part of an OpenDML file, so the field's two-hour AVI was listed as 2:15:36 of its 2:29:58 and its last 14 minutes could be neither played nor reached; the length now follows FFmpeg's rule, the longest stream of variable-size samples by its own header (#ttv-178).
+- **Fix**: An MP4 or Matroska file whose timeline does not begin at zero no longer lists seconds past its last picture. Its length was counted from zero while every cut is published from the file's start, so a file starting at 5 s ended its playlist with 5 s that hold no picture (#ttv-178).
+- **Fix**: A Matroska file that states no `Duration`, as one written while streaming does, opens; its length is the end of its last frame. It was refused with `media-duration-unavailable` once its packets had been read (#ttv-178).
+- **Fix**: An MPEG program stream (`.mpg`, `.vob`) of more than one group of pictures opens. A group whose first picture carried no timestamp was placed on the previous group's base, and the index refused to go back: none of four such files FFmpeg wrote opened (#ttv-178).
+
 ## 2.97.21
 
 - **Fix**: An encoder reading an original file opens in a fraction of the time. FFmpeg read through the input route alone, so every return to bytes it had already read was a new request: an OpenDML AVI's open goes from its super index in the header to each standard index and back, and on the field's two-hour AVI its 195 indexes made 390 requests and 636-1243 MB of answers, each waiting for the main thread — 7.8-13.7 s for a cold start's first open. Read through FFmpeg's `cache:` protocol the same open makes 3 requests: on Home Assistant's FFmpeg 8.1.2 the first piece came after 2.8 s against 4.8 s with nothing else running, and the pieces were the same to the byte, on FFmpeg 6.1 as well. The cache's temporary file holds at most what the run was admitted and is counted by the budget on its disk (#ttv-178).

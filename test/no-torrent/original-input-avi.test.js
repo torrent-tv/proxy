@@ -8,6 +8,11 @@ import { spawn, spawnSync } from "node:child_process";
 import ffmpegBin from "ffmpeg-static";
 import ffprobe from "@ffprobe-installer/ffprobe";
 import { AviContainer } from "../../services/media/container/AviContainer.js";
+import { ContainerOrchestrator } from "../../services/media/ContainerOrchestrator.js";
+import { readPlaybackDeclarations } from "../../services/media/read-playback-declarations.js";
+import { playbackDeclarations } from "../../services/media/playback-declarations.js";
+import { computeCutGrid } from "../../services/encode/output/cut-grid.js";
+import { mediaPlaylistText } from "../../services/encode/output/playlists.js";
 import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
 import { buildOriginalCommand } from "../../services/encode/source-command.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
@@ -240,6 +245,41 @@ test("an OpenDML AVI past one gibibyte plays its interval from the named bytes o
   assert.equal((await recording.readSourceRanges({ from: 30, to: 32 })).kind, "result");
   assert.ok(!reads.some(([start, end]) => start <= afterMovi + 7 && afterMovi <= end), "the chunk after the first movi is not read");
   await checkAvi(directory, file, { duration: 100, audio: true, timeBase: 1 / FPS, copyable: true });
+
+  // The plan lasts as long as the film, not as its first RIFF: OpenDML has the
+  // main header count the first RIFF's frames only, and a two-hour film lost
+  // its last fourteen minutes to it (torrent-tv/meta#178). Read the way the
+  // plan reads it, cut and listed the way the player is given it.
+  const declarations = await readPlaybackDeclarations(new ContainerOrchestrator(), { sourceKey: "generated", fileIndex: 0,
+    fileSize: bytes.length, label: "opendml.avi", packetInterval: { from: 0, to: 1 },
+    readRange: async (start, end) => bytes.subarray(start, end + 1) });
+  assert.equal(declarations.kind, "result");
+  const length = playbackDeclarations({ ...declarations.value, fileBytes: bytes.length }).durationSeconds;
+  const stated = Number(spawnSync(ffprobe.path, ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file],
+    { encoding: "utf8", windowsHide: true }).stdout);
+  const firstRiff = bytes.readUInt32LE(32) * bytes.readUInt32LE(48) / 1e6;
+  assert.ok(firstRiff < stated - 1, `the main header counts the first RIFF only: ${firstRiff}s of ${stated}s`);
+  assert.ok(Math.abs(length - stated) < 1 / FPS, `the plan lasts ${length}s, FFmpeg reads ${stated}s`);
+  const keyframes = (await containerOf(bytes).parseKeyframeIndex()).times;
+  const { boundaries } = computeCutGrid({ useKeyframeGrid: true, durationSeconds: length, segDur: 4, keyframeTimes: keyframes, startTime: 0 });
+  const listed = mediaPlaylistText({ boundaries, segmentFormat: fmp4Format }).split("\n")
+    .filter(line => line.startsWith("#EXTINF:")).reduce((sum, line) => sum + Number(line.slice(8, -1)), 0);
+  assert.ok(Math.abs(listed - length) < 1e-3, `the playlist lists ${listed}s of ${length}s`);
+
+  // And the last segment is made from the second RIFF's named bytes.
+  const last = boundaries.length - 2;
+  const from = boundaries[last], to = boundaries[last + 1];
+  assert.ok(from > firstRiff, "the last segment lies in the second RIFF");
+  const container = containerOf(bytes);
+  const video = (await container.readTracks()).filter(track => track.type === "video").map(track => track.trackNumber);
+  const source = await container.readSourceRanges({ from, to, trackIds: video });
+  assert.equal(source.kind, "result");
+  const end = await runOver(directory, { bytes, ranges: source.ranges, from, command: {
+    startIndex: last, timeline: { published: boundaries, cutGrid: "keyframe" }, keyframes: { times: keyframes },
+    transcodeVideo: true, selections: [{ track: { type: "video", reorderDepth: 0 }, index: 0 }] } });
+  const expected = pictures(file, 1 / FPS).filter(([pts]) => pts >= from - 1e-6 && pts < to - 1e-6).map(([, hash]) => hash);
+  assert.ok(expected.length > 0);
+  assert.deepEqual(pictures(end.piece, 1 / 12800).map(([, hash]) => hash), expected, "the last segment holds the film's last pictures");
 }));
 
 

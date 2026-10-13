@@ -62,7 +62,7 @@ function cluster(blocks) {
 
 function params(bytes, tracks) {
   return { readRange: async (a, b) => bytes.subarray(a, b + 1), fileSize: bytes.length,
-    layout: { firstClusterAt: 0, segmentEnd: bytes.length, secondsPerTick: 0.001 }, tracks, durationSeconds: 1 };
+    layout: { firstClusterAt: 0, segmentEnd: bytes.length, secondsPerTick: 0.001 }, tracks, endSeconds: 1 };
 }
 
 for (const [name, lace, lengths] of [

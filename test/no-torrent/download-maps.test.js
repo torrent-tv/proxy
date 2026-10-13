@@ -416,6 +416,23 @@ test("a pass states what it has resolved before it works out a lower zone", asyn
   assert.deepEqual(sent.at(-1).zones.map(zone => [zone.byteStart, zone.priority]), stated);
 });
 
+test("a pass's zones are worked out only when a lower priority is stated", async () => {
+  // Built before every zone, they made the pass quadratic: a cold AVI's start
+  // forecast waited 71 s for a pass that had taken 12 s (torrent-tv/meta#178).
+  let asked = 0;
+  const maps = new DownloadMaps({ publish: async () => {}, resolvePlayback: async map => {
+    const converted = [];
+    for (const zone of map.zones) {
+      map.workingOut(zone.priority, () => { asked++; return converted; });
+      converted.push({ ...zone, outputKey: "out", index: zone.from, byteStart: zone.from * 100, byteEnd: zone.to * 100 - 1 });
+    }
+    return converted;
+  } });
+  const zones = Array.from({ length: 50 }, (_, at) => ({ from: at * 10, to: at * 10 + 10, priority: at < 25 ? 100 : 99 }));
+  await maps.playback({ sourceKey: "source", fileIndex: 0, durationSeconds: 500, zones });
+  assert.equal(asked, 2, "once for the first zone, once where the priority drops");
+});
+
 test("a read that changes nothing in the map does not send it again, and does not wait for it", async () => {
   const sent = [];
   let deliver;

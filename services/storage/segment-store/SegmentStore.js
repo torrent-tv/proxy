@@ -595,6 +595,23 @@ export class SegmentStore {
   }
 
   /**
+   * When the encoder last wrote a file it has closed under its working name,
+   * on the kernel's clock and so apart from when this process got to it; null
+   * when it is not there.
+   *
+   * @param {string} key
+   * @param {string} makingName
+   * @returns {number | null}
+   */
+  writtenAtOf(key, makingName) {
+    try {
+      return statSync(path.join(this.#root, directoryNameFor(key), makingName)).mtimeMs;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * The media intervals a stored piece holds, read once from its bytes and kept
    * with them, or undefined where its format reads none or it is not here.
    *

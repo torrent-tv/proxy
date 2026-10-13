@@ -123,6 +123,8 @@ export class EncodeRun {
    */
   #pendingAtStop = null;
   #closedTimings = new Map();
+  /** When the encoder named each closed piece on its channel, until it is published. */
+  #namedAt = new Map();
   #publicationError = null;
   #publicationCode = null;
   #inputTruncated = false;
@@ -622,6 +624,7 @@ export class EncodeRun {
       if (name.length === 0) {
         continue;
       }
+      this.#namedAt.set(name, this.now());
       if (this.#publicationError) continue;
       if (this.#stopping) {
         // Flushed by our stop. Never published; it tells where the piece closed
@@ -681,7 +684,8 @@ export class EncodeRun {
       // name a request can actually ask for.
       let served;
       try {
-        served = this.onClosed(name, following, this.#closedTimings.get(name) ?? null, { tentative });
+        served = this.onClosed(name, following, this.#closedTimings.get(name) ?? null,
+          { tentative, namedAt: this.#namedAt.get(name) ?? null });
       } catch (error) {
         if (quiet) {
           // A piece closed before our stop that cannot be proved whole is not
@@ -702,7 +706,10 @@ export class EncodeRun {
       } finally {
         // A piece not proved whole on its own keeps its timing for the file
         // after it.
-        if (!tentative || served) this.#closedTimings.delete(name);
+        if (!tentative || served) {
+          this.#closedTimings.delete(name);
+          this.#namedAt.delete(name);
+        }
       }
 
       if (!served) return false;

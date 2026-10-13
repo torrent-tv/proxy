@@ -468,6 +468,8 @@ export function startMemoryReport({
   /** @type {Record<string, number>} */
   let lastWritten = {};
   let lastWrittenAt = 0;
+  /** The anonymous memory and the time the mappings were last read at. */
+  let mappingsReadAt = null;
   const slug = (label || scope).replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   const directory = snapshotDir || os.tmpdir();
 
@@ -553,13 +555,25 @@ export function startMemoryReport({
           // the reading now happens once a second rather than once a minute.
           const available = availableMemory();
           anonymousBytes = await readAnonymousMemory();
+          // THE MAPPINGS ONLY WHERE THE ANONYMOUS MEMORY THEY BREAK DOWN HAS
+          // MOVED, or once in a quiet interval. The line is written on every
+          // swing of resident memory, which array buffers taken and given back
+          // make every two or three seconds, and each walk of `smaps` cost the
+          // main thread about 70 ms: 15.6 s of it in ten minutes of a cold AVI
+          // on Home Assistant, while segments waited to be sent
+          // (torrent-tv/meta#178).
+          const mappingsDue = mappingsReadAt === null || now - mappingsReadAt.at >= quietMs ||
+            !Number.isFinite(anonymousBytes) || !Number.isFinite(mappingsReadAt.anonymousBytes) ||
+            Math.abs(anonymousBytes - mappingsReadAt.anonymousBytes) >= changeBytes;
+          const mappings = mappingsDue ? await readMappingSummary() : null;
+          if (mappingsDue) mappingsReadAt = { at: now, anonymousBytes };
           log(describeMemory({
             scope,
             label,
             process: processMemory,
             available,
             anonymousBytes,
-            mappings: await readMappingSummary(),
+            mappings,
             diskFreeBytes: diskPath ? await readDiskFree(diskPath) : null,
             stores,
             extra

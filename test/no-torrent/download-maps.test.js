@@ -617,3 +617,57 @@ test("a pass whose zones only moved their deadlines leaves the packed zones stan
   finish();
   await away;
 });
+
+test("a paused viewer's map moves only its deadlines, and the torrent is told the current order", async () => {
+  // A pass gives one zone per segment, its demand stated once for the ranges
+  // the segment reads (r26, torrent-tv/meta#178). A pause can keep every
+  // priority and move the deadlines; the soundtrack then comes before the
+  // picture, and both the windows and their order say so.
+  const sent = [];
+  const picture = [[0, 99], [1000, 1999]];
+  const sound = [[0, 99], [5000, 5499]];
+  const maps = new DownloadMaps({ publish: async map => sent.push(map), pack: zones => coalescedZones(zones, 0),
+    resolvePlayback: async map => map.zones.flatMap(zone => [
+      { outputKey: "picture", index: 0, from: zone.from, to: zone.to, priority: zone.priority, deadlineAt: zone.deadlineAt,
+        downloadInterval: { from: zone.from, to: zone.to }, ranges: picture },
+      { outputKey: "sound", index: 0, from: zone.from, to: zone.to, priority: zone.priority, deadlineAt: zone.soundDeadlineAt,
+        downloadInterval: { from: zone.from, to: zone.to }, ranges: sound }]) });
+  const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 10 };
+  await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 90, deadlineAt: 100, soundDeadlineAt: 150 }] });
+  const windows = () => sent.at(-1).zones.map(zone => [zone.byteStart, zone.byteEnd, zone.priority, zone.deadlineAt]);
+  assert.deepEqual(windows(), [[0, 99, 90, 100], [1000, 1999, 90, 100], [5000, 5499, 90, 150]]);
+  const before = sent.length;
+  await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 90, deadlineAt: 500, soundDeadlineAt: 250 }] });
+  assert.equal(sent.length, before + 1, "the new order is sent");
+  assert.deepEqual(windows(), [[0, 99, 90, 250], [1000, 1999, 90, 500], [5000, 5499, 90, 250]]);
+});
+
+test("a segment whose map zone moved its bounds keeps its bytes stated, and is stated in the new band when worked out", async () => {
+  // The viewer moving on re-cuts the map zones while a segment reads the same
+  // bytes: in the meantime its zone stands, all its ranges with it, and the
+  // pass states it with the zone it belongs to now (review of
+  // torrent-tv/meta#178).
+  const sent = [];
+  let release = null;
+  const ranges = [[0, 99], [1000, 1999]];
+  const maps = new DownloadMaps({ publish: async map => sent.push(map), pack: zones => coalescedZones(zones, 0),
+    resolvePlayback: async map => {
+      if (release) await new Promise(resolve => { const go = release; release = null; go(resolve); });
+      const zone = map.zones[0];
+      return [{ outputKey: "picture", index: 3, from: 6, to: 8, priority: zone.priority, urgent: zone.urgent, deadlineAt: zone.deadlineAt,
+        downloadInterval: { from: zone.from, to: zone.to }, ranges }];
+    } });
+  const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 20 };
+  await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 90, deadlineAt: 1_000 }] });
+  const stated = () => sent.at(-1).zones.map(zone => [zone.byteStart, zone.byteEnd, zone.priority]);
+  assert.deepEqual(stated(), [[0, 99, 90], [1000, 1999, 90]]);
+  let finish = null;
+  release = resolve => { finish = resolve; };
+  const moving = maps.playback({ ...file, zones: [{ from: 2, to: 12, priority: 95, deadlineAt: 2_000 }] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sent.at(-1).zones.map(zone => [zone.byteStart, zone.byteEnd]), [[0, 99], [1000, 1999]],
+    "the segment's bytes are still stated while the pass is under way");
+  finish();
+  await moving;
+  assert.deepEqual(stated(), [[0, 99, 95], [1000, 1999, 95]]);
+});

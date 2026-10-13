@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: Packing the download map finds a repeat of the same bytes by the two numbers of the range instead of a string made of them, keeps the ranges in numeric lists, and takes a zone that names several ranges with one demand for all of them. The same windows are sent; packing a two-hour AVI's map took 25 s of the main thread in fifteen minutes on Home Assistant, 20 s of it making those strings (#ttv-178).
+
 ## 2.97.30
 
 - **Fix**: The bytes each segment reads are kept for the start forecast in a table of their own instead of being read off the zones the torrent is told. The forecast lost a segment's bytes whenever its zone left the map in the meantime, and could only ever see what the torrent was told in the form it was told it (#ttv-178).

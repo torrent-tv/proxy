@@ -1,6 +1,7 @@
 ## Unreleased
 
 - **Perf**: While a viewer's new map is turned into bytes, the zones already resolved stand as they are unless one is withdrawn or changes its level or priority; a deadline worked out on a later clock no longer replaces them. Replaced on every pass, they were a new list each time, and every metadata statement during the pass packed the whole film again: 24 s of the main thread in fifteen minutes of a two-hour AVI on Home Assistant (#ttv-178).
+- **Perf**: Raising the next run's input to its first segment's place counts the bytes held by search instead of sorting everything held again at each step, and looks only at each output's first segment and the ones after it. A soundtrack's segments add a few bytes each, so its stretch is walked far, and each step sorted every range taken so far: 26 s of the main thread in fifteen minutes of a two-hour AVI on Home Assistant. The same segments are raised as before (#ttv-178).
 
 ## 2.97.28
 

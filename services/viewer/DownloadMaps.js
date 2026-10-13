@@ -270,7 +270,7 @@ export class DownloadMaps {
     const builtFrom = this.#clock();
     // Compared and sent as the torrent is to act on it: the playback zones
     // packed into as few windows as say the same (`coalescedZones`).
-    const zones = this.#pack([...file.zones, ...file.nativeZones]);
+    const zones = [...this.#packedPlayback(file)];
     for (const { ranges, requestId, priority, urgent, deadlineAt, order } of file.metadata.values()) {
       for (const [byteStart, byteEnd] of ranges) {
         zones.push({ byteStart, byteEnd, priority, urgent, downloadOnly: true, requestId, deadlineAt, ...(order ? { order } : {}) });
@@ -337,6 +337,27 @@ export class DownloadMaps {
       if (file.shape === shape) file.shape = null;
     });
     return pending;
+  }
+
+  /**
+   * The playback and native zones packed, worked out again only when they
+   * have changed. Both are replaced whole, never edited in place, so the arrays
+   * themselves say whether they have. A metadata statement used to pack every
+   * zone of the film again before it added its own few ranges: 27 s of the main
+   * thread in fifteen minutes of a two-hour AVI on Home Assistant, the thread
+   * that also sends the viewer's segments (r22, torrent-tv/meta#178).
+   *
+   * Not kept when a zone is wanted "within N seconds": packing turns that into
+   * an instant on the clock it is packed at.
+   */
+  #packedPlayback(file) {
+    const kept = file.packed;
+    if (kept && kept.zones === file.zones && kept.nativeZones === file.nativeZones) return kept.result;
+    const input = [...file.zones, ...file.nativeZones];
+    const result = this.#pack(input);
+    const relative = input.some(zone => !Number.isFinite(zone.deadlineAt) && Number.isFinite(zone.withinSeconds));
+    file.packed = relative ? null : { zones: file.zones, nativeZones: file.nativeZones, result };
+    return result;
   }
 
   #statsOf(file) {

@@ -569,3 +569,38 @@ test("what a map sends and compares is packed: one window per touching stretch o
     { from: 20, to: 30, priority: 99 }] });
   assert.equal(sent.length, 1);
 });
+
+test("a metadata statement adds its ranges to the packed playback zones without packing them again", async () => {
+  // A statement used to pack every zone of the film again: 27 s of the main
+  // thread in fifteen minutes on Home Assistant (r22, torrent-tv/meta#178).
+  const sent = [];
+  let packed = 0;
+  const maps = new DownloadMaps({ publish: async map => sent.push(map), pack: zones => { packed += 1; return coalescedZones(zones, 0); },
+    resolvePlayback: async map => map.zones.map(zone => ({ ...zone, outputKey: "out", index: zone.from,
+      byteStart: zone.from * 100, byteEnd: zone.to * 100 - 1 })) });
+  const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 40 };
+  await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 100, urgent: true, deadlineAt: 5_000 },
+    { from: 10, to: 20, priority: 99, deadlineAt: 15_000 }] });
+  const afterPlayback = packed;
+  await maps.metadata({ ...file, statement: "packets:a", result: { kind: "needs-ranges", ranges: [[5000, 5099]], requestId: "a" } });
+  await maps.metadata({ ...file, statement: "packets:b", result: { kind: "needs-ranges", ranges: [[6000, 6099]], requestId: "b" } });
+  assert.equal(packed, afterPlayback, "the playback zones are not packed again for a statement");
+  assert.deepEqual(sent.at(-1).zones.map(zone => [zone.byteStart, zone.byteEnd, zone.requestId ?? null]),
+    [[0, 999, null], [1000, 1999, null], [5000, 5099, "a"], [6000, 6099, "b"]]);
+  // The packed zones are not the ones the statements were added to.
+  await maps.withdrawMetadata("source", 0, "packets:a");
+  assert.deepEqual(sent.at(-1).zones.map(zone => zone.requestId ?? null), [null, null, "b"]);
+  // New playback zones are packed again.
+  await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 100, urgent: true, deadlineAt: 5_000 }] });
+  assert.ok(packed > afterPlayback);
+  assert.deepEqual(sent.at(-1).zones.map(zone => [zone.byteStart, zone.byteEnd, zone.requestId ?? null]), [[0, 999, null], [6000, 6099, "b"]]);
+});
+
+test("native zones wanted within some seconds are packed again on each publication", async () => {
+  // Packing turns "within N seconds" into an instant on its own clock.
+  let packed = 0;
+  const maps = new DownloadMaps({ publish: async () => undefined, pack: zones => { packed += 1; return coalescedZones(zones); } });
+  await maps.native({ sourceKey: "source", fileIndex: 0, zones: [{ byteStart: 0, byteEnd: 99, priority: 100, urgent: true, withinSeconds: 4 }] });
+  await maps.metadata({ sourceKey: "source", fileIndex: 0, statement: "packets", result: { kind: "needs-ranges", ranges: [[500, 599]], requestId: "r" } });
+  assert.equal(packed, 2);
+});

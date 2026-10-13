@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: A metadata read no longer packs every playback zone of the film again before it adds its own few ranges to the download map. The packed playback and native zones are kept until they change, and a statement is added to them: on Home Assistant that packing took 27 s of the main thread in fifteen minutes of a two-hour AVI, on the thread that also sends the viewer its segments (#ttv-178).
+
 ## 2.97.27
 
 - **Perf**: The download map tells the torrent one window per stretch of bytes of one band instead of one zone per range of every segment. A film is thousands of segments and each names its own bytes and the header and index all of them read: some 10 000 zones were built, compared, copied to the torrent thread and stated there every three seconds a viewer played on, and on Home Assistant the main thread — the one that also sends the viewer's pieces — was busy 71 % of ten minutes of a cold AVI. The forecast of single pieces now takes a band's pieces in the order the sequential picker takes them, so a long window does not price its nearest piece at its farthest (#ttv-178).

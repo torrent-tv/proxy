@@ -604,3 +604,19 @@ test("native zones wanted within some seconds are packed again on each publicati
   await maps.metadata({ sourceKey: "source", fileIndex: 0, statement: "packets", result: { kind: "needs-ranges", ranges: [[500, 599]], requestId: "r" } });
   assert.equal(packed, 2);
 });
+
+test("a pass that hands back the zones it resolved before is neither packed nor read again", async () => {
+  // `resolvedPasses` in server.js hands back the last pass's zones when the
+  // pass is worked out from the same things (torrent-tv/meta#178).
+  let packed = 0;
+  const resolved = [{ from: 0, to: 10, priority: 100, urgent: true, deadlineAt: 5_000, outputKey: "out", index: 0, byteStart: 0, byteEnd: 999 }];
+  const maps = new DownloadMaps({ publish: async () => undefined, pack: zones => { packed += 1; return coalescedZones(zones, 0); },
+    resolvePlayback: async () => resolved });
+  const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 40 };
+  const zones = [{ from: 0, to: 10, priority: 100, urgent: true, deadlineAt: 5_000 }];
+  await maps.playback({ ...file, zones });
+  const once = packed;
+  await maps.playback({ ...file, zones: [{ ...zones[0] }] });
+  assert.equal(packed, once);
+  assert.deepEqual(maps.inputsForOutput("source", "out", 0), [{ sourceId: "source:0", ranges: [{ start: 0, end: 1000 }] }]);
+});

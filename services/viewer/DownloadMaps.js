@@ -20,6 +20,8 @@ export class DownloadMaps {
   #clock;
   /** What the torrent is told of the playback zones: as many windows as say the same thing. */
   #pack;
+  /** What a list of zones says each segment reads, by the list. @type {WeakMap<object[], Map>} */
+  #inputsOf = new WeakMap();
 
   constructor({ publish, resolvePlayback = async map => map.zones, log = null, now = Date.now,
     clock = () => performance.timeOrigin + performance.now(), pack = zones => zones }) {
@@ -254,7 +256,16 @@ export class DownloadMaps {
     file.zones = zones;
     // What `#emit` reads has changed, whether or not it is published now.
     file.dirty = true;
+    // A pass that resolves what the pass before resolved hands back the same
+    // zones (`resolvedPasses` in server.js), and what they say of each segment
+    // is the same too.
+    const known = this.#inputsOf.get(zones);
+    if (known) {
+      file.inputs = known;
+      return;
+    }
     file.inputs = new Map();
+    this.#inputsOf.set(zones, file.inputs);
     for (const zone of zones) {
       if (typeof zone.outputKey !== "string" || !Number.isSafeInteger(zone.index)) continue;
       let output = file.inputs.get(zone.outputKey);

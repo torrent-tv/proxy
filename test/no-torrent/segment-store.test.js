@@ -369,3 +369,54 @@ test("what the store weighs is reported, and dropping one output frees it", (t) 
   assert.equal(store.stats().outputs, 0);
   assert.equal(readdirSync(root).length, 0, "the watched output directory was removed");
 });
+
+test("a watched directory is read once and then kept up piece by piece", async (t) => {
+  // Read again on every change of its modification time, which every working
+  // file moves, the soundtrack's 2250 pieces were listed again for each new one:
+  // 71 s of the main thread in fifteen minutes on Home Assistant (r22,
+  // torrent-tv/meta#178).
+  const { store, root } = storeInATempRoot();
+  t.after(() => { store.dropAll("the check is over"); rmSync(root, { recursive: true, force: true }); });
+  const dir = store.directoryFor(KEY);
+  store.useFormat(KEY, fmp4Format);
+  writeSegment(dir, 0, 10);
+  writeSegment(dir, 1, 30);
+  const reading = store.refresh(KEY);
+  assert.deepEqual(store.provenNumbers(KEY), [0, 1]);
+
+  writeFileSync(path.join(dir, "making-7-00002.mp4"), Buffer.alloc(50));
+  assert.equal(store.publish(KEY, "making-7-00002.mp4", fmp4Format), "segment-00002.mp4");
+  assert.deepEqual(store.provenNumbers(KEY), [0, 1, 2]);
+  assert.equal(store.sizesOf(KEY).get(2), 50);
+  assert.deepEqual(store.largestPiece(KEY), { index: 2, size: 50 });
+  assert.equal(store.stats().bytes, 90);
+  assert.equal(store.refresh(KEY), reading, "the publication is put into the reading, not read again");
+
+  // A working file opened and written moves the directory, and is no piece.
+  writeFileSync(path.join(dir, "making-7-00003.mp4"), Buffer.alloc(5));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(store.refresh(KEY), reading, "a working file does not make the directory be read again");
+  assert.deepEqual(store.provenNumbers(KEY), [0, 1, 2]);
+
+  store.remove(KEY, 2, "the check takes it out");
+  assert.deepEqual(store.provenNumbers(KEY), [0, 1]);
+  assert.deepEqual(store.largestPiece(KEY), { index: 1, size: 30 });
+  assert.equal(store.stats().bytes, 40);
+  assert.equal(store.refresh(KEY), reading);
+});
+
+test("a piece renamed into place by its muxer is found when asked for, before the watch says so", (t) => {
+  // The `hls` muxer renames its own pieces and reports nothing; the watch tells
+  // the store a moment later. A question in between looks at the one file.
+  const { store, root } = storeInATempRoot();
+  t.after(() => { store.dropAll("the check is over"); rmSync(root, { recursive: true, force: true }); });
+  const dir = store.directoryFor(KEY);
+  store.useFormat(KEY, fmp4Format);
+  store.refresh(KEY);
+  writeSegment(dir, 5, 20);
+  assert.ok(store.pathOf(KEY, 5));
+  assert.deepEqual(store.provenNumbers(KEY), [5]);
+  assert.equal(store.sizesOf(KEY).get(5), 20);
+  writeFileSync(path.join(dir, fmp4Format.segmentFileName(6)), Buffer.alloc(0));
+  assert.equal(store.pathOf(KEY, 6), null, "a file of no bytes is still no segment");
+});

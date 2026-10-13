@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.31
 
 - **Perf**: Packing the download map finds a repeat of the same bytes by the two numbers of the range instead of a string made of them, keeps the ranges in numeric lists, and takes a zone that names several ranges with one demand for all of them. The same windows are sent; packing a two-hour AVI's map took 25 s of the main thread in fifteen minutes on Home Assistant, 20 s of it making those strings (#ttv-178).
 - **Perf**: A download map pass gives one zone per segment, its demand — level, priority, deadline and the map zone it belongs to — stated once for all the ranges the segment reads, and the ranges are the list kept for that segment from pass to pass. A zone per range copied the demand into each: about ten thousand objects a pass over a two-hour AVI, made again 21-61 times a minute on Home Assistant. Every pass still states each segment's current demand, so its deadlines and their order are this pass's (#ttv-178).

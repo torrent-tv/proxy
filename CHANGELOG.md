@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.28
 
 - **Perf**: A metadata read no longer packs every playback zone of the film again before it adds its own few ranges to the download map. The packed playback and native zones are kept until they change, and a statement is added to them: on Home Assistant that packing took 27 s of the main thread in fifteen minutes of a two-hour AVI, on the thread that also sends the viewer its segments (#ttv-178).
 - **Perf**: The store of finished segments reads a watched directory once and then keeps what it holds up to date piece by piece: a piece published, removed or named by the directory watch is put in or taken out alone. The directory used to be listed again, with a `stat` of every piece, whenever its modification time moved, and every working file an encoder opens moves it: on Home Assistant the soundtrack's 2250 pieces were listed again for each new one, 71 s of the main thread in fifteen minutes of a two-hour AVI. A piece asked for and not held is looked for on the disk alone, so a change the watch did not deliver cannot leave it absent (#ttv-178).

@@ -566,7 +566,7 @@ export async function startProxyServer({
         if (waiting.has(zone.outputKey)) continue;
         // What is resolved so far is stated before a lower zone is worked out
         // (DownloadMaps, torrent-tv/meta#178).
-        map.workingOut?.(zone.priority, expanded());
+        map.workingOut?.(zone.priority, expanded);
         if (direct) {
           // Asked per zone too: a soundtrack of an AVI is read from its own
           // packets, which the same index states (torrent-tv/meta#166).

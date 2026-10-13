@@ -87,9 +87,14 @@ export class DownloadMaps {
     // pass that works nothing out — every pass over a film already worked out
     // — states nothing early.
     let stated = Number.POSITIVE_INFINITY;
-    const workingOut = (priority, zones) => {
+    // The zones are asked for only when they are stated: worked out before
+    // every lower zone of a pass, they were the whole pass over again at each
+    // of its 4000 steps, and a cold AVI's start forecast waited 71 s for it
+    // (Home Assistant 2026-10-13, torrent-tv/meta#178).
+    const workingOut = (priority, zonesOf) => {
       if (!(priority < stated)) return;
       stated = priority;
+      const zones = typeof zonesOf === "function" ? zonesOf() : zonesOf;
       if (zones.length === 0 || !isCurrent()) return;
       this.#setZones(file, withRetained(zones, retained));
       this.#emit(file).catch(() => undefined);

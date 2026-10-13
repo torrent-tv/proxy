@@ -18,6 +18,7 @@ import { IndexMemory } from "./services/storage/IndexMemory.js";
 import { probePackets } from "./services/media/probe-packets.js";
 import { segmentDemands, sourceDeadline } from "./services/viewer/segment-demands.js";
 import { expandToTargetInputs } from "./services/viewer/target-input-expansion.js";
+import { SegmentInputTable } from "./services/viewer/segment-input-table.js";
 import { SourcePreparation } from "./services/viewer/SourcePreparation.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
@@ -185,6 +186,7 @@ export async function startProxyServer({
       for (const key of segmentSourceRanges.keys()) if (key.startsWith(`${sourceKey}:`)) segmentSourceRanges.delete(key);
       for (const key of segmentReadings.keys()) if (key.startsWith(`${sourceKey}:`)) segmentReadings.delete(key);
       for (const key of resolvedPasses.keys()) if (key.startsWith(`${sourceKey}:`)) resolvedPasses.delete(key);
+      segmentInputs.forget(sourceKey);
       outputParts.encodeInputs?.bytesChanged();
     },
     // Pieces arriving is ANNOUNCED by the thread that owns the swarm; what is
@@ -476,6 +478,8 @@ export async function startProxyServer({
    * from and what it resolved (`playback-pass.js`); forgotten with the source.
    */
   const resolvedPasses = new Map();
+  /** Which source bytes each segment of an output reads, for the forecast (`segment-input-table.js`). */
+  const segmentInputs = new SegmentInputTable();
   /** A segment's ranges joined at the precision the torrent fetches, once per kept list and piece length. */
   const joinedRanges = new WeakMap();
   const joinedRangesOf = (ranges, pieceLength) => {
@@ -588,7 +592,11 @@ export async function startProxyServer({
         const { wanted, modes, interval, rangesKey } = reading;
         const { tracks: _choices, owner: _owner, sourceInterval: _sourceInterval, ...demand } = zone;
         const convert = ranges => {
-          for (const [byteStart, byteEnd] of joinedRangesOf(ranges, pieceLength)) converted.push({ ...demand,
+          const joined = joinedRangesOf(ranges, pieceLength);
+          // What the segment reads is kept for the forecast in a table of its
+          // own, whatever form the torrent is told it in.
+          segmentInputs.set(map.sourceKey, map.fileIndex, zone.outputKey, zone.index, joined);
+          for (const [byteStart, byteEnd] of joined) converted.push({ ...demand,
             downloadInterval: { from: zone.owner.from, to: zone.owner.to }, byteStart, byteEnd });
         };
         // The bytes one segment needs are a fact of the file and the output, so
@@ -751,7 +759,7 @@ export async function startProxyServer({
     readMetadataActivity: () => containerOrchestrator.activity(),
     onViewerChanged: () => { void sourcePreparation?.refresh(); onStateChanged(); },
     onEncodersChanged: () => onStateChanged(),
-    sourceInputsFor: (output, index) => downloadMaps.inputsForOutput(output.file.sourceKey, output.outputKey, index),
+    sourceInputsFor: (output, index) => segmentInputs.inputsFor(output.file.sourceKey, output.outputKey, index),
     readSourceMedia: async (params) => {
       await playbackPlanner.getPlan(params);
       const media = playbackPlanner.getCachedMediaInfo(params);

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The bytes each segment reads are kept for the start forecast in a table of their own instead of being read off the zones the torrent is told. The forecast lost a segment's bytes whenever its zone left the map in the meantime, and could only ever see what the torrent was told in the form it was told it (#ttv-178).
+
 ## 2.97.29
 
 - **Perf**: While a viewer's new map is turned into bytes, the zones already resolved stand as they are unless one is withdrawn or changes its level or priority; a deadline worked out on a later clock no longer replaces them. Replaced on every pass, they were a new list each time, and every metadata statement during the pass packed the whole film again: 24 s of the main thread in fifteen minutes of a two-hour AVI on Home Assistant (#ttv-178).

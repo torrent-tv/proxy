@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: An encoder reads its input through FFmpeg's cache only where that cache works. A Linux FFmpeg keeps the cache's file in /tmp alone, and with no /tmp it can write, every run failed at its open ("Cannot open temporary file /tmp/ffcacheXXXXXX" on Home Assistant's FFmpeg with a read-only root). One small read through the cache is tried at startup with this proxy's own FFmpeg; until it has worked, inputs are read directly and nothing is counted for the cache on the disk budget (#ttv-178).
+
 ## 2.97.23
 
 - **Chore**: Each published piece says where its time went: when the encoder finished writing it (the file's own time), when the encoder named it, and when it was published — on its own, when the file after it closed, or at the run's end. A piece that came 5.7 s after the one before stopped a viewer inside a running run, and nothing told the encoder's time from the proxy's (#ttv-178).

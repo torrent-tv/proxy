@@ -20,8 +20,6 @@ export class DownloadMaps {
   #clock;
   /** What the torrent is told of the playback zones: as many windows as say the same thing. */
   #pack;
-  /** What a list of zones says each segment reads, by the list. @type {WeakMap<object[], Map>} */
-  #inputsOf = new WeakMap();
 
   constructor({ publish, resolvePlayback = async map => map.zones, log = null, now = Date.now,
     clock = () => performance.timeOrigin + performance.now(), pack = zones => zones }) {
@@ -152,19 +150,6 @@ export class DownloadMaps {
     return this.#files.get(`${sourceKey}:${fileIndex}`)?.sourceZones.some(zone => zone.from === from && zone.to === to) ?? false;
   }
 
-  /** Exact source ranges already resolved by the download map, without new reads. */
-  inputsForOutput(sourceKey, outputKey, index) {
-    const sources = [];
-    for (const file of this.#files.values()) {
-      if (file.sourceKey !== sourceKey) continue;
-      const ranges = file.inputs.get(outputKey)?.get(index);
-      if (!ranges?.length) continue;
-      sources.push({ sourceId: `${sourceKey}:${file.fileIndex}`,
-        ranges });
-    }
-    return sources.length ? sources : null;
-  }
-
   metadata({ sourceKey, fileIndex, statement, result, priority = 100, urgent = true, deadlineAt = 0, interval, leadSeconds = 0, scope = "playback", order = 0 }) {
     if (!Number.isFinite(leadSeconds) || leadSeconds < 0) throw new TypeError("Metadata preparation time must be finite and nonnegative.");
     const file = this.#file(sourceKey, fileIndex);
@@ -255,7 +240,7 @@ export class DownloadMaps {
     const key = `${sourceKey}:${fileIndex}`;
     let file = this.#files.get(key);
     if (!file) {
-      file = { sourceKey, fileIndex, durationSeconds: 0, zones: [], inputs: new Map(), nativeZones: [], sourceZones: [], revision: 0, epoch: ++this.#nextEpoch, metadata: new Map(), pending: Promise.resolve(), dirty: true };
+      file = { sourceKey, fileIndex, durationSeconds: 0, zones: [], nativeZones: [], sourceZones: [], revision: 0, epoch: ++this.#nextEpoch, metadata: new Map(), pending: Promise.resolve(), dirty: true };
       this.#files.set(key, file);
     }
     return file;
@@ -265,24 +250,6 @@ export class DownloadMaps {
     file.zones = zones;
     // What `#emit` reads has changed, whether or not it is published now.
     file.dirty = true;
-    // A pass that resolves what the pass before resolved hands back the same
-    // zones (`resolvedPasses` in server.js), and what they say of each segment
-    // is the same too.
-    const known = this.#inputsOf.get(zones);
-    if (known) {
-      file.inputs = known;
-      return;
-    }
-    file.inputs = new Map();
-    this.#inputsOf.set(zones, file.inputs);
-    for (const zone of zones) {
-      if (typeof zone.outputKey !== "string" || !Number.isSafeInteger(zone.index)) continue;
-      let output = file.inputs.get(zone.outputKey);
-      if (!output) file.inputs.set(zone.outputKey, output = new Map());
-      let ranges = output.get(zone.index);
-      if (!ranges) output.set(zone.index, ranges = []);
-      ranges.push({ start: zone.byteStart, end: zone.byteEnd + 1 });
-    }
   }
 
   #emit(file) {

@@ -127,36 +127,6 @@ test("complete segment bytes remain published while their map interval is repric
   await pending;
 });
 
-test("forecast input addresses come from published segment demand without starting a read", async () => {
-  const maps = new DownloadMaps({ publish: () => {}, resolvePlayback: async () => [
-    { from: 0, to: 4, outputKey: "picture", index: 2, byteStart: 100, byteEnd: 107 }
-  ] });
-  await maps.playback({ sourceKey: "source", fileIndex: 7, durationSeconds: 4,
-    zones: [{ from: 0, to: 4, priority: 100 }] });
-  assert.deepEqual(maps.inputsForOutput("source", "picture", 2), [
-    { sourceId: "source:7", ranges: [{ start: 100, end: 108 }] }
-  ]);
-  assert.equal(maps.inputsForOutput("source", "another", 2), null);
-});
-
-test("forecast lookups do not scan every packet range again and discard withdrawn addresses", async () => {
-  let reads = 0;
-  const ranges = Array.from({ length: 1000 }, (_, index) => ({
-    from: 0, to: 4, index: index % 10, byteStart: index * 10, byteEnd: index * 10 + 7,
-    get outputKey() { reads++; return "picture"; }
-  }));
-  const maps = new DownloadMaps({ publish() {}, resolvePlayback: async () => ranges });
-  await maps.playback({ sourceKey: "source", fileIndex: 0, durationSeconds: 4,
-    zones: [{ from: 0, to: 4, priority: 100 }] });
-  reads = 0;
-  for (let index = 0; index < 10; index++) {
-    assert.equal(maps.inputsForOutput("source", "picture", index)[0].ranges.length, 100);
-  }
-  assert.equal(reads, 0, "a published map must be indexed once instead of scanned for each segment forecast");
-  await maps.forget("source", 0);
-  assert.equal(maps.inputsForOutput("source", "picture", 0), null);
-});
-
 test("metadata deadlines include preparation time after a paused map is repriced", async () => {
   let published;
   const maps = new DownloadMaps({ publish: map => { published = map; }, resolvePlayback: async () => [] });
@@ -362,7 +332,6 @@ test("a viewer moving on keeps the resolved zones until the re-cut map is resolv
   const moving = maps.playback({ ...file, zones: [{ from: 2, to: 12, priority: 100 }, { from: 12, to: 22, priority: 99 }] });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [0, 1000], "the interim map still states the film being watched");
-  assert.deepEqual(maps.inputsForOutput("source", "out", 10), [{ sourceId: "source:0", ranges: [{ start: 1000, end: 2000 }] }]);
   release();
   await moving;
   assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [200, 1200]);
@@ -399,7 +368,6 @@ test("a pass states what it has resolved before it works out a lower zone", asyn
   assert.deepEqual(worked, [0, 0, 1, 2], "nothing before the first zone; one map as each lower priority is reached");
   assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [0, 1000, 2000],
     "the swarm has the higher zones while the lowest is worked out");
-  assert.deepEqual(maps.inputsForOutput("source", "out", 20), [{ sourceId: "source:0", ranges: [{ start: 2000, end: 3000 }] }]);
   release();
   await passing;
   assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [0, 1000, 2000, 3000]);
@@ -411,7 +379,6 @@ test("a pass states what it has resolved before it works out a lower zone", asyn
   await last;
   const stated = [[0, 99], [1000, 99], [2000, 98], [3000, 97]];
   assert.deepEqual(sent.at(-1).zones.map(zone => [zone.byteStart, zone.priority]), stated);
-  assert.deepEqual(maps.inputsForOutput("source", "out", 0), [{ sourceId: "source:0", ranges: [{ start: 0, end: 1000 }] }]);
   release();
   await again;
   assert.deepEqual(sent.at(-1).zones.map(zone => [zone.byteStart, zone.priority]), stated);
@@ -563,7 +530,6 @@ test("what a map sends and compares is packed: one window per touching stretch o
     { from: 20, to: 30, priority: 99 }] });
   assert.deepEqual(sent.at(-1).zones.map(zone => [zone.byteStart, zone.byteEnd, zone.priority]), [[0, 1999, 100], [2000, 2999, 99]]);
   // Each segment still states the bytes it reads.
-  assert.deepEqual(maps.inputsForOutput("source", "out", 10), [{ sourceId: "source:0", ranges: [{ start: 1000, end: 2000 }] }]);
   // A pass that changes nothing the torrent acts on sends nothing.
   await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 100, urgent: true }, { from: 10, to: 20, priority: 100, urgent: true },
     { from: 20, to: 30, priority: 99 }] });
@@ -605,7 +571,7 @@ test("native zones wanted within some seconds are packed again on each publicati
   assert.equal(packed, 2);
 });
 
-test("a pass that hands back the zones it resolved before is neither packed nor read again", async () => {
+test("a pass that hands back the zones it resolved before is not packed again", async () => {
   // `resolvedPasses` in server.js hands back the last pass's zones when the
   // pass is worked out from the same things (torrent-tv/meta#178).
   let packed = 0;
@@ -618,7 +584,6 @@ test("a pass that hands back the zones it resolved before is neither packed nor 
   const once = packed;
   await maps.playback({ ...file, zones: [{ ...zones[0] }] });
   assert.equal(packed, once);
-  assert.deepEqual(maps.inputsForOutput("source", "out", 0), [{ sourceId: "source:0", ranges: [{ start: 0, end: 1000 }] }]);
 });
 
 test("a pass whose zones only moved their deadlines leaves the packed zones standing for the statements made meanwhile", async () => {
@@ -627,7 +592,8 @@ test("a pass whose zones only moved their deadlines leaves the packed zones stan
   // torrent-tv/meta#178).
   let packed = 0;
   let release = null;
-  const maps = new DownloadMaps({ publish: async () => undefined, pack: zones => { packed += 1; return coalescedZones(zones, 0); },
+  const sent = [];
+  const maps = new DownloadMaps({ publish: async map => sent.push(map), pack: zones => { packed += 1; return coalescedZones(zones, 0); },
     resolvePlayback: async map => {
       if (release) await new Promise(resolve => { const go = release; release = null; go(resolve); });
       return map.zones.map(zone => ({ ...zone, outputKey: "out", index: zone.from, byteStart: zone.from * 100, byteEnd: zone.to * 100 - 1 }));
@@ -647,7 +613,7 @@ test("a pass whose zones only moved their deadlines leaves the packed zones stan
   release = resolve => { finish = resolve; };
   const away = maps.playback({ ...file, zones: [{ from: 20, to: 30, priority: 100, urgent: true, deadlineAt: 9_000 }] });
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(maps.inputsForOutput("source", "out", 0), null);
+  assert.ok(!sent.at(-1).zones.some(zone => zone.byteStart === 0), "the zone nobody wants any more is not stated in the meantime");
   finish();
   await away;
 });

@@ -35,3 +35,18 @@ test("each output's first segment is its own", () => {
   assert.deepEqual(expanded.map(one => [one.outputKey, one.index, one.priority]),
     [["picture", 10, 100], ["picture", 11, 99], ["sound", 4, 90], ["sound", 5, 90]]);
 });
+
+test("a soundtrack whose segments add a few bytes each is raised as far as its input reaches, and no further", () => {
+  // Each segment names the header and index every segment reads, and 1000
+  // bytes of its own; the walk is long, and each step is counted by search
+  // (r24, torrent-tv/meta#178).
+  const own = index => 10_000 + index * 10_000;
+  const sound = (index, priority) => zone(index, priority, [[0, 99], [100, 199], [own(index), own(index) + 999]], { outputKey: "sound" });
+  const zones = [...sound(0, 100)];
+  for (let index = 1; index < 2000; index++) zones.push(...sound(index, 90));
+  const expanded = expandToTargetInputs(zones, () => 50_000);
+  // 1200 bytes for the first, then 1000 a segment: 48 more fit in 50 000.
+  const raised = expanded.filter(one => one.priority === 100).map(one => one.index);
+  assert.equal(Math.max(...raised), 48);
+  assert.equal(raised.length, 49 * 3);
+});

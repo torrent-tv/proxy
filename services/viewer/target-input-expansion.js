@@ -19,22 +19,83 @@
  */
 
 /**
- * Bytes covered by a list of inclusive ranges, each byte counted once: the
- * declarations and indexes every segment of an original file names are held
- * once by the run that reads them.
- *
- * @param {Array<[number, number]>} ranges
- * @returns {number}
+ * The bytes a run's input holds, each counted once: the declarations and
+ * indexes every segment of an original file names are held once by the run
+ * that reads them. Kept merged and in order, so a segment's ranges are
+ * counted against it by search rather than by sorting everything held again —
+ * a soundtrack's segments add a few bytes each, and its stretch is walked far.
  */
-function coveredBytes(ranges) {
-  let total = 0;
-  let end = -1;
-  for (const [start, last] of [...ranges].sort((left, right) => left[0] - right[0])) {
-    if (last <= end) continue;
-    total += last - Math.max(start, end + 1) + 1;
-    end = last;
+class HeldBytes {
+  /** Inclusive [start, end], merged, ascending. @type {Array<[number, number]>} */
+  #ranges = [];
+  total = 0;
+
+  /** @param {Array<[number, number]>} ranges */
+  constructor(ranges = []) {
+    this.add(ranges);
   }
-  return total;
+
+  /** The first held range that ends at or after `at`. */
+  #from(at) {
+    let low = 0;
+    let high = this.#ranges.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (this.#ranges[middle][1] < at) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  /**
+   * What these ranges would add, without adding them.
+   *
+   * @param {Array<[number, number]>} ranges
+   * @returns {number}
+   */
+  adds(ranges) {
+    let added = 0;
+    for (const [start, end] of merged(ranges)) {
+      let at = start;
+      for (let index = this.#from(start); at <= end && index < this.#ranges.length && this.#ranges[index][0] <= end; index++) {
+        const [heldStart, heldEnd] = this.#ranges[index];
+        if (heldStart > at) added += heldStart - at;
+        at = Math.max(at, heldEnd + 1);
+      }
+      if (at <= end) added += end - at + 1;
+    }
+    return added;
+  }
+
+  /** @param {Array<[number, number]>} ranges */
+  add(ranges) {
+    for (const [start, end] of merged(ranges)) {
+      this.total += this.adds([[start, end]]);
+      // Joined with every held range it touches or overlaps.
+      const first = this.#from(start - 1);
+      let last = first;
+      let joinedStart = start;
+      let joinedEnd = end;
+      while (last < this.#ranges.length && this.#ranges[last][0] <= end + 1) {
+        joinedStart = Math.min(joinedStart, this.#ranges[last][0]);
+        joinedEnd = Math.max(joinedEnd, this.#ranges[last][1]);
+        last++;
+      }
+      this.#ranges.splice(first, last - first, [joinedStart, joinedEnd]);
+    }
+  }
+}
+
+/** Inclusive ranges merged where they overlap or touch, ascending. @param {Array<[number, number]>} ranges */
+function merged(ranges) {
+  const sorted = [...ranges].sort((left, right) => left[0] - right[0]);
+  const out = [];
+  for (const [start, end] of sorted) {
+    const previous = out.at(-1);
+    if (previous && start <= previous[1] + 1) previous[1] = Math.max(previous[1], end);
+    else out.push([start, end]);
+  }
+  return out;
 }
 
 /**
@@ -48,39 +109,56 @@ function coveredBytes(ranges) {
  * @returns {Zone[]} In their order; raised zones are copies.
  */
 export function expandToTargetInputs(zones, targetBytesOf) {
-  /** @type {Map<string, Map<number, Zone[]>>} */
-  const byOutput = new Map();
+  // ONE WALK FOR EACH OUTPUT'S FIRST SEGMENT, and the segments after it only
+  // as far as the run's input reaches. The map names every segment of a film,
+  // and each pass used to group all of them and work out each one's highest
+  // priority before looking at the few the run copies: 26 s of the main thread
+  // in fifteen minutes of a two-hour AVI on Home Assistant (r24,
+  // torrent-tv/meta#178).
+  /** @type {Map<string, { index: number, priority: number, zone: Zone }>} */
+  const first = new Map();
   for (const zone of zones) {
-    let segments = byOutput.get(zone.outputKey);
-    if (!segments) byOutput.set(zone.outputKey, segments = new Map());
-    const list = segments.get(zone.index);
-    if (list) list.push(zone);
-    else segments.set(zone.index, [zone]);
+    const best = first.get(zone.outputKey);
+    if (!best || zone.priority > best.priority || (zone.priority === best.priority && zone.index < best.index)) {
+      first.set(zone.outputKey, { index: zone.index, priority: zone.priority, zone });
+    }
+  }
+  /** @type {Map<string, { first: { index: number, priority: number, zone: Zone }, target: number, after: Map<number, Zone[]> }>} */
+  const runs = new Map();
+  for (const [outputKey, best] of first) {
+    const target = targetBytesOf(outputKey);
+    if (target > 0) runs.set(outputKey, { first: best, target, after: new Map() });
+  }
+  if (runs.size === 0) return zones;
+  /** @type {Map<string, Array<[number, number]>>} */
+  const held = new Map();
+  for (const zone of zones) {
+    const run = runs.get(zone.outputKey);
+    if (!run) continue;
+    if (zone.index === run.first.index) {
+      let ranges = held.get(zone.outputKey);
+      if (!ranges) held.set(zone.outputKey, ranges = []);
+      ranges.push([zone.byteStart, zone.byteEnd]);
+    } else if (zone.index > run.first.index) {
+      const list = run.after.get(zone.index);
+      if (list) list.push(zone);
+      else run.after.set(zone.index, [zone]);
+    }
   }
   /** @type {Map<Zone, Zone>} */
   const raised = new Map();
-  for (const [outputKey, segments] of byOutput) {
-    const target = targetBytesOf(outputKey);
-    if (!(target > 0)) continue;
-    let first = null;
-    for (const [index, list] of segments) {
-      const priority = Math.max(...list.map(zone => zone.priority));
-      if (first === null || priority > first.priority || (priority === first.priority && index < first.index)) {
-        first = { index, priority, zone: list.find(zone => zone.priority === priority) };
-      }
-    }
-    if (first === null) continue;
-    const held = segments.get(first.index).map(zone => [zone.byteStart, zone.byteEnd]);
+  for (const [outputKey, run] of runs) {
+    const holding = new HeldBytes(held.get(outputKey) ?? []);
     // The run's input is a stretch of consecutive segments: one already made,
     // or not yet worked out, ends it.
-    for (let index = first.index + 1; segments.has(index); index++) {
-      const list = segments.get(index);
-      const ranges = [...held, ...list.map(zone => [zone.byteStart, zone.byteEnd])];
-      if (coveredBytes(ranges) > target) break;
-      held.push(...list.map(zone => [zone.byteStart, zone.byteEnd]));
+    for (let index = run.first.index + 1; run.after.has(index); index++) {
+      const list = run.after.get(index);
+      const ranges = list.map(zone => [zone.byteStart, zone.byteEnd]);
+      if (holding.total + holding.adds(ranges) > run.target) break;
+      holding.add(ranges);
       for (const zone of list) {
-        raised.set(zone, { ...zone, priority: first.priority, urgent: first.zone.urgent,
-          behind: first.zone.behind, deferred: first.zone.deferred });
+        raised.set(zone, { ...zone, priority: run.first.priority, urgent: run.first.zone.urgent,
+          behind: run.first.zone.behind, deferred: run.first.zone.deferred });
       }
     }
   }

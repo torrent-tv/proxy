@@ -64,6 +64,18 @@ export function deadlineOfMapZone(zone, now = Date.now()) {
 }
 
 /**
+ * The byte ranges a zone names: a segment's zone names all the ranges its
+ * segment reads, and states its demand once for them (`ranges`); any other
+ * zone names one (`byteStart`-`byteEnd`). Inclusive.
+ *
+ * @param {{ ranges?: Array<[number, number]>, byteStart?: number, byteEnd?: number }} zone
+ * @returns {Array<[number, number]>}
+ */
+export function rangesOfZone(zone) {
+  return Array.isArray(zone.ranges) ? zone.ranges : [[zone.byteStart, zone.byteEnd]];
+}
+
+/**
  * The zones with every repeat of the same bytes left out but the one the swarm
  * would rank first.
  *
@@ -80,14 +92,9 @@ export function deadlineOfMapZone(zone, now = Date.now()) {
  * @returns {Zone[]} In their order, without the repeats.
  */
 export function withoutRepeatedZones(zones, now = Date.now()) {
-  const keys = zones.map(zone => `${zone.byteStart}:${zone.byteEnd}`);
-  const best = new Map();
-  zones.forEach((zone, index) => {
-    const kept = best.get(keys[index]);
-    const band = { urgency: levelOfMapZone(zone), priority: priorityOfMapZone(zone), deadlineAt: deadlineOfMapZone(zone, now) };
-    if (!kept || compareBands(band, kept.band) < 0) best.set(keys[index], { index, band });
-  });
-  return zones.filter((_zone, index) => best.get(keys[index]).index === index);
+  const bands = zones.map(zone => bandOf(zone, now));
+  const best = bestOfRepeats(zones.length, index => zones[index].byteStart, index => zones[index].byteEnd, index => bands[index]);
+  return zones.filter((_zone, index) => best.get(zones[index].byteStart).get(zones[index].byteEnd) === index);
 }
 
 /**
@@ -105,45 +112,103 @@ export function withoutRepeatedZones(zones, now = Date.now()) {
  * consecutive segments are consecutive bytes. A zone a metadata read states
  * keeps its own request and order, and is left as it is.
  *
- * @template {{ byteStart: number, byteEnd: number }} Zone
- * @param {Zone[]} zones
+ * A segment's zone states its demand once for all its ranges
+ * ({@link rangesOfZone}); each range is a part of its own here, so a repeat is
+ * found range by range, and the band and deadline every range is packed with
+ * are the zone's current ones.
+ *
+ * @param {Array<{ byteStart?: number, byteEnd?: number, ranges?: Array<[number, number]> }>} zones
  * @param {number} [now]
  * @returns {object[]}
  */
 export function coalescedZones(zones, now = Date.now()) {
+  // Every range of every zone is a part, kept in numbers rather than objects:
+  // a film's map is ten thousand of them (r26, torrent-tv/meta#178).
+  let count = 0;
+  for (const zone of zones) count += Array.isArray(zone.ranges) ? zone.ranges.length : 1;
+  const starts = new Float64Array(count);
+  const ends = new Float64Array(count);
+  const owners = new Int32Array(count);
+  const bands = zones.map(zone => bandOf(zone, now));
+  let at = 0;
+  zones.forEach((zone, index) => {
+    for (const [start, end] of rangesOfZone(zone)) {
+      starts[at] = start;
+      ends[at] = end;
+      owners[at] = index;
+      at += 1;
+    }
+  });
+  const best = bestOfRepeats(count, part => starts[part], part => ends[part], part => bands[owners[part]]);
   const kept = [];
+  /** Band key → the band and its parts, in the order the bands first appear. */
   const groups = new Map();
-  for (const zone of withoutRepeatedZones(zones, now)) {
+  for (let part = 0; part < count; part++) {
+    if (best.get(starts[part]).get(ends[part]) !== part) continue;
+    const zone = zones[owners[part]];
     if (zone.requestId !== undefined || zone.downloadOnly || (Number.isSafeInteger(zone.order) && zone.order > 0)) {
       kept.push(zone);
       continue;
     }
-    const urgency = levelOfMapZone(zone);
-    const priority = priorityOfMapZone(zone);
-    const key = `${urgency}:${priority}`;
+    const band = bands[owners[part]];
+    const key = band.urgency * 1000 + band.priority;
     let group = groups.get(key);
-    if (!group) groups.set(key, group = { urgency, priority, parts: [] });
-    group.parts.push({ start: zone.byteStart, end: zone.byteEnd, deadlineAt: deadlineOfMapZone(zone, now) });
+    if (!group) groups.set(key, group = { band, parts: [] });
+    group.parts.push(part);
   }
-  for (const { urgency, priority, parts } of groups.values()) {
-    parts.sort((left, right) => left.start - right.start);
-    let window = null;
+  for (const { band: { urgency, priority }, parts } of groups.values()) {
+    parts.sort((left, right) => starts[left] - starts[right]);
+    let windowStart = 0;
+    let windowEnd = -1;
+    let windowDeadline = Number.POSITIVE_INFINITY;
+    let open = false;
     const close = () => {
-      if (!window) return;
-      kept.push({ byteStart: window.start, byteEnd: window.end, priority, urgent: urgency === Urgency.NEAR,
+      if (!open) return;
+      kept.push({ byteStart: windowStart, byteEnd: windowEnd, priority, urgent: urgency === Urgency.NEAR,
         behind: urgency === Urgency.BEHIND, deferred: urgency === Urgency.TAIL,
-        ...(Number.isFinite(window.deadlineAt) ? { deadlineAt: window.deadlineAt } : {}) });
+        ...(Number.isFinite(windowDeadline) ? { deadlineAt: windowDeadline } : {}) });
     };
     for (const part of parts) {
-      if (window && part.start <= window.end + 1) {
-        window.end = Math.max(window.end, part.end);
-        window.deadlineAt = Math.min(window.deadlineAt, part.deadlineAt);
+      const deadlineAt = bands[owners[part]].deadlineAt;
+      if (open && starts[part] <= windowEnd + 1) {
+        windowEnd = Math.max(windowEnd, ends[part]);
+        windowDeadline = Math.min(windowDeadline, deadlineAt);
       } else {
         close();
-        window = { ...part };
+        open = true;
+        windowStart = starts[part];
+        windowEnd = ends[part];
+        windowDeadline = deadlineAt;
       }
     }
     close();
   }
   return kept;
+}
+
+/** The band a zone's bytes are fetched in. */
+function bandOf(zone, now) {
+  return { urgency: levelOfMapZone(zone), priority: priorityOfMapZone(zone), deadlineAt: deadlineOfMapZone(zone, now) };
+}
+
+/**
+ * Which of the parts naming each exact byte range is the best: by band
+ * ({@link compareBands}), the first of equals. Kept by the range's two numbers
+ * rather than a string made of them: making a key of each of a film's ten
+ * thousand ranges was most of what packing its map cost (r26,
+ * torrent-tv/meta#178).
+ *
+ * @returns {Map<number, Map<number, number>>} start → end → the best part.
+ */
+function bestOfRepeats(count, startOf, endOf, bandOfPart) {
+  const best = new Map();
+  for (let part = 0; part < count; part++) {
+    const start = startOf(part);
+    const end = endOf(part);
+    let byEnd = best.get(start);
+    if (!byEnd) best.set(start, byEnd = new Map());
+    const kept = byEnd.get(end);
+    if (kept === undefined || compareBands(bandOfPart(part), bandOfPart(kept)) < 0) byEnd.set(end, part);
+  }
+  return best;
 }

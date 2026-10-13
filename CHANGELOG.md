@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.26
 
 - **Fix**: A cold film's start no longer waits for the download map's pass to work its zones out again before every lower zone (broken in 2.97.25). The zones a pass publishes as it goes were built — with the next run's input raised — before each of its 4000 steps whether or not they were published, so the pass was quadratic: the start forecast answered "source-input-ranges-unavailable" for 71 s on a cold AVI against about 12 s before, and the build took 29 s of the main thread in ten minutes. They are now built only when published (#ttv-178).
 - **Fix**: The memory line walks the process's mappings only when the anonymous memory they break down has moved, or once a minute. It is written on every swing of resident memory, which array buffers make every two or three seconds, and each walk took the main thread about 70 ms — 15.6 s in ten minutes of a cold AVI on Home Assistant, while segments waited to be sent (#ttv-178).

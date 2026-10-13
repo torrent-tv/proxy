@@ -720,6 +720,37 @@ export function planEncoders({
  * @returns {{ stall: number, ahead: number, whole: number }} Three counts of
  *   seconds, compared in that order by {@link cheaperThan}.
  */
+/** Each number's rank in the map, worked out once per map rather than per arrangement scored. */
+const ranksByMap = new WeakMap();
+
+/**
+ * The highest priority any span gives each number from `first` to `last`.
+ *
+ * Asked once per number of the film by every arrangement a plan scores, it
+ * walked every span each time: 19 s of the main thread in ten minutes of a cold
+ * AVI on Home Assistant (torrent-tv/meta#178). The map does not change between
+ * the arrangements of one plan, so the answer is kept with it.
+ *
+ * @param {WantedSpan[]} wanted
+ * @param {number} first
+ * @param {number} last
+ * @returns {(index: number) => number}
+ */
+function ranksOf(wanted, first, last) {
+  const kept = ranksByMap.get(wanted);
+  if (kept && kept.first === first && kept.last === last) return kept.rankAt;
+  const ranks = new Float64Array(Math.max(0, last - first + 1));
+  for (const span of wanted) {
+    const priority = Number(span.priority) || 0;
+    for (let index = Math.max(first, span.from); index <= Math.min(last, span.to); index += 1) {
+      if (priority > ranks[index - first]) ranks[index - first] = priority;
+    }
+  }
+  const rankAt = (index) => (index >= first && index <= last ? ranks[index - first] : 0);
+  ranksByMap.set(wanted, { first, last, rankAt });
+  return rankAt;
+}
+
 function latenessOf(encoders, coverage, wanted, untilNeeded, rate, refetchSecPerSegment, segmentSeconds) {
   const first = Math.min(...wanted.map((span) => span.from));
   const last = Math.max(...wanted.map((span) => span.to));
@@ -750,15 +781,7 @@ function latenessOf(encoders, coverage, wanted, untilNeeded, rate, refetchSecPer
   // that is 2024 s, which outvotes everything: field 2026-09-08, one viewer got
   // three encoders, two of them on film behind them, and the run serving them
   // was killed to make room for one.
-  const rankAt = (at) => {
-    let rank = 0;
-    for (const span of wanted) {
-      if (at >= span.from && at <= span.to) {
-        rank = Math.max(rank, Number(span.priority) || 0);
-      }
-    }
-    return rank;
-  };
+  const rankAt = ranksOf(wanted, first, last);
   // The ranks the map actually states, most urgent first. The comparison is over
   // these and nothing else, so a rank can never be outvoted by a lower one
   // however many seconds are at stake there.

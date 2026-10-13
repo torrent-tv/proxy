@@ -61,6 +61,7 @@ import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
 import { containerOrchestrator, CONTAINER_HEAD_BYTES, describeWorkTags } from "./services/media/ContainerOrchestrator.js";
 import { readPlaybackDeclarations } from "./services/media/read-playback-declarations.js";
 import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
+import { passInputs, samePass } from "./services/viewer/playback-pass.js";
 import { nativeSourceMap, nativeOriginalSourceMap } from "./services/viewer/NativeSourceMap.js";
 import { MediaReadRequests } from "./services/media/MediaReadRequests.js";
 import { SegmentInputs } from "./services/media/SegmentInputs.js";
@@ -183,6 +184,7 @@ export async function startProxyServer({
       downloadMaps.retire(sourceKey);
       for (const key of segmentSourceRanges.keys()) if (key.startsWith(`${sourceKey}:`)) segmentSourceRanges.delete(key);
       for (const key of segmentReadings.keys()) if (key.startsWith(`${sourceKey}:`)) segmentReadings.delete(key);
+      for (const key of resolvedPasses.keys()) if (key.startsWith(`${sourceKey}:`)) resolvedPasses.delete(key);
       outputParts.encodeInputs?.bytesChanged();
     },
     // Pieces arriving is ANNOUNCED by the thread that owns the swarm; what is
@@ -469,6 +471,11 @@ export async function startProxyServer({
     byIndex.set(zone.index, { trackList, shift, choicesKey, from: zone.sourceInterval.from, to: zone.sourceInterval.to, reading });
     return reading;
   };
+  /**
+   * The last complete pass over each file, by file: what it was worked out
+   * from and what it resolved (`playback-pass.js`); forgotten with the source.
+   */
+  const resolvedPasses = new Map();
   /** A segment's ranges joined at the precision the torrent fetches, once per kept list and piece length. */
   const joinedRanges = new WeakMap();
   const joinedRangesOf = (ranges, pieceLength) => {
@@ -538,6 +545,17 @@ export async function startProxyServer({
         }
       }
       demands.sort((left, right) => left.deadlineAt - right.deadlineAt || right.priority - left.priority || left.index - right.index);
+      // WHAT THIS PASS IS WORKED OUT FROM, compared with the last complete pass
+      // over the file (`resolvedPasses`): the outputs and their targets, how the
+      // torrent fetches and where the file's clock starts, and every segment
+      // asked for, in the order of its deadline, with its level and priority.
+      const fileKey = `${map.sourceKey}:${map.fileIndex}`;
+      const pass = { tracks: tracks.value, ...passInputs({ pieceLength, shift, targets, demands }) };
+      const last = resolvedPasses.get(fileKey);
+      if (samePass(last, pass)) return last.result;
+      // Kept only from a pass that worked every segment out; one that met a
+      // reading not there yet is worked out again until it is.
+      let complete = true;
       // A container that names the bytes of an interval from an index it holds
       // answers every segment by arithmetic: once that index is read
       // ("source-navigation"), the ranges are computed here directly instead of
@@ -580,7 +598,7 @@ export async function startProxyServer({
         // were never asked for (Home Assistant 2026-10-08, torrent-tv/meta#151).
         const known = segmentSourceRanges.get(rangesKey);
         if (known) { convert(known); continue; }
-        if (waiting.has(zone.outputKey)) continue;
+        if (waiting.has(zone.outputKey)) { complete = false; continue; }
         // What is resolved so far is stated before a lower zone is worked out
         // (DownloadMaps, torrent-tv/meta#178).
         map.workingOut?.(zone.priority, expanded);
@@ -613,9 +631,10 @@ export async function startProxyServer({
           requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
           demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
         if (!map.isCurrent()) return [];
-        if (!intervalParams) continue;
+        if (!intervalParams) { complete = false; continue; }
         const navigation = await containerOrchestrator.inspect(intervalParams, "source-navigation");
         if (navigation.kind !== "result") {
+          complete = false;
           if (navigation.kind === "needs-ranges" || navigation.kind === "needs-memory") waiting.add(zone.outputKey);
           continue;
         }
@@ -623,13 +642,16 @@ export async function startProxyServer({
         const packets = await containerOrchestrator.inspect(intervalParams, originalRanges ? "source-ranges" : "packets");
         if (!map.isCurrent()) return [];
         if (packets.kind === "needs-memory") waiting.add(zone.outputKey);
-        if (packets.kind !== "result") continue;
+        if (packets.kind !== "result") { complete = false; continue; }
         const input = originalRanges ? packets.value : new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
-        if (input.kind !== "result") continue;
+        if (input.kind !== "result") { complete = false; continue; }
         segmentSourceRanges.set(rangesKey, input.ranges);
         convert(input.ranges);
       }
-      return expanded();
+      const result = expanded();
+      if (complete) resolvedPasses.set(fileKey, { ...pass, result });
+      else resolvedPasses.delete(fileKey);
+      return result;
     }
   });
   const mediaReads = new MediaReadRequests({

@@ -17,6 +17,7 @@ import { ProbeRequests } from "./services/media/ProbeRequests.js";
 import { IndexMemory } from "./services/storage/IndexMemory.js";
 import { probePackets } from "./services/media/probe-packets.js";
 import { segmentDemands, sourceDeadline } from "./services/viewer/segment-demands.js";
+import { expandToTargetInputs } from "./services/viewer/target-input-expansion.js";
 import { SourcePreparation } from "./services/viewer/SourcePreparation.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
@@ -490,11 +491,16 @@ export async function startProxyServer({
       const pieceLength = Number(torrentPool.knownTorrent(map.sourceKey)?.pieceLength);
       const converted = [];
       const demands = [];
+      // What each output's next run would copy, asked of the swarm as one group
+      // with its first segment (`target-input-expansion.js`).
+      const targets = new Map();
+      const expanded = () => expandToTargetInputs(converted, outputKey => targets.get(outputKey) ?? null);
       for (const output of outputParts.outputs.values()) {
         if (output.file.sourceKey !== map.sourceKey) continue;
         const consumers = [...outputParts.viewers.forOutput(output).values()].filter(viewer =>
           viewer.isPresent() && !outputParts.outputs.supersededBy(output, viewer.activeVariantId ?? null));
         if (consumers.length === 0) continue;
+        targets.set(output.outputKey, outputParts.encodeInputs?.targetInputBytes?.(output) ?? null);
         const inventory = outputParts.segmentStore.sizesOf(output.outputKey);
         let bytes = 0, seconds = 0;
         for (const [index, size] of inventory) {
@@ -560,7 +566,7 @@ export async function startProxyServer({
         if (waiting.has(zone.outputKey)) continue;
         // What is resolved so far is stated before a lower zone is worked out
         // (DownloadMaps, torrent-tv/meta#178).
-        map.workingOut?.(zone.priority, converted);
+        map.workingOut?.(zone.priority, expanded());
         if (direct) {
           // Asked per zone too: a soundtrack of an AVI is read from its own
           // packets, which the same index states (torrent-tv/meta#166).
@@ -606,7 +612,7 @@ export async function startProxyServer({
         segmentSourceRanges.set(rangesKey, input.ranges);
         convert(input.ranges);
       }
-      return converted;
+      return expanded();
     }
   });
   const mediaReads = new MediaReadRequests({

@@ -303,6 +303,23 @@ export class EncodeInputs {
     return this.stretchFor(output)?.bytes ?? null;
   }
 
+  /**
+   * What the next run of this output would be given to copy, whatever has
+   * arrived: the stretch `stretchFor` sizes, within the memory encoder inputs
+   * may hold. The download map asks the swarm for that much as one group
+   * (`viewer/target-input-expansion.js`); a stretch shortened to what is here
+   * would ask only for what is here. Null while it is not known.
+   *
+   * @param {object} output
+   * @returns {number | null}
+   */
+  targetInputBytes(output) {
+    const bytes = this.stretchBytesFor(output);
+    if (bytes === null) return null;
+    const capacity = this.#capacity();
+    return Number.isFinite(capacity) ? Math.min(bytes, capacity) : bytes;
+  }
+
   #prepare(request) {
     request.pending = true;
     request.revision = this.#revision;

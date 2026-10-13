@@ -16,7 +16,7 @@ export async function futureDownload(entries, { now = Date.now(), findStore = pi
   const forecasts = new Map();
   const pending = [];
   let steps = 0;
-  for (const { torrent, register } of entries) {
+  for (const { torrent, register, limit = null } of entries) {
     if (torrent.destroyed || torrent.ready === false) continue;
     const wanted = new Map();
     for (const window of register.windows()) {
@@ -81,7 +81,10 @@ export async function futureDownload(entries, { now = Date.now(), findStore = pi
       const remaining = piece?.missing;
       const speed = (torrent.wires ?? []).reduce((sum, wire) => {
         if (wire.destroyed || !wire.peerPieces?.get(index)) return sum;
-        const rate = Number(wire.downloadSpeed?.());
+        // What it carried with its queue kept full, where it has been seen so:
+        // its speed while our selection gave it little measures our asking
+        // (`SelectionLimit`, torrent-tv/meta#178).
+        const rate = Number(limit?.capacityOf?.(wire) ?? wire.downloadSpeed?.());
         return Number.isFinite(rate) && rate > 0 ? sum + rate : sum;
       }, 0);
       pending.push({ arrivals, index, ...band, seconds:

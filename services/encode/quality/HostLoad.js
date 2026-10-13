@@ -31,7 +31,15 @@ function threadSays(now, previous) {
   const reads = Number.isFinite(now.readerReads) && Number.isFinite(previous.readerReads) && now.readerReads > previous.readerReads
     && Number.isFinite(now.readerMs) && Number.isFinite(previous.readerMs)
     ? `; ${now.readerReads - previous.readerReads} read(s) for readers took ${Math.round(now.readerMs - previous.readerMs)}ms in it` : "";
-  return loop + reads;
+  // Whether our own selection held the swarm back over the interval, and what
+  // it gave in the time it did not (`SelectionLimit`, torrent-tv/meta#178).
+  const ms = (now.selection?.ms ?? 0) - (previous.selection?.ms ?? 0);
+  const freeMs = (now.selection?.freeMs ?? 0) - (previous.selection?.freeMs ?? 0);
+  const freeBytes = (now.selection?.freeBytes ?? 0) - (previous.selection?.freeBytes ?? 0);
+  const held = ms > 0 && freeMs >= 0 && freeMs <= ms
+    ? `; our selection held a peer back ${Math.round((1 - freeMs / ms) * 100)}% of the time` +
+      (freeMs > 0 ? `, the rest gave ${(freeBytes / freeMs / 1000).toFixed(2)} MB/s` : "") : "";
+  return loop + reads + held;
 }
 
 export class HostLoad {
@@ -211,6 +219,7 @@ export class HostLoad {
         readerReads: totals?.readerReads ?? null,
         loopP99Ms: totals?.loopP99Ms ?? null,
         loopMaxMs: totals?.loopMaxMs ?? null,
+        selection: totals?.selection ?? null,
         metadata: this.#host.readMetadataActivity?.()
       };
       this.#learnThreadCost(now);
@@ -482,7 +491,8 @@ export class HostLoad {
       const totals = await this.#host.getTorrentTotals();
       const read = (key) => { const value = Number(totals?.[key]); return Number.isFinite(value) ? value : null; };
       return { downloaded: read("downloaded"), uploaded: read("uploaded"), served: read("served"), threadCpuSeconds: read("threadCpuSeconds"),
-        readerMs: read("readerMs"), readerReads: read("readerReads"), loopP99Ms: read("loopP99Ms"), loopMaxMs: read("loopMaxMs") };
+        readerMs: read("readerMs"), readerReads: read("readerReads"), loopP99Ms: read("loopP99Ms"), loopMaxMs: read("loopMaxMs"),
+        selection: totals?.selection ?? null };
     } catch {
       return null; // the pool is busy or gone; a reading missed is not a fault
     }

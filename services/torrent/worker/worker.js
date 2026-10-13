@@ -28,7 +28,7 @@ import { Readable } from "node:stream";
 import { heldFileBytes } from "./held-file-bytes.js";
 import { createSendStream } from "./channel.js";
 import { readFragments, supplyFiguresFor } from "./piece-reader.js";
-import { demandFor, forecastDownloads } from "../download/registry.js";
+import { demandFor, forecastDownloads, selectionLimitOf } from "../download/registry.js";
 import { heldRangesOf, ownsItsMemory, readHeldBytes, readHeldRanges } from "./held-bytes.js";
 import { CompletedFiles, completedFilesRoot } from "../../storage/files/CompletedFiles.js";
 import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../../storage/files/piece-from-whole-file.js";
@@ -435,11 +435,16 @@ async function runCommand(command, params, id) {
       // be.
       let downloaded = 0;
       let uploaded = 0;
+      // Over every torrent: the time our own selection held a connection back,
+      // and the bytes and time of the rest (`SelectionLimit`).
+      const selection = { ms: 0, heldBackMs: 0, freeBytes: 0, freeMs: 0 };
       for (const torrent of pool.client?.torrents ?? []) {
         const gotBytes = Number(torrent?.downloaded);
         const sentBytes = Number(torrent?.uploaded);
         downloaded += Number.isFinite(gotBytes) ? gotBytes : 0;
         uploaded += Number.isFinite(sentBytes) ? sentBytes : 0;
+        const limit = selectionLimitOf(torrent);
+        if (limit) for (const key of Object.keys(selection)) selection[key] += limit[key];
       }
       // This thread's own processor time, read in the same moment as the
       // bytes, so the price of a downloaded byte is taken over one interval
@@ -450,7 +455,7 @@ async function runCommand(command, params, id) {
       const loopMaxMs = loopDelay.count > 0 ? loopDelay.max / 1e6 : null;
       loopDelay.reset();
       return { downloaded, uploaded, served: servedBytes, threadCpuSeconds: (usage.user + usage.system) / 1e6,
-        readerMs, readerReads, loopP99Ms, loopMaxMs };
+        readerMs, readerReads, loopP99Ms, loopMaxMs, selection };
     }
 
 

@@ -18,6 +18,40 @@
 
 import { emptyMap, mapForViewer, mergeMaps, runsOf, pauseCoefficient } from "./PriorityMap.js";
 
+/**
+ * What a map built from these viewers depends on, as values to compare: the
+ * same values build the same map (`mapForViewer`, `mergeMaps`).
+ *
+ * A viewer's map is a function of the second they stand at, not of the moment
+ * it is asked — `mapForViewer` floors the position — and of the time they have
+ * paused only while that pause is lowering their priorities. A map built on
+ * every pass of the encoders' plan, which is every piece a soundtrack copy
+ * closes, was the same map 2.4 times a second (Home Assistant r22,
+ * torrent-tv/meta#178).
+ *
+ * @param {{ durationSeconds: number, allowanceSeconds: number, viewers: object[], viewerCount?: number }} params
+ * @returns {number[]}
+ */
+export function mapInputsOf({ durationSeconds, allowanceSeconds, viewers, viewerCount }) {
+  const count = viewerCount ?? new Set((viewers ?? []).map((one, index) => one.id ?? index)).size;
+  const inputs = [Number(durationSeconds) || 0, Number(allowanceSeconds) || 0, count];
+  for (const viewer of viewers ?? []) {
+    const playing = viewer.playing !== false;
+    const urgentReady = viewer.urgentReady === true;
+    const at = Number.isFinite(viewer.atSeconds) && viewer.atSeconds > 0 ? Math.floor(viewer.atSeconds) : 0;
+    const attenuated = !playing && urgentReady && count > 1;
+    inputs.push(at, playing ? 1 : 0, urgentReady ? 1 : 0, attenuated ? Number(viewer.pauseSeconds) || 0 : 0);
+  }
+  return inputs;
+}
+
+/** Whether two lists hold the same values in the same order. */
+function sameValues(left, right) {
+  if (!left || left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index++) if (!Object.is(left[index], right[index])) return false;
+  return true;
+}
+
 export class PriorityOrchestrator {
   /** Where the map goes once it is built. @type {(published: object) => void} */
   #publish;
@@ -56,6 +90,12 @@ export class PriorityOrchestrator {
    * @type {Map<string, import("./PriorityMap.js").PriorityMap>}
    */
   #byOutput = new Map();
+
+  /** What the map of each file was built from, with its demands. @type {Map<string, { inputs: number[], demand: string }>} */
+  #builtFrom = new Map();
+
+  /** What the map of each output was built from. @type {Map<string, number[]>} */
+  #outputBuiltFrom = new Map();
 
   /** The registry of this component that knows who watches each output. @type {{ forOutput: (output: object) => Map<string, object> }} */
   #viewers;
@@ -155,8 +195,18 @@ export class PriorityOrchestrator {
    *   film, merged over everyone watching it.
    */
   build({ sourceKey, fileIndex, durationSeconds, allowanceSeconds, viewers, demandKey = null }) {
-    const map = this.#mapFrom({ durationSeconds, allowanceSeconds, viewers });
     const key = `${sourceKey}:${fileIndex}`;
+    // The same map and the same demands publish nothing new: neither is built
+    // again (`mapInputsOf`).
+    const inputs = mapInputsOf({ durationSeconds, allowanceSeconds, viewers });
+    const demand = JSON.stringify(demandKey);
+    const built = this.#builtFrom.get(key);
+    const kept = this.#maps.get(key);
+    if (kept && built?.demand === demand && sameValues(built.inputs, inputs)) {
+      return kept;
+    }
+    this.#builtFrom.set(key, { inputs, demand });
+    const map = this.#mapFrom({ durationSeconds, allowanceSeconds, viewers });
     this.#maps.set(key, map);
     // Unchanged maps are not republished: the downloading rebuilds what it asks
     // the swarm for on every one, and a viewer sitting still would otherwise
@@ -302,6 +352,7 @@ export class PriorityOrchestrator {
         const last = this.#last.get(key);
         this.#maps.delete(key);
         this.#last.delete(key);
+        this.#builtFrom.delete(key);
         if (last) {
           this.#publishNothingFor(last);
         }
@@ -310,6 +361,7 @@ export class PriorityOrchestrator {
     for (const address of [...this.#byOutput.keys()]) {
       if (!byOutput.has(address)) {
         this.#byOutput.delete(address);
+        this.#outputBuiltFrom.delete(address);
       }
     }
     for (const one of byFile.values()) {
@@ -326,6 +378,9 @@ export class PriorityOrchestrator {
     for (const [address, one] of byOutput) {
       // Competition is per file, even when two viewers use different outputs.
       one.viewerCount = new Set((byFile.get(one.fileKey)?.viewers ?? []).map((viewer, index) => viewer.id ?? index)).size;
+      const inputs = mapInputsOf(one);
+      if (this.#byOutput.has(address) && sameValues(this.#outputBuiltFrom.get(address), inputs)) continue;
+      this.#outputBuiltFrom.set(address, inputs);
       this.#byOutput.set(address, this.#mapFrom(one));
     }
   }

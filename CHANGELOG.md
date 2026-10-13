@@ -1,4 +1,4 @@
-## Unreleased
+## 2.97.22
 
 - **Fix**: A large AVI plays to its end. Its length was taken from the main header, whose frame count covers only the first part of an OpenDML file, so the field's two-hour AVI was listed as 2:15:36 of its 2:29:58 and its last 14 minutes could be neither played nor reached; the length now follows FFmpeg's rule, the longest stream of variable-size samples by its own header (#ttv-178).
 - **Fix**: An MP4 or Matroska file whose timeline does not begin at zero no longer lists seconds past its last picture. Its length was counted from zero while every cut is published from the file's start, so a file starting at 5 s ended its playlist with 5 s that hold no picture (#ttv-178).

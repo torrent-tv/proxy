@@ -74,11 +74,13 @@ test("a changed map invalidates a forecast without modifying protocol state", as
   assert.equal(entry.wire.requests.length, 0);
 });
 
-test("unrequested pieces share the measured completion of their public selection band", async () => {
+test("unrequested pieces of one band arrive in the order the sequential picker takes them", async () => {
+  // A band now spans a stretch of many segments (`coalescedZones`); charged its
+  // end, its nearest piece would be priced at its farthest (torrent-tv/meta#178).
   const entry = state();
   entry.wire.peerPieces = { get: () => true };
   const result = await forecast(entry);
-  assert.deepEqual([...result.arrivals.values()], [6500, 6500, 6500]);
+  assert.deepEqual([...result.arrivals.values()], [2500, 4500, 6500]);
   assert.deepEqual(entry.wire.requests, []);
 });
 
@@ -89,8 +91,8 @@ test("global bands do not spend the same measured supply concurrently", async ()
   second.register.state({ claimant: "viewer", fileIndex: 0, byteStart: 0,
     byteEnd: 6 * BLOCK - 1, priority: 10, urgency: 0 });
   const result = await futureDownload([second, first], { now: 500, findStore: () => null });
-  assert.deepEqual([...result.get(first.torrent).arrivals.values()], [6500, 6500, 6500]);
-  assert.deepEqual([...result.get(second.torrent).arrivals.values()], [12500, 12500, 12500]);
+  assert.deepEqual([...result.get(first.torrent).arrivals.values()], [2500, 4500, 6500]);
+  assert.deepEqual([...result.get(second.torrent).arrivals.values()], [8500, 10500, 12500]);
 });
 
 test("an unadvertised piece prevents a band estimate while observed queues remain usable", async () => {

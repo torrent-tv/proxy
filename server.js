@@ -56,7 +56,7 @@ import { createPlaybackPlanner } from "./services/media/playback-planner.js";
 import { KeyframeTables } from "./services/media/KeyframeTables.js";
 import { contentsOf } from "./services/torrent/Contents.js";
 import { joinedWithinPieces } from "./services/torrent/demand/pieces.js";
-import { withoutRepeatedZones } from "./services/torrent/map-zones.js";
+import { coalescedZones, withoutRepeatedZones } from "./services/torrent/map-zones.js";
 import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
 import { containerOrchestrator, CONTAINER_HEAD_BYTES, describeWorkTags } from "./services/media/ContainerOrchestrator.js";
 import { readPlaybackDeclarations } from "./services/media/read-playback-declarations.js";
@@ -436,10 +436,23 @@ export async function startProxyServer({
    * change; forgotten with the source.
    */
   const segmentReadings = new Map();
+  // Per output, then per segment: every segment of an output of one pass shares
+  // its list of track choices, so the output's key and the choices' key are
+  // worked out once for it. Built for each of a pass's segments, the two
+  // strings cost the main thread 13 s in ten minutes of a cold AVI on Home
+  // Assistant (torrent-tv/meta#178).
+  const readingsByChoices = new WeakMap();
   const segmentReadingOf = (zone, trackList, shift, map) => {
-    const choicesKey = zone.tracks.map(choice => `${choice.type}/${choice.index}/${choice.mode}`).join(",");
-    const key = `${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`;
-    const kept = segmentReadings.get(key);
+    let output = readingsByChoices.get(zone.tracks);
+    if (!output) {
+      const outputKey = `${map.sourceKey}:${map.fileIndex}:${zone.outputKey}`;
+      let byIndex = segmentReadings.get(outputKey);
+      if (!byIndex) segmentReadings.set(outputKey, byIndex = new Map());
+      output = { byIndex, choicesKey: zone.tracks.map(choice => `${choice.type}/${choice.index}/${choice.mode}`).join(",") };
+      readingsByChoices.set(zone.tracks, output);
+    }
+    const { byIndex, choicesKey } = output;
+    const kept = byIndex.get(zone.index);
     if (kept && kept.trackList === trackList && kept.shift === shift && kept.choicesKey === choicesKey &&
       kept.from === zone.sourceInterval.from && kept.to === zone.sourceInterval.to) return kept.reading;
     const selected = zone.tracks.map(choice => ({ choice, track: choice.type === "video"
@@ -453,7 +466,7 @@ export async function startProxyServer({
         modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
       reading = { wanted, modes, interval, rangesKey: `${map.sourceKey}:${map.fileIndex}:${JSON.stringify(interval)}` };
     }
-    segmentReadings.set(key, { trackList, shift, choicesKey, from: zone.sourceInterval.from, to: zone.sourceInterval.to, reading });
+    byIndex.set(zone.index, { trackList, shift, choicesKey, from: zone.sourceInterval.from, to: zone.sourceInterval.to, reading });
     return reading;
   };
   /** A segment's ranges joined at the precision the torrent fetches, once per kept list and piece length. */
@@ -474,6 +487,10 @@ export async function startProxyServer({
     // same bytes — lost them with 2.96.11, and the start forecast answered
     // "source-input-ranges-unavailable" for ever (Home Assistant 2026-10-11).
     publish: (map) => torrentPool.setPriorityMap({ ...map, zones: withoutRepeatedZones(map.zones) }),
+    // And what is sent is packed: a stretch of one level and priority is one
+    // window, not one zone per range of each of its segments
+    // (`coalescedZones`, torrent-tv/meta#178).
+    pack: (zones) => coalescedZones(zones),
     log: (line) => logger.info(line),
     resolvePlayback: async (map) => {
       if (map.zones.length === 0) return [];

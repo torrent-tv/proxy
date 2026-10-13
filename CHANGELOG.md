@@ -1,3 +1,8 @@
+## Unreleased
+
+- **Perf**: The download map tells the torrent one window per stretch of bytes of one band instead of one zone per range of every segment. A film is thousands of segments and each names its own bytes and the header and index all of them read: some 10 000 zones were built, compared, copied to the torrent thread and stated there every three seconds a viewer played on, and on Home Assistant the main thread — the one that also sends the viewer's pieces — was busy 71 % of ten minutes of a cold AVI. The forecast of single pieces now takes a band's pieces in the order the sequential picker takes them, so a long window does not price its nearest piece at its farthest (#ttv-178).
+- **Perf**: Placing the encoders works out each number's rank in the map once per map instead of once per arrangement scored: 19 s of the main thread in the same ten minutes (#ttv-178).
+
 ## 2.97.26
 
 - **Fix**: A cold film's start no longer waits for the download map's pass to work its zones out again before every lower zone (broken in 2.97.25). The zones a pass publishes as it goes were built — with the next run's input raised — before each of its 4000 steps whether or not they were published, so the pass was quadratic: the start forecast answered "source-input-ranges-unavailable" for 71 s on a cold AVI against about 12 s before, and the build took 29 s of the main thread in ten minutes. They are now built only when published (#ttv-178).

@@ -67,6 +67,20 @@ export function directoryNameFor(key) {
 }
 
 /**
+ * The biggest of these pieces and its number.
+ *
+ * @param {Map<number, number>} sizes
+ * @returns {{ index: number, size: number }}
+ */
+function largestOf(sizes) {
+  let largest = { index: -1, size: 0 };
+  for (const [index, size] of sizes) {
+    if (size > largest.size) largest = { index, size };
+  }
+  return largest;
+}
+
+/**
  * What one output's directory holds, as last read.
  *
  * @typedef {object} HeldContents
@@ -75,6 +89,9 @@ export function directoryNameFor(key) {
  * @property {number} bytes - What those files weigh.
  * @property {number} unproven - The highest number, whose closure nothing
  *   proves, or -1 when the directory holds no segments.
+ * @property {boolean} followed - Whether every change since the reading has
+ *   been told to this store: it was read while the directory was watched, and
+ *   each piece published, removed or seen arriving since was put into it.
  */
 
 export class SegmentStore {
@@ -226,21 +243,36 @@ export class SegmentStore {
   }
 
   /**
-   * Re-read this output's directory if it has moved since last time.
+   * What this output's directory holds: kept up to date piece by piece while
+   * the directory is watched, read whole otherwise.
    *
-   * A directory's modification time changes when an entry is added or removed,
-   * so a quiet request costs one `stat` rather than a listing.
+   * A WATCHED DIRECTORY IS READ ONCE. Every change to it after that is a piece
+   * published or removed here, or one the watch names, and each puts that one
+   * piece in or takes it out. It used to be read again — `readdir` and a `stat`
+   * of every piece — whenever its modification time moved, and the time moves
+   * with every working file an encoder opens: on Home Assistant 71 s of the
+   * main thread in fifteen minutes of a two-hour AVI, 2250 pieces of soundtrack
+   * listed again for each new one (r22, torrent-tv/meta#178).
+   *
+   * Unwatched, a directory's modification time still decides, so a quiet
+   * request costs one `stat` rather than a listing.
    *
    * @param {string} key
    * @returns {HeldContents}
    */
   refresh(key) {
     const format = this.#formats.get(key);
-    const empty = { readAt: 0, byNumber: new Map(), bytes: 0, unproven: -1, largest: { index: -1, size: 0 } };
+    const empty = { readAt: 0, byNumber: new Map(), bytes: 0, unproven: -1, largest: { index: -1, size: 0 }, followed: false };
     if (!format) {
       return this.#held.get(key) ?? empty;
     }
+    const followed = this.#held.get(key);
+    if (followed?.followed && this.#watchers.has(key)) {
+      return followed;
+    }
     const dir = path.join(this.#root, directoryNameFor(key));
+    // Watched from before the listing, so nothing that happens after it is missed.
+    const watched = this.#watchers.has(key);
     let mtime = 0;
     try {
       mtime = statSync(dir).mtimeMs;
@@ -300,9 +332,59 @@ export class SegmentStore {
       this.#held.delete(key);
       return empty;
     }
-    const contents = { readAt: mtime, byNumber, sizes, bytes, unproven: highest, largest };
+    const contents = { readAt: mtime, byNumber, sizes, bytes, unproven: highest, largest, followed: watched };
     this.#held.set(key, contents);
     return contents;
+  }
+
+  /**
+   * Put one closed piece into what is held, from the file now under its served
+   * name. Nothing is done while nothing is held: the next question reads the
+   * directory whole.
+   *
+   * @param {string} key
+   * @param {number} index
+   * @returns {void}
+   */
+  #heldArrived(key, index) {
+    const contents = this.#held.get(key);
+    const format = this.#formats.get(key);
+    if (!contents || !format?.segmentFileName) {
+      return;
+    }
+    const full = path.join(this.#root, directoryNameFor(key), format.segmentFileName(index));
+    const size = statSync(full, { throwIfNoEntry: false })?.size ?? 0;
+    // Under the rule `refresh` applies to a listing: a file of no bytes is not
+    // a segment, whatever its name says.
+    if (!(size > 0)) {
+      this.#heldGone(key, index);
+      return;
+    }
+    contents.bytes += size - (contents.sizes.get(index) ?? 0);
+    contents.byNumber.set(index, full);
+    contents.sizes.set(index, size);
+    if (index > contents.unproven) contents.unproven = index;
+    if (size > contents.largest.size) contents.largest = { index, size };
+    else if (contents.largest.index === index) contents.largest = largestOf(contents.sizes);
+  }
+
+  /**
+   * Take one piece out of what is held.
+   *
+   * @param {string} key
+   * @param {number} index
+   * @returns {void}
+   */
+  #heldGone(key, index) {
+    const contents = this.#held.get(key);
+    if (!contents?.byNumber.has(index)) {
+      return;
+    }
+    contents.bytes -= contents.sizes.get(index) ?? 0;
+    contents.byNumber.delete(index);
+    contents.sizes.delete(index);
+    if (contents.unproven === index) contents.unproven = Math.max(-1, ...contents.byNumber.keys());
+    if (contents.largest.index === index) contents.largest = largestOf(contents.sizes);
   }
 
   /**
@@ -566,8 +648,9 @@ export class SegmentStore {
     }
     // Publication registers the material even after the previous directory was dropped.
     this.useFormat(key, format);
-    // What the directory holds has changed, so the memory of it is stale.
-    this.#held.delete(key);
+    // What the directory holds has changed by this one piece.
+    if (index >= 0) this.#heldArrived(key, index);
+    else this.#held.delete(key);
     if (index >= 0) {
       if (mediaRanges) {
         const byIndex = this.#mediaRanges.get(key) ?? new Map();
@@ -750,6 +833,8 @@ export class SegmentStore {
           end();
           return;
         }
+        // Nothing can be inferred from a change the platform did not name.
+        if (typeof name !== "string") this.#held.delete(key);
         this.#noticed(key, typeof name === "string" ? name : null);
         this.#changed(key);
       });
@@ -781,6 +866,9 @@ export class SegmentStore {
       return;
     }
     this.#watchers.delete(key);
+    // Changes are no longer told: what is held is checked against the disk again.
+    const held = this.#held.get(key);
+    if (held) held.followed = false;
     try {
       watcher.close();
     } catch {
@@ -800,19 +888,16 @@ export class SegmentStore {
    * @returns {void}
    */
   #noticed(key, name) {
-    // WHAT WAS READ OF THIS DIRECTORY IS STALE. Dropped rather than re-read:
-    // re-reading HERE is quadratic in the pieces of a film — one listing per
-    // file written, of a directory that grows with every file, measured at 110 s
-    // against 3 s over 482 pieces — while dropping costs one listing to whoever
-    // asks next, which is bounded by the questions and not by the writes.
-    //
-    // IT IS NOT ENOUGH TO LET `refresh` NOTICE BY ITSELF. It re-reads when the
-    // directory's modification time has moved, and that time is stated in
-    // milliseconds: a file written in the same millisecond as the last reading
-    // leaves it unmoved, and the piece is then reported absent although it is
-    // there. That is the hazard `refresh` documents and `publish` has always
-    // guarded against by dropping the memory.
-    this.#held.delete(key);
+    // A reading taken before the watch began is checked against the
+    // directory's modification time, which is stated in milliseconds: a file
+    // written in the same millisecond as that reading leaves it unmoved, and
+    // the piece would be reported absent although it is there. Such a reading
+    // is dropped, and the next question reads the directory once, while it is
+    // watched. A reading kept up piece by piece is told of this one piece below
+    // — not read again, which is a listing of a directory that grows with every
+    // file for every file written (71 s in fifteen minutes on Home Assistant,
+    // r22, torrent-tv/meta#178).
+    if (!this.#held.get(key)?.followed) this.#held.delete(key);
     const format = this.#formats.get(key);
     const dir = path.join(this.#root, directoryNameFor(key));
     const index = name && format?.isSegmentFileName?.(name)
@@ -823,8 +908,10 @@ export class SegmentStore {
       // before anything is announced — otherwise clearing up after a dead run
       // would read as that run's pieces arriving.
       if (!existsSync(path.join(dir, name))) {
+        this.#heldGone(key, index);
         return;
       }
+      this.#heldArrived(key, index);
       this.#announceArrival(key, index);
       return;
     }
@@ -839,6 +926,7 @@ export class SegmentStore {
     }
     for (const waiting of [...byIndex.keys()]) {
       if (existsSync(path.join(dir, format.segmentFileName(waiting)))) {
+        this.#heldArrived(key, waiting);
         this.#announceArrival(key, waiting);
       }
     }
@@ -1025,7 +1113,14 @@ export class SegmentStore {
    */
   pathOf(key, index) {
     this.#touched.set(key, this.#now());
-    return this.refresh(key).byNumber.get(index) ?? null;
+    const contents = this.refresh(key);
+    const found = contents.byNumber.get(index);
+    if (found || !contents.followed) return found ?? null;
+    // A reading kept up piece by piece answers from what it was told, and a
+    // change the watch failed to deliver would leave a closed piece absent for
+    // good. The one file asked about is looked at — a `stat`, not a listing.
+    this.#heldArrived(key, index);
+    return contents.byNumber.get(index) ?? null;
   }
 
   /**
@@ -1180,7 +1275,7 @@ export class SegmentStore {
       this.#logger.warn(`segment store: could not remove segment ${index}: ${error.message}`);
       return 0;
     }
-    this.#held.delete(key);
+    this.#heldGone(key, index);
     this.#mediaRanges.get(key)?.delete(index);
     this.#changed(key);
     return size;

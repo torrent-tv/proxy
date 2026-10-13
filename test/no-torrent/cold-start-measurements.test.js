@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { describeShares, parseStat, partOfThread, sharesBetween } from "../../services/storage/processor-report.js";
+import { describeShares, parseStat, partOfThread, sharesBetween, threadReader } from "../../services/storage/processor-report.js";
 import { describeAnswers } from "../../services/encode/OriginalInput.js";
 import { DownloadMaps } from "../../services/viewer/DownloadMaps.js";
 import { MachineBudget } from "../../services/storage/MachineBudget.js";
@@ -33,6 +33,47 @@ test("shares are per core, and a process present in one reading only adds nothin
   assert.ok(Math.abs(shares.worker - 0.2) < 1e-9);
   assert.equal(shares.ffmpeg, 0.5);
   assert.match(describeShares([shares, { ...shares, main: 1.05 }]), /main 90% \(highest second 105%\)/);
+});
+
+test("the threads are read as the process, the main thread and the torrent thread, the rest by difference", () => {
+  // Every thread's stat read each second, about a hundred files, took 12 s of
+  // the main thread in fifteen minutes on Home Assistant (r22, torrent-tv/meta#178).
+  const ticks = { 82: 400, 90: 200, 91: 50, 92: 20 };
+  const names = { 82: "MainThread", 90: "WorkerThread", 91: "libuv-worker", 92: "V8 DefaultWorke" };
+  let total = 800;
+  const opened = [];
+  const line = (name, used) => `x (${name}) S 1 2 3 4 5 6 7 8 9 10 ${used} 0 0 0`;
+  const readText = (file) => {
+    opened.push(file);
+    if (file === "/proc/82/stat") return line("node", total);
+    const tid = Number(/task\/(\d+)\/stat$/.exec(file)?.[1]);
+    if (!(tid in ticks)) throw new Error("gone");
+    return line(names[tid], ticks[tid]);
+  };
+  const list = () => Object.keys(ticks);
+  const reader = threadReader({ pid: 82, readText, list });
+  const first = reader.read();
+  assert.deepEqual({ ...first, epoch: undefined }, { main: 4, worker: 2, other: 2, epoch: undefined });
+  opened.length = 0;
+  ticks[82] += 100; ticks[90] += 50; total += 200;
+  const second = reader.read();
+  assert.deepEqual(opened, ["/proc/82/stat", "/proc/82/task/82/stat", "/proc/82/task/90/stat"], "three files, not every thread's");
+  const shares = sharesBetween({ at: 0, process: 0, threads: first, ffmpeg: new Map() },
+    { at: 1000, process: 2, threads: second, ffmpeg: new Map() });
+  assert.equal(shares.main, 1);
+  assert.equal(shares.worker, 0.5);
+  assert.equal(shares.other, 0.5);
+  // The torrent thread is made again: it is looked up again, and the second
+  // across that is not read as a jump.
+  delete ticks[90];
+  assert.equal(reader.read(), null);
+  ticks[93] = 10; names[93] = "WorkerThread";
+  const third = reader.read();
+  assert.equal(third.worker, 0.1);
+  const across = sharesBetween({ at: 0, process: 0, threads: second, ffmpeg: new Map() },
+    { at: 1000, process: 1, threads: third, ffmpeg: new Map() });
+  assert.equal(across.main, null);
+  assert.equal(across.other, null);
 });
 
 test("FFmpeg's answers are described by what it took, not by the ranges answered", () => {

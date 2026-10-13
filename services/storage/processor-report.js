@@ -74,31 +74,78 @@ function statOf(file) {
 
 /**
  * CPU seconds of this process's threads, by part, or null where `/proc` cannot
- * be read.
+ * be read. Each reading names which torrent threads it counted (`epoch`): the
+ * difference between two readings that counted different ones says nothing.
  *
  * READ SYNCHRONOUSLY, with the clock read beside it: a reading is only a share
  * when every counter in it and its time belong to one instant. Read as
  * promises on the field host (2.97.0), the counters were taken while the main
  * thread was busy and the time after, and a second read "process 1238 %" of a
- * core (torrent-tv/meta#177). About a hundred small files a second, kernel
- * memory, no disk.
+ * core (torrent-tv/meta#177).
  *
- * @param {number} [pid]
- * @returns {{ main: number, worker: number, other: number } | null}
+ * THREE OR FOUR FILES A SECOND, NOT EVERY THREAD'S. The line names the main
+ * thread, the torrent thread and the rest, and the rest is the whole process
+ * less the two: the process's own counter carries every thread it has had.
+ * Reading the stat of each of its threads every second, about a hundred
+ * files, took 12 s of the main thread in fifteen minutes on Home Assistant
+ * (r22, torrent-tv/meta#178). Which threads are the torrent thread is looked
+ * up again when one of them is gone and at every `rediscover()`.
+ *
+ * @param {object} [params]
+ * @param {number} [params.pid]
+ * @param {(file: string) => string} [params.readText]
+ * @param {(dir: string) => string[]} [params.list]
+ * @returns {{ read: () => ({ main: number, worker: number, other: number, epoch: number } | null), rediscover: () => void }}
  */
-export function readThreadSeconds(pid = process.pid) {
-  let tids;
-  try {
-    tids = readdirSync(`/proc/${pid}/task`);
-  } catch {
-    return null;
-  }
-  const parts = { main: 0, worker: 0, other: 0 };
-  for (const entry of tids) {
-    const stat = statOf(`/proc/${pid}/task/${entry}/stat`);
-    if (stat) parts[partOfThread(Number(entry), stat.name, pid)] += stat.seconds;
-  }
-  return parts;
+export function threadReader({ pid = process.pid, readText = (file) => readFileSync(file, "utf8"), list = readdirSync } = {}) {
+  const stat = (file) => {
+    try {
+      return parseStat(readText(file));
+    } catch {
+      return null;
+    }
+  };
+  /** The torrent thread's ids, or null until they are looked up. @type {number[] | null} */
+  let workers = null;
+  /** How many times they have been looked up. */
+  let epoch = 0;
+  const lookUp = () => {
+    let tids;
+    try {
+      tids = list(`/proc/${pid}/task`);
+    } catch {
+      return null;
+    }
+    return tids.map(Number).filter((tid) => {
+      const one = stat(`/proc/${pid}/task/${tid}/stat`);
+      return one && partOfThread(tid, one.name, pid) === "worker";
+    });
+  };
+  return {
+    read() {
+      if (workers === null) {
+        workers = lookUp();
+        epoch += 1;
+      }
+      if (workers === null) return null;
+      const total = stat(`/proc/${pid}/stat`);
+      const main = stat(`/proc/${pid}/task/${pid}/stat`);
+      if (!total || !main) return null;
+      let worker = 0;
+      for (const tid of workers) {
+        const one = stat(`/proc/${pid}/task/${tid}/stat`);
+        if (!one) {
+          workers = null;
+          return null;
+        }
+        worker += one.seconds;
+      }
+      return { main: main.seconds, worker, other: Math.max(0, total.seconds - main.seconds - worker), epoch };
+    },
+    rediscover() {
+      workers = null;
+    }
+  };
 }
 
 /**
@@ -129,6 +176,9 @@ export function sharesBetween(before, after) {
   const seconds = (after.at - before.at) / 1000;
   if (!(seconds > 0)) return null;
   const share = (from, to) => (Number.isFinite(from) && Number.isFinite(to) ? Math.max(0, to - from) / seconds : null);
+  // The torrent threads looked up again in between: their counters and the
+  // rest's are not comparable across that.
+  const threads = before.threads?.epoch === after.threads?.epoch;
   let ffmpeg = null;
   for (const [pid, value] of after.ffmpeg) {
     const earlier = before.ffmpeg.get(pid);
@@ -137,9 +187,9 @@ export function sharesBetween(before, after) {
   return {
     seconds,
     process: share(before.process, after.process),
-    main: share(before.threads?.main, after.threads?.main),
-    worker: share(before.threads?.worker, after.threads?.worker),
-    other: share(before.threads?.other, after.threads?.other),
+    main: threads ? share(before.threads?.main, after.threads?.main) : null,
+    worker: threads ? share(before.threads?.worker, after.threads?.worker) : null,
+    other: threads ? share(before.threads?.other, after.threads?.other) : null,
     ffmpeg
   };
 }
@@ -178,10 +228,11 @@ export function startProcessorReport({ log, ffmpegPids, detailed = () => false, 
   let previous = null;
   let series = [];
   let since = Date.now();
+  const threads = threadReader();
   const tick = () => {
     const at = Date.now();
     const usage = process.cpuUsage();
-    const now = { at, process: (usage.user + usage.system) / 1e6, threads: readThreadSeconds(), ffmpeg: readProcessesSeconds(ffmpegPids()) };
+    const now = { at, process: (usage.user + usage.system) / 1e6, threads: threads.read(), ffmpeg: readProcessesSeconds(ffmpegPids()) };
     const shares = previous ? sharesBetween(previous, now) : null;
     previous = now;
     if (!shares) return;
@@ -191,6 +242,8 @@ export function startProcessorReport({ log, ffmpegPids, detailed = () => false, 
       log(`processor: ${describeShares(series)}`);
       series = [];
       since = now.at;
+      // A torrent thread made again since is counted as the rest until then.
+      threads.rediscover();
     }
   };
   const timer = setInterval(tick, everyMs);

@@ -196,6 +196,9 @@ const KEY_PATTERN =
  * packaged how.
  */
 export class OutputSpec {
+  /** The identity, once worked out. @type {string | null} */
+  #key = null;
+
   /**
    * @param {object} params
    * @param {string} params.sourceKey - `torrent:<infohash>`, the canonical
@@ -282,6 +285,13 @@ export class OutputSpec {
    * @returns {string}
    */
   toKey() {
+    // Worked out once: nothing that enters it changes after construction —
+    // every part copies what it is given — and it is asked for wherever an
+    // output is addressed, 5 s of the main thread in fifteen minutes on Home
+    // Assistant (r22, torrent-tv/meta#178).
+    if (this.#key !== null) {
+      return this.#key;
+    }
     const parts = [this.sourceKey, `fmt=${this.segmentFormatId}`, this.grid.toKey(), this.carries];
     if (this.video) {
       parts.push(this.video.toKey());
@@ -289,7 +299,8 @@ export class OutputSpec {
     if (this.audio) {
       parts.push(this.audio.toKey());
     }
-    return parts.join(":");
+    this.#key = parts.join(":");
+    return this.#key;
   }
 
   /**

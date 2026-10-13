@@ -880,15 +880,31 @@ export class ViewerRequests {
     return trend.snapshot();
   }
 
+  /**
+   * What the swarm can give this source. A rate measured while our own
+   * selection held a connection back measures our asking: on a cold Matroska
+   * it read 0.4-1.3 MB/s while the same swarm later gave 12-14 MB/s, and the
+   * forecast swung from 0.9 s to 19 075 s (torrent-tv/meta#178). So it is read
+   * from the time no connection was held back (`SelectionLimit`), and a later
+   * such reading lowers it as readily as it raises it. Until there is one, the
+   * rate delivered stands, which is the least the swarm can give.
+   */
   #sourceRateReadings(state, id, stats, now) {
-    let trend = state.sources.get(id);
-    if (!trend) {
-      trend = new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds);
-      state.sources.set(id, trend);
+    let source = state.sources.get(id);
+    if (!source) {
+      const { RateTrend } = this.#host.playbackReadiness;
+      source = { delivered: new RateTrend(this.#host.lookaheadSeconds), free: new RateTrend(this.#host.lookaheadSeconds), limit: null };
+      state.sources.set(id, source);
     }
     if (Number.isFinite(stats?.downloadSpeed) && stats.downloadSpeed >= 0) {
-      trend.add(now, stats.downloadSpeed);
+      source.delivered.add(now, stats.downloadSpeed);
     }
-    return trend.snapshot();
+    const limit = stats?.selectionLimit;
+    if (limit && source.limit && limit.freeMs > source.limit.freeMs) {
+      source.free.add(now, Math.max(0, limit.freeBytes - source.limit.freeBytes) * 1000 / (limit.freeMs - source.limit.freeMs));
+    }
+    // Totals that went back belong to a torrent added again: read on from them.
+    if (limit) source.limit = limit;
+    return source.free.snapshot() ?? source.delivered.snapshot();
   }
 }

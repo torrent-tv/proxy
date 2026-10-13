@@ -18,7 +18,7 @@ import { logger } from "../../utils/logger.js";
 import { pieceStoreOf } from "./piece-store-of.js";
 import { demandProgress } from "./demand-progress.js";
 import { Urgency, urgencyName } from "./demand/index.js";
-import { demandFor, firstClassStatement, forgetTorrent, reconcileAll, hasUnmetDemand } from "./download/registry.js";
+import { demandFor, firstClassStatement, forgetTorrent, reconcileAll, hasUnmetDemand, selectionLimitOf } from "./download/registry.js";
 import { applyDownloadRate } from "./download/throttle.js";
 import { withdrawClaim } from "./download/withdraw-claim.js";
 import { deadlineOfMapZone, levelOfMapZone, priorityOfMapZone } from "./map-zones.js";
@@ -2057,6 +2057,9 @@ export class TorrentPool {
       numPeers,
       downloadSpeed,
       uploadSpeed,
+      // Bytes and time split by whether our own selection held a connection
+      // back: what the swarm can give is read from the rest (`SelectionLimit`).
+      selectionLimit: selectionLimitOf(torrent),
       connectedPeers: reach.connectedPeers,
       deliveringPeers: reach.deliveringPeers,
       knownPeers: reach.knownPeers,

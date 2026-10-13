@@ -17,6 +17,7 @@
 
 import { DemandRegister } from "../demand/DemandRegister.js";
 import { SwarmSelection } from "./SwarmSelection.js";
+import { SelectionLimit } from "./SelectionLimit.js";
 import { futureDownload } from "./FutureDownload.js";
 import { urgencyName } from "../demand/index.js";
 
@@ -56,7 +57,8 @@ export function demandFor(torrent) {
     return held;
   }
   const register = new DemandRegister();
-  const entry = { torrent, register, selection: new SwarmSelection({ torrent, register }), withdrawalRevision: 0 };
+  const selection = new SwarmSelection({ torrent, register });
+  const entry = { torrent, register, selection, limit: new SelectionLimit({ torrent, register, selection }), withdrawalRevision: 0 };
   byTorrent.set(torrent, entry);
   live.add(entry);
   entry.onBytesChanged = () => reconcileAll();
@@ -105,6 +107,16 @@ export function forgetTorrent(torrent) {
   live.delete(held);
 }
 
+/**
+ * Whether this proxy's own selection held the swarm back, as grow-only totals
+ * (`SelectionLimit`); null for a torrent nothing has been stated about.
+ *
+ * @param {object} torrent
+ */
+export function selectionLimitOf(torrent) {
+  return byTorrent.get(torrent)?.limit.totals() ?? null;
+}
+
 /** What the swarm was last told to fetch first: the level, its priority and the pieces per torrent. */
 export function firstClassStatement() {
   return firstClassStated;
@@ -142,6 +154,9 @@ export function reconcileAll() {
   } finally {
     publishingSelections = false;
   }
+  // Each torrent's connections looked at under what it has just been told:
+  // on every verified piece and on the pool's timer.
+  for (const entry of entries) entry.limit.sample();
   // What the swarm is told to fetch FIRST, said when it changes. Lower classes
   // are withheld because a wire with no first-class piece would fall through.
   const said = entries.map(entry => `${String(entry.torrent.infoHash ?? "").slice(0, 8)}: ` +

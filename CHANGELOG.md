@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Chore**: Each published piece says where its time went: when the encoder finished writing it (the file's own time), when the encoder named it, and when it was published — on its own, when the file after it closed, or at the run's end. A piece that came 5.7 s after the one before stopped a viewer inside a running run, and nothing told the encoder's time from the proxy's (#ttv-178).
+
 ## 2.97.22
 
 - **Fix**: A large AVI plays to its end. Its length was taken from the main header, whose frame count covers only the first part of an OpenDML file, so the field's two-hour AVI was listed as 2:15:36 of its 2:29:58 and its last 14 minutes could be neither played nor reached; the length now follows FFmpeg's rule, the longest stream of variable-size samples by its own header (#ttv-178).

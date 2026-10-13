@@ -1121,7 +1121,7 @@ export class EncodeRuns {
       // from it — a re-encoded picture, or sound served as its own output. Such
       // a piece is published on its own line (torrent-tv/meta#178).
       publishesAlone: this.publishesAlone(session),
-      onClosed: (name, following, timing, { tentative = false } = {}) => {
+      onClosed: (name, following, timing, { tentative = false, namedAt = null } = {}) => {
 
         const index = session.segmentFormat.segmentIndexFromName(
           session.segmentFormat.servedNameOf?.(name) ?? name);
@@ -1131,6 +1131,8 @@ export class EncodeRuns {
         if (Number.isInteger(index) && (index < safeIndex || index > run.to)) return null;
         let bytes = null;
         const address = session.outputKey ?? "";
+        // Read before anything rewrites it: when the encoder finished it.
+        const writtenAt = this.#host.segmentFiles.writtenAtOf?.(address, name) ?? null;
         const fmp4 = admittedInput && session.segmentFormat.id === "fmp4" && session.spec.carries !== "audio-only";
         // The first piece of a run that read the picture from its keyframe:
         // its leading pictures are the ones the run before made, or none.
@@ -1157,6 +1159,14 @@ export class EncodeRuns {
         const published = this.#host.segmentFiles.publish(address, name, session.segmentFormat, { mediaRanges, bytes });
         if (!published) throw new Error(`Closed piece #${index} could not be stored.`);
         this.#leadingByOutput.get(address)?.delete(index);
+        // WHERE A LATE PIECE'S TIME WENT: the encoder writing it, this process
+        // getting to its name, or its publication waiting for the file after
+        // it. A piece 5.7 s apart from the one before stopped a viewer inside a
+        // running run, and nothing said which (torrent-tv/meta#178).
+        const since = at => (Number.isFinite(at) ? `+${Math.round(at - run.startedAt)}ms` : "unknown");
+        this.#host.logger.info(`encode-run #${run.from}..#${run.to} on ${address}: #${index} written by the encoder ${since(writtenAt)}, ` +
+          `named ${since(namedAt)}, published ${since(run.now())} ` +
+          (following ? `when ${following} closed` : tentative ? "on its own" : "at the run's end"));
         return published;
 
       },

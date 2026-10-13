@@ -102,8 +102,11 @@ function merged(ranges) {
  * The map's byte zones with each output's next run input raised to its first
  * segment's place.
  *
- * @template {{ outputKey: string, index: number, priority: number, urgent?: boolean, behind?: boolean, deferred?: boolean, byteStart: number, byteEnd: number }} Zone
- * @param {Zone[]} zones - One or more per segment, as the map's pass made them.
+ * @template {{ outputKey: string, index: number, priority: number, urgent?: boolean, behind?: boolean, deferred?: boolean,
+ *   ranges?: Array<[number, number]>, byteStart?: number, byteEnd?: number }} Zone
+ * @param {Zone[]} zones - One or more per segment, as the map's pass made
+ *   them: a segment's zone names all its ranges (`ranges`), any other one
+ *   range (`byteStart`-`byteEnd`).
  * @param {(outputKey: string) => number | null} targetBytesOf - What the
  *   output's next run would be given to copy; nothing is raised without it.
  * @returns {Zone[]} In their order; raised zones are copies.
@@ -138,7 +141,7 @@ export function expandToTargetInputs(zones, targetBytesOf) {
     if (zone.index === run.first.index) {
       let ranges = held.get(zone.outputKey);
       if (!ranges) held.set(zone.outputKey, ranges = []);
-      ranges.push([zone.byteStart, zone.byteEnd]);
+      ranges.push(...rangesOf(zone));
     } else if (zone.index > run.first.index) {
       const list = run.after.get(zone.index);
       if (list) list.push(zone);
@@ -153,7 +156,7 @@ export function expandToTargetInputs(zones, targetBytesOf) {
     // or not yet worked out, ends it.
     for (let index = run.first.index + 1; run.after.has(index); index++) {
       const list = run.after.get(index);
-      const ranges = list.map(zone => [zone.byteStart, zone.byteEnd]);
+      const ranges = list.flatMap(rangesOf);
       if (holding.total + holding.adds(ranges) > run.target) break;
       holding.add(ranges);
       for (const zone of list) {
@@ -163,4 +166,9 @@ export function expandToTargetInputs(zones, targetBytesOf) {
     }
   }
   return raised.size === 0 ? zones : zones.map(zone => raised.get(zone) ?? zone);
+}
+
+/** The ranges a zone names, inclusive. */
+function rangesOf(zone) {
+  return Array.isArray(zone.ranges) ? zone.ranges : [[zone.byteStart, zone.byteEnd]];
 }

@@ -543,7 +543,7 @@ export async function startProxyServer({
       // ranges closer than a piece hold the same pieces as one.
       const pieceLength = Number(torrentPool.knownTorrent(map.sourceKey)?.pieceLength);
       const passStartedAt = performance.now();
-      let segments = 0;
+      let rangeCount = 0;
       const converted = [];
       const demands = [];
       // What each output's next run would copy, asked of the swarm as one group
@@ -629,12 +629,18 @@ export async function startProxyServer({
         const { tracks: _choices, owner: _owner, sourceInterval: _sourceInterval, ...demand } = zone;
         const convert = ranges => {
           const joined = joinedRangesOf(ranges, pieceLength);
-          segments += 1;
+          rangeCount += joined.length;
           // What the segment reads is kept for the forecast in a table of its
           // own, whatever form the torrent is told it in.
           segmentInputs.set(map.sourceKey, map.fileIndex, zone.outputKey, zone.index, joined);
-          for (const [byteStart, byteEnd] of joined) converted.push({ ...demand,
-            downloadInterval: { from: zone.owner.from, to: zone.owner.to }, byteStart, byteEnd });
+          // ONE ZONE FOR THE SEGMENT, its demand stated once for all the
+          // ranges it reads. The demand — level, priority, deadline, the map
+          // zone it belongs to — is this pass's; the ranges are the list kept
+          // for the segment, unchanged from pass to pass. A zone for each
+          // range copied the demand into every one: ten thousand objects a
+          // pass over a two-hour AVI, made again 21-61 times a minute on Home
+          // Assistant (r26, torrent-tv/meta#178).
+          converted.push({ ...demand, downloadInterval: { from: zone.owner.from, to: zone.owner.to }, ranges: joined });
         };
         // The bytes one segment needs are a fact of the file and the output, so
         // they are worked out once. A whole film is thousands of segments and
@@ -694,7 +700,7 @@ export async function startProxyServer({
         convert(input.ranges);
       }
       const result = expanded();
-      notePass({ complete, segments, ranges: converted.length, zones: result.length, ms: performance.now() - passStartedAt });
+      notePass({ complete, segments: converted.length, ranges: rangeCount, zones: result.length, ms: performance.now() - passStartedAt });
       if (complete) resolvedPasses.set(fileKey, { ...pass, result });
       else resolvedPasses.delete(fileKey);
       return result;

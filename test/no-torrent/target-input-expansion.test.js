@@ -50,3 +50,21 @@ test("a soundtrack whose segments add a few bytes each is raised as far as its i
   assert.equal(Math.max(...raised), 48);
   assert.equal(raised.length, 49 * 3);
 });
+
+test("a segment's zone naming all its ranges is raised as its ranges one by one would be", () => {
+  // One zone per segment, its demand stated once for its ranges (r26,
+  // torrent-tv/meta#178): the same segments take the first one's place.
+  const segment = (index, priority, own, outputKey = "picture") =>
+    ({ outputKey, index, priority, urgent: priority === 100, behind: false, deferred: false, ranges: [[0, 99], [100, 199], [own, own + 999]] });
+  const zones = [segment(10, 100, 10_000), segment(11, 99, 11_000), segment(12, 98, 12_000), segment(13, 97, 13_000),
+    segment(4, 90, 50_000, "sound"), segment(5, 89, 51_000, "sound")];
+  const perRange = zones.flatMap(({ ranges, ...demand }) => ranges.map(([byteStart, byteEnd]) => ({ ...demand, byteStart, byteEnd })));
+  const target = key => key === "sound" ? 2200 : 3200;
+  const bySegment = list => list.map(one => [one.outputKey, one.index, one.priority, one.urgent]);
+  const raised = expandToTargetInputs(zones, target);
+  const one = [...new Map(expandToTargetInputs(perRange, target).map(zone => [`${zone.outputKey}:${zone.index}`, zone])).values()];
+  assert.deepEqual(bySegment(raised), bySegment(one));
+  assert.deepEqual(bySegment(raised), [["picture", 10, 100, true], ["picture", 11, 100, true], ["picture", 12, 100, true],
+    ["picture", 13, 97, false], ["sound", 4, 90, false], ["sound", 5, 90, false]]);
+  assert.equal(raised[1].ranges, zones[1].ranges, "a raised zone names the same ranges");
+});

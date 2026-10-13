@@ -26,7 +26,20 @@ list, absent index or unsupported format.
 
 Playback declarations come from this shared reader. If the header omits usable
 duration, preparation requests indexed packet timing. Opening playback does not
-start an independent ffmpeg URL probe. Additional demuxers supply packet
+start an independent ffmpeg URL probe.
+
+Every container states its length from the start of its own timeline, because
+the plan publishes each cut as its file time less that start. MPEG-TS, MPEG-PS
+and ASF measure it so from their packets or header. MP4 subtracts the initial
+empty edit from `mvhd`, and Matroska subtracts the first Cluster's timestamp from
+`Duration`; a Matroska file with no `Duration` takes the end of its last frame
+from the complete packet index. AVI takes FFmpeg's rule (`avidec.c`, the `strh`
+case): a stream of variable-size samples lasts `dwLength` units of its own
+`dwScale/dwRate`, and the film lasts as long as the longest such stream.
+`avih.dwTotalFrames` counts the first RIFF only under OpenDML, so it is read only
+when no stream states a length. An MPEG video picture without its own timestamp
+is placed by `temporal_reference`, which restarts with every group of pictures;
+a new group begins where the last picture shown ended. Additional demuxers supply packet
 addresses, PTS/DTS, lengths and SHA-256 hashes; admission verifies that addressed
 source bytes match demuxed payloads.
 

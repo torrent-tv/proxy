@@ -620,6 +620,16 @@ export class Mp4Container extends Container {
     info.startTimeSeconds = movieTimescale > 0
       ? Mp4Container.#emptyEditSeconds(moov, header, movieTimescale)
       : null;
+    // `mvhd` states the length of the longest track, and a track lasts as long
+    // as its edits, the empty one included (ISO/IEC 14496-12, 8.2.2 and 8.6.6).
+    // The film is shown from the end of that empty edit, and the plan's
+    // timeline begins there — as every other container states its length —
+    // so the edit is not the film's. Counted in, a file starting at 5 s listed
+    // five seconds past its last frame (torrent-tv/meta#178).
+    if (info.durationSeconds !== null && info.startTimeSeconds > 0) {
+      const shown = info.durationSeconds - info.startTimeSeconds;
+      info.durationSeconds = shown > 0 ? shown : null;
+    }
     return info;
   }
 

@@ -28,6 +28,7 @@ export class MpegElementaryIndex {
         nalIndex: track.codecId === "h264" ? new H264ElementaryIndex(track, this.index)
           : track.codecId === "hevc" ? new HevcElementaryIndex(track, this.index) : null,
         picture: null, pendingStart: 0, lastPicture: -1, presentationBase: null, lastDts: null, referencePts: null,
+        lastGroup: -1, groupBegins: false, shownUntil: null,
         audioBytes: Buffer.alloc(0), audioStart: 0, audioPts: null, lastTimestamp: null, clockShift: 0,
         reservoir: new MpegAudioReservoir(), packetCount: 0,
         lastExtension: -1, requiresStamp: false });
@@ -97,6 +98,10 @@ export class MpegElementaryIndex {
       if ((code === 0xb3 || code === 0xb8) && offset > state.lastPicture) {
         if (state.pendingStart === null) state.pendingStart = offset;
       }
+      if (code === 0xb8 && offset > state.lastGroup) {
+        state.lastGroup = offset;
+        state.groupBegins = true;
+      }
       if (code !== 0 || at + 6 > bytes.length || offset <= state.lastPicture) continue;
       if (!(state.track.fps > 0)) throw new Error("MPEG video cadence is not declared.");
       const reference = (bytes[at + 4] << 2) | (bytes[at + 5] >> 6);
@@ -107,7 +112,16 @@ export class MpegElementaryIndex {
       const stamp = stampAt(state, offset);
       if (state.requiresStamp && !stamp) throw new Error("MPEG repeated frames require an explicit following timestamp.");
       state.requiresStamp = false;
+      // `temporal_reference` counts the pictures of one group of pictures in
+      // the order they are shown, from 0 (ISO/IEC 13818-2, 6.3.9), so a new
+      // group shows its first picture where the last one shown ended. A muxer
+      // stamps a PES packet, not every picture: a group whose first picture
+      // came unstamped was placed on the previous group's base, up to a group
+      // earlier, and the index refused to go back: none of four program
+      // streams FFmpeg wrote with more than one group opened (torrent-tv/meta#178).
       if (stamp) state.presentationBase = stamp.pts - reference / state.track.fps;
+      else if (state.groupBegins && state.shownUntil !== null) state.presentationBase = state.shownUntil;
+      state.groupBegins = false;
       if (state.presentationBase === null) throw new Error("MPEG picture has no presentation timestamp.");
       const pts = stamp?.pts ?? state.presentationBase + reference / state.track.fps;
       const dts = stamp?.dts ?? (state.lastDts === null ? pts : state.lastDts + 1 / state.track.fps);
@@ -129,6 +143,7 @@ export class MpegElementaryIndex {
     const { start, ...packet } = state.picture;
     if (!(end > start)) throw new Error("MPEG picture has no bytes.");
     this.index.append(state.track.trackNumber, { ...packet, ranges: addresses(state, start, end) });
+    state.shownUntil = Math.max(state.shownUntil ?? -Infinity, packet.pts + packet.duration);
     state.mappings = state.mappings.filter(mapping => mapping.to > end);
   }
 

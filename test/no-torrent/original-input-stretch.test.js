@@ -445,3 +445,36 @@ test("an input read from the keyframe before holds the piece it is for, even bef
   assert.deepEqual([input.from, input.to], [4, 5], "#4 alone would not make #5");
   input.release();
 });
+
+test("an input waiting for its bytes is tried again when some of them arrive, not at every piece of the file", async () => {
+  // A seek's input was prepared 28 times in 8.5 s, once for every piece the
+  // torrent verified anywhere in the file, each try asking the torrent thread
+  // which ranges it holds (r34, torrent-tv/meta#178).
+  let held = [HEADER];
+  let asked = 0;
+  const { inputs } = inputsOver({ held: () => { asked += 1; return held; } });
+  assert.equal(await admitted(inputs, 0, 0), null, "segment 0 has no bytes yet");
+  const before = asked;
+  inputs.bytesChanged({ sourceKey: "film", ranges: [{ fileIndex: 0, start: 500, end: 509 }] });
+  for (let turn = 0; turn < 5; turn++) await setImmediate();
+  assert.equal(inputs.take(output, 0, 0), null);
+  assert.equal(asked, before, "bytes it does not wait for wake nothing, and the plan's next look does not try it again");
+  held = [[0, 9], HEADER];
+  inputs.bytesChanged({ sourceKey: "film", ranges: [{ fileIndex: 0, start: 0, end: 9 }] });
+  for (let turn = 0; turn < 5; turn++) await setImmediate();
+  const input = inputs.take(output, 0, 0);
+  assert.deepEqual([input?.from, input?.to], [0, 0], "its own bytes start it");
+  input.release();
+});
+
+test("an event that names no bytes tries every waiting input again", async () => {
+  let held = [HEADER];
+  const { inputs } = inputsOver({ held: () => held });
+  assert.equal(await admitted(inputs, 0, 0), null);
+  held = [[0, 9], HEADER];
+  inputs.bytesChanged();
+  for (let turn = 0; turn < 5; turn++) await setImmediate();
+  const input = inputs.take(output, 0, 0);
+  assert.deepEqual([input?.from, input?.to], [0, 0]);
+  input.release();
+});

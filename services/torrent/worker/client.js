@@ -254,7 +254,8 @@ export class TorrentWorkerClient {
           this.#onPiecesArrived({
             sourceKey: message.sourceKey,
               fileIndexes: Array.isArray(message.fileIndexes) ? message.fileIndexes : [],
-              ...(typeof message.reason === "string" ? { reason: message.reason } : {})
+              ...(typeof message.reason === "string" ? { reason: message.reason } : {}),
+              ...(Array.isArray(message.arrived) ? { arrived: message.arrived } : {})
           });
           break;
         default:

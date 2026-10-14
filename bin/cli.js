@@ -88,6 +88,7 @@ program
   .option("--no-transcode-audio", "Disable optional HLS AAC audio transcoding")
   .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
   .option("--delivery-sink", "Serve /api/delivery-sink, a torrent-free byte stream for delivery testing")
+  .option("--pin-preset <name>", "Encode every software picture at this libx264 preset only, for runs that must be compared at one quality (off by default)")
   .option("--profile-start <seconds>", "Profile the main thread's CPU for this many seconds from the first source opened, written beside the state (off by default)")
   .option(
     "--send-chunk-bytes <bytes>",
@@ -394,6 +395,7 @@ try {
     logFile: options.logFile ?? "",
     deliverySink: options.deliverySink === true,
     profileStartSeconds: Number(options.profileStart) || 0,
+    pinnedPreset: typeof options.pinPreset === "string" && options.pinPreset.trim() ? options.pinPreset.trim() : null,
     // Late-bound the same way `webRtcManager` is below: the torrent pool is
     // built inside `startProxyServer`, before `dataChannelHandler` — the
     // thing that actually owns a channel to push down — exists.

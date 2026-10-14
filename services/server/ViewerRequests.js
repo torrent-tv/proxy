@@ -60,7 +60,13 @@ export class ViewerRequests {
   #host;
   /** @type {WeakMap<object, Map<string, object>>} */
   #rateStateBySession = new WeakMap();
-  /** The pieces of each output as the start forecast read them last; see `#segmentsOf`. */
+  /**
+   * The pieces of each output as the start forecast read them last (see
+   * `#segmentsOf`), and what the forecast keeps of their time geometry while
+   * they stand (`playback-readiness.js` `timescaleOfPieces`).
+   *
+   * @type {WeakMap<object, { pieces: object[], geometry: object }>}
+   */
   #forecastPieces = new WeakMap();
 
   /**
@@ -658,6 +664,7 @@ export class ViewerRequests {
           this.#host.initialOutputBitsPerMediaSecondOf?.(output) ?? 0,
         readings: trackRates,
         segments,
+        geometry: this.#forecastPieces.get(output)?.geometry,
         readySegmentIndices: [...inventory.keys()],
         segmentSizesBytes: inventory
       });
@@ -808,11 +815,12 @@ export class ViewerRequests {
   #segmentsOf(output, sessionInit, inventory, positionSeconds) {
     const timeline = output.timeline;
     const count = timeline?.segmentCount ?? 0;
-    let kept = this.#forecastPieces.get(output);
-    if (!kept) {
-      kept = [];
-      this.#forecastPieces.set(output, kept);
+    let forecast = this.#forecastPieces.get(output);
+    if (!forecast) {
+      forecast = { pieces: [], geometry: {} };
+      this.#forecastPieces.set(output, forecast);
     }
+    const kept = forecast.pieces;
     const segments = [];
     for (let index = 0; index < count; index++) {
       const endSeconds = timeline.publishedStartOf(index + 1);

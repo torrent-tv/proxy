@@ -812,3 +812,41 @@ test("pieces already played and never read change no answer, so they are not pla
   assert.equal(everything.reason, "minimum-safe-delay");
   assert.deepEqual(withoutPlayed, everything);
 });
+
+test("a track's time geometry kept between polls is the one worked out anew", () => {
+  // Gathering every remaining piece's edges for the timescale and placing each
+  // on the page's clock on every poll was about 3 s of Home Assistant's main
+  // thread in 15 minutes (torrent-tv/meta#178).
+  const state = input({ durationSeconds: 12 });
+  const [first] = state.tracks[0].segments;
+  state.tracks[0].segments = [first,
+    { index: 1, startSeconds: 4, endSeconds: 6, sourceInputs: first.sourceInputs },
+    { index: 2, startSeconds: 6, endSeconds: 8, sourceInputs: first.sourceInputs },
+    { index: 3, startSeconds: 8, endSeconds: 12, sourceInputs: first.sourceInputs, mediaRanges: servedMs([8001, 12001]) }];
+  first.mediaRanges = servedMs([42, 4042]);
+  state.tracks[0].readySegmentIndices = [0, 3];
+  state.tracks[0].segmentSizesBytes = new Map([[0, 40], [3, 40]]);
+  state.tracks[0].clientRanges = [{ start: 0, end: 0.5 }];
+  const geometry = {};
+  const poll = (change) => {
+    change?.(state);
+    const anew = {};
+    const answer = predictPlaybackReadiness({ ...state, tracks: state.tracks.map(track => ({ ...track, geometry })) });
+    assert.deepEqual(answer, predictPlaybackReadiness({ ...state, tracks: state.tracks.map(track => ({ ...track, geometry: anew })) }));
+    assert.deepEqual(answer, predictPlaybackReadiness(state));
+    assert.deepEqual(geometry.placed, anew.placed);
+    return geometry.placed;
+  };
+  const placed = poll();
+  assert.equal(poll(), placed, "the same pieces, timescale and clock: the placement is the one kept");
+  poll(s => { s.positionSeconds = 0.1; });
+  poll(s => { s.tracks[0].clockOffsetSeconds = -0.042; });
+  poll(s => { s.tracks[0].clockOffsetSeconds = -0.5; });
+  poll(s => { s.tracks[0].clockOffsetSeconds = -0.25; });
+  poll(s => { s.tracks[0].segments[3].mediaRanges = servedMs([8003, 12003]); });
+  poll(s => { s.tracks[0].segments[2].endSeconds = 7.5; });
+  poll(s => { s.tracks[0].segments[3].startSeconds = 7.5; });
+  poll(s => { s.tracks[0].segments[1].index = 5; });
+  poll(s => { s.tracks[0].segments[2] = { ...s.tracks[0].segments[2], sourceInputs: [{ sourceId: "source", ranges: [{ start: 6, end: 7 }] }] }; });
+  poll(s => { s.bufferedAheadSeconds = 0.30000000000000004; });
+});

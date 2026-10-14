@@ -139,21 +139,16 @@ export function predictPlaybackReadiness(input = {}) {
       range.end > range.start).map((range) => ({ start: fromSeconds(range.start), end: fromSeconds(range.end) }))
     : null);
   // One timescale in which every time of this forecast is a whole number of
-  // ticks, so that adding and comparing never seek a common denominator.
+  // ticks, so that adding and comparing never seek a common denominator. A
+  // track's pieces give it the same timescale while they are the same pieces.
   const unit = commonTimescale([
     fromSeconds(finiteNonNegative(input.positionSeconds)), fromSeconds(duration),
     fromSeconds(finiteNonNegative(input.bufferedAheadSeconds)), REPORTED_TIME_ERROR, ...clocks,
     ...reported.flatMap((ranges) => (ranges ?? []).flatMap(({ start, end }) => [start, end])),
-    ...tracks.flatMap((track) => (Array.isArray(track.segments) ? track.segments : []).flatMap((segment) => [
-      ...(segment.mediaRanges?.timescale ? [mediaTime(0n, segment.mediaRanges.timescale)] : []),
-      ...exactBoundsOf(segment)
-    ]))
+    ...tracks.map((track) => mediaTime(0n, timescaleOfPieces(track)))
   ]);
   const zero = mediaTime(0n, unit);
-  const segmentsOf = tracks.map((track, trackIndex) => predictedMediaSegments(
-    (Array.isArray(track.segments) ? track.segments : []).map((segment) => ({
-      ...segment, exact: exactTimesOf(segment), ranges: playerRanges(segment.mediaRanges, rescale(clocks[trackIndex], unit), unit)
-    })), unit));
+  const segmentsOf = tracks.map((track, trackIndex) => placedPieces(track, rescale(clocks[trackIndex], unit), unit));
   const origin = latest(zero, ...segmentsOf.map((segments) =>
     segments.find(({ index }) => index === 0)?.ranges?.[0]?.start ?? zero));
   const at = latest(origin, rescale(fromSeconds(finiteNonNegative(input.positionSeconds)), unit));
@@ -645,10 +640,69 @@ function timesOf(segment) {
   return segment.exact ?? exactTimesOf(segment);
 }
 
-/** @returns {import("./media-time.js").MediaTime[]} The finite playlist edges of a piece, exactly. */
-function exactBoundsOf(segment) {
-  const { start, end } = exactTimesOf(segment);
-  return [start, end].filter(Boolean);
+/**
+ * WHAT A TRACK'S PIECES GIVE THE FORECAST'S TIME, KEPT BETWEEN POLLS while
+ * they are the same pieces. The forecast runs on every poll of a waiting
+ * viewer, and gathering the edges of every remaining piece for the timescale,
+ * then placing each on the page's clock, was about 3 s of the proxy's main
+ * thread in r35's first 15 minutes on Home Assistant (torrent-tv/meta#178).
+ * `track.geometry` is kept by whoever keeps the pieces; without it nothing is
+ * kept, and the answer is the same either way: a placement is reused only for
+ * the same pieces, the same timescale and the same clock offset, so no time is
+ * rounded for the reuse.
+ *
+ * @param {{ segments?: object[], geometry?: object }} track
+ * @returns {bigint} The least timescale holding every edge and every served tick of its pieces.
+ */
+function timescaleOfPieces(track) {
+  const segments = Array.isArray(track.segments) ? track.segments : [];
+  const geometry = track.geometry;
+  if (geometry && samePieces(geometry.pieces, segments)) return geometry.timescale;
+  const distinct = new Set();
+  for (const segment of segments) {
+    if (segment.mediaRanges?.timescale) distinct.add(segment.mediaRanges.timescale);
+    const { start, end } = exactTimesOf(segment);
+    if (start) distinct.add(start.timescale);
+    if (end) distinct.add(end.timescale);
+  }
+  const timescale = commonTimescale([...distinct].map((value) => mediaTime(0n, value)));
+  if (geometry) {
+    geometry.pieces = segments.map((segment) => ({ segment, index: segment.index, startSeconds: segment.startSeconds,
+      endSeconds: segment.endSeconds, mediaRanges: segment.mediaRanges }));
+    geometry.timescale = timescale;
+    geometry.placed = null;
+  }
+  return timescale;
+}
+
+/**
+ * A track's pieces on the page's clock in `unit`: read pieces at their served
+ * ranges, the others placed between them. Reused while the pieces are those
+ * {@link timescaleOfPieces} last took and `unit` and `clock` are the same.
+ *
+ * @param {{ segments?: object[], geometry?: object }} track
+ * @param {import("./media-time.js").MediaTime} clock - In `unit`.
+ * @param {bigint} unit
+ */
+function placedPieces(track, clock, unit) {
+  const geometry = track.geometry;
+  if (geometry?.placed && geometry.placedUnit === unit && geometry.placedClock === clock.ticks) return geometry.placed;
+  const placed = predictedMediaSegments((Array.isArray(track.segments) ? track.segments : []).map((segment) => ({
+    ...segment, exact: exactTimesOf(segment), ranges: playerRanges(segment.mediaRanges, clock, unit)
+  })), unit);
+  if (geometry) Object.assign(geometry, { placed, placedUnit: unit, placedClock: clock.ticks });
+  return placed;
+}
+
+/** Whether `segments` are the pieces `kept` recorded, field by field the forecast reads. */
+function samePieces(kept, segments) {
+  if (!Array.isArray(kept) || kept.length !== segments.length) return false;
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index], was = kept[index];
+    if (segment !== was.segment || segment.index !== was.index || segment.startSeconds !== was.startSeconds ||
+      segment.endSeconds !== was.endSeconds || segment.mediaRanges !== was.mediaRanges) return false;
+  }
+  return true;
 }
 
 /**

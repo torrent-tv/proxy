@@ -1103,7 +1103,8 @@ export class EncodeCost {
     sourceHeight,
     outputFps,
     source = null,
-    requiredSpeed = null
+    requiredSpeed = null,
+    observedDecodeCostSec = null
   }) {
     if (!transcodeVideo || this.#host().encoderKind !== "software" || !this.#host().benchmark) {
       return null;
@@ -1113,26 +1114,44 @@ export class EncodeCost {
       return null;
     }
     const concurrentCostSec = this.#committedMachineCostSec();
+    // THE FILE'S OWN DECODE COST, where its encoder has already been read: the
+    // opening had it and the choice priced decoding from the startup model
+    // instead (review of r28, torrent-tv/meta#178).
+    const decodeCostSec = Number.isFinite(observedDecodeCostSec) && observedDecodeCostSec > 0 ? observedDecodeCostSec : null;
+    /** Every size and preset the choice priced, with the speed it was priced at. */
+    const considered = [];
     const speedForPreset = (benchmark, frame, outputPixelsPerSec) => {
-      if (concurrentCostSec === null) {
-        return null;
-      }
-      return this.#speedOnThisMachine({
+      const speed = concurrentCostSec === null ? null : this.#speedOnThisMachine({
         benchmark,
         source,
         width: frame.width,
         height: frame.height,
         fps: outputPixelsPerSec / (frame.width * frame.height),
-        observedDecodeCostSec: null,
+        observedDecodeCostSec: decodeCostSec,
         concurrentCostSec
       });
+      considered.push({ preset: benchmark[0]?.preset, width: frame.width, height: frame.height, speed });
+      return speed;
     };
-    return chooseSoftwareEncodeSettings(
+    const choice = chooseSoftwareEncodeSettings(
       this.#host().benchmark,
       { width: ceiling.w, height: ceiling.h },
       outputFps,
-      { decodeModel: this.#host().decodeModel, source, requiredSpeed, speedForPreset }
+      { decodeModel: this.#host().decodeModel, source, requiredSpeed, speedForPreset, observedDecodeCostSec: decodeCostSec }
     );
+    // WHAT THE CHOICE WAS MADE FROM, said once per choice: three runs of one
+    // file on one host opened at three presets and nothing said why (r25, r26,
+    // r28, torrent-tv/meta#178).
+    if (choice) {
+      const availability = this.#host().availability;
+      const priced = considered.map(({ preset, width, height, speed }) =>
+        `${width}x${height} ${preset}=${Number.isFinite(speed) ? `${speed.toFixed(2)}x` : "unpriced"}`).join(", ");
+      logger.info(`encode choice: ${choice.width}x${choice.height}@${Number(outputFps).toFixed(3)} ${choice.preset} against ${choice.bar.toFixed(2)}x; ` +
+        `priced ${priced}; decoding ${decodeCostSec === null ? "from the startup model" : `${decodeCostSec.toFixed(4)} s per second, measured on this file`}; ` +
+        `machine ${availability?.known ? `${Math.round(availability.share * 100)}% to spare` : "share unknown"}; ` +
+        `committed work ${concurrentCostSec === null ? "unmeasured" : `${concurrentCostSec.toFixed(3)} s per second`}`);
+    }
+    return choice;
   }
 }
 

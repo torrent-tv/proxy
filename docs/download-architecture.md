@@ -29,6 +29,17 @@ ranges in the eligible group are published as a union, matching the library's
 public selection merging. Publishing background ranges alongside urgent ranges
 would otherwise merge them and lose the urgent interval's independent selection.
 
+What the torrent is told of a played file is kept from map to map
+(`torrent/PlaybackProjection.js`): each output segment's demand and source
+ranges, each range with the segments naming it, each band's ranges in byte
+order, and the windows made of them. A new map reworks only the segments in the
+stretches of film where it says something the last map did not — another
+priority, level or deadline — plus the segments made or lost since, and the
+next run's input group. A deadline is a time base plus a relative deadline; a
+viewer playing on moves only the base, so such a map reworks no segment and the
+windows take the base plus the earliest relative deadline they hold. A map
+stated in absolute time, two viewers apart, is worked out whole.
+
 A file's zones are resolved to bytes in the order of their deadlines, and the
 first pass over a film works out thousands of them. Before that pass works out
 a zone of a lower priority than any before it, what it has resolved is

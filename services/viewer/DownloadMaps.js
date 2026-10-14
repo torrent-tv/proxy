@@ -49,6 +49,10 @@ export class DownloadMaps {
     // Assistant 2026-10-07, torrent-tv/meta#95). A zone no new zone overlaps —
     // a seek away — is withdrawn at once.
     const retained = file.zones.flatMap(zone => {
+      // A window its resolver keeps current itself — the projection of the
+      // file's segments, brought to this map by the pass below — stands as it
+      // is until the pass states it (`PlaybackProjection`, torrent-tv/meta#178).
+      if (zone.standing === true) return [zone];
       const interval = zone.downloadInterval ?? zone;
       const current = sourceZones.exactly(interval);
       if (!current) {
@@ -343,7 +347,10 @@ export class DownloadMaps {
     const kept = file.packed;
     if (kept && kept.zones === file.zones && kept.nativeZones === file.nativeZones) return kept.result;
     const input = [...file.zones, ...file.nativeZones];
-    const result = this.#pack(input);
+    // Windows already packed by their resolver are not packed again unless
+    // something else is to be packed with them.
+    const result = file.nativeZones.length === 0 && file.zones.length > 0 && file.zones.every(zone => zone.standing === true)
+      ? file.zones : this.#pack(input);
     const relative = input.some(zone => !Number.isFinite(zone.deadlineAt) && Number.isFinite(zone.withinSeconds));
     file.packed = relative ? null : { zones: file.zones, nativeZones: file.nativeZones, result };
     return result;
@@ -435,7 +442,11 @@ function zoneIndexOf(file) {
 function withRetained(resolved, retained) {
   const keyOf = zone => typeof zone.outputKey === "string" && Number.isSafeInteger(zone.index) ? `${zone.outputKey}:${zone.index}` : null;
   const resolvedKeys = new Set(resolved.map(keyOf).filter(key => key !== null));
+  // Windows a resolver keeps current are all of what it states: the ones it
+  // stated before are what it states now.
+  const standing = resolved.some(zone => zone.standing === true);
   return [...resolved, ...retained.filter(zone => {
+    if (standing && zone.standing === true) return false;
     const key = keyOf(zone);
     return key === null || !resolvedKeys.has(key);
   })];

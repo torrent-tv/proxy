@@ -307,7 +307,7 @@ export class EncodeInputs {
    * What the next run of this output would be given to copy, whatever has
    * arrived: the stretch `stretchFor` sizes, within the memory encoder inputs
    * may hold. The download map asks the swarm for that much as one group
-   * (`viewer/target-input-expansion.js`); a stretch shortened to what is here
+   * (`torrent/PlaybackProjection.js`); a stretch shortened to what is here
    * would ask only for what is here. Null while it is not known.
    *
    * @param {object} output

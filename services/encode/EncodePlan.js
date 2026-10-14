@@ -362,6 +362,26 @@ export function planEncoders({
   const decided = new Map();
   const room = Math.max(0, maxRuns - live.length);
   const refetchPerSegment = segmentSeconds * refetchSecPerFilmSecond;
+  // WHAT "NEVER" IS, ONE FIGURE FOR EVERY ARRANGEMENT THIS PASS COMPARES: later
+  // than any encoder here can reach the last wanted number — the film's length,
+  // a start and a stop, the whole wanted stretch at the slowest rate any
+  // arrangement can run at, and every piece fetched again. Capped at the film's
+  // length instead, a slow encoder's arrival scored as never; and worked out
+  // from each arrangement's own encoders, the arrangement without an encoder
+  // had a smaller never than the one with it. Either way an encoder making the
+  // film behind the viewer at 0.57x scored no better than none, and the plan
+  // stopped it before its first piece, then started it again when the speed
+  // read 1.9x — thirteen times in three minutes on Home Assistant, each start
+  // copying 108-122 MB of input (r37, torrent-tv/meta#178).
+  const neverSec = (() => {
+    const first = Math.min(...wanted.map((span) => span.from));
+    const last = Math.max(...wanted.map((span) => span.to));
+    const film = (last + 1) * segmentSeconds;
+    const slowest = rate / contentionPenaltyFor(Math.max(maxRuns, live.length));
+    if (!(slowest > 0) || !Number.isFinite(film)) return film;
+    return film + firstByteWaitSec + killCostSec + (last - first + 2) / slowest +
+      (last - first + 1) * refetchPerSegment + segmentSeconds;
+  })();
 
   let arrangements = [{ fill: [], used: new Set(), fresh: 0 }];
   for (let index = 0; index < positions.length; index += 1) {
@@ -441,7 +461,7 @@ export function planEncoders({
           : (piece) => finishesItsPieceIn(run, piece)
       });
     }
-    const scored = latenessOf(priced(encoders), coverage, wanted, untilNeeded, rate / contentionPenaltyFor(Math.max(0, encoders.length - 1)), refetchPerSegment, segmentSeconds);
+    const scored = latenessOf(priced(encoders), coverage, wanted, untilNeeded, rate / contentionPenaltyFor(Math.max(0, encoders.length - 1)), refetchPerSegment, segmentSeconds, neverSec);
     if (bestScore === null || cheaperThan(scored, bestScore)) {
       bestScore = scored;
       best = arrangement;
@@ -492,7 +512,7 @@ export function planEncoders({
   const scoreOf = (override) => {
     const encoders = encodersOf(override);
     return latenessOf(encoders, coverage, wanted, untilNeeded,
-      rate / contentionPenaltyFor(Math.max(0, encoders.length - 1)), refetchPerSegment, segmentSeconds);
+      rate / contentionPenaltyFor(Math.max(0, encoders.length - 1)), refetchPerSegment, segmentSeconds, neverSec);
   };
   for (const run of live) {
     if (placement.has(run)) {
@@ -519,7 +539,7 @@ export function planEncoders({
     const kept = encodersOf(new Map());
     const without = encodersOf(new Map([[run, null]]));
     const scoreOf_ = (encoders) => latenessOf(encoders, coverage, wanted, untilNeeded,
-      rate / contentionPenaltyFor(Math.max(0, encoders.length - 1)), refetchPerSegment, segmentSeconds);
+      rate / contentionPenaltyFor(Math.max(0, encoders.length - 1)), refetchPerSegment, segmentSeconds, neverSec);
     return cheaperThan(scoreOf_(kept), scoreOf_(without));
   };
 
@@ -586,7 +606,7 @@ export function planEncoders({
         continue;
       }
       const without = latenessOf(encodersOf(new Map([[run, null]])), coverage, wanted, untilNeeded,
-        rate / contentionPenaltyFor(Math.max(0, live.length - 2)), refetchPerSegment, segmentSeconds);
+        rate / contentionPenaltyFor(Math.max(0, live.length - 2)), refetchPerSegment, segmentSeconds, neverSec);
       if (cheapestScore === null || cheaperThan(without, cheapestScore)) {
         cheapestScore = without;
         cheapest = run;
@@ -751,13 +771,14 @@ function ranksOf(wanted, first, last) {
   return rankAt;
 }
 
-function latenessOf(encoders, coverage, wanted, untilNeeded, rate, refetchSecPerSegment, segmentSeconds) {
+function latenessOf(encoders, coverage, wanted, untilNeeded, rate, refetchSecPerSegment, segmentSeconds, neverSec = null) {
   const first = Math.min(...wanted.map((span) => span.from));
   const last = Math.max(...wanted.map((span) => span.to));
-  // What a number nobody reaches at all counts as. The film's own length is the
-  // honest bound — nothing can be later than never — and a finite figure is what
-  // lets two hopeless arrangements still be told apart by the rest of the sum.
-  const never = (last + 1) * segmentSeconds;
+  // What a number nobody reaches at all counts as: one figure for every
+  // arrangement the plan compares, later than any arrival (`neverSec` in
+  // `planEncoders`), and finite, so two hopeless arrangements are still told
+  // apart by the rest of the sum. Without it, the film's own length.
+  const never = Number.isFinite(neverSec) ? neverSec : (last + 1) * segmentSeconds;
 
   // WHICH SIDE OF THE VIEWERS a piece is on. The map states it; nothing here
   // works it out from positions, and nothing here knows where a viewer stands.
@@ -876,7 +897,7 @@ function latenessOf(encoders, coverage, wanted, untilNeeded, rate, refetchSecPer
     // gives. It is a definition rather than a guard: it also makes the score
     // total on a host whose startup measured nothing at all, where every arrival
     // is beyond reckoning and every arrangement is therefore equally hopeless.
-    const when = byWhom === null ? never : Math.min(soonest, never);
+    const when = byWhom === null || !Number.isFinite(soonest) ? never : soonest;
     const rank = rankAt(index);
     doneAt.set(rank, Math.max(doneAt.get(rank) ?? 0, when));
     const deadline = untilNeeded(index);

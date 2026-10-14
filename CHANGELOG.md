@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The encoder plan scores "never" as one figure for every arrangement it compares, later than any encoder can arrive: capped at the film's length, an encoder making the film behind the viewer at 0.57x scored the same as none and was stopped before its first piece, then started again when the speed read 1.9x — thirteen times in three minutes on Home Assistant, each start copying 108-122 MB of input (#ttv-178).
+
 ## 2.98.11
 
 - **Fix**: A run asks for the next run's input at its own first piece when the rest of the run leaves the measured time to prepare it, instead of as soon as its own stretch is copied: on Home Assistant a background run's 108.7 MB and the next 115.6 MB were copied together while the run opened, and the share left to encoders fell from 65 % to 10-16 % before either had a piece. A run of one piece, or one whose rest is shorter than the last preparation, asks at once as before (#ttv-178).

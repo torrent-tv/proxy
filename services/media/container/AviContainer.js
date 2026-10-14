@@ -42,6 +42,8 @@ export class AviContainer extends Container {
   #workTags = null;
   /** The index alone: undefined until read, null when the file states none. */
   #index = undefined;
+  /** The index while it is being read, so two asks read it once. */
+  #indexReading = null;
   #layout = null;
   /** The first RIFF's `idx1`: undefined until looked for, null when there is none. */
   #idx1Chunk = undefined;
@@ -167,6 +169,38 @@ export class AviContainer extends Container {
    */
   async #readIndex() {
     if (this.#index !== undefined) return this.#index;
+    // One reading for every asker: a read of the picture's ranges may now be
+    // answered beside the sound's table (`answersWithoutReading`), and two
+    // asks at once would each read the index and each hold its memory.
+    this.#indexReading ??= this.#readIndexOnce().finally(() => { this.#indexReading = null; });
+    return this.#indexReading;
+  }
+
+  /**
+   * Whether `statement` is answered from what this container has already
+   * read, without reading or parsing anything more — so it may be answered
+   * beside a read of the same file still in progress
+   * (`ContainerOrchestrator.inspect`). Field r38 (Home Assistant, 2026-10-14):
+   * the picture's first input waited about 4 s behind the sound's packet table
+   * of the whole film, which it does not use — its ranges are named from the
+   * index alone (`readSourceRanges`), while the table is the sound's
+   * (`readPacketIndex`), built in portions that give the thread back
+   * (torrent-tv/meta#178).
+   *
+   * Once the index has been read, so have the tracks and the place of `movi`
+   * it was read with, and the picture's statements read nothing else.
+   *
+   * @param {string} statement
+   * @returns {boolean}
+   */
+  answersWithoutReading(statement) {
+    if (statement === "media-info") return Boolean(this.mediaInfo);
+    if (statement === "source-navigation" || statement === "source-ranges") return this.#index !== undefined;
+    return false;
+  }
+
+  /** The index, read from the file; see `#readIndex`. */
+  async #readIndexOnce() {
     const tracks = await this.readTracks();
     const { streams } = await this.#readHeaders();
     const { movi } = await this.#topLevel();

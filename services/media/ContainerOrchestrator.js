@@ -136,10 +136,15 @@ export class ContainerOrchestrator {
     let lifetime = this.#lifetimes.get(key);
     if (!lifetime) this.#lifetimes.set(key, lifetime = {});
     const isCurrent = () => this.#lifetimes.get(key) === lifetime && params.isCurrent?.() !== false;
-    const previous = this.#reads.get(key) ?? Promise.resolve();
     // Reads of one file run one after another, so an answer can wait for every
     // read asked before it. Told to whoever asked, apart from the read itself,
     // because the two call for different remedies (torrent-tv/meta#166).
+    // A statement answered from what was already read reads and parses
+    // nothing, so it is answered beside the queue and holds nobody up: the
+    // picture's first input of an AVI waited about 4 s behind the sound's
+    // table of the whole film it does not use (r38, torrent-tv/meta#178).
+    const aside = this.#answersWithoutReading(key, statement);
+    const previous = aside ? Promise.resolve() : this.#reads.get(key) ?? Promise.resolve();
     const askedAt = Date.now();
     const reading = previous.catch(() => undefined).then(async () => {
       if (!isCurrent()) return { result: { kind: "terminal", reason: "request-obsolete", requestId: params.requestId } };
@@ -149,7 +154,7 @@ export class ContainerOrchestrator {
       params.onTimed?.(statement, startedAt - askedAt, Date.now() - startedAt);
       return { result, revision };
     });
-    this.#reads.set(key, reading);
+    if (!aside) this.#reads.set(key, reading);
     try {
       const { result, revision } = await reading;
       if (!isCurrent()) return { kind: "terminal", reason: "request-obsolete", requestId: params.requestId };
@@ -160,6 +165,12 @@ export class ContainerOrchestrator {
     } finally {
       if (this.#reads.get(key) === reading) this.#reads.delete(key);
     }
+  }
+
+  /** Whether a statement of this file is answered from what was already read: its track table kept here, or the container's word. */
+  #answersWithoutReading(key, statement) {
+    if (statement === "tracks" && this.tracks.has(key)) return true;
+    return this.cache.get(key)?.answersWithoutReading?.(statement) === true;
   }
 
   async #inspectRead(params, statement) {

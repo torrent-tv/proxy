@@ -62,7 +62,7 @@ test("a block held by one slow peer is asked of another, and never of a third ho
   const slow = wire("slow", { speed: 1_000 }), fast = wire("fast"), other = wire("other", { speed: 50_000 });
   const one = torrent([slow, fast, other]);
   tail(one, 0, slow, [126, 127]);
-  assert.deepEqual(duplicateTailFor(one, 0), { duplicated: 2, missing: 2, wires: 3, unplaced: 0 });
+  assert.deepEqual(duplicateTailFor(one, 0), { duplicated: 2, missing: 2, wires: 3, unplaced: 0, dueAt: null });
   assert.deepEqual(fast.requests.map(request => request.offset / BLOCK).sort(), [126, 127], "the fastest peer, which held neither");
   for (let look = 0; look < 5; look += 1) assert.equal(duplicateTailFor(one, 0).duplicated, 0, "two copies in flight are enough");
   assert.equal(other.requests.length, 0);
@@ -81,7 +81,7 @@ test("nobody else to ask leaves the block unplaced, and a tail too long or a blo
   const slow = wire("slow", { speed: 1_000 });
   const one = torrent([slow]);
   tail(one, 2, slow, [127]);
-  assert.deepEqual(duplicateTailFor(one, 2), { duplicated: 0, missing: 1, wires: 1, unplaced: 1 });
+  assert.deepEqual(duplicateTailFor(one, 2), { duplicated: 0, missing: 1, wires: 1, unplaced: 1, dueAt: null });
 
   const fast = wire("fast");
   const two = torrent([slow, fast]);
@@ -148,10 +148,30 @@ test("the pieces somebody waits for are the urgent first class, and none while i
 
 test("a completed piece, or one no peer can give, is left alone", () => {
   assert.deepEqual(duplicateTailFor({ pieces: [null], wires: [wire("any")], _request: () => true }, 0),
-    { duplicated: 0, missing: 0, wires: 0, unplaced: 0 });
+    { duplicated: 0, missing: 0, wires: 0, unplaced: 0, dueAt: null });
   const slow = wire("slow", { speed: 1_000 }), lacking = wire("lacking", { pieces: [] });
   const one = torrent([slow, lacking]);
   tail(one, 0, slow, [127]);
   slow.peerChoking = true;
   assert.equal(duplicateTailFor(one, 0).duplicated, 0, "a choking peer and one without the piece cannot be asked");
+});
+
+test("a block is asked of a second peer only once its request has been out a queue time, and is looked at again then", () => {
+  const slow = wire("slow", { speed: 1_000 }), fast = wire("fast");
+  const one = torrent([slow, fast]);
+  tail(one, 1, slow, [127]);
+  slow.requests[0].askedAt = 10_000;
+  assert.deepEqual(duplicateTailFor(one, 1, { now: 10_400 }), { duplicated: 0, missing: 1, wires: 2, unplaced: 0, dueAt: 11_000 },
+    "out 0.4 s: not late yet");
+  assert.equal(fast.requests.length, 0);
+  assert.equal(duplicateTailFor(one, 1, { now: 11_000 }).duplicated, 1, "out 1 s: late, asked of the other peer");
+
+  const pending = [], wakes = [];
+  const two = torrent([slow, fast]);
+  tail(two, 2, slow, [127]);
+  slow.requests.at(-1).askedAt = 20_000;
+  new TailRepeat({ torrent: two, requiredPieces: () => [{ from: 2, to: 2 }], now: () => 20_300,
+    schedule: (work) => pending.push(work), wake: (work, ms) => { wakes.push(ms); return wakes.length; }, clear() {} });
+  while (pending.length) pending.shift()();
+  assert.deepEqual(wakes, [700], "one look armed for the moment the block becomes late");
 });

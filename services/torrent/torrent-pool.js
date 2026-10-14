@@ -1545,7 +1545,13 @@ export class TorrentPool {
       wire.request = function (index, offset, length, callback) {
         const queued = this.requests.length;
         const answer = request.call(this, index, offset, length, callback);
-        if (this.requests.length > queued) timings.asked(index, offset, peer, Date.now());
+        if (this.requests.length > queued) {
+          const now = Date.now();
+          timings.asked(index, offset, peer, now);
+          // When this wire was asked for the block: how long it has held it is
+          // what decides whether a second peer is asked (`duplicateTailFor`).
+          this.requests.at(-1).askedAt = now;
+        }
         return answer;
       };
       wire.on("piece", (index, offset) => timings.arrived(index, offset, peer, Date.now()));

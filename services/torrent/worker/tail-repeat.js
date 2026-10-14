@@ -18,10 +18,12 @@
  * peer becomes able or unable to give the piece; so it is looked at on those —
  * a block arriving, a wire unchoking, a peer stating a piece, a wire joining
  * or closing, a piece verified, a new map. Several in one turn of the event
- * loop are one look. A tail no other wire could be asked for now is looked at
- * once more after the time a wire's queue is sized to empty in — WebTorrent
- * sizes it to one second of the wire's speed (`PIPELINE_MAX_DURATION`) — in
- * case nothing else happens in between.
+ * loop are one look. A block is asked again only once its request has been out
+ * a wire's queue time (`duplicateTailFor`), so a block not yet late is looked
+ * at again when it becomes late, and a late one no other wire could take is
+ * looked at again a queue time later — once, in case nothing else happens in
+ * between. WebTorrent sizes a wire's queue to one second of its speed
+ * (`PIPELINE_MAX_DURATION`).
  */
 
 import { duplicateTailFor } from "./fastest-wires.js";
@@ -41,12 +43,15 @@ export class TailRepeat {
   #clear;
   #scheduled = false;
   #timer = null;
+  /** When the armed look runs, wall clock ms. */
+  #timerAt = Number.POSITIVE_INFINITY;
   #disposed = false;
   /** @type {Map<object, { onBlock: (index: number) => void, onPeer: () => void }>} */
   #wires = new Map();
   #onWire;
   #onPoke;
   #log;
+  #now;
   /**
    * Grow-only, for the log: block copies asked, looks taken, and blocks that
    * arrived after their piece was complete — what the copies cost.
@@ -62,9 +67,11 @@ export class TailRepeat {
    * @param {(work: () => void, ms: number) => unknown} [params.wake]
    * @param {(handle: unknown) => void} [params.clear]
    * @param {(line: string) => void} [params.log]
+   * @param {() => number} [params.now]
    */
-  constructor({ torrent, requiredPieces, duplicate = duplicateTailFor, schedule = setImmediate, wake = setTimeout, clear = clearTimeout, log = null }) {
+  constructor({ torrent, requiredPieces, duplicate = duplicateTailFor, schedule = setImmediate, wake = setTimeout, clear = clearTimeout, log = null, now = Date.now }) {
     this.#log = log;
+    this.#now = now;
     this.#torrent = torrent;
     this.#requiredPieces = requiredPieces;
     this.#duplicate = duplicate;
@@ -93,6 +100,19 @@ export class TailRepeat {
     for (const wire of [...this.#wires.keys()]) this.#forget(wire);
     if (this.#timer !== null) this.#clear(this.#timer);
     this.#timer = null;
+  }
+
+  /** One look armed at a time, at the earliest moment asked for. */
+  #lookAgainAt(at, now) {
+    if (!Number.isFinite(at) || at >= this.#timerAt) return;
+    if (this.#timer !== null) this.#clear(this.#timer);
+    this.#timerAt = at;
+    this.#timer = this.#wake(() => {
+      this.#timer = null;
+      this.#timerAt = Number.POSITIVE_INFINITY;
+      this.poke();
+    }, Math.max(0, at - now));
+    this.#timer?.unref?.();
   }
 
   #watch(wire) {
@@ -128,14 +148,16 @@ export class TailRepeat {
     this.#scheduled = false;
     if (this.#disposed) return;
     this.totals.looks += 1;
-    let unplaced = 0;
+    const now = this.#now();
+    let unplaced = 0, dueAt = Number.POSITIVE_INFINITY;
     const asked = [];
     for (const { from, to } of this.#requiredPieces()) {
       for (let index = from; index <= to; index += 1) {
         if (this.#torrent.bitfield?.get?.(index)) continue;
-        const result = this.#duplicate(this.#torrent, index);
+        const result = this.#duplicate(this.#torrent, index, { minAgeMs: WIRE_QUEUE_SECONDS * 1000, now });
         this.totals.duplicated += result.duplicated;
         unplaced += result.unplaced;
+        if (Number.isFinite(result.dueAt)) dueAt = Math.min(dueAt, result.dueAt);
         if (result.duplicated > 0) asked.push(`${index}:${result.duplicated}/${result.missing}`);
       }
     }
@@ -143,12 +165,7 @@ export class TailRepeat {
       this.#log?.(`tail: asked a second peer for the last blocks of piece:blocks/missing ${asked.join(" ")}; ` +
         `${this.totals.duplicated} block copies asked so far, ${this.totals.lateBlocks} block(s) arrived after their piece was complete`);
     }
-    if (unplaced > 0 && this.#timer === null) {
-      this.#timer = this.#wake(() => {
-        this.#timer = null;
-        this.poke();
-      }, WIRE_QUEUE_SECONDS * 1000);
-      this.#timer?.unref?.();
-    }
+    if (unplaced > 0) dueAt = Math.min(dueAt, now + WIRE_QUEUE_SECONDS * 1000);
+    this.#lookAgainAt(dueAt, now);
   }
 }

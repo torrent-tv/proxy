@@ -25,6 +25,7 @@ import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { computeCutGrid } from "../../services/encode/output/cut-grid.js";
 import { nearestKeyframeAtOrBefore } from "../../services/encode/run-command.js";
 import { Output } from "../../services/encode/output/Output.js";
+import { OUTPUT_UNAVAILABLE } from "../../services/encode/output/index.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { qualityStateOf } from "../../services/encode/quality/OutputQualityState.js";
 import { chooseOutput, chosenOutputOf } from "../../services/viewer/choices.js";
@@ -1267,4 +1268,31 @@ test("a file opened at a position starts its sound THERE, not a look-ahead earli
     584,
     "where the viewer opened, less one segment of margin, and nothing else"
   );
+});
+
+test("a step the master lists and the offer no longer holds is answered as not available now", async (t) => {
+  // Field r28 (torrent-tv/meta#178): the proxy asked the page for 360p, the
+  // offer moved back to 400p, and the page's warm-up arriving after it was
+  // answered "no such variant". The step exists; it is not available now.
+  const dirPath = await mkdtemp(path.join(os.tmpdir(), "quality-variants-withdrawn-"));
+  const { manager } = managerWithOwnStore({
+    softwarePresetBenchmark: [{ preset: "veryfast", pixelsPerSec: 1_000_000 }],
+    decodeCostModel: { pixelTerm: 0.01, bitrateTerm: 0, constantTerm: 0 }
+  });
+  const base = fakeSession({ id: BASE_ID, encodeHeight: 812, dirPath });
+  base.file.learn({ width: 1920, height: 1080, fps: 24, bitrateKbps: 10_000 });
+  manager.hostLoad.requiredSpeedFor = () => 8;
+  manager.outputs.set(BASE_ID, base);
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  assert.deepEqual(manager.quality.offeredHeights(base), [812]);
+  await assert.rejects(manager.renditions.prepareVariant(BASE_ID, 540, 240, VIEWER), (error) => {
+    assert.equal(error.code, OUTPUT_UNAVAILABLE);
+    assert.deepEqual(error.details.figures, { height: 540, offeredHeights: [812] });
+    return true;
+  });
+  assert.equal(await manager.renditions.prepareVariant(BASE_ID, 999, 240, VIEWER), null,
+    "a height the master never listed is still no such step");
 });

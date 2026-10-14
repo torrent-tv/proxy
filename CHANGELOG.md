@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Preparing a quality step the master lists but the offer no longer holds is answered as not available now (409, with the heights offered) instead of "no such variant". The proxy can withdraw its ask while the page is already preparing the step: on Home Assistant 360p was asked for, the offer moved back to 400p two seconds later, and the page's preparation arriving after it was refused as if the step did not exist (#ttv-178).
+
 ## 2.97.31
 
 - **Perf**: Packing the download map finds a repeat of the same bytes by the two numbers of the range instead of a string made of them, keeps the ranges in numeric lists, and takes a zone that names several ranges with one demand for all of them. The same windows are sent; packing a two-hour AVI's map took 25 s of the main thread in fifteen minutes on Home Assistant, 20 s of it making those strings (#ttv-178).

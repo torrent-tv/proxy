@@ -388,6 +388,9 @@ export class Viewer {
    *   picture is in picture-in-picture. Absent means on screen.
    * @param {boolean} [report.inPictureInPicture] - Whether the picture has been
    *   pulled out of the page, which is watching it with the tab hidden.
+   * @param {number} [report.generation] - Which of this viewer's viewings the
+   *   page made the report in (`Assignments`). Absent from a page one release
+   *   behind; then the report is taken as current.
    * @param {number} [now]
    */
   report(
@@ -406,11 +409,18 @@ export class Viewer {
       onScreen,
       inPictureInPicture,
       qualityMode,
-      visiblePicture
+      visiblePicture,
+      generation
     },
     now = Date.now()
   ) {
     this.noteVisiblePicture(visiblePicture);
+    // A REPORT MADE BEFORE THE VIEWER'S LAST SEEK says where they were, not
+    // where they are: sent just before the seek and answered after it, it
+    // would place them back in the viewing they left, and the deadlines worked
+    // out from their position would follow it (torrent-tv/meta#178 review).
+    // What it measured of the link is still a measurement of the link.
+    const stale = this.isOfAnEarlierViewing(generation);
     // Whether the size on their screen was picked by hand or is the automatic
     // choice. Kept only when stated: a page one release behind says nothing,
     // and is taken as picking, which is what every page was before.
@@ -428,6 +438,7 @@ export class Viewer {
     const linkMeasuredAt = hasLinkMeasurement ? now : this.netReport?.linkMeasuredAt ?? null;
     const sampleMbps = Number(linkSampleMbps);
     const sampleAt = Number(linkSampleAt);
+    const previous = this.netReport;
     const hasPlaybackSample = Number.isFinite(sampleMbps) && sampleMbps > 0 &&
       Number.isFinite(sampleAt) && sampleAt > 0;
     const newerPlaybackSample = hasPlaybackSample && sampleAt > (this.netReport?.linkSampleAt ?? 0);
@@ -458,6 +469,13 @@ export class Viewer {
     };
     // Where the picture is now. A report states a place the viewer has played
     // to, not a place they moved to: their buffer's history stands.
+    if (stale) {
+      this.netReport = { ...this.netReport, positionSeconds: previous?.positionSeconds ?? null,
+        bufferedAheadSec: previous?.bufferedAheadSec ?? 0, bufferedRanges: previous?.bufferedRanges ?? null,
+        timestampOffsets: previous?.timestampOffsets ?? {}, at: previous?.at ?? now };
+      this.seen(now);
+      return;
+    }
     if (Number.isFinite(positionSeconds) && positionSeconds >= 0) {
       this.#place(/** @type {number} */ (positionSeconds), now);
     }
@@ -489,6 +507,18 @@ export class Viewer {
     this.inPictureInPicture = inPictureInPicture === undefined ? false : Boolean(inPictureInPicture);
     this.onScreen = onScreen === undefined ? true : Boolean(onScreen);
     this.seen(now);
+  }
+
+  /**
+   * Whether something the page stated in viewing `generation` was stated
+   * before this viewer's last seek. A page that names no viewing is taken as
+   * current, as every page was before it could name one.
+   *
+   * @param {number | undefined} generation
+   * @returns {boolean}
+   */
+  isOfAnEarlierViewing(generation) {
+    return Number.isInteger(generation) && generation < this.assignments.generation;
   }
 
   /**

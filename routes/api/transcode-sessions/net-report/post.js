@@ -83,6 +83,10 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply,
   // by an output of the same quality or better that is already made.
   const qualityMode = body.qualityMode === "auto" || body.qualityMode === "manual" ? body.qualityMode : undefined;
   const positionSeconds = Number(body.positionSeconds);
+  // Which of this viewer's viewings the page made the report in; a page one
+  // release behind does not say (`Viewer.isOfAnEarlierViewing`).
+  const stated = Number(body.generation);
+  const generation = Number.isInteger(stated) ? stated : undefined;
   // The picture as the viewer sees it, in physical pixels: the upper bound of
   // the height of a re-encoded output made for them (roadmap item 98). Sent the
   // moment it changes; a page that does not say leaves the size as it was.
@@ -94,12 +98,10 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply,
   // to the rung on screen. A page that does not say leaves the rung as it was.
   const playingHeight = Number(body.playingHeight);
   if (Number.isInteger(playingHeight) && playingHeight > 0) {
-    renditions.viewerPlays(
-      sessionId,
-      consumerId,
-      playingHeight,
-      Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined
-    );
+    // Where they stood when they said it, unless they have seeked since.
+    const placed = Number.isFinite(positionSeconds) && positionSeconds >= 0 &&
+      !viewers.get?.(consumerId)?.isOfAnEarlierViewing(generation);
+    renditions.viewerPlays(sessionId, consumerId, playingHeight, placed ? positionSeconds : undefined);
   }
   // Where they stood and whether they were playing or waiting, before this
   // report: what the encoders are planned from (`movedForThePlan`).
@@ -126,7 +128,8 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply,
       qualityMode,
       visiblePicture,
       positionSeconds:
-        Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined
+        Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : undefined,
+      generation
     }
   });
   if (!recorded) {

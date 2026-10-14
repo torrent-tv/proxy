@@ -84,6 +84,11 @@ export class RateTrend {
     return true;
   }
 
+  /** The time of the newest reading kept, or -Infinity. */
+  get lastAt() {
+    return this.#readings.at(-1)?.at ?? Number.NEGATIVE_INFINITY;
+  }
+
   snapshot() {
     if (this.#readings.length === 0) {
       return null;

@@ -10,6 +10,8 @@
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { contentionPenalty } from "./contention.js";
+import { LOOKAHEAD_PAUSE_SECONDS } from "./CushionReport.js";
+import { SpeedReadings } from "./SpeedReadings.js";
 import { ENCODE_RUN_STATE, liveRunsOf, runStateOf, wireState } from "./encode-run-state.js";
 import { ENCODE_EXIT } from "./encode-exit.js";
 import { EncodeRun, endOfRun } from "./EncodeRun.js";
@@ -171,6 +173,8 @@ export class EncodeRuns {
    * @type {WeakMap<object, { cpuSeconds: number, filmSeconds: number, reading: boolean, beside: number }>}
    */
   #cpuOfRun = new WeakMap();
+  /** Every speed reading of each output's runs, for the start forecast (`SpeedReadings.js`). */
+  #speedReadings = new SpeedReadings(LOOKAHEAD_PAUSE_SECONDS);
 
   #lastInputToken = 0;
   #inputFailures = new InputFailures();
@@ -490,6 +494,18 @@ export class EncodeRuns {
       if (/^E[A-Z]+$/.test(error?.code ?? "")) throw error;
       return false;
     }
+  }
+
+  /**
+   * The speed readings of this output's runs measured after `after`, oldest
+   * first, within the forecast's horizon.
+   *
+   * @param {object} output
+   * @param {number} [after] - The time of the last reading the asker has.
+   * @returns {Array<{ speed: number, at: number }>}
+   */
+  speedReadingsOf(output, after) {
+    return this.#speedReadings.after(output, after);
   }
 
   /**
@@ -1179,7 +1195,10 @@ export class EncodeRuns {
       // group before it in hand — the leading pictures the run that starts
       // there cannot make.
       onTail: (name) => this.#keepLeadingPictures(session, admittedInput, name),
-      onSpeedMeasured: () => this.#host.noteRunSpeedMeasured?.(session, run),
+      onSpeedMeasured: (reading) => {
+        this.#speedReadings.note(session, reading);
+        this.#host.noteRunSpeedMeasured?.(session, run);
+      },
       onEnded: (ended) => {
         this.#runsByInputToken.delete(inputToken);
         if (admittedInput.original) {

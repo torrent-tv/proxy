@@ -583,7 +583,7 @@ export function wireOutputs({
     // source preparation's answer, set on these parts by the assembly.
     subtitleReadyFor: (viewer) => parts.subtitleReadyFor?.(viewer) ?? true,
     sourceInputsFor: (output, index) => parts.sourceInputsFor?.(output, index),
-    encodeSpeedReadingOf: (output) => parts.encodeCost.latestSpeedReadingOf(output),
+    encodeSpeedReadingsOf: (output, after) => parts.encodeRuns.speedReadingsOf(output, after),
     projectedEncodeSpeedOf: (output) => parts.encodeCost.projectedSpeedOf(output),
     // The speed the offer predicted for this output when it chose its mode: a
     // forecast with no measured piece yet stands on it rather than on the

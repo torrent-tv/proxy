@@ -497,15 +497,14 @@ export class EncodeRuns {
   }
 
   /**
-   * The speed readings of this output's runs measured after `after`, oldest
-   * first, within the forecast's horizon.
+   * The speed readings of this output's runs within the forecast's horizon,
+   * in the order they were taken.
    *
    * @param {object} output
-   * @param {number} [after] - The time of the last reading the asker has.
    * @returns {Array<{ speed: number, at: number }>}
    */
-  speedReadingsOf(output, after) {
-    return this.#speedReadings.after(output, after);
+  speedReadingsOf(output) {
+    return this.#speedReadings.windowOf(output);
   }
 
   /**

@@ -604,7 +604,7 @@ export class ViewerRequests {
     const tracks = [];
     for (const output of outputs) {
       const trackProgress = output === session ? progress : this.#host.encodeRuns.progressOf(output);
-      const trackRates = this.#trackRateReadings(measurement, output, now);
+      const trackRates = this.#trackRateReadings(output, now);
       const trackName = output === session ? "video" : "audio";
       // The page states the offset its player applied to this track, and the
       // init it applied it to is the session's. Until both are known, the
@@ -691,12 +691,6 @@ export class ViewerRequests {
       });
     }
 
-    const activeTrackIds = new Set(tracks.map(({ id }) => id));
-    for (const id of measurement.tracks.keys()) {
-      if (!activeTrackIds.has(id)) {
-        measurement.tracks.delete(id);
-      }
-    }
     const bufferedAheadSeconds = Number(viewerReading?.bufferedAheadSec);
     const positionSeconds = Number.isFinite(viewerReading?.positionSeconds)
       ? viewerReading.positionSeconds
@@ -880,25 +874,23 @@ export class ViewerRequests {
     const id = typeof consumerId === "string" ? consumerId : "";
     let state = byViewer.get(id);
     if (!state) {
-      state = { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), tracks: new Map(), sources: new Map() };
+      state = { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), sources: new Map() };
       byViewer.set(id, state);
     }
     return state;
   }
 
-  #trackRateReadings(state, output, now) {
-    const id = output.outputKey;
-    let trend = state.tracks.get(id);
-    if (!trend) {
-      trend = new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds);
-      state.tracks.set(id, trend);
-    }
-    // Every reading since this trend's last, not the newest one at the poll:
-    // a run that ended between two polls took its readings with it.
-    for (const reading of this.#host.encodeSpeedReadingsOf?.(output, trend.lastAt) ?? []) {
-      if (reading.at <= now) trend.add(reading.at, reading.speed);
-    }
-    if (!trend.snapshot()) {
+  /**
+   * The encoder's rate for the forecast: the output's whole window of readings,
+   * summarized again on each poll. A run that ended between two polls took its
+   * readings with it when the forecast asked for the newest one alone; and two
+   * runs of one output can report out of order, so a summary kept and added to
+   * would drop the later-told, earlier-taken one (torrent-tv/meta#178).
+   */
+  #trackRateReadings(output, now) {
+    const readings = (this.#host.encodeSpeedReadingsOf?.(output) ?? []).filter(reading => reading.at <= now);
+    const summary = readings.length > 0 ? this.#host.playbackReadiness.rateSummaryOf(readings) : null;
+    if (!summary) {
       // ONLY UNTIL A PIECE IS MEASURED does the prediction stand for the
       // encoder, and it is not kept among the readings. Added on every poll
       // between runs, it put the machine's share of that moment — 1 % at a
@@ -911,7 +903,7 @@ export class ViewerRequests {
         return seed.snapshot();
       }
     }
-    return trend.snapshot();
+    return summary;
   }
 
   /**

@@ -117,3 +117,23 @@ test("an encoder with one setting is matched to its one mode when the output nam
   assert.equal(modeEntryFor(BENCHMARK, null), null);
   assert.equal(modeEntryFor(BENCHMARK, "ultrafast"), BENCHMARK[1]);
 });
+
+test("new software mode choice prices decoding from the file's own measured cost where there is one", () => {
+  // The opening had the file's measured decode cost and the choice priced
+  // decoding from the startup model instead (review of r28,
+  // torrent-tv/meta#178). Here the model says 1/6 s per second, and the file
+  // was measured at 0.8: `fast` then runs at 1 / (0.8 + 1/3) = 0.88x and
+  // `ultrafast` at 1 / (0.8 + 1/12) = 1.13x.
+  const params = {
+    transcodeVideo: true,
+    targetWidth: FRAME.width,
+    targetHeight: FRAME.height,
+    sourceWidth: FRAME.width,
+    sourceHeight: FRAME.height,
+    outputFps: FPS,
+    source: { megapixelsPerSecond: 5.5, megabitsPerSecond: 1 },
+    requiredSpeed: 1
+  };
+  assert.equal(costWith().chooseEncodeBudget(params).preset, "fast", "from the model, `fast` holds 2x");
+  assert.equal(costWith().chooseEncodeBudget({ ...params, observedDecodeCostSec: 0.8 }).preset, "ultrafast");
+});

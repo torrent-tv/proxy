@@ -144,7 +144,8 @@ export function decideOutputFormat({
         sourceHeight: source.height,
         outputFps: fps,
         source: source.decode,
-        requiredSpeed: cost.requiredSpeed
+        requiredSpeed: cost.requiredSpeed,
+        observedDecodeCostSec: cost.observedDecodeCostSec ?? null
       });
   const width = budget?.width ?? ceiling?.w ?? 0;
   const height = budget?.height ?? ceiling?.h ?? 0;

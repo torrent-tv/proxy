@@ -1715,7 +1715,8 @@ export function buildResolutionLadder(ceilingWidth, ceilingHeight) {
  * @param {{ width: number, height: number }} ceiling
  * @param {number} outputFps
  * @param {{ decodeModel?: object | null, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, requiredSpeed?: number | null }} [cost]
- * @returns {{ width: number, height: number, preset: string, ladder: Array<{ width: number, height: number }>, rungIndex: number } | null}
+ * @returns {{ width: number, height: number, preset: string, ladder: Array<{ width: number, height: number }>, rungIndex: number, bar: number } | null}
+ *   `bar` is the speed the choice had to clear.
  */
 export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps, cost = {}) {
   if (!Array.isArray(benchmark) || benchmark.length === 0) {
@@ -1750,7 +1751,7 @@ export function chooseSoftwareEncodeSettings(benchmark, ceiling, outputFps, cost
   }
   const chosen = ladder[chosenIndex];
   const preset = pickSoftwarePreset(benchmark, chosen.width * chosen.height * fps, cost, chosen);
-  return { width: chosen.width, height: chosen.height, preset, ladder, rungIndex: chosenIndex };
+  return { width: chosen.width, height: chosen.height, preset, ladder, rungIndex: chosenIndex, bar };
 }
 
 /**

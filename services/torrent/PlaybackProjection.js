@@ -341,6 +341,14 @@ export class PlaybackProjection {
   #ordered = true;
   /** The segments wanted whose ranges are not worked out yet. @type {Set<Segment>} */
   #unresolved = new Set();
+  /**
+   * Outputs whose next run's input is to be raised again before the windows
+   * are told: worked out once for everything a map or a pass changed, not at
+   * each segment that changed — on a cold start that was once for each of
+   * 4500 segments worked out (r34, torrent-tv/meta#178).
+   * @type {Set<OutputState>}
+   */
+  #raiseAgain = new Set();
   /** The time base of the last map, or 0 for a map stated in absolute time. */
   #base = 0;
   #absolute = true;
@@ -408,6 +416,7 @@ export class PlaybackProjection {
             segment.ready = now;
             this.#activate(segment);
             this.#track(segment);
+            this.#raiseAgain.add(output);
             reworked++;
           }
         }
@@ -423,8 +432,8 @@ export class PlaybackProjection {
         }
         if (leadMoved) for (const segment of output.segments) if (this.#reckon(segment)) reworked++;
       }
+      if (fresh || output.target !== (info.target ?? null)) this.#raiseAgain.add(output);
       output.target = info.target ?? null;
-      this.#raise(output);
     }
     for (const output of [...this.#outputs.values()]) if (!seen.has(output.outputKey)) this.#dropOutput(output);
     if (nextBase !== this.#base || absolute !== this.#absolute) this.#told = null;
@@ -463,7 +472,7 @@ export class PlaybackProjection {
     }
     this.#activate(segment);
     this.#track(segment);
-    this.#raise(segment.output);
+    this.#raiseAgain.add(segment.output);
   }
 
   /**
@@ -507,6 +516,8 @@ export class PlaybackProjection {
    *   deferred: boolean, deadlineAt?: number, standing: true }>}
    */
   windows() {
+    for (const output of this.#raiseAgain) if (this.#outputs.get(output.outputKey) === output) this.#raise(output);
+    this.#raiseAgain.clear();
     if (this.#told && this.#dirty.size === 0) return this.#told;
     for (const key of this.#dirty) this.#makeWindows(key);
     this.#dirty.clear();
@@ -560,6 +571,7 @@ export class PlaybackProjection {
     this.#lead(segment);
     this.#activate(segment);
     this.#track(segment);
+    this.#raiseAgain.add(segment.output);
     return true;
   }
 
@@ -753,6 +765,7 @@ export class PlaybackProjection {
       this.#unresolved.delete(segment);
     }
     this.#outputs.delete(output.outputKey);
+    this.#raiseAgain.delete(output);
     this.#told = null;
   }
 }

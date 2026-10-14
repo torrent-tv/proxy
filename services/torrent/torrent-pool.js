@@ -1300,6 +1300,7 @@ export class TorrentPool {
     // depend on facts that are gone by the time it is said.
     if (Array.isArray(zones) && zones.length === 0) {
       withdrawPriorityMap(torrent, fileIndex);
+      reconcileAll();
       // The ends of the file go with it. They are kept for as long as the file
       // is open, and this is what says it is not.
       // And this may have been the last thing anybody wanted of this torrent.
@@ -1346,6 +1347,11 @@ export class TorrentPool {
     // Bands the map no longer has: a viewer moved on, and what they had wanted
     // is not wanted by anybody now.
     withdrawPriorityMap(torrent, fileIndex, ordered.length);
+    // THE SWARM IS TOLD WHEN THE MAP IS APPLIED, not at the next piece verified
+    // or the pool's timer: on Home Assistant a seek's map was applied and the
+    // swarm went on fetching the old first class for 1.16 s, until the next
+    // piece happened to be verified (r34, torrent-tv/meta#178).
+    reconcileAll();
     // WHAT THE SWARM WAS ACTUALLY TOLD, said on change and never on a timer.
     // The map was applied in silence: that it had been BUILT was visible in the
     // encoding's own line, and that the download had received it was visible

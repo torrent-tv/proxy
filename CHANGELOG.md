@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A priority map reaches the swarm when it is applied: the selection of what is fetched first was worked out again only at the next piece verified or the pool's timer, so after a seek on Home Assistant the swarm went on fetching the old first class for 1.16 s (#ttv-178).
+
 ## 2.98.5
 
 - **Perf**: The next run's input is raised again once for everything a map or a pass changed, before the windows are told, instead of at every segment that changed: on a cold start that was once for each of 4500 segments worked out, 2.5 s of the main thread on Home Assistant (#ttv-178).

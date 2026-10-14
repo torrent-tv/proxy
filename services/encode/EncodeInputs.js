@@ -28,6 +28,8 @@ export class EncodeInputs {
   /** Whether an output's last resolved input was its original file. @type {WeakMap<object, boolean>} */
   #original = new WeakMap();
   #revision = 0;
+  /** Output → how long its last input took to be ready, ms. @type {WeakMap<object, number>} */
+  #preparedIn = new WeakMap();
   #memoryRevision = 0;
   #held = 0;
   #allowed = 0;
@@ -270,6 +272,18 @@ export class EncodeInputs {
    * @param {{ sourceKey: string, ranges: Array<{ fileIndex: number, start: number, end: number }> } | null} [arrived] -
    *   The bytes that arrived, inclusive, when the event names them.
    */
+  /**
+   * How long this output's last input took from being asked for to being
+   * ready, in milliseconds, or null before one was: the time a run gives the
+   * input after it to be prepared in (`EncodeRuns`).
+   *
+   * @param {object} output
+   * @returns {number | null}
+   */
+  preparationMsOf(output) {
+    return this.#preparedIn.get(output) ?? null;
+  }
+
   bytesChanged(arrived = null) {
     this.#revision++;
     for (const request of this.#requests.values()) {
@@ -376,6 +390,7 @@ export class EncodeInputs {
       // is commanded over its prefix.
       if (result.kind === "result" && result.to > request.to) result.to = Math.max(request.from, request.to);
       request.result = result;
+      if (result.kind === "result") this.#preparedIn.set(request.output, this.#now() - request.timing.askedAt);
       this.#note(request, result.kind === "result" ? `ready #${result.from}..#${result.to}, ${result.bytes ?? "?"} bytes` +
         (Number.isFinite(result.copyMs) ? (result.deferredBytes > 0
           ? `, opening part copied in ${result.copyMs}ms, ${result.deferredBytes} bytes of the stretch copied while the run opens`

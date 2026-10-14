@@ -13,18 +13,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Timeline, Timelines } from "../../services/encode/output/Timeline.js";
 import { PacketIndex } from "../../services/media/container/PacketIndex.js";
+import { mapForViewer, mergeMaps } from "../../services/viewer/PriorityMap.js";
+
+/**
+ * A viewer who stopped beside another, their urgent work done and no time
+ * paused yet: their film is wanted at full priority from where they stand,
+ * with no urgency.
+ */
+function yielded(atSeconds) {
+  return mapForViewer({ atSeconds, durationSeconds: 12, allowanceSeconds: 1000, playing: false, urgentReady: true, viewerCount: 2 });
+}
 
 test("segment demand preserves urgent preparation independently of equal priorities and deadlines", () => {
   const timeline = new Timeline({ boundaries: [0, 4, 8, 12], cutGrid: "uniform" });
-  const map = { durationSeconds: 12, priority: new Uint8Array(12).fill(100),
-    secondsUntilPlayed: Float64Array.from({ length: 12 }, (_, index) => index),
-    behind: new Uint8Array(12), urgent: Uint8Array.from({ length: 12 }, (_, index) => index < 8 ? 1 : 0) };
+  // Priority 100 and the time of the distance throughout; urgent only for the
+  // first 8 s, which the watching viewer's allowance makes urgent.
+  const watching = mapForViewer({ atSeconds: 0, durationSeconds: 12, allowanceSeconds: 8, viewerCount: 2 });
+  const map = mergeMaps([watching, yielded(0)]);
   assert.deepEqual(timeline.inSegments(map, 3), [
     { from: 0, to: 1, priority: 100, withinSeconds: 0, urgent: true, behind: false },
     { from: 2, to: 2, priority: 100, withinSeconds: 8, urgent: false, behind: false }
   ]);
-  map.urgent.fill(0);
-  assert.deepEqual(timeline.inSegments(map, 3), [
+  assert.deepEqual(timeline.inSegments(yielded(0), 3), [
     { from: 0, to: 2, priority: 100, withinSeconds: 0, urgent: false, behind: false }
   ]);
 });
@@ -122,15 +132,13 @@ test("a copied piece is wanted by the second its end falls in, because a copy ru
   // the player placed the next piece there: a viewer at 8 s asked for the piece
   // ending at 8 s (field 2026-10-09, torrent-tv/meta#159).
   const timeline = new Timeline({ boundaries: [0, 4, 8, 12], cutGrid: "uniform" });
-  const map = { durationSeconds: 12, priority: Uint8Array.from({ length: 12 }, (_, second) => second >= 8 ? 100 : 1),
-    secondsUntilPlayed: Float64Array.from({ length: 12 }, (_, second) => Math.max(0, second - 8)),
-    behind: Uint8Array.from({ length: 12 }, (_, second) => second < 8 ? 1 : 0), urgent: new Uint8Array(12) };
+  const map = yielded(8);
   assert.deepEqual(timeline.inSegments(map, 3), [
-    { from: 0, to: 1, priority: 1, withinSeconds: 0, urgent: false, behind: true },
+    { from: 0, to: 1, priority: 1, withinSeconds: Number.POSITIVE_INFINITY, urgent: false, behind: true },
     { from: 2, to: 2, priority: 100, withinSeconds: 0, urgent: false, behind: false }
   ]);
   assert.deepEqual(timeline.inSegments(map, 3, { runsPastEnd: true }), [
-    { from: 0, to: 0, priority: 1, withinSeconds: 0, urgent: false, behind: true },
+    { from: 0, to: 0, priority: 1, withinSeconds: Number.POSITIVE_INFINITY, urgent: false, behind: true },
     { from: 1, to: 2, priority: 100, withinSeconds: 0, urgent: false, behind: false }
   ]);
 });

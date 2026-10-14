@@ -156,8 +156,8 @@ export class Timeline {
    * It lived in the session manager, which is a place, not a layer. Here it is
    * beside the table it converts against.
    *
-   * @param {import("../../viewer/PriorityMap.js").PriorityMap} map - One number
-   *   per second of film.
+   * @param {import("../../viewer/PriorityMap.js").PriorityMap} map - What every
+   *   viewer of this output wants, in seconds of film.
    * @param {number} segmentCount - How many pieces this output has.
    * @param {{ runsPastEnd?: boolean }} [shape] - `runsPastEnd`: the output's
    *   pieces copy a stream, which is cut where its packets end, so a piece
@@ -188,22 +188,10 @@ export class Timeline {
       const until = index + 1 < segmentCount
         ? Math.max(from + 1, runsPastEnd ? Math.floor(end) + 1 : Math.ceil(end))
         : map.durationSeconds;
-      let priority = 0;
-      let withinSeconds = Number.POSITIVE_INFINITY;
-      let behind = true;
-      let urgent = false;
-      for (let second = from; second < until && second < map.durationSeconds; second += 1) {
-        if (map.priority[second] > priority) {
-          priority = map.priority[second];
-        }
-        if (map.secondsUntilPlayed[second] < withinSeconds) {
-          withinSeconds = map.secondsUntilPlayed[second];
-        }
-        if (map.behind[second] === 0) {
-          behind = false;
-        }
-        if (map.urgent?.[second]) urgent = true;
-      }
+      // Asked of the map for the piece's seconds as a whole, not second by
+      // second: a walk of every second of the film for every output on every
+      // plan (torrent-tv/meta#178).
+      const { priority, withinSeconds, behind, urgent } = map.on(from, until);
       if (priority === 0) {
         continue;
       }

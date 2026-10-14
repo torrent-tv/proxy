@@ -44,34 +44,45 @@
  */
 
 /**
- * THE MAP ITSELF: one number per second of film.
+ * THE MAP ITSELF: what each viewer wants, kept as the rules that say it, and
+ * answered for a second, for a stretch, or as the stretches of one value.
  *
- * Literally an array as long as the film, where the value at second `x` says how
- * urgently that second is wanted. Stated by the user 2026-09-06, and it replaced
- * a list of stretches each carrying two numbers.
+ * The rules are the ones the map has had since 2026-09-06, when an array of one
+ * number per second of film replaced a list of stretches: a priority for every
+ * second, the time until a viewer plays it, and whether it lies behind every
+ * viewer, is wanted before playback can continue, or has been yielded by a
+ * viewer who stopped. What changed (torrent-tv/meta#178) is only how they are
+ * held. Every one of those values is a step function of the distance from a
+ * viewer, with steps the rules themselves place — where the viewer stands, the
+ * end of the urgent allowance, the doubling bands of priority — and the time is
+ * that distance. Built as arrays the length of the film, a map cost a pass over
+ * every second for every viewer and again for the merge, on every move of a
+ * viewer: on Home Assistant the main thread built them 21-61 times a minute
+ * over a two-hour film (r26). Held as rules, a question costs what the viewers
+ * and their steps cost, and nothing per second of film.
  *
- * Two arrays rather than one, because two different questions are asked of the
- * map and only one of them can be answered by a rank:
+ * Two different questions are asked of the map and only one of them can be
+ * answered by a rank:
  *
  * - `priority` orders the work. Only the ORDER between values is meaningful;
  *   the scale below says what the numbers separate;
- * - `secondsUntilPlayed` is a quantity, and it is what makes lateness
- *   computable at all: whoever fills the map compares "when is this needed"
- *   against "when would it arrive", and only the second half is theirs to work
- *   out. `Infinity` where nobody is on their way.
+ * - the time until a second is played is a quantity, and it is what makes
+ *   lateness computable at all: whoever fills the map compares "when is this
+ *   needed" against "when would it arrive", and only the second half is theirs
+ *   to work out. `Infinity` where nobody is on their way.
  *
- * @typedef {object} PriorityMap
- * @property {number} durationSeconds - The film's length, in whole seconds.
- * @property {Uint8Array} priority - One entry per second. Zero means nothing is
- *   wanted there, which happens only where nobody is watching at all.
- * @property {Float64Array} secondsUntilPlayed - One entry per second.
- * @property {Uint8Array} behind - One entry per second, 1 where the second lies
- *   behind EVERY viewer. Stated rather than worked out from the other two,
- *   because working it out means knowing this file's scale, and the consumers
- *   are in other layers. Inferred from the absence of a time, as it was, it was
- *   wrong for a stopped viewer: their whole film carries no time, so the film in
- *   front of them counted as behind them and the encoders wandered to the start
- *   of the file.
+ * The merge keeps what it always did: the highest priority and the soonest
+ * time, taken separately — two viewers can tie on the coarse priority while one
+ * is genuinely nearer; in front of ANYBODY is in front; a second is urgent if
+ * any viewer needs it before playback can continue; and it is deferred only if
+ * every viewer in front of it has yielded it.
+ *
+ * @typedef {object} MapPoint
+ * @property {number} priority - Zero where nobody wants it.
+ * @property {number} untilSeconds - Seconds until a viewer plays it.
+ * @property {boolean} behind - Behind every viewer.
+ * @property {boolean} urgent
+ * @property {boolean} deferred
  */
 
 /**
@@ -86,6 +97,7 @@
  * @property {boolean} urgent - Required preparation before playback can continue.
  * @property {boolean} behind - Whether this lies behind every viewer.
  */
+
 
 /**
  * Wanted seconds use priorities 1..100. Distance lowers priority relative to
@@ -167,28 +179,27 @@ function stepsAway(distanceSeconds, allowanceSeconds) {
   return Math.floor(Math.log2(1 + distanceSeconds / allowanceSeconds));
 }
 
+/** Where nothing is wanted. */
+const NO_DEMAND = Object.freeze({ priority: NOTHING, untilSeconds: Number.POSITIVE_INFINITY, behind: true, urgent: false, deferred: false });
+
 /**
- * An empty map of the right length: nothing wanted anywhere.
+ * The first whole distance whose step is at least `step`, worked out by the
+ * same arithmetic the step is read with, so a boundary is exactly where the
+ * value changes.
  *
- * @param {number} durationSeconds
- * @returns {PriorityMap}
+ * @param {number} step
+ * @param {number} allowanceSeconds
+ * @returns {number}
  */
-export function emptyMap(durationSeconds) {
-  const seconds = Number.isFinite(durationSeconds) && durationSeconds > 0
-    ? Math.ceil(durationSeconds)
-    : 0;
-  return {
-    durationSeconds: seconds,
-    priority: new Uint8Array(seconds),
-    secondsUntilPlayed: new Float64Array(seconds).fill(Number.POSITIVE_INFINITY),
-    behind: new Uint8Array(seconds).fill(1),
-    urgent: new Uint8Array(seconds),
-    deferred: new Uint8Array(seconds)
-  };
+function firstDistanceOfStep(step, allowanceSeconds) {
+  let distance = Math.ceil(allowanceSeconds * (2 ** step - 1));
+  while (distance > 0 && stepsAway(distance - 1, allowanceSeconds) >= step) distance -= 1;
+  while (stepsAway(distance, allowanceSeconds) < step) distance += 1;
+  return distance;
 }
 
 /**
- * One viewer's map.
+ * One viewer's demand: the rules of their map, with where they stand.
  *
  * **The number is a reading of how soon they will be there.** A viewer watching
  * forward reaches second `x` after `x - p` seconds of film. That distance — not
@@ -198,6 +209,253 @@ export function emptyMap(durationSeconds) {
  * Pause retains urgent preparation first. Once that work is ready, the
  * allowance / (allowance + pauseSeconds) coefficient gradually reduces this
  * viewer's priorities if others consume the file. Resume restores them.
+ */
+class ViewerDemand {
+  /**
+   * @param {{ atSeconds: number, durationSeconds: number, allowanceSeconds: number, playing?: boolean,
+   *   pauseSeconds?: number, urgentReady?: boolean, viewerCount?: number }} params
+   */
+  constructor({ atSeconds, durationSeconds, allowanceSeconds, playing = true, pauseSeconds = 0, urgentReady = false, viewerCount = 1 }) {
+    this.durationSeconds = Number.isFinite(durationSeconds) && durationSeconds > 0 ? Math.ceil(durationSeconds) : 0;
+    this.at = Number.isFinite(atSeconds) && atSeconds > 0 ? Math.floor(atSeconds) : 0;
+    this.allowance = Number.isFinite(allowanceSeconds) && allowanceSeconds > 0 ? allowanceSeconds : this.durationSeconds;
+    // The measured urgent span is the time scale. There is no chosen decay
+    // period: one span on pause halves the excess above minimum priority.
+    this.attenuate = playing === false && urgentReady && viewerCount > 1;
+    this.elapsed = Number.isFinite(pauseSeconds) ? Math.max(0, pauseSeconds) : 0;
+    this.coefficient = pauseCoefficient({ playing, urgentReady, viewerCount, pauseSeconds: this.elapsed, allowanceSeconds: this.allowance });
+  }
+
+  /** The priority at a whole distance in front of the viewer. @param {number} distance */
+  priorityAt(distance) {
+    const priority = Math.max(NOBODY_IS_COMING, AT_A_WATCHING_VIEWER - stepsAway(distance, this.allowance));
+    return Math.max(NOBODY_IS_COMING, 1 + Math.floor((priority - 1) * this.coefficient));
+  }
+
+  /**
+   * @param {number} second
+   * @returns {MapPoint | null} Null where the film does not reach.
+   */
+  pointAt(second) {
+    if (!(second >= 0 && second < this.durationSeconds)) return null;
+    if (second < this.at) {
+      return { priority: NOBODY_IS_COMING, untilSeconds: Number.POSITIVE_INFINITY, behind: true, urgent: false, deferred: false };
+    }
+    const distance = second - this.at;
+    // Urgent preparation keeps its deadline during pause. After completion,
+    // pause duration defers this viewer's work without altering other viewers.
+    return { priority: this.priorityAt(distance), untilSeconds: distance + (this.attenuate ? this.elapsed : 0), behind: false,
+      urgent: distance < this.allowance && !this.attenuate, deferred: this.attenuate };
+  }
+
+  /** Every second where one of this viewer's values may change, inside the film. @returns {number[]} */
+  breaks() {
+    const breaks = [this.at, this.durationSeconds, this.at + Math.ceil(this.allowance)];
+    for (let step = 1; step < AT_A_WATCHING_VIEWER - NOBODY_IS_COMING; step += 1) {
+      const second = this.at + firstDistanceOfStep(step, this.allowance);
+      if (second >= this.durationSeconds) break;
+      breaks.push(second);
+    }
+    return breaks.filter(second => second > 0 && second <= this.durationSeconds);
+  }
+}
+
+/**
+ * Every viewer's demand on one film, merged: the map.
+ */
+export class PriorityMap {
+  /** @type {ViewerDemand[]} */
+  #viewers;
+  /** The film between the breaks, each stretch with its value at its start; worked out once. */
+  #pieces = null;
+
+  /** @param {ViewerDemand[]} [viewers] */
+  constructor(viewers = []) {
+    this.#viewers = viewers.filter(viewer => viewer.durationSeconds > 0);
+    /** The film's length, in whole seconds. */
+    this.durationSeconds = this.#viewers.reduce((longest, viewer) => Math.max(longest, viewer.durationSeconds), 0);
+  }
+
+  /** The viewers' demands, for a merge. */
+  get viewers() {
+    return this.#viewers;
+  }
+
+  /**
+   * What is wanted at one second.
+   *
+   * @param {number} second
+   * @returns {MapPoint}
+   */
+  at(second) {
+    let priority = NOTHING;
+    let untilSeconds = Number.POSITIVE_INFINITY;
+    let behind = true;
+    let urgent = false;
+    let yieldedByAll = true;
+    for (const viewer of this.#viewers) {
+      const point = viewer.pointAt(second);
+      if (!point) continue;
+      if (point.priority > priority) priority = point.priority;
+      if (point.untilSeconds < untilSeconds) untilSeconds = point.untilSeconds;
+      if (!point.behind) {
+        // In front of ANYBODY is in front: a stretch one viewer has passed is
+        // still the film another is walking towards.
+        behind = false;
+        // Deferred only if every viewer needing this second has yielded it.
+        if (!point.deferred) yieldedByAll = false;
+      }
+      if (point.urgent) urgent = true;
+    }
+    if (priority === NOTHING) return NO_DEMAND;
+    return { priority, untilSeconds, behind, urgent, deferred: !behind && yieldedByAll };
+  }
+
+  /**
+   * What a stretch of seconds wants as a whole, taken as a piece made or not
+   * made whole is wanted: as much as its strongest second, as soon as its
+   * soonest one, in front of somebody if any second of it is, urgent if any
+   * second of it is.
+   *
+   * A viewer's priority does not rise with distance and their time rises a
+   * second a second, so the second of the stretch nearest to them answers both.
+   *
+   * @param {number} from - First second, inclusive.
+   * @param {number} to - Last second, exclusive.
+   * @returns {{ priority: number, withinSeconds: number, behind: boolean, urgent: boolean }}
+   *   Priority zero where nobody wants any of it.
+   */
+  on(from, to) {
+    let priority = NOTHING;
+    let withinSeconds = Number.POSITIVE_INFINITY;
+    let behind = true;
+    let urgent = false;
+    const pieces = this.#piecesOfFilm();
+    // The first stretch that ends after `from`.
+    let low = 0;
+    let high = pieces.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (pieces[middle].to <= from) low = middle + 1;
+      else high = middle;
+    }
+    for (let index = low; index < pieces.length && pieces[index].from < to; index += 1) {
+      const { from: start, point } = pieces[index];
+      if (point.priority === NOTHING) continue;
+      if (point.priority > priority) priority = point.priority;
+      // Inside a stretch every viewer in front stays in front and their time
+      // rises a second a second, so the soonest time rises with it.
+      const until = point.untilSeconds + (Math.max(from, start) - start);
+      if (until < withinSeconds) withinSeconds = until;
+      if (!point.behind) behind = false;
+      if (point.urgent) urgent = true;
+    }
+    return { priority, withinSeconds, behind, urgent };
+  }
+
+  /** @returns {Array<{ from: number, to: number, point: MapPoint }>} */
+  #piecesOfFilm() {
+    if (this.#pieces) return this.#pieces;
+    const breaks = this.#breaks();
+    const pieces = [];
+    for (let index = 0; index + 1 < breaks.length; index += 1) {
+      pieces.push({ from: breaks[index], to: breaks[index + 1], point: this.at(breaks[index]) });
+    }
+    this.#pieces = pieces;
+    return pieces;
+  }
+
+  /** Every second where a merged value may change, with 0 and the end, ascending. */
+  #breaks() {
+    const breaks = new Set([0, this.durationSeconds]);
+    for (const viewer of this.#viewers) for (const second of viewer.breaks()) breaks.add(second);
+    return [...breaks].filter(second => second >= 0 && second <= this.durationSeconds).sort((left, right) => left - right);
+  }
+
+  /**
+   * The map as stretches: runs of seconds that agree on everything but the
+   * time, ascending, without gaps or overlaps. Seconds nobody wants are left
+   * out.
+   *
+   * THE TIME OF A STRETCH IS THE TIME OF ITS NEAR EDGE. A stretch is met at its
+   * beginning, so its beginning is when it must exist; whoever needs the time
+   * of a second inside it walks forward from there, at a second of film per
+   * second, which is the same arithmetic that put the number here. Merging on
+   * the exact time as well would merge nothing at all: the time is the
+   * distance, so it differs at every second.
+   *
+   * @returns {DemandZone[]}
+   */
+  runs() {
+    /** @type {DemandZone[]} */
+    const runs = [];
+    for (const { from, to, point } of this.#piecesOfFilm()) {
+      if (point.priority === NOTHING) continue;
+      const previous = runs[runs.length - 1];
+      if (previous && previous.to === from && previous.priority === point.priority && previous.behind === point.behind &&
+        previous.urgent === point.urgent && previous.deferred === point.deferred) {
+        previous.to = to;
+        continue;
+      }
+      runs.push({ from, to, priority: point.priority, withinSeconds: point.untilSeconds, behind: point.behind,
+        urgent: point.urgent, deferred: point.deferred });
+    }
+    return runs;
+  }
+
+  /**
+   * Where viewers stand, read off the map: every second whose priority rises
+   * above the second before it.
+   *
+   * A viewer's own map is highest where they stand and falls away in front of
+   * them, so in a merged map each viewer's position is a step UP — the one place
+   * a value is higher than the value just behind it. A viewer standing inside the
+   * stretch somebody else is walking towards adds nothing that map does not
+   * already ask for, and is not a step; neither is somebody behind everybody.
+   *
+   * Read by whoever orders work by where people are and must not know what a
+   * viewer is — the subtitle walk reads the clusters at these times first.
+   *
+   * @returns {number[]} Seconds, ascending.
+   */
+  viewerStarts() {
+    const starts = [];
+    for (const second of this.#breaks()) {
+      if (second >= this.durationSeconds) continue;
+      const value = this.at(second).priority;
+      const before = second === 0 ? NOBODY_IS_COMING : this.at(second - 1).priority;
+      if (value > before && value > NOBODY_IS_COMING) starts.push(second);
+    }
+    return starts;
+  }
+}
+
+/**
+ * A map with nothing in it, which says the same as nobody watching.
+ *
+ * @returns {PriorityMap}
+ */
+export function emptyMap() {
+  return new PriorityMap([]);
+}
+
+/**
+ * How far a viewer's priorities are lowered while they pause beside other
+ * viewers: allowance / (allowance + pauseSeconds), once their urgent work is
+ * ready; 1 otherwise.
+ *
+ * @param {{ playing?: boolean, urgentReady?: boolean, viewerCount: number, pauseSeconds?: number, allowanceSeconds?: number }} params
+ * @returns {number}
+ */
+export function pauseCoefficient({ playing, urgentReady, viewerCount, pauseSeconds, allowanceSeconds }) {
+  if (playing !== false || !urgentReady || viewerCount <= 1) return 1;
+  const allowance = Number.isFinite(allowanceSeconds) && allowanceSeconds > 0 ? allowanceSeconds : 1;
+  const elapsed = Number.isFinite(pauseSeconds) ? Math.max(0, pauseSeconds) : 0;
+  return allowance / (allowance + elapsed);
+}
+
+/**
+ * One viewer's map.
  *
  * **What must NOT be here**, and the boundary is the point: how fast this
  * machine encodes, how many encoders that takes, what a second weighs in bytes,
@@ -211,182 +469,43 @@ export function emptyMap(durationSeconds) {
  * @param {number} params.allowanceSeconds - The measured depth below which an
  *   interruption reaches this viewer. The width of the first step.
  * @param {boolean} [params.playing] - Whether the picture is moving.
+ * @param {number} [params.pauseSeconds]
+ * @param {boolean} [params.urgentReady]
+ * @param {number} [params.viewerCount]
  * @returns {PriorityMap}
  */
-export function pauseCoefficient({ playing, urgentReady, viewerCount, pauseSeconds, allowanceSeconds }) {
-  if (playing !== false || !urgentReady || viewerCount <= 1) return 1;
-  const allowance = Number.isFinite(allowanceSeconds) && allowanceSeconds > 0 ? allowanceSeconds : 1;
-  const elapsed = Number.isFinite(pauseSeconds) ? Math.max(0, pauseSeconds) : 0;
-  return allowance / (allowance + elapsed);
-}
-
-export function mapForViewer({ atSeconds, durationSeconds, allowanceSeconds, playing = true,
-  pauseSeconds = 0, urgentReady = false, viewerCount = 1 }) {
-  const map = emptyMap(durationSeconds);
-  if (map.durationSeconds === 0) {
-    return map;
-  }
-  const at = Number.isFinite(atSeconds) && atSeconds > 0 ? Math.floor(atSeconds) : 0;
-  const allowance = Number.isFinite(allowanceSeconds) && allowanceSeconds > 0
-    ? allowanceSeconds
-    : map.durationSeconds;
-  const watching = playing !== false;
-  // The measured urgent span is the time scale. There is no chosen decay
-  // period: one span on pause halves the excess above minimum priority.
-  const attenuate = !watching && urgentReady && viewerCount > 1;
-  const elapsed = Number.isFinite(pauseSeconds) ? Math.max(0, pauseSeconds) : 0;
-  const coefficient = pauseCoefficient({ playing, urgentReady, viewerCount, pauseSeconds: elapsed, allowanceSeconds: allowance });
-  for (let second = 0; second < map.durationSeconds; second += 1) {
-    if (second < at) {
-      map.priority[second] = NOBODY_IS_COMING;
-      continue;
-    }
-    map.behind[second] = 0;
-    const distance = second - at;
-    const priority = Math.max(NOBODY_IS_COMING, AT_A_WATCHING_VIEWER - stepsAway(distance, allowance));
-    map.priority[second] = Math.max(NOBODY_IS_COMING, 1 + Math.floor((priority - 1) * coefficient));
-    map.urgent[second] = distance < allowance && !attenuate ? 1 : 0;
-    map.deferred[second] = attenuate ? 1 : 0;
-    // Urgent preparation keeps its deadline during pause. After completion,
-    // pause duration defers this viewer's work without altering other viewers.
-    map.secondsUntilPlayed[second] = distance + (attenuate ? elapsed : 0);
-  }
-  return map;
-}
-
-/**
- * Where viewers stand, read off a map: every second whose priority rises above
- * the second before it.
- *
- * A viewer's own map is highest where they stand and falls away in front of
- * them, so in a merged map each viewer's position is a step UP — the one place
- * a value is higher than the value just behind it. A viewer standing inside the
- * stretch somebody else is walking towards adds nothing that map does not
- * already ask for, and is not a step; neither is somebody behind everybody.
- *
- * Read by whoever orders work by where people are and must not know what a
- * viewer is — the subtitle walk reads the clusters at these times first.
- *
- * @param {PriorityMap | null | undefined} map
- * @returns {number[]} Seconds, ascending.
- */
-export function viewerStartsOn(map) {
-  const starts = [];
-  if (!map || !(map.durationSeconds > 0)) {
-    return starts;
-  }
-  for (let second = 0; second < map.durationSeconds; second += 1) {
-    const value = map.priority[second];
-    const before = second === 0 ? NOBODY_IS_COMING : map.priority[second - 1];
-    if (value > before && value > NOBODY_IS_COMING) {
-      starts.push(second);
-    }
-  }
-  return starts;
+export function mapForViewer(params) {
+  return new PriorityMap([new ViewerDemand(params)]);
 }
 
 /**
  * Every viewer's map as one.
  *
- * The highest priority per second wins, and the soonest time: film two people
- * want is as urgent as the more urgent of them, and making it once serves both.
- * The two are taken separately on purpose — the priority is coarse, so two
- * viewers can tie on it while one is genuinely nearer, and whoever schedules
- * against the time must be given the nearer one.
- *
- * In front of ANYBODY is in front, and the third array says so directly.
- *
  * @param {PriorityMap[]} maps
  * @returns {PriorityMap}
  */
 export function mergeMaps(maps) {
-  const all = (maps ?? []).filter((map) => map && map.durationSeconds > 0);
-  if (all.length === 0) {
-    return emptyMap(0);
-  }
-  const merged = emptyMap(Math.max(...all.map((map) => map.durationSeconds)));
-  merged.deferred.fill(1);
-  for (const map of all) {
-    for (let second = 0; second < map.durationSeconds; second += 1) {
-      if (map.priority[second] > merged.priority[second]) {
-        merged.priority[second] = map.priority[second];
-      }
-      if (map.secondsUntilPlayed[second] < merged.secondsUntilPlayed[second]) {
-        merged.secondsUntilPlayed[second] = map.secondsUntilPlayed[second];
-      }
-      // In front of ANYBODY is in front: a stretch one viewer has passed is
-      // still the film another is walking towards.
-      if (map.behind[second] === 0) {
-        merged.behind[second] = 0;
-      }
-      if (map.urgent?.[second]) merged.urgent[second] = 1;
-      // Deferred only if every viewer needing this second has yielded it.
-      if (map.behind[second] === 0 && !map.deferred?.[second]) merged.deferred[second] = 0;
-    }
-  }
-  for (let second = 0; second < merged.durationSeconds; second += 1) {
-    if (merged.behind[second]) merged.deferred[second] = 0;
-  }
-  return merged;
+  return new PriorityMap((maps ?? []).filter(Boolean).flatMap(map => map.viewers));
 }
 
 /**
- * The map as stretches: runs of seconds that agree on both numbers.
+ * The map as stretches (`PriorityMap.runs`).
  *
- * A VIEW of the map, never a second copy of it. Consumers that work in ranges —
- * the swarm is asked for byte ranges, an encoder is given a stretch of pieces —
- * would otherwise each write this walk for themselves.
- *
- * @param {PriorityMap} map
- * @returns {DemandZone[]} Ascending, without gaps or overlaps. Seconds nobody
- *   wants are left out.
+ * @param {PriorityMap | null | undefined} map
+ * @returns {DemandZone[]}
  */
 export function runsOf(map) {
-  /** @type {DemandZone[]} */
-  const runs = [];
-  if (!map || !(map.durationSeconds > 0)) {
-    return runs;
-  }
-  for (let second = 0; second < map.durationSeconds; second += 1) {
-    const priority = map.priority[second];
-    if (priority === NOTHING) {
-      continue;
-    }
-    const behind = map.behind[second] === 1;
-    const urgent = map.urgent?.[second] === 1;
-    const deferred = map.deferred?.[second] === 1;
-    const previous = runs[runs.length - 1];
-    if (
-      previous
-      && previous.to === second
-      && previous.priority === priority
-      && previous.behind === behind
-      && previous.urgent === urgent
-      && previous.deferred === deferred
-    ) {
-      previous.to = second + 1;
-      continue;
-    }
-    // THE TIME OF A STRETCH IS THE TIME OF ITS NEAR EDGE. A stretch is met at
-    // its beginning, so its beginning is when it must exist; whoever needs the
-    // time of a second inside it walks forward from there, at a second of film
-    // per second, which is the same arithmetic that put the number here.
-    //
-    // Merging on the exact time as well would merge nothing at all: the time is
-    // the distance, so it differs at every second, and the map came back as one
-    // stretch per second of film.
-    const withinSeconds = map.secondsUntilPlayed[second];
-    runs.push({
-      from: second,
-      to: second + 1,
-      priority,
-      withinSeconds,
-      behind,
-      urgent,
-      deferred
-    });
-  }
-  return runs;
+  return map ? map.runs() : [];
+}
+
+/**
+ * Where viewers stand on a map (`PriorityMap.viewerStarts`).
+ *
+ * @param {PriorityMap | null | undefined} map
+ * @returns {number[]}
+ */
+export function viewerStartsOn(map) {
+  return map ? map.viewerStarts() : [];
 }
 
 /**

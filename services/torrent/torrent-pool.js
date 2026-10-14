@@ -25,6 +25,22 @@ import { deadlineOfMapZone, levelOfMapZone, priorityOfMapZone } from "./map-zone
 import { deriveSourceKey } from "../../utils/torrent-source-key.js";
 import { noteTorrentDestroyed } from "./destroyed-torrents.js";
 import { PieceTimings, describePieceTiming } from "./piece-timing.js";
+import { TailRepeat } from "./worker/tail-repeat.js";
+
+/**
+ * The second-peer requests for the last blocks of a piece somebody waits for,
+ * one per torrent, made when the torrent is first watched and stopped when it
+ * is forgotten (`worker/tail-repeat.js`).
+ *
+ * @type {WeakMap<object, TailRepeat>}
+ */
+const tailRepeats = new WeakMap();
+
+/** Stop asking second peers for a torrent that is going. */
+function dropTailRepeat(torrent) {
+  tailRepeats.get(torrent)?.dispose();
+  tailRepeats.delete(torrent);
+}
 
 /** How a window stated from the priority map names itself. */
 const MAP_CLAIMANT = "priority-map";
@@ -1353,6 +1369,8 @@ export class TorrentPool {
     // swarm went on fetching the old first class for 1.16 s, until the next
     // piece happened to be verified (r34, torrent-tv/meta#178).
     reconcileAll();
+    // And a new map may make other pieces the ones somebody waits for.
+    tailRepeats.get(torrent)?.poke();
     // WHAT THE SWARM WAS ACTUALLY TOLD, said on change and never on a timer.
     // The map was applied in silence: that it had been BUILT was visible in the
     // encoding's own line, and that the download had received it was visible
@@ -1515,6 +1533,8 @@ export class TorrentPool {
     // its blocks were in flight, and from whom (`piece-timing.js`). One line
     // per piece: a 2.3 GB film is 563.
     const timings = new PieceTimings();
+    tailRepeats.set(torrent, new TailRepeat({ torrent, requiredPieces: () => demandFor(torrent).selection.requiredPieces(),
+      log: (line) => logger.info(`download ${label()} ${line}`) }));
     torrent.on("wire", (wire) => {
       // WebTorrent asks a wire for a block by calling `request` and states
       // nothing; a request the wire refuses (choked, closed) is not queued and
@@ -1963,6 +1983,7 @@ export class TorrentPool {
       return;
     }
     forgetTorrent(torrent);
+    dropTailRepeat(torrent);
     this.#forgetBookkeeping(torrent);
     const name = typeof torrent.name === "string" ? torrent.name : "(unknown)";
     logger.warn(
@@ -2008,6 +2029,7 @@ export class TorrentPool {
   #removeTorrent(torrent, reason = "unknown") {
     // Everything anybody stated for this torrent goes with it.
     forgetTorrent(torrent);
+    dropTailRepeat(torrent);
     if (!torrent) {
       return;
     }

@@ -20,10 +20,12 @@
  * @property {string | null} slowestPeer - Who sent that block.
  * @property {number} lastInFlightMs - How long the block that completed the piece was in flight.
  * @property {string | null} lastPeer - Who sent it.
+ * @property {number} askedAgain - Asks of a block already asked of another peer.
+ * @property {number} arrivedTwice - Blocks that arrived after a copy of them had, and were dropped.
  */
 
 export class PieceTimings {
-  /** @type {Map<number, { firstAskAt: number, asks: number, peers: Set<string>, blocks: Map<number, number>, slowestMs: number, slowestPeer: string | null, lastInFlightMs: number, lastPeer: string | null }>} */
+  /** @type {Map<number, { firstAskAt: number, asks: number, peers: Set<string>, blocks: Map<number, number>, arrived: Set<number>, askedAgain: number, arrivedTwice: number, slowestMs: number, slowestPeer: string | null, lastInFlightMs: number, lastPeer: string | null }>} */
   #pieces = new Map();
 
   /**
@@ -37,12 +39,14 @@ export class PieceTimings {
   asked(piece, offset, peer, now) {
     let record = this.#pieces.get(piece);
     if (!record) {
-      record = { firstAskAt: now, asks: 0, peers: new Set(), blocks: new Map(), slowestMs: 0, slowestPeer: null, lastInFlightMs: 0, lastPeer: null };
+      record = { firstAskAt: now, asks: 0, peers: new Set(), blocks: new Map(), arrived: new Set(), askedAgain: 0, arrivedTwice: 0,
+        slowestMs: 0, slowestPeer: null, lastInFlightMs: 0, lastPeer: null };
       this.#pieces.set(piece, record);
     }
     record.asks += 1;
     record.peers.add(peer);
     if (!record.blocks.has(offset)) record.blocks.set(offset, now);
+    else record.askedAgain += 1;
   }
 
   /**
@@ -58,6 +62,13 @@ export class PieceTimings {
     const record = this.#pieces.get(piece);
     const askedAt = record?.blocks.get(offset);
     if (askedAt === undefined) return;
+    // A copy of a block that had already arrived is dropped by the piece; its
+    // bytes are what asking a second peer cost.
+    if (record.arrived.has(offset)) {
+      record.arrivedTwice += 1;
+      return;
+    }
+    record.arrived.add(offset);
     const inFlightMs = now - askedAt;
     if (inFlightMs >= record.slowestMs) {
       record.slowestMs = inFlightMs;
@@ -86,7 +97,9 @@ export class PieceTimings {
       slowestMs: record.slowestMs,
       slowestPeer: record.slowestPeer,
       lastInFlightMs: record.lastInFlightMs,
-      lastPeer: record.lastPeer
+      lastPeer: record.lastPeer,
+      askedAgain: record.askedAgain,
+      arrivedTwice: record.arrivedTwice
     };
   }
 }
@@ -101,5 +114,7 @@ export function describePieceTiming(timing) {
   if (!timing) return "";
   return `; first block asked ${(timing.askedAgoMs / 1000).toFixed(1)}s before, ${timing.asks} block ask(s) to ${timing.peers} peer(s), ` +
     `slowest block ${(timing.slowestMs / 1000).toFixed(1)}s in flight from ${timing.slowestPeer ?? "?"}, ` +
-    `the last one ${(timing.lastInFlightMs / 1000).toFixed(1)}s from ${timing.lastPeer ?? "?"}`;
+    `the last one ${(timing.lastInFlightMs / 1000).toFixed(1)}s from ${timing.lastPeer ?? "?"}` +
+    (timing.askedAgain > 0 || timing.arrivedTwice > 0
+      ? `, ${timing.askedAgain} block(s) asked again, ${timing.arrivedTwice} arrived twice` : "");
 }

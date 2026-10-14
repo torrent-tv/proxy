@@ -13,6 +13,7 @@ import { contentionPenalty } from "./contention.js";
 import { LOOKAHEAD_PAUSE_SECONDS } from "./CushionReport.js";
 import { SpeedReadings } from "./SpeedReadings.js";
 import { nextInputAtFirstPiece } from "./next-input.js";
+import { runOpenOf } from "./run-open.js";
 import { ENCODE_RUN_STATE, liveRunsOf, runStateOf, wireState } from "./encode-run-state.js";
 import { ENCODE_EXIT } from "./encode-exit.js";
 import { EncodeRun, endOfRun } from "./EncodeRun.js";
@@ -1330,11 +1331,14 @@ export class EncodeRuns {
     const grid = session.timeline?.published ?? session.timeline?.boundaries;
     const pieceSeconds = Number(grid?.[run.from + 1]) - Number(grid?.[run.from]);
     const speed = run.speedX > 0 ? run.speedX : this.#host.encodeOrchestrator.speedOn?.(session.outputKey) ?? 0;
-    if (!Number.isFinite(ended.firstNamedMs) || !(pieceSeconds > 0) || !(speed > 0)) return;
     // FFmpeg's reads may have waited for the stretch being copied; that wait
-    // is the copy's, and the stretch is sized from the open (torrent-tv/meta#178).
-    const waitedMs = Number.isFinite(ended.firstNamedWallMs) ? run.originalInput?.waitedBefore?.(ended.firstNamedWallMs) ?? 0 : 0;
-    const openSeconds = Math.max(0, (ended.firstNamedMs - waitedMs) / 1000 - pieceSeconds / speed);
+    // is the copy's, and the stretch is sized from the open (`run-open.js`).
+    const open = runOpenOf({
+      firstNamedMs: ended.firstNamedMs, firstNamedWallMs: ended.firstNamedWallMs, startedAt: run.startedAt,
+      waitedBefore: run.originalInput?.waitedBefore, pieceSeconds, speed
+    });
+    if (!open) return;
+    const { openSeconds, waitedMs } = open;
     this.#host.encodeOrchestrator.noteOpen?.(session.outputKey ?? "", openSeconds);
     this.#host.logger.info(`encode input of run #${run.from}..#${run.to} on ${session.outputKey}: opened in ` +
       `${openSeconds.toFixed(2)}s (first piece named at ${ended.firstNamedMs}ms, ${pieceSeconds.toFixed(3)}s of film at ${speed.toFixed(2)}x` +

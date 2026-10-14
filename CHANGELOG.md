@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.9
 
 - **Fix**: Every speed reading of an output's runs reaches the start forecast: it took only the newest reading of a run alive when it asked, and on a cold start on Home Assistant the runs were three pieces long and ended between its polls, so of the readings 0.78, 1.80, 2.25, 2.84 and 2.69x it got 0.78 and 2.69x and held the picture on 0.78x for 13 s (#ttv-178).
 - **Perf**: The start forecast keeps only the times of a track's pieces between polls, and reads every other field of a piece from the poll: a piece whose torrent inputs were told again is a new object with the same times, and its times were worked out again. In r37 on Home Assistant the forecast took 19.2 s of the main thread in 15 minutes, mostly working them out again. Once a minute the proxy now says how many forecasts ran, their time each, and per track whether the times were kept or why they were worked out again (#ttv-178).

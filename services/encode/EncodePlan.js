@@ -991,47 +991,64 @@ function lastOf(windows) {
 
 function deadlineReaderFor(windows, segmentSeconds) {
   const perSegment = segmentSeconds > 0 ? segmentSeconds : 0;
-  return (index) => {
-    let soonest = Number.POSITIVE_INFINITY;
-    for (const span of windows) {
-      if (index < span.from || index > span.to) {
-        continue;
-      }
-      const stated = /** @type {{ withinSeconds?: number }} */ (span).withinSeconds;
-      // A stretch stated with no time is somebody waiting at its near edge: that
-      // is what stating one means. The rest of it grows with the distance, the
-      // same as a stated one — read as due all at once instead, a window as wide
-      // as a viewer's cushion demanded its far end instantly and bought an
-      // encoder to stand beside one already working.
-      // `null` IS A STATEMENT AND IT SAYS NOBODY IS COMING. `undefined` is the
-      // absence of one, and a caller that knows only a position is somebody
-      // waiting at it.
-      //
-      // Read through `Number()`, `null` becomes 0 — due NOW — so the film BEHIND
-      // the viewers, which the map marks with exactly that, was the most urgent
-      // material in the file. Everything followed from it: it bought encoders,
-      // it took the run standing in front of the viewer because that run was the
-      // nearest encoder to it, and it did so again on every pass. Field 2026-09-08:
-      // 39 moves in one session, 24 between three adjacent numbers, one viewer
-      // on three encoders, and the picture stood still for 116.7 s in three
-      // interruptions, the worst of them 91.8 s.
-      //
-      // The map has always said it plainly — `{"from":0,"to":57,"priority":1,
-      // "withinSeconds":null,"behind":true}` is in the log of every session — and
-      // this line turned it into its opposite. Fourth time in this repository
-      // that the input to a calculation was not what the calculation assumed.
-      const within = stated === undefined ? 0 : (stated === null ? Number.NaN : Number(stated));
-      if (!Number.isFinite(within)) {
-        // Stated as no time at all: nobody is coming here.
-        continue;
-      }
+  // A TABLE BY SEGMENT, filled once per plan. Read for every segment of every
+  // arrangement the plan weighs, a search of every window for each index was
+  // the plan's own walk times the windows (r26, torrent-tv/meta#178). Filled
+  // span by span with the same rule, the soonest of overlapping spans kept.
+  let last = -1;
+  for (const span of windows) {
+    if (Number.isFinite(span.to) && span.to > last) last = Math.floor(span.to);
+  }
+  const table = new Float64Array(last + 1).fill(Number.POSITIVE_INFINITY);
+  for (const span of windows) {
+    const within = withinOf(span);
+    if (!Number.isFinite(within)) {
+      // Stated as no time at all: nobody is coming here.
+      continue;
+    }
+    for (let index = Math.max(0, Math.ceil(span.from)); index <= span.to; index += 1) {
       const here = within + (index - span.from) * perSegment;
-      if (here < soonest) {
-        soonest = here;
+      if (here < table[index]) {
+        table[index] = here;
       }
     }
-    return soonest;
-  };
+  }
+  return (index) => (index >= 0 && index < table.length ? table[index] : Number.POSITIVE_INFINITY);
+}
+
+/**
+ * When a window is first needed, in seconds from now: NaN where it says nobody
+ * is coming.
+ *
+ * A stretch stated with no time is somebody waiting at its near edge: that
+ * is what stating one means. The rest of it grows with the distance, the
+ * same as a stated one — read as due all at once instead, a window as wide
+ * as a viewer's cushion demanded its far end instantly and bought an
+ * encoder to stand beside one already working.
+ * `null` IS A STATEMENT AND IT SAYS NOBODY IS COMING. `undefined` is the
+ * absence of one, and a caller that knows only a position is somebody
+ * waiting at it.
+ *
+ * Read through `Number()`, `null` becomes 0 — due NOW — so the film BEHIND
+ * the viewers, which the map marks with exactly that, was the most urgent
+ * material in the file. Everything followed from it: it bought encoders,
+ * it took the run standing in front of the viewer because that run was the
+ * nearest encoder to it, and it did so again on every pass. Field 2026-09-08:
+ * 39 moves in one session, 24 between three adjacent numbers, one viewer
+ * on three encoders, and the picture stood still for 116.7 s in three
+ * interruptions, the worst of them 91.8 s.
+ *
+ * The map has always said it plainly — `{"from":0,"to":57,"priority":1,
+ * "withinSeconds":null,"behind":true}` is in the log of every session — and
+ * that reading turned it into its opposite. Fourth time in this repository
+ * that the input to a calculation was not what the calculation assumed.
+ *
+ * @param {WantedSpan} span
+ * @returns {number}
+ */
+function withinOf(span) {
+  const stated = /** @type {{ withinSeconds?: number }} */ (span).withinSeconds;
+  return stated === undefined ? 0 : (stated === null ? Number.NaN : Number(stated));
 }
 
 /**

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A run's open is measured only at a measured processing speed — the run's own between two closed pieces, else the output's newest such reading — and not recorded where none exists or where the piece's encoding at that speed exceeds the time to it; the open estimated before stands. Runs of one piece on Home Assistant were priced at a predicted 0.08x, recorded opens of 0.00 s, and the next inputs were sized from them to one piece each, so every piece cost 6.0-7.5 s for 4 s of film and the picture stood 22 times (r41, #ttv-178).
+
 ## 2.98.16
 
 - **Fix**: The machine's share left to encoders counts every FFmpeg run between two readings: a run that started since the first is counted whole, and one that ended since is counted from the time the kernel keeps for this process's ended children, less what the first reading already counted of it. Only runs present in both readings were counted, so a run that started and ended between two readings 5 s apart left `ffmpeg=0%` beside 6.65 s of its CPU, and that work was taken for other processes' (r41, Home Assistant). A share that cannot be told whole keeps the last availability, and its line says so (#ttv-178).

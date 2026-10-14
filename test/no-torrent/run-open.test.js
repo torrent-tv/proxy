@@ -40,3 +40,13 @@ test("nothing is stated where a term is unknown, and no wait is assumed without 
   assert.deepEqual(runOpenOf({ firstNamedMs: 3000, firstNamedWallMs: 3000, startedAt: 1_791_995_000_000, waitedBefore: null, pieceSeconds: 1, speed: 1 }),
     { waitedMs: 0, openSeconds: 2 });
 });
+
+test("a piece whose encoding at the measured speed exceeds the time to it is no open, not a zero one", () => {
+  // r41, Home Assistant: the first piece named 6283 ms after the spawn, 4 s of
+  // film, priced at 0.08x — 50 s of encoding.
+  assert.equal(runOpenOf({ firstNamedMs: 6283, firstNamedWallMs: 6283, startedAt: 1_791_995_000_000, waitedBefore: null,
+    pieceSeconds: 4, speed: 0.08 }), null);
+  const measured = runOpenOf({ firstNamedMs: 6200, firstNamedWallMs: 6200, startedAt: 1_791_995_000_000, waitedBefore: null,
+    pieceSeconds: 4, speed: 0.8 });
+  assert.ok(Math.abs(measured.openSeconds - 1.2) < 1e-9, "at a measured 0.8x the open is the rest");
+});

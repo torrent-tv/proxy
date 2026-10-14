@@ -39,6 +39,7 @@ export class DownloadMaps {
     const now = Date.now();
     file.sourceZones = zones.map(zone => Number.isFinite(zone.deadlineAt) || !Number.isFinite(zone.withinSeconds)
       ? zone : { ...zone, deadlineAt: now + Math.max(0, zone.withinSeconds) * 1000 });
+    const sourceZones = zoneIndexOf(file);
     let changed = false;
     // Until the new zones are resolved to bytes, a resolved zone stays while
     // the film it covers is still wanted. A viewer moving on re-cuts every zone
@@ -49,9 +50,9 @@ export class DownloadMaps {
     // a seek away — is withdrawn at once.
     const retained = file.zones.flatMap(zone => {
       const interval = zone.downloadInterval ?? zone;
-      const current = file.sourceZones.find(candidate => candidate.from === interval.from && candidate.to === interval.to);
+      const current = sourceZones.exactly(interval);
       if (!current) {
-        const stillWanted = file.sourceZones.some(candidate => candidate.from < interval.to && interval.from < candidate.to);
+        const stillWanted = sourceZones.overlaps(interval);
         if (!stillWanted) changed = true;
         return stillWanted ? [zone] : [];
       }
@@ -76,7 +77,7 @@ export class DownloadMaps {
         changed = true;
       }
       else if (metadata.interval) {
-        const current = file.sourceZones.find(zone => zone.from === metadata.interval.from && zone.to === metadata.interval.to);
+        const current = sourceZones.exactly(metadata.interval);
         const deadlineAt = Number.isFinite(current.deadlineAt) ? current.deadlineAt - metadata.leadSeconds * 1000 : current.deadlineAt;
         if (metadata.priority !== current.priority || metadata.urgent !== current.urgent || metadata.deadlineAt !== deadlineAt) changed = true;
         metadata.priority = current.priority;
@@ -147,7 +148,8 @@ export class DownloadMaps {
   }
 
   wantsInterval(sourceKey, fileIndex, { from, to }) {
-    return this.#files.get(`${sourceKey}:${fileIndex}`)?.sourceZones.some(zone => zone.from === from && zone.to === to) ?? false;
+    const file = this.#files.get(`${sourceKey}:${fileIndex}`);
+    return Boolean(file && zoneIndexOf(file).exactly({ from, to }));
   }
 
   metadata({ sourceKey, fileIndex, statement, result, priority = 100, urgent = true, deadlineAt = 0, interval, leadSeconds = 0, scope = "playback", order = 0 }) {
@@ -155,7 +157,7 @@ export class DownloadMaps {
     const file = this.#file(sourceKey, fileIndex);
     if (result.kind === "needs-ranges") {
       if (interval && !this.wantsInterval(sourceKey, fileIndex, interval)) return Promise.resolve();
-      const current = interval && file.sourceZones.find(zone => zone.from === interval.from && zone.to === interval.to);
+      const current = interval && zoneIndexOf(file).exactly(interval);
       if (current) {
         priority = current.priority;
         urgent = current.urgent;
@@ -370,6 +372,60 @@ export class DownloadMaps {
       `${stats.skipped} statement(s) changed nothing and built no map`);
     file.stats = emptyStats(now);
   }
+}
+
+/**
+ * The map zones of one statement, looked up by interval.
+ *
+ * Every zone kept from the last pass asks which zone of the new map it belongs
+ * to, by its exact interval, and if none, whether any new zone still overlaps
+ * it — a search of every new zone for every kept one, thousands by tens on
+ * every statement over a film (r26, torrent-tv/meta#178). The exact match is
+ * a table, and the overlap a binary search over the zones, which a map states
+ * ascending and apart; zones in any other order are searched as before.
+ */
+class ZoneIndex {
+  /** The list indexed: replaced whole, never edited in place, so it says whether the index is current. */
+  zones;
+  #byInterval = new Map();
+  #ordered = true;
+
+  /** @param {Array<{ from: number, to: number }>} zones */
+  constructor(zones) {
+    this.zones = zones;
+    zones.forEach((zone, index) => {
+      const key = `${zone.from}:${zone.to}`;
+      // The first of equals, as a search from the start would find.
+      if (!this.#byInterval.has(key)) this.#byInterval.set(key, zone);
+      if (index > 0 && !(zone.from >= zones[index - 1].to)) this.#ordered = false;
+    });
+  }
+
+  /** The zone with exactly this interval. @param {{ from: number, to: number }} interval */
+  exactly({ from, to }) {
+    return this.#byInterval.get(`${from}:${to}`);
+  }
+
+  /** Whether any zone overlaps this interval. @param {{ from: number, to: number }} interval */
+  overlaps({ from, to }) {
+    const zones = this.zones;
+    if (!this.#ordered) return zones.some(zone => zone.from < to && from < zone.to);
+    // The first zone that ends after `from`; it overlaps if it begins before `to`.
+    let low = 0;
+    let high = zones.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (zones[middle].to <= from) low = middle + 1;
+      else high = middle;
+    }
+    return low < zones.length && zones[low].from < to;
+  }
+}
+
+/** The index of a file's map zones, made again when they have been replaced. */
+function zoneIndexOf(file) {
+  if (file.sourceIndex?.zones !== file.sourceZones) file.sourceIndex = new ZoneIndex(file.sourceZones);
+  return file.sourceIndex;
 }
 
 /**

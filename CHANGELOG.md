@@ -1,6 +1,7 @@
 ## Unreleased
 
 - **Perf**: The priority map holds what each viewer wants as the rules that say it — where they stand, the urgent allowance, the doubling bands of priority, the pause — and answers for a second, for a stretch and as stretches of one value from them, instead of building arrays one entry per second of film for every viewer and again for the merge. The answers are the same; building, merging and cutting the map of a two-hour film for two viewers took 0.6-0.9 ms and takes 0.03-0.1 ms, and it was built 21-61 times a minute on Home Assistant (#ttv-178).
+- **Perf**: Turning the priority map into what each output and the torrent are asked for no longer searches the whole map for every segment: a segment's zones are walked beside the output's cut grid, a kept zone finds its new map zone by its interval in a table and its overlap by a binary search, and the encoders' plan reads a segment's deadline from a table filled once per plan. The answers are the same (#ttv-178).
 
 ## 2.98.0
 

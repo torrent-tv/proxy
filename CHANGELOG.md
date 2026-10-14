@@ -1,6 +1,9 @@
 ## Unreleased
 
 - **Fix**: A block of a waited piece is asked of a second peer only once its request to the first has been out a wire's queue time (1 s, what WebTorrent sizes a queue to), and the tail is looked at again the moment such a block becomes late. Copied as soon as the tail was short, 12-16 blocks of nearly every piece were asked twice and 82 of 215 copies arrived after their piece was complete (r41, Home Assistant, #ttv-178).
+
+## 2.98.17
+
 - **Fix**: A run's open is measured only at a measured processing speed — the run's own between two closed pieces, else the output's newest such reading — and not recorded where none exists or where the piece's encoding at that speed exceeds the time to it; the open estimated before stands. Runs of one piece on Home Assistant were priced at a predicted 0.08x, recorded opens of 0.00 s, and the next inputs were sized from them to one piece each, so every piece cost 6.0-7.5 s for 4 s of film and the picture stood 22 times (r41, #ttv-178).
 
 ## 2.98.16

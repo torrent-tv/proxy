@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: The next run's input is raised again once for everything a map or a pass changed, before the windows are told, instead of at every segment that changed: on a cold start that was once for each of 4500 segments worked out, 2.5 s of the main thread on Home Assistant (#ttv-178).
+
 ## 2.98.4
 
 - **Perf**: What the torrent is told of a played file is kept from map to map and brought up to date by what a new map changes, instead of being worked out whole on every map: each segment keeps its demand and ranges, each range the segments naming it, each band its ranges in byte order. A viewer playing on moves only the deadlines' time base, and such a map reworks no segment; otherwise only the segments where the map says something new, those made or lost, and the next run's input are worked out again, and only the bands they touch are packed again. The windows are the same, on every map of 8 000 random ones; over a two-hour film with two outputs a map took 6.6-7.0 ms and takes 0.53-0.83 ms on this machine, and on Home Assistant one was worked out whole every second (#ttv-178).

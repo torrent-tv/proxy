@@ -1,6 +1,9 @@
-## 2.98.10
+## Unreleased
 
 - **Fix**: A run asks for the next run's input at its own first piece when the rest of the run leaves the measured time to prepare it, instead of as soon as its own stretch is copied: on Home Assistant a background run's 108.7 MB and the next 115.6 MB were copied together while the run opened, and the share left to encoders fell from 65 % to 10-16 % before either had a piece. A run of one piece, or one whose rest is shorter than the last preparation, asks at once as before (#ttv-178).
+
+## 2.98.10
+
 - **Fix**: The start forecast summarizes the output's whole window of encoder speed readings on each poll, in the order they were taken: two runs of one output can report out of order, and a summary kept and added to dropped the reading told second and taken first (#ttv-178).
 
 ## 2.98.9

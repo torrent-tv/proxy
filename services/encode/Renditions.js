@@ -1358,8 +1358,23 @@ export class Renditions {
     if (!base) {
       return null;
     }
-    if (!this.#host.qualityOffer.offeredHeightsFor(base).includes(height)) {
-      return null;
+    const offered = this.#host.qualityOffer.offeredHeightsFor(base);
+    if (!offered.includes(height)) {
+      if (!this.#host.outputs.splicableHeights(base).includes(height)) {
+        return null;
+      }
+      // A STEP THE MASTER LISTS AND THE OFFER NO LONGER HOLDS. The offer moves
+      // with what the machine measures, and a page preparing a step it was
+      // asked for can arrive after the ask was withdrawn: field r28, 360p
+      // asked at 21:40:44.308, the offer down to 400p at 21:40:46.143, the
+      // warm-up at 46.170 answered "no such variant" (torrent-tv/meta#178).
+      // The step exists; it is not available now, and the page keeps what it
+      // plays and follows the next ask.
+      this.#host.logger.info(`transcode ${base.id} warming ${height}p for ${consumerId}: not offered now (offering ${offered.map(one => `${one}p`).join(" ") || "nothing"})`);
+      const error = new Error(`${height}p is not offered now.`);
+      error.code = OUTPUT_UNAVAILABLE;
+      error.details = { reason: `${height}p is not offered on this machine now`, figures: { height, offeredHeights: offered } };
+      throw error;
     }
     const index = this.#host.outputTimes.segmentIndexForTime(base, positionSeconds);
     const variant = await this.resolveVariantSession(baseSessionId, height, index, consumerId);

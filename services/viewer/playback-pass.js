@@ -22,18 +22,30 @@
  *   behind?: boolean, deferred?: boolean, from: number, to: number,
  *   sourceInterval?: { from: number, to: number } }>} params.demands - In the
  *   order of their deadlines.
- * @returns {{ outputs: string[], inputs: number[] }}
+ * @returns {{ outputs: string[], inputs: Float64Array }}
  */
 export function passInputs({ pieceLength, shift, targets, demands }) {
   const outputs = [...targets.keys()];
-  const inputs = [pieceLength, shift];
-  for (const target of targets.values()) inputs.push(target ?? -1);
+  const position = new Map(outputs.map((outputKey, at) => [outputKey, at]));
+  // Numbers in a list made to its length: grown a value at a time, eight for
+  // each of a film's 3500 segments, it was most of what comparing a pass cost
+  // (r30, torrent-tv/meta#178).
+  const inputs = new Float64Array(2 + targets.size + demands.length * 8);
+  let at = 0;
+  inputs[at++] = pieceLength;
+  inputs[at++] = shift;
+  for (const target of targets.values()) inputs[at++] = target ?? -1;
   for (const demand of demands) {
     // The segment's own interval too: a cut grid read again can give one
     // number other bytes.
-    inputs.push(outputs.indexOf(demand.outputKey), demand.index, demand.priority,
-      (demand.urgent ? 1 : 0) + (demand.behind ? 2 : 0) + (demand.deferred ? 4 : 0),
-      demand.from, demand.to, demand.sourceInterval?.from ?? -1, demand.sourceInterval?.to ?? -1);
+    inputs[at++] = position.get(demand.outputKey) ?? -1;
+    inputs[at++] = demand.index;
+    inputs[at++] = demand.priority;
+    inputs[at++] = (demand.urgent ? 1 : 0) + (demand.behind ? 2 : 0) + (demand.deferred ? 4 : 0);
+    inputs[at++] = demand.from;
+    inputs[at++] = demand.to;
+    inputs[at++] = demand.sourceInterval?.from ?? -1;
+    inputs[at++] = demand.sourceInterval?.to ?? -1;
   }
   return { outputs, inputs };
 }
@@ -41,8 +53,8 @@ export function passInputs({ pieceLength, shift, targets, demands }) {
 /**
  * Whether a pass is worked out from what an earlier one was.
  *
- * @param {{ tracks: unknown, outputs: string[], inputs: number[] } | undefined} last
- * @param {{ tracks: unknown, outputs: string[], inputs: number[] }} next
+ * @param {{ tracks: unknown, outputs: string[], inputs: ArrayLike<number> } | undefined} last
+ * @param {{ tracks: unknown, outputs: string[], inputs: ArrayLike<number> }} next
  * @returns {boolean}
  */
 export function samePass(last, next) {

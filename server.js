@@ -437,44 +437,55 @@ export async function startProxyServer({
   /** Source byte ranges of one segment interval, by file and interval; forgotten with the source. */
   const segmentSourceRanges = new Map();
   /**
-   * What one segment of an output reads — its tracks, its interval and the key
-   * its bytes are kept under — by output and segment, until the tracks, the
-   * file's start time, the segment's interval or the choices of the output
-   * change; forgotten with the source.
+   * WHAT ONE SEGMENT OF AN OUTPUT IS, kept from pass to pass: where it lies in
+   * the source, what it reads — its tracks and the key its bytes are kept under
+   * — and, once known, those bytes joined at the precision the torrent fetches,
+   * by output and segment. Worked out again only when the output's timeline,
+   * the tracks, the file's start time or the output's choices change; forgotten
+   * with the source. None of it depends on where a viewer stands, and a pass is
+   * made every time one moves: looked up, made and joined again for each of a
+   * film's 3500 segments on every pass, they were 6 s of the 40 s the passes
+   * cost the main thread in fifteen minutes on Home Assistant (r30,
+   * torrent-tv/meta#178).
    */
   const segmentReadings = new Map();
-  // Per output, then per segment: every segment of an output of one pass shares
-  // its list of track choices, so the output's key and the choices' key are
-  // worked out once for it. Built for each of a pass's segments, the two
-  // strings cost the main thread 13 s in ten minutes of a cold AVI on Home
-  // Assistant (torrent-tv/meta#178).
-  const readingsByChoices = new WeakMap();
-  const segmentReadingOf = (zone, trackList, shift, map) => {
-    let output = readingsByChoices.get(zone.tracks);
-    if (!output) {
-      const outputKey = `${map.sourceKey}:${map.fileIndex}:${zone.outputKey}`;
-      let byIndex = segmentReadings.get(outputKey);
-      if (!byIndex) segmentReadings.set(outputKey, byIndex = new Map());
-      output = { byIndex, choicesKey: zone.tracks.map(choice => `${choice.type}/${choice.index}/${choice.mode}`).join(",") };
-      readingsByChoices.set(zone.tracks, output);
-    }
-    const { byIndex, choicesKey } = output;
-    const kept = byIndex.get(zone.index);
-    if (kept && kept.trackList === trackList && kept.shift === shift && kept.choicesKey === choicesKey &&
-      kept.from === zone.sourceInterval.from && kept.to === zone.sourceInterval.to) return kept.reading;
-    const selected = zone.tracks.map(choice => ({ choice, track: choice.type === "video"
+  /** One output's segments, by index. */
+  const segmentRecordsOf = (map, output) => {
+    const key = `${map.sourceKey}:${map.fileIndex}:${output.outputKey}`;
+    let records = segmentReadings.get(key);
+    if (!records) segmentReadings.set(key, records = new Map());
+    return records;
+  };
+  /** The choices of one output's tracks as a key, worked out once for the list of them a pass shares. */
+  const choicesKeys = new WeakMap();
+  const choicesKeyOf = (choices) => {
+    let key = choicesKeys.get(choices);
+    if (key === undefined) choicesKeys.set(choices, key = choices.map(choice => `${choice.type}/${choice.index}/${choice.mode}`).join(","));
+    return key;
+  };
+  const segmentRecordOf = (records, demand, { timeline, trackList, shift, map }) => {
+    const choicesKey = choicesKeyOf(demand.tracks);
+    const kept = records.get(demand.index);
+    if (kept && kept.timeline === timeline && kept.trackList === trackList && kept.shift === shift && kept.choicesKey === choicesKey) return kept;
+    const sourceInterval = timeline.sourceInterval(demand.index, demand.index, shift);
+    const selected = demand.tracks.map(choice => ({ choice, track: choice.type === "video"
       ? ContainerTrack.firstUsable(trackList, "video")
       : trackList.filter(track => track.type === choice.type)[choice.index] }));
     let reading = null;
     if (!selected.some(({ track }) => !track)) {
       const wanted = selected.map(({ track }) => track);
       const modes = new Map(selected.map(({ choice, track }) => [track, choice.mode]));
-      const interval = { ...zone.sourceInterval, trackIds: wanted.map(track => track.trackNumber),
+      const interval = { ...sourceInterval, trackIds: wanted.map(track => track.trackNumber),
         modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
       reading = { wanted, modes, interval, rangesKey: `${map.sourceKey}:${map.fileIndex}:${JSON.stringify(interval)}` };
     }
-    byIndex.set(zone.index, { trackList, shift, choicesKey, from: zone.sourceInterval.from, to: zone.sourceInterval.to, reading });
-    return reading;
+    // `joined` is the segment's ranges as the torrent is told them, made from
+    // the list `ranges` at `pieceLength`; `registered` is the list the input
+    // table was last given.
+    const record = { timeline, trackList, shift, choicesKey, sourceInterval, reading,
+      ranges: null, pieceLength: Number.NaN, joined: null, registered: null };
+    records.set(demand.index, record);
+    return record;
   };
   /**
    * The last complete pass over each file, by file: what it was worked out
@@ -507,15 +518,6 @@ export async function startProxyServer({
       `giving ${passCosts.zones} zone(s); ${Math.round(passCosts.ms)}ms from start to result in all, longest ${Math.round(passCosts.maxMs)}ms; ` +
       `${passCosts.built} zone list(s) built for the map in ${Math.round(passCosts.buildMs)}ms`);
     Object.assign(passCosts, { since: now, reused: 0, worked: 0, incomplete: 0, segments: 0, ranges: 0, zones: 0, built: 0, buildMs: 0, ms: 0, maxMs: 0 });
-  };
-  /** A segment's ranges joined at the precision the torrent fetches, once per kept list and piece length. */
-  const joinedRanges = new WeakMap();
-  const joinedRangesOf = (ranges, pieceLength) => {
-    const kept = joinedRanges.get(ranges);
-    if (kept && kept.pieceLength === pieceLength) return kept.joined;
-    const joined = joinedWithinPieces(ranges, pieceLength);
-    if (ranges !== null && typeof ranges === "object") joinedRanges.set(ranges, { pieceLength, joined });
-    return joined;
   };
   const downloadMaps = new DownloadMaps({
     // The ranges a picture reads at open are named again by every segment;
@@ -574,14 +576,22 @@ export async function startProxyServer({
         const links = consumers.map(viewer => viewer.linkReading()?.linkMbps)
           .filter(value => Number.isFinite(value) && value > 0);
         const encodeSpeed = outputParts.encodeCost.latestSpeedReadingOf(output)?.speed;
+        const linkMbps = links.length ? Math.min(...links) : null;
+        const records = segmentRecordsOf(map, output);
+        const facts = { timeline: output.timeline, trackList: tracks.value, shift, map };
+        // Each demand is this pass's own object (`segmentDemands`), so it is
+        // completed in place rather than copied.
         for (const demand of segmentDemands(output, map.fileIndex, map.zones)) {
           if (inventory.has(demand.index)) continue;
           const deadlineAt = sourceDeadline(demand, { encodeSpeed,
-            outputBytes: seconds > 0 ? bytes / seconds * (demand.to - demand.from) : null,
-            linkMbps: links.length ? Math.min(...links) : null });
-          const leadSeconds = Number.isFinite(demand.deadlineAt) ? Math.max(0, (demand.deadlineAt - deadlineAt) / 1000) : 0;
-          demands.push({ ...demand, deadlineAt, leadSeconds, outputKey: output.outputKey,
-            sourceInterval: output.timeline.sourceInterval(demand.index, demand.index, shift) });
+            outputBytes: seconds > 0 ? bytes / seconds * (demand.to - demand.from) : null, linkMbps });
+          const record = segmentRecordOf(records, demand, facts);
+          demand.leadSeconds = Number.isFinite(demand.deadlineAt) ? Math.max(0, (demand.deadlineAt - deadlineAt) / 1000) : 0;
+          demand.deadlineAt = deadlineAt;
+          demand.outputKey = output.outputKey;
+          demand.sourceInterval = record.sourceInterval;
+          demand.record = record;
+          demands.push(demand);
         }
       }
       demands.sort((left, right) => left.deadlineAt - right.deadlineAt || right.priority - left.priority || left.index - right.index);
@@ -618,24 +628,37 @@ export async function startProxyServer({
       // two-hour AVI (torrent-tv/meta#178).
       const waiting = new Set();
       const turn = takeTurns();
+      /** One download interval per map zone, shared by the segments it owns: read, never changed. */
+      const downloadIntervals = new Map();
+      const downloadIntervalOf = (owner) => {
+        let interval = downloadIntervals.get(owner);
+        if (!interval) downloadIntervals.set(owner, interval = { from: owner.from, to: owner.to });
+        return interval;
+      };
       for (const zone of demands) {
         if (!map.isCurrent()) return [];
-        // WHAT A SEGMENT READS IS WORKED OUT ONCE, not on every publication: its
-        // tracks, its interval and the key its bytes are kept under depend on
-        // the output, the segment and the file's start time, none of which a
-        // new map changes. Rebuilt for every segment of the film on every map,
-        // this pass held the main thread up to 1.5 s at a time on Home
+        // WHAT A SEGMENT READS IS WORKED OUT ONCE, not on every publication
+        // (`segmentRecordOf`). Rebuilt for every segment of the film on every
+        // map, this pass held the main thread up to 1.5 s at a time on Home
         // Assistant (torrent-tv/meta#178).
-        const reading = segmentReadingOf(zone, tracks.value, shift, map);
+        const { record } = zone;
+        const reading = record.reading;
         if (!reading) continue;
         const { wanted, modes, interval, rangesKey } = reading;
-        const { tracks: _choices, owner: _owner, sourceInterval: _sourceInterval, ...demand } = zone;
         const convert = ranges => {
-          const joined = joinedRangesOf(ranges, pieceLength);
+          if (record.ranges !== ranges || record.pieceLength !== pieceLength) {
+            record.ranges = ranges;
+            record.pieceLength = pieceLength;
+            record.joined = joinedWithinPieces(ranges, pieceLength);
+          }
+          const joined = record.joined;
           rangeCount += joined.length;
           // What the segment reads is kept for the forecast in a table of its
           // own, whatever form the torrent is told it in.
-          segmentInputs.set(map.sourceKey, map.fileIndex, zone.outputKey, zone.index, joined);
+          if (record.registered !== joined) {
+            segmentInputs.set(map.sourceKey, map.fileIndex, zone.outputKey, zone.index, joined);
+            record.registered = joined;
+          }
           // ONE ZONE FOR THE SEGMENT, its demand stated once for all the
           // ranges it reads. The demand — level, priority, deadline, the map
           // zone it belongs to — is this pass's; the ranges are the list kept
@@ -643,14 +666,16 @@ export async function startProxyServer({
           // range copied the demand into every one: ten thousand objects a
           // pass over a two-hour AVI, made again 21-61 times a minute on Home
           // Assistant (r26, torrent-tv/meta#178).
-          converted.push({ ...demand, downloadInterval: { from: zone.owner.from, to: zone.owner.to }, ranges: joined });
+          converted.push({ index: zone.index, from: zone.from, to: zone.to, priority: zone.priority, urgent: zone.urgent,
+            behind: zone.behind, deferred: zone.deferred, deadlineAt: zone.deadlineAt, leadSeconds: zone.leadSeconds,
+            outputKey: zone.outputKey, downloadInterval: downloadIntervalOf(zone.owner), ranges: joined });
         };
         // The bytes one segment needs are a fact of the file and the output, so
         // they are worked out once. A whole film is thousands of segments and
         // the map changes every few seconds; worked out afresh on every change,
         // a pass over a two-hour AVI never finished and the next segment's bytes
         // were never asked for (Home Assistant 2026-10-08, torrent-tv/meta#151).
-        const known = segmentSourceRanges.get(rangesKey);
+        const known = record.ranges ?? segmentSourceRanges.get(rangesKey);
         if (known) { convert(known); continue; }
         if (waiting.has(zone.outputKey)) { complete = false; continue; }
         // What is resolved so far is stated before a lower zone is worked out

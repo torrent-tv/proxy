@@ -881,12 +881,36 @@ function describePieceBuffers() {
  * @param {object} torrent
  * @returns {void}
  */
-function announceArrivals(sourceKey, torrent, reason = "verified") {
+function announceArrivals(sourceKey, torrent, reason = "verified", piece = null) {
   const fileIndexes = [...demandFor(torrent).register.files()];
   if (fileIndexes.length === 0) {
     return;
   }
-  parentPort.postMessage({ type: Event.PIECES_CHANGED, sourceKey, fileIndexes, reason });
+  parentPort.postMessage({ type: Event.PIECES_CHANGED, sourceKey, fileIndexes, reason,
+    ...(Number.isSafeInteger(piece) ? { arrived: bytesOfPiece(torrent, piece) } : {}) });
+}
+
+/**
+ * The bytes of one piece, as each file it covers counts them: what a reader
+ * waiting for named bytes compares against, so a piece of another part of the
+ * file wakes nobody (torrent-tv/meta#178).
+ *
+ * @param {object} torrent
+ * @param {number} piece
+ * @returns {Array<{ fileIndex: number, start: number, end: number }>} Inclusive.
+ */
+function bytesOfPiece(torrent, piece) {
+  const pieceLength = Number(torrent.pieceLength);
+  const length = Number(torrent.length);
+  if (!(pieceLength > 0) || !(length > 0)) return [];
+  const start = piece * pieceLength;
+  const end = Math.min(length, start + pieceLength) - 1;
+  const arrived = [];
+  (torrent.files ?? []).forEach((file, fileIndex) => {
+    const from = Math.max(start, file.offset), to = Math.min(end, file.offset + file.length - 1);
+    if (to >= from) arrived.push({ fileIndex, start: from - file.offset, end: to - file.offset });
+  });
+  return arrived;
 }
 
 
@@ -917,7 +941,7 @@ function ensureArrivalsWired(sourceKey, torrent) {
   }
   arrivalsWired.add(torrent);
   holdingsChanged();
-  torrent.on("verified", () => announceArrivals(sourceKey, torrent));
+  torrent.on("verified", (piece) => announceArrivals(sourceKey, torrent, "verified", piece));
   torrent.on("piece-withdrawn", () => announceArrivals(sourceKey, torrent, "withdrawn"));
   torrent.once("close", () => {
     if (resolvedTorrents.get(sourceKey) !== torrent) return;

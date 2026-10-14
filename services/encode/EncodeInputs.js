@@ -259,10 +259,27 @@ export class EncodeInputs {
     return this.take(output, from, to);
   }
 
-  bytesChanged() {
+  /**
+   * Bytes of a source changed: every waiting input is tried again, except one
+   * that waits for named bytes none of which have come. Tried at every piece
+   * of the file, a seek's input was prepared 28 times in 8.5 s on Home
+   * Assistant, each time asking the torrent thread which ranges it holds
+   * (171 ms on average), and the try that found its bytes could start only
+   * after the one in flight (r34, torrent-tv/meta#178).
+   *
+   * @param {{ sourceKey: string, ranges: Array<{ fileIndex: number, start: number, end: number }> } | null} [arrived] -
+   *   The bytes that arrived, inclusive, when the event names them.
+   */
+  bytesChanged(arrived = null) {
     this.#revision++;
     for (const request of this.#requests.values()) {
-      if (!request.pending && request.result?.kind !== "result" && request.result?.kind !== "terminal") this.#prepare(request);
+      if (request.pending || request.result?.kind === "result" || request.result?.kind === "terminal") continue;
+      if (arrived && request.result?.kind === "needs-bytes" && !awaitedIn(request.result, arrived)) {
+        // Nothing it waits for has come: it stands as tried at this revision.
+        request.revision = this.#revision;
+        continue;
+      }
+      this.#prepare(request);
     }
   }
 
@@ -486,7 +503,9 @@ export class EncodeInputs {
       // found pieces missing, and the run was refused for good (torrent-tv/meta#178).
       if (this.#heldRanges !== null && !await this.#present(chosen.sources, held, request.timing)) {
         const [first] = chosen.sources;
-        return { kind: "needs-bytes", sourceKey: first.sourceKey, fileIndex: first.fileIndex, ranges: first.input.ranges };
+        return { kind: "needs-bytes", sourceKey: first.sourceKey, fileIndex: first.fileIndex, ranges: first.input.ranges,
+          // Every source of the stretch, so the bytes of any of them wake it.
+          awaiting: chosen.sources.map(source => ({ sourceKey: source.sourceKey, fileIndex: source.fileIndex, ranges: source.input.ranges })) };
       }
       if (this.#requests.get(request.key) !== request) return undefined;
       this.#wanted.set(request.key, { wanted: chosen.bytes, required: chosen.bytes });
@@ -525,6 +544,21 @@ export class EncodeInputs {
     }
     return true;
   }
+}
+
+/**
+ * Whether some of the bytes an input waits for are among those that arrived.
+ *
+ * @param {{ sourceKey: string, fileIndex: number, ranges: Array<[number, number]>,
+ *   awaiting?: Array<{ sourceKey: string, fileIndex: number, ranges: Array<[number, number]> }> }} waiting
+ * @param {{ sourceKey: string, ranges: Array<{ fileIndex: number, start: number, end: number }> }} arrived
+ * @returns {boolean}
+ */
+function awaitedIn(waiting, arrived) {
+  const sources = waiting.awaiting ?? [waiting];
+  return sources.some(source => source.sourceKey === arrived.sourceKey && Array.isArray(source.ranges) &&
+    arrived.ranges.some(range => range.fileIndex === source.fileIndex &&
+      source.ranges.some(([start, end]) => range.start <= end && range.end >= start)));
 }
 
 /**

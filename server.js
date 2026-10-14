@@ -200,7 +200,7 @@ export async function startProxyServer({
     // The ONE forward reference here, and it is safe by construction: this fires
     // only once the worker thread is up and a piece has verified, which is long
     // after the declarations below have run.
-    onPiecesArrived: ({ sourceKey, fileIndexes }) => {
+    onPiecesArrived: ({ sourceKey, fileIndexes, arrived }) => {
       for (const fileIndex of fileIndexes) {
         mediaReads.bytesChanged(sourceKey, fileIndex);
         probeReads.bytesChanged(sourceKey, fileIndex);
@@ -211,7 +211,9 @@ export async function startProxyServer({
         // is read again now; nothing was recorded for that wait.
         keyframeTables.readAgainIfUnanswered({ sourceKey, fileIndex, logName: String(fileIndex) });
       }
-      outputParts.encodeInputs?.bytesChanged();
+      // Which bytes arrived, when the event names them: an input waiting for
+      // named bytes is tried again only when some of them have come.
+      outputParts.encodeInputs?.bytesChanged(Array.isArray(arrived) ? { sourceKey, ranges: arrived } : null);
     }
   });
   const selectedPort = await getPort({

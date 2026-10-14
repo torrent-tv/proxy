@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.2
 
 - **Perf**: A pass that turns the priority map into the torrent's demand keeps what does not depend on where a viewer stands — each segment's interval in the source, what it reads and its bytes joined for the torrent — from one pass to the next, folds the map zones a segment overlaps into numbers instead of lists, and completes each demand in place instead of copying it twice. The demands are the same; on a two-hour film a pass was made once a second over 3500 segments, and these parts of it were 13 s of the main thread in fifteen minutes on Home Assistant (#ttv-178).
 

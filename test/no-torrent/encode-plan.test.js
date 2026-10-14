@@ -543,3 +543,35 @@ test("two encoders never share a segment number", () => {
     );
   }
 });
+
+test("a starting encoder making the film behind the viewers is not stopped as no better than none", () => {
+  // Home Assistant r37: the encoder making the film behind the viewer was
+  // still starting, and the output's speed read 0.57x while that start took
+  // the machine. Reaching the end of the stretch then took longer than the film
+  // lasts, which scored as "never", the same as no encoder at all; the plan
+  // stopped it before its first piece, and started it again when the speed
+  // read 1.9x — thirteen times in three minutes (torrent-tv/meta#178).
+  const made = () => {
+    const coverage = new CoverageMap({ segmentCount: 2250 });
+    for (let index = 0; index <= 84; index += 1) coverage.markReady(index);
+    for (let index = 2198; index <= 2249; index += 1) coverage.markReady(index);
+    return coverage;
+  };
+  const windows = [
+    { from: 0, to: 2197, priority: 1, withinSeconds: null, urgent: false, behind: true },
+    { from: 2198, to: 2199, priority: 100, withinSeconds: 0, urgent: true, behind: false },
+    { from: 2200, to: 2249, priority: 99, withinSeconds: 6, urgent: false, behind: false }
+  ];
+  const host = { ...HOST, maxRuns: 1, killCostSec: 1.89, firstByteWaitSec: 4.24, refetchSecPerFilmSecond: 0 };
+  for (const speedX of [0.57, 0.9, 3.73]) {
+    const coverage = made();
+    const starting = run({ from: 85, to: 2197, head: 85, speedX: 0, startedAt: Date.now() - 4000 });
+    coverage.claim(starting, 85, 2197);
+    const kept = planEncoders({ coverage, windows, runs: [starting], ...host, speedX });
+    assert.equal(kept.some((action) => action.type === "stop"), false,
+      `at ${speedX}x: ${kept.map((action) => `${action.type} ${action.because ?? ""}`).join(", ")}`);
+    const fresh = planEncoders({ coverage: made(), windows, runs: [], ...host, speedX });
+    assert.deepEqual(fresh.map((action) => [action.type, action.from]), [["start", 85]],
+      `at ${speedX}x the plan starts what it keeps`);
+  }
+});

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Each verified piece says when its first block was asked of the swarm, how many block asks went to how many peers, and how long its slowest and its last block were in flight and from whom; WebTorrent states no outgoing request, so a piece verified last could not be told apart as asked late or held by a slow peer (#ttv-178). The subscription to a request event nothing emits is gone.
+
 ## 2.98.13
 
 - **Fix**: A run's open, from which the next stretch is sized, leaves out the time FFmpeg waited for the stretch to be copied again. The wait was taken up to the run's time to its first piece used as a moment on the wall clock, which lay before every wait, so none was ever left out (#ttv-178).

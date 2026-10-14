@@ -71,7 +71,7 @@ import { ViewerRequests } from "./ViewerRequests.js";
 import { OutputLifecycle } from "./OutputLifecycle.js";
 import { SegmentServing } from "./SegmentServing.js";
 import { audioStartSecondsFor } from "../viewer/audio-start.js";
-import { forecastRate, predictPlaybackReadiness, RateTrend } from "../viewer/playback-readiness.js";
+import { forecastRate, rateSummaryOf, predictPlaybackReadiness, RateTrend } from "../viewer/playback-readiness.js";
 import { audioRenditionName } from "../media/audio-inventory.js";
 import { Renditions } from "../encode/Renditions.js";
 import { CushionReport, LOOKAHEAD_PAUSE_SECONDS } from "../encode/CushionReport.js";
@@ -578,12 +578,12 @@ export function wireOutputs({
     get encodeRuns() { return parts.encodeRuns; },
     // When this viewer's playback can start and run to the end: the viewer
     // component's forecast, which models the viewer's browser.
-    playbackReadiness: { predict: predictPlaybackReadiness, forecastRate, RateTrend },
+    playbackReadiness: { predict: predictPlaybackReadiness, forecastRate, rateSummaryOf, RateTrend },
     // Whether the subtitle a viewer chose has been read where they stand — the
     // source preparation's answer, set on these parts by the assembly.
     subtitleReadyFor: (viewer) => parts.subtitleReadyFor?.(viewer) ?? true,
     sourceInputsFor: (output, index) => parts.sourceInputsFor?.(output, index),
-    encodeSpeedReadingsOf: (output, after) => parts.encodeRuns.speedReadingsOf(output, after),
+    encodeSpeedReadingsOf: (output) => parts.encodeRuns.speedReadingsOf(output),
     projectedEncodeSpeedOf: (output) => parts.encodeCost.projectedSpeedOf(output),
     // The speed the offer predicted for this output when it chose its mode: a
     // forecast with no measured piece yet stands on it rather than on the

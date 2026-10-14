@@ -59,6 +59,22 @@ export function forecastRate(readings, now = Date.now(), horizonSeconds = 0, wei
 }
 
 /**
+ * The summary the forecast reads, of a window of readings taken in any order:
+ * ordered by when each was taken, readings taken in the same millisecond kept
+ * apart. Null for no reading.
+ *
+ * @param {Array<{ at: number, speed?: number, value?: number }>} readings
+ * @returns {object | null}
+ */
+export function rateSummaryOf(readings) {
+  const ordered = (Array.isArray(readings) ? readings : [])
+    .map(reading => ({ at: reading?.at, value: reading?.value ?? reading?.speed }))
+    .filter(reading => Number.isFinite(reading.at) && Number.isFinite(reading.value) && reading.value >= 0)
+    .sort((left, right) => left.at - right.at);
+  return ordered.length > 0 ? summarizeRate(ordered) : null;
+}
+
+/**
  * Measurements over the output's existing look-ahead horizon. The oldest
  * boundary sample is retained until another sample replaces it, so a repeated
  * report never changes the history or invents a new measurement.
@@ -82,11 +98,6 @@ export class RateTrend {
       this.#readings.shift();
     }
     return true;
-  }
-
-  /** The time of the newest reading kept, or -Infinity. */
-  get lastAt() {
-    return this.#readings.at(-1)?.at ?? Number.NEGATIVE_INFINITY;
   }
 
   snapshot() {

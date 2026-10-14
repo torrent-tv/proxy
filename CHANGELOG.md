@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The start forecast summarizes the output's whole window of encoder speed readings on each poll, in the order they were taken: two runs of one output can report out of order, and a summary kept and added to dropped the reading told second and taken first (#ttv-178).
+
 ## 2.98.9
 
 - **Fix**: Every speed reading of an output's runs reaches the start forecast: it took only the newest reading of a run alive when it asked, and on a cold start on Home Assistant the runs were three pieces long and ended between its polls, so of the readings 0.78, 1.80, 2.25, 2.84 and 2.69x it got 0.78 and 2.69x and held the picture on 0.78x for 13 s (#ttv-178).

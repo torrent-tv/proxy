@@ -264,25 +264,42 @@ export function describePieceTail(torrent, pieceIndex) {
  * @param {object} torrent
  * @param {number} pieceIndex
  * @param {object} [options]
+ * A BLOCK IS ASKED AGAIN ONLY ONCE IT IS LATE. A short tail is not by itself a
+ * delay: copied as soon as the tail was short, 12-16 blocks of nearly every
+ * piece were asked twice and 82 of 215 copies arrived after their piece was
+ * complete (r41, Home Assistant, torrent-tv/meta#178). So a block is asked of a
+ * second peer once its request to the first has been out `minAgeMs` — by
+ * default the second WebTorrent sizes a wire's queue to fill
+ * (`PIPELINE_MAX_DURATION`), a starting point to be checked in the field — and
+ * the earliest moment a held block becomes late is returned, so whoever calls
+ * this can look again then.
+ *
+ * @param {object} torrent
+ * @param {number} pieceIndex
+ * @param {object} [options]
  * @param {number} [options.maxCopies] - How many wires a missing block may be
  *   in flight on at once: the first request and one copy beside it.
- * @returns {{ duplicated: number, missing: number, wires: number, unplaced: number }}
+ * @param {number} [options.minAgeMs] - How long the first request must have been out.
+ * @param {number} [options.now] - Wall clock, ms.
+ * @returns {{ duplicated: number, missing: number, wires: number, unplaced: number, dueAt: number | null }}
  *   `duplicated` counts requests the library actually placed for a block that
- *   was already outstanding elsewhere; `unplaced` the blocks in flight on one
- *   wire alone that no other wire could be asked for now.
+ *   was already outstanding elsewhere; `unplaced` the late blocks in flight on
+ *   one wire alone that no other wire could be asked for now; `dueAt` when the
+ *   first block held by one wire and not yet late becomes late, or null.
  */
-export function duplicateTailFor(torrent, pieceIndex, { maxCopies = 2 } = {}) {
+export function duplicateTailFor(torrent, pieceIndex, { maxCopies = 2, minAgeMs = 1000, now = Date.now() } = {}) {
   const piece = torrent?.pieces?.[pieceIndex];
   const buffer = Array.isArray(piece?._buffer) ? piece._buffer : null;
   if (!piece || !buffer || typeof piece.cancel !== "function" || !canPlaceRequests(torrent)) {
-    return { duplicated: 0, missing: 0, wires: 0, unplaced: 0 };
+    return { duplicated: 0, missing: 0, wires: 0, unplaced: 0, dueAt: null };
   }
   const chunks = Number.isFinite(piece._chunks) ? piece._chunks : buffer.length;
   // Most calls are for a piece still arriving in bulk; its own count says so
   // without walking its blocks or every wire's queue.
   if (Number.isFinite(piece._buffered) && chunks - piece._buffered > SHORT_TAIL_BLOCKS) {
-    return { duplicated: 0, missing: chunks - piece._buffered, wires: 0, unplaced: 0 };
+    return { duplicated: 0, missing: chunks - piece._buffered, wires: 0, unplaced: 0, dueAt: null };
   }
+
   const missing = [];
   for (let index = 0; index < chunks; index += 1) {
     if (!buffer[index]) {
@@ -291,7 +308,7 @@ export function duplicateTailFor(torrent, pieceIndex, { maxCopies = 2 } = {}) {
   }
   const candidates = wiresForPiece(torrent, pieceIndex);
   if (missing.length === 0 || candidates.length === 0) {
-    return { duplicated: 0, missing: missing.length, wires: candidates.length, unplaced: 0 };
+    return { duplicated: 0, missing: missing.length, wires: candidates.length, unplaced: 0, dueAt: null };
   }
 
   // A tail this short is what a blocked read is actually waiting on, and a
@@ -300,26 +317,34 @@ export function duplicateTailFor(torrent, pieceIndex, { maxCopies = 2 } = {}) {
   // bytes that are already coming — measured 2026-08-19, the tails a reader
   // waits on are 2 to 14 blocks of 512.
   if (missing.length > SHORT_TAIL_BLOCKS) {
-    return { duplicated: 0, missing: missing.length, wires: candidates.length, unplaced: 0 };
+    return { duplicated: 0, missing: missing.length, wires: candidates.length, unplaced: 0, dueAt: null };
   }
 
-  // Which wires each missing block is in flight on, read from the wires' own
-  // queues: the library keeps a block's reservation for one wire only, and a
-  // copy asked here is visible nowhere else.
-  const holders = new Map(missing.map(block => [block, new Set()]));
+  // Which wires each missing block is in flight on, and since when, read from
+  // the wires' own queues: the library keeps a block's reservation for one
+  // wire only, and a copy asked here is visible nowhere else. A request with no
+  // time of its own was asked before anybody watched, and is old.
+  const holders = new Map(missing.map(block => [block, { wires: new Set(), since: Number.POSITIVE_INFINITY }]));
   for (const wire of Array.isArray(torrent.wires) ? torrent.wires : []) {
     for (const request of Array.isArray(wire?.requests) ? wire.requests : []) {
       if (request?.piece !== pieceIndex) continue;
-      holders.get(Math.floor(request.offset / BLOCK_BYTES))?.add(wire);
+      const holding = holders.get(Math.floor(request.offset / BLOCK_BYTES));
+      if (!holding) continue;
+      holding.wires.add(wire);
+      holding.since = Math.min(holding.since, Number.isFinite(request.askedAt) ? request.askedAt : Number.NEGATIVE_INFINITY);
     }
   }
 
-  let duplicated = 0, unplaced = 0;
+  let duplicated = 0, unplaced = 0, dueAt = null;
   for (const block of missing) {
-    const held = holders.get(block);
+    const { wires: held, since } = holders.get(block);
     // Not in flight anywhere: the library's own picker asks for it; a block
     // nobody has been asked for is not a tail held by a slow peer.
     if (held.size === 0 || held.size >= maxCopies) continue;
+    if (now - since < minAgeMs) {
+      dueAt = Math.min(dueAt ?? Number.POSITIVE_INFINITY, since + minAgeMs);
+      continue;
+    }
     let placed = false;
     for (const wire of candidates) {
       if (held.has(wire)) continue;
@@ -343,7 +368,7 @@ export function duplicateTailFor(torrent, pieceIndex, { maxCopies = 2 } = {}) {
     }
     if (!placed) unplaced += 1;
   }
-  return { duplicated, missing: missing.length, wires: candidates.length, unplaced };
+  return { duplicated, missing: missing.length, wires: candidates.length, unplaced, dueAt };
 }
 
 /**

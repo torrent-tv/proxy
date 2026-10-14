@@ -38,37 +38,36 @@ function viewer(atSeconds, playing = true) {
   });
 }
 
-test("the map is one entry per second of film", () => {
+test("the map answers every second of the film and nothing past it", () => {
   const map = viewer(600);
   assert.equal(map.durationSeconds, FILM);
-  assert.equal(map.priority.length, FILM);
-  assert.equal(map.secondsUntilPlayed.length, FILM);
-  assert.equal(map.behind.length, FILM);
+  assert.ok(map.at(FILM - 1).priority > 0);
+  assert.equal(map.at(FILM).priority, 0, "past the end nothing is wanted");
 });
 
 test("the nearer a viewer is to a second, the higher its number", () => {
   // The whole of what a priority means: which of two seconds is wanted first.
   const map = viewer(600);
-  assert.ok(map.priority[600] > map.priority[700], "their own second beats one a hundred on");
-  assert.ok(map.priority[700] > map.priority[3000], "and that beats one forty minutes on");
+  assert.ok(map.at(600).priority > map.at(700).priority, "their own second beats one a hundred on");
+  assert.ok(map.at(700).priority > map.at(3000).priority, "and that beats one forty minutes on");
 });
 
 test("the time is the distance, because a viewer covers a second of film in a second", () => {
   const map = viewer(600);
-  assert.equal(map.secondsUntilPlayed[600], 0, "they are there now");
-  assert.equal(map.secondsUntilPlayed[660], 60, "a minute of film away is a minute away");
+  assert.equal(map.at(600).untilSeconds, 0, "they are there now");
+  assert.equal(map.at(660).untilSeconds, 60, "a minute of film away is a minute away");
 });
 
 test("what is behind a viewer is wanted, and wanted last", () => {
   // Still wanted — a seek back must be cheap — but it yields to everything
   // anybody is walking towards, however far off that is.
   const map = viewer(600);
-  assert.equal(map.behind[599], 1);
-  assert.equal(map.behind[600], 0);
-  assert.ok(isBehindEverybody(map.priority[599]));
-  assert.ok(map.priority[599] < map.priority[3599],
+  assert.equal(Number(map.at(599).behind), 1);
+  assert.equal(Number(map.at(600).behind), 0);
+  assert.ok(isBehindEverybody(map.at(599).priority));
+  assert.ok(map.at(599).priority < map.at(3599).priority,
     "the last second of the film outranks the second they just watched");
-  assert.equal(map.secondsUntilPlayed[599], Number.POSITIVE_INFINITY,
+  assert.equal(map.at(599).untilSeconds, Number.POSITIVE_INFINITY,
     "nobody is on their way there, so there is no time by which it must exist");
 });
 
@@ -77,10 +76,10 @@ test("a pause keeps priorities and urgent deadlines until urgent work is ready",
   // over the whole film, as it was, their position disappeared entirely — and
   // with it the rule that what is in front of them is made first.
   const map = viewer(600, false);
-  assert.equal(map.behind[599], 1, "what they have watched is still behind them");
-  assert.equal(map.behind[600], 0, "and what they have not is still in front");
-  assert.ok(map.priority[600] > map.priority[599], "in front still outranks behind");
-  assert.ok(map.priority[600] > map.priority[3000], "and nearer still outranks further");
+  assert.equal(Number(map.at(599).behind), 1, "what they have watched is still behind them");
+  assert.equal(Number(map.at(600).behind), 0, "and what they have not is still in front");
+  assert.ok(map.at(600).priority > map.at(599).priority, "in front still outranks behind");
+  assert.ok(map.at(600).priority > map.at(3000).priority, "and nearer still outranks further");
   assert.deepEqual(map.priority, viewer(600).priority);
   assert.deepEqual(map.secondsUntilPlayed, viewer(600).secondsUntilPlayed);
 });
@@ -92,7 +91,7 @@ test("completed urgent work enables gradual attenuation only with competing view
   const watching = viewer(600);
   const stopped = mapForViewer({ atSeconds: 3000, durationSeconds: FILM, allowanceSeconds: ALLOWANCE,
     playing: false, urgentReady: true, pauseSeconds: ALLOWANCE, viewerCount: 2 });
-  assert.ok(watching.priority[3599] > stopped.priority[3000],
+  assert.ok(watching.at(3599).priority > stopped.at(3000).priority,
     "the far tail of a watching viewer beats the very next second of a stopped one");
 });
 
@@ -104,10 +103,10 @@ test("pause attenuation approaches one, never zero, and resume restores prioriti
   const early = make(8);
   const late = make(80);
   for (let second = 0; second < FILM; second += 1) {
-    assert.ok(late.priority[second] >= 1);
-    assert.ok(late.priority[second] <= early.priority[second]);
+    assert.ok(late.at(second).priority >= 1);
+    assert.ok(late.at(second).priority <= early.at(second).priority);
   }
-  assert.equal(make(8000).priority[600], 1);
+  assert.equal(make(8000).at(600).priority, 1);
   assert.deepEqual(make(80, { playing: true }).priority, viewer(600).priority);
   assert.deepEqual(make(80, { viewerCount: 1 }).priority, viewer(600).priority);
   assert.deepEqual(make(80, { urgentReady: false }).priority, viewer(600).priority);
@@ -119,24 +118,24 @@ test("a paused viewer cannot reduce another viewer's priority for shared media",
     playing: false, urgentReady: true, pauseSeconds: 8000, viewerCount: 2 });
   const merged = mergeMaps([active, paused]);
   assert.deepEqual(merged.priority, active.priority);
-  assert.equal(merged.urgent[600], 1);
-  assert.equal(merged.deferred[600], 0);
+  assert.equal(Number(merged.at(600).urgent), 1);
+  assert.equal(Number(merged.at(600).deferred), 0);
 });
 
 test("two viewers merge to the more urgent of them, second by second", () => {
   const merged = mergeMaps([viewer(600), viewer(1800)]);
-  assert.equal(merged.priority[1800], merged.priority[600],
+  assert.equal(merged.at(1800).priority, merged.at(600).priority,
     "each of them is at the top of the scale where they stand");
-  assert.equal(merged.secondsUntilPlayed[1800], 0, "the nearer time wins");
-  assert.equal(merged.behind[599], 1, "behind both of them is behind");
-  assert.equal(merged.behind[700], 0, "and in front of ANYBODY is in front");
+  assert.equal(merged.at(1800).untilSeconds, 0, "the nearer time wins");
+  assert.equal(Number(merged.at(599).behind), 1, "behind both of them is behind");
+  assert.equal(Number(merged.at(700).behind), 0, "and in front of ANYBODY is in front");
 });
 
 test("the second viewer's position is not buried under the first viewer's distance", () => {
   // The failure this guards: one viewer's far film outranking another viewer's
   // own second, so the second of them is served by nobody.
   const merged = mergeMaps([viewer(600), viewer(1800)]);
-  assert.ok(merged.priority[1800] > merged.priority[1799],
+  assert.ok(merged.at(1800).priority > merged.at(1799).priority,
     "where the second viewer stands beats the film just before them");
 });
 

@@ -15,7 +15,7 @@ export async function nativeOriginalSourceMap({ container, viewers, durationSeco
     const input = await container.readMappedSourceRanges({ from: zone.from + startTimeSeconds,
       to: Math.min(durationSeconds, zone.to) + startTimeSeconds });
     if (input.kind !== "result") continue;
-    const links = viewers.filter((_viewer, index) => maps[index].priority[zone.from] === zone.priority)
+    const links = viewers.filter((_viewer, index) => maps[index].at(zone.from).priority === zone.priority)
       .map(viewer => viewer.linkReading()?.linkMbps).filter(rate => Number.isFinite(rate) && rate > 0);
     const bytes = input.ranges.reduce((sum, [start, end]) => sum + end - start + 1, 0);
     const deliverySeconds = links.length ? bytes * 8 / (Math.min(...links) * 1_000_000) : 0;
@@ -46,7 +46,7 @@ export function nativeSourceMap({ index, tracks, viewers, durationSeconds, start
       const input = index.inputFor({ trackId: track.trackNumber, from, to });
       if (input.kind === "needs-index") continue;
       if (input.kind !== "result") throw new Error(`Native source input refused: ${input.reason}`);
-      const links = viewers.filter((_viewer, viewerIndex) => maps[viewerIndex].priority[zone.from] === zone.priority)
+      const links = viewers.filter((_viewer, viewerIndex) => maps[viewerIndex].at(zone.from).priority === zone.priority)
         .map(viewer => viewer.linkReading()?.linkMbps).filter(rate => Number.isFinite(rate) && rate > 0);
       const bytes = input.ranges.reduce((sum, [start, end]) => sum + end - start + 1, 0);
       const deliverySeconds = links.length ? bytes * 8 / (Math.min(...links) * 1_000_000) : 0;

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: The priority map holds what each viewer wants as the rules that say it — where they stand, the urgent allowance, the doubling bands of priority, the pause — and answers for a second, for a stretch and as stretches of one value from them, instead of building arrays one entry per second of film for every viewer and again for the merge. The answers are the same; building, merging and cutting the map of a two-hour film for two viewers took 0.6-0.9 ms and takes 0.03-0.1 ms, and it was built 21-61 times a minute on Home Assistant (#ttv-178).
+
 ## 2.98.0
 
 - **Fix**: Preparing a quality step the master lists but the offer no longer holds is answered as not available now (409, with the heights offered) instead of "no such variant". The proxy can withdraw its ask while the page is already preparing the step: on Home Assistant 360p was asked for, the offer moved back to 400p two seconds later, and the page's preparation arriving after it was refused as if the step did not exist (#ttv-178).

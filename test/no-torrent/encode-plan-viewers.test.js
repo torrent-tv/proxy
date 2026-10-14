@@ -271,14 +271,14 @@ test("one viewer paused retains the download and encoding order", () => {
   });
   assert.ok(map.durationSeconds > 0, "a paused viewer still wants the film");
   for (let second = 0; second < map.durationSeconds; second += 1) {
-    assert.equal(map.secondsUntilPlayed[second], second < 400 ? Number.POSITIVE_INFINITY : second - 400,
+    assert.equal(map.at(second).untilSeconds, second < 400 ? Number.POSITIVE_INFINITY : second - 400,
       "pausing alone does not reduce this viewer's demand");
   }
   // Their POSITION survives the pause, and with it the rule that what is in
   // front of them is made before what is behind.
-  assert.equal(map.behind[399], 1, "what they have watched is behind them");
-  assert.equal(map.behind[400], 0, "and what they have not is in front");
-  assert.ok(map.priority[400] > map.priority[399], "which is what the numbers say");
+  assert.equal(Number(map.at(399).behind), 1, "what they have watched is behind them");
+  assert.equal(Number(map.at(400).behind), 0, "and what they have not is in front");
+  assert.ok(map.at(400).priority > map.at(399).priority, "which is what the numbers say");
 });
 
 // --------------------------------------------------------------- two viewers

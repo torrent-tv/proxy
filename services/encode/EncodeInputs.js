@@ -273,7 +273,15 @@ export class EncodeInputs {
   bytesChanged(arrived = null) {
     this.#revision++;
     for (const request of this.#requests.values()) {
-      if (request.pending || request.result?.kind === "result" || request.result?.kind === "terminal") continue;
+      if (request.pending) {
+        // The try in flight may have read before these bytes came. What it
+        // waits for is known only when it answers, so they are kept for that
+        // answer; bytes not named make it try again whatever it answers.
+        if (!arrived) request.unnamedArrival = true;
+        else (request.arrivedMeanwhile ??= []).push(arrived);
+        continue;
+      }
+      if (request.result?.kind === "result" || request.result?.kind === "terminal") continue;
       if (arrived && request.result?.kind === "needs-bytes" && !awaitedIn(request.result, arrived)) {
         // Nothing it waits for has come: it stands as tried at this revision.
         request.revision = this.#revision;
@@ -341,6 +349,8 @@ export class EncodeInputs {
     request.pending = true;
     request.revision = this.#revision;
     request.memoryRevision = this.#memoryRevision;
+    request.arrivedMeanwhile = null;
+    request.unnamedArrival = false;
     // Where the time from the request to its input goes, across every attempt:
     // field 2026-10-10, a picture's request took 38 s before its copy began and
     // nothing said on what (torrent-tv/meta#166).
@@ -382,10 +392,27 @@ export class EncodeInputs {
       request.pending = false;
       if (request.result?.kind !== "needs-memory") this.#wanted.delete(request.key);
       const changed = request.result?.kind === "needs-memory"
-        ? request.memoryRevision !== this.#memoryRevision : request.revision !== this.#revision;
+        ? request.memoryRevision !== this.#memoryRevision : this.#arrivedFor(request);
       if (this.#requests.get(request.key) === request && changed &&
         request.result?.kind !== "result" && request.result?.kind !== "terminal") this.#prepare(request);
     });
+  }
+
+  /**
+   * Whether bytes came during a try that the try may have missed. A try that
+   * waits for named bytes is repeated only when some of them came, or when an
+   * event named nothing; the others stand it as tried at this revision. In r36
+   * a held-range check took 344 ms, and a piece of the file arriving during it
+   * started another (torrent-tv/meta#178).
+   */
+  #arrivedFor(request) {
+    if (request.revision === this.#revision) return false;
+    const arrivals = request.arrivedMeanwhile ?? [];
+    request.arrivedMeanwhile = null;
+    if (request.unnamedArrival || request.result?.kind !== "needs-bytes" ||
+      arrivals.some(arrived => awaitedIn(request.result, arrived))) return true;
+    request.revision = this.#revision;
+    return false;
   }
 
   /** The reservation a packet input makes: all of it, or nothing. */

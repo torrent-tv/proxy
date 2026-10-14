@@ -467,6 +467,42 @@ test("an input waiting for its bytes is tried again when some of them arrive, no
   input.release();
 });
 
+test("bytes arriving while an input is being tried start another try only when it waits for them", async () => {
+  // Bytes of the file came while a try was asking the torrent thread which
+  // ranges it holds (344 ms in r36), and every one of them made it try again
+  // when it answered (review of torrent-tv/meta#178).
+  let answer = null;
+  let asked = 0;
+  const { inputs } = inputsOver({ held: () => { asked += 1; return new Promise(resolve => { answer = resolve; }); } });
+  const settle = async () => { for (let turn = 0; turn < 5; turn++) await setImmediate(); };
+  assert.equal(inputs.take(output, 0, 0), null);
+  await settle();
+  inputs.bytesChanged({ sourceKey: "film", ranges: [{ fileIndex: 0, start: 500, end: 509 }] });
+  answer([HEADER]);
+  await settle();
+  assert.equal(asked, 1, "bytes it does not wait for start no second try");
+  assert.equal(inputs.take(output, 0, 0), null);
+  await settle();
+  assert.equal(asked, 1, "nor does the plan's next look");
+
+  inputs.bytesChanged({ sourceKey: "film", ranges: [{ fileIndex: 0, start: 0, end: 9 }] });
+  await settle();
+  assert.equal(asked, 2, "its own bytes try it");
+  inputs.bytesChanged({ sourceKey: "film", ranges: [{ fileIndex: 0, start: 0, end: 9 }] });
+  answer([HEADER]);
+  await settle();
+  assert.equal(asked, 3, "its own bytes during a try start another after it");
+  inputs.bytesChanged();
+  answer([HEADER]);
+  await settle();
+  assert.equal(asked, 4, "an event naming nothing during a try starts another");
+  answer([[0, 9], HEADER]);
+  await settle();
+  const input = inputs.take(output, 0, 0);
+  assert.deepEqual([input?.from, input?.to], [0, 0]);
+  input.release();
+});
+
 test("an event that names no bytes tries every waiting input again", async () => {
   let held = [HEADER];
   const { inputs } = inputsOver({ held: () => held });

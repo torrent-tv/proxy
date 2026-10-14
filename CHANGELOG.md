@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Bytes of the file arriving while a waiting encoder input is being tried start another try only when the input waits for them: on Home Assistant a held-range check takes about 344 ms, and any piece verified anywhere in the file during it repeated the try (#ttv-178).
+
 ## 2.98.6
 
 - **Perf**: An encoder input waiting for its bytes is tried again only when some of them arrive: the torrent thread names the bytes of each piece it verifies. It was tried at every piece verified anywhere in the file, and a seek's input was prepared 28 times in 8.5 s on Home Assistant, each try asking the torrent thread which ranges it holds (171 ms on average) (#ttv-178).

@@ -137,3 +137,23 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
   assert.equal(manager.viewers.forOutput(session).has("staying"), true, "and it takes nobody else with it");
   assert.equal(manager.viewers.size, 1);
 });
+
+test("a report made before the viewer's last seek does not put them back where they were", () => {
+  // Sent just before a seek and answered after it, a report states where the
+  // viewer stood in the viewing they left; the deadlines worked out from
+  // their position must not follow it (torrent-tv/meta#178 review).
+  const viewer = new Viewer("someone");
+  viewer.report({ bufferedAheadSec: 30, positionSeconds: 100, playing: true, generation: 0 }, 1_000_000);
+  viewer.assignments.statedGeneration(1, 1_001_000);
+  viewer.report({ bufferedAheadSec: 0, positionSeconds: 6000, playing: false, waiting: true, generation: 1 }, 1_001_000);
+  viewer.report({ bufferedAheadSec: 31, positionSeconds: 101, playing: true, linkMbps: 42, generation: 0 }, 1_001_500);
+  assert.equal(viewer.positionSeconds(1_001_500), 6000, "the late report of the viewing left behind places nobody");
+  assert.equal(viewer.waiting, true, "nor says they play");
+  assert.equal(viewer.bufferedSeconds, 0, "nor what they hold");
+  assert.equal(viewer.linkReading().linkMbps, 42, "what it measured of the link still stands");
+  assert.equal(viewer.isOfAnEarlierViewing(0), true);
+  assert.equal(viewer.isOfAnEarlierViewing(1), false);
+  assert.equal(viewer.isOfAnEarlierViewing(undefined), false, "a page that names no viewing is current");
+  viewer.report({ bufferedAheadSec: 4, positionSeconds: 6001, playing: true, generation: 1 }, 1_002_000);
+  assert.equal(viewer.positionSeconds(1_002_000), 6001);
+});

@@ -10,7 +10,7 @@
  */
 
 export class SegmentInputTable {
-  /** `sourceKey` → output → segment → file → its ranges. @type {Map<string, Map<string, Map<number, Map<number, { joined: Array<[number, number]>, ranges: Array<{ start: number, end: number }> }>>>>} */
+  /** `sourceKey` → output → segment → its files' ranges, and the list `inputsFor` answers while they stand. @type {Map<string, Map<string, Map<number, { files: Map<number, { joined: Array<[number, number]>, ranges: Array<{ start: number, end: number }> }>, inputs: Array<{ sourceId: string, ranges: Array<{ start: number, end: number }> }> | null }>>>} */
   #bySource = new Map();
 
   /**
@@ -25,15 +25,19 @@ export class SegmentInputTable {
     if (!outputs) this.#bySource.set(sourceKey, outputs = new Map());
     let segments = outputs.get(outputKey);
     if (!segments) outputs.set(outputKey, segments = new Map());
-    let files = segments.get(index);
-    if (!files) segments.set(index, files = new Map());
+    let segment = segments.get(index);
+    if (!segment) segments.set(index, segment = { files: new Map(), inputs: null });
     // The same reading keeps its list: whoever compares inputs compares them by it.
-    if (files.get(fileIndex)?.joined === joined) return;
-    files.set(fileIndex, { joined, ranges: joined.map(([start, end]) => ({ start, end: end + 1 })) });
+    if (segment.files.get(fileIndex)?.joined === joined) return;
+    segment.files.set(fileIndex, { joined, ranges: joined.map(([start, end]) => ({ start, end: end + 1 })) });
+    segment.inputs = null;
   }
 
   /**
-   * The bytes one segment reads, by file, or null where none are known.
+   * The bytes one segment reads, by file, or null where none are known. The
+   * same list while they stand: the start forecast asks for every segment of
+   * the film on each poll, and keeps what it derived from a segment whose
+   * inputs are the same list.
    *
    * @param {string} sourceKey
    * @param {string} outputKey
@@ -41,9 +45,10 @@ export class SegmentInputTable {
    * @returns {Array<{ sourceId: string, ranges: Array<{ start: number, end: number }> }> | null}
    */
   inputsFor(sourceKey, outputKey, index) {
-    const files = this.#bySource.get(sourceKey)?.get(outputKey)?.get(index);
-    if (!files?.size) return null;
-    return [...files].map(([fileIndex, { ranges }]) => ({ sourceId: `${sourceKey}:${fileIndex}`, ranges }));
+    const segment = this.#bySource.get(sourceKey)?.get(outputKey)?.get(index);
+    if (!segment?.files.size) return null;
+    segment.inputs ??= [...segment.files].map(([fileIndex, { ranges }]) => ({ sourceId: `${sourceKey}:${fileIndex}`, ranges }));
+    return segment.inputs;
   }
 
   /** @param {string} sourceKey */

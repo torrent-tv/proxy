@@ -11,7 +11,7 @@ test("a segment's bytes are found by the forecast whatever the torrent is told, 
   const first = table.inputsFor("source", "picture", 2);
   assert.deepEqual(first, [{ sourceId: "source:7", ranges: [{ start: 100, end: 108 }, { start: 200, end: 210 }] }]);
   table.set("source", 7, "picture", 2, joined);
-  assert.equal(table.inputsFor("source", "picture", 2)[0].ranges, first[0].ranges, "the same reading keeps its list");
+  assert.equal(table.inputsFor("source", "picture", 2), first, "the same reading keeps its list");
   table.set("source", 7, "picture", 2, [[300, 309]]);
   assert.deepEqual(table.inputsFor("source", "picture", 2)[0].ranges, [{ start: 300, end: 310 }], "a newer reading replaces it");
   table.set("source", 8, "picture", 2, [[0, 9]]);

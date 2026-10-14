@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: The start forecast keeps only the times of a track's pieces between polls, and reads every other field of a piece from the poll: a piece whose torrent inputs were told again is a new object with the same times, and its times were worked out again. In r37 on Home Assistant the forecast took 19.2 s of the main thread in 15 minutes, mostly working them out again. Once a minute the proxy now says how many forecasts ran, their time each, and per track whether the times were kept or why they were worked out again (#ttv-178).
+
 ## 2.98.8
 
 - **Perf**: The start forecast keeps each track's time geometry between polls while its pieces, timescale and clock offset are the same: the timescale of its pieces and their placement on the page's clock. Gathering every remaining piece's edges and placing each anew on every poll of a waiting viewer was about 3 s of Home Assistant's main thread in 15 minutes; over a two-hour film a poll takes 5.6 ms instead of 8.8 ms on this machine, with the same answer on 450 random polls (#ttv-178).

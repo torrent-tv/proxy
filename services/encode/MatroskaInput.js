@@ -54,20 +54,56 @@ export async function* matroskaInput({ tracks, readPacket, originSeconds = 0, in
       slices = avcPacketSlices(slices);
       payloadBytes = slices.reduce((sum, slice) => sum + slice.length, 0);
     }
-    const blockHeader = Buffer.concat([vint(selected + 1), Buffer.from([0, 0, 0])]);
+    // EVERY PACKET'S CLUSTER IS WRITTEN INTO ONE BUFFER, its sizes worked out
+    // first: an element at a time, each id parsed from hex, each number split
+    // into bytes through BigInt and every part joined again, this writer was
+    // 6 % of the main thread over a two-hour AVI on Home Assistant (r30,
+    // torrent-tv/meta#178). The bytes are the same.
     const duration = Math.round(packet.duration * 1e6);
-    const afterBlock = Buffer.concat([
-      ...(duration > 0 ? [uintElement("9b", duration)] : []),
-      ...(packet.discardPaddingSeconds ? [signedElement("75a2", Math.round(packet.discardPaddingSeconds * 1e9))] : []),
-      ...(packet.keyframe ? [] : [element("fb", Buffer.from([0]))])]);
-    const blockPrefix = prefix("a1", blockHeader.length + payloadBytes);
-    const groupPrefix = prefix("a0", blockPrefix.length + blockHeader.length + payloadBytes + afterBlock.length);
-    const timestamp = uintElement("e7", stamp);
-    const clusterPrefix = prefix("1f43b675", timestamp.length + groupPrefix.length + blockPrefix.length +
-      blockHeader.length + payloadBytes + afterBlock.length);
-    yield Buffer.concat([clusterPrefix, timestamp, groupPrefix, blockPrefix, blockHeader]);
+    const padding = packet.discardPaddingSeconds ? Math.round(packet.discardPaddingSeconds * 1e9) : null;
+    if (duration > 0 && !Number.isSafeInteger(duration)) throw new TypeError("EBML unsigned integer is invalid.");
+    if (padding !== null && !Number.isSafeInteger(padding)) throw new TypeError("EBML signed integer is outside its exact range.");
+    const blockHeaderBytes = vintWidth(selected + 1) + 3;
+    const durationWidth = duration > 0 ? uintWidth(duration) : 0;
+    const afterBytes = (duration > 0 ? 1 + vintWidth(durationWidth) + durationWidth : 0) +
+      (padding !== null ? 2 + 1 + 8 : 0) + (packet.keyframe ? 0 : 3);
+    const blockSize = blockHeaderBytes + payloadBytes;
+    const blockPrefixBytes = 1 + vintWidth(blockSize);
+    const groupSize = blockPrefixBytes + blockSize + afterBytes;
+    const groupPrefixBytes = 1 + vintWidth(groupSize);
+    const stampWidth = uintWidth(stamp);
+    const timestampBytes = 1 + vintWidth(stampWidth) + stampWidth;
+    const clusterSize = timestampBytes + groupPrefixBytes + groupSize;
+    const head = Buffer.allocUnsafe(4 + vintWidth(clusterSize) + timestampBytes + groupPrefixBytes + blockPrefixBytes + blockHeaderBytes);
+    let at = head.writeUInt32BE(0x1f43b675, 0);
+    at = writeVint(head, at, clusterSize);
+    head[at++] = 0xe7;
+    at = writeVint(head, at, stampWidth);
+    at = writeUint(head, at, stamp, stampWidth);
+    head[at++] = 0xa0;
+    at = writeVint(head, at, groupSize);
+    head[at++] = 0xa1;
+    at = writeVint(head, at, blockSize);
+    at = writeVint(head, at, selected + 1);
+    head[at++] = 0; head[at++] = 0; head[at++] = 0;
+    yield head;
     for (const slice of slices) yield slice;
-    if (afterBlock.length) yield afterBlock;
+    if (afterBytes > 0) {
+      const after = Buffer.allocUnsafe(afterBytes);
+      let offset = 0;
+      if (duration > 0) {
+        after[offset++] = 0x9b;
+        offset = writeVint(after, offset, durationWidth);
+        offset = writeUint(after, offset, duration, durationWidth);
+      }
+      if (padding !== null) {
+        offset = after.writeUInt16BE(0x75a2, offset);
+        offset = writeVint(after, offset, 8);
+        offset = after.writeBigInt64BE(BigInt(padding), offset);
+      }
+      if (!packet.keyframe) { after[offset++] = 0xfb; after[offset++] = 0x81; after[offset++] = 0; }
+      yield after;
+    }
   }
 }
 
@@ -128,31 +164,52 @@ function matroskaCodec(codec) {
   return declared;
 }
 
-function vint(value) {
+/** How many bytes an EBML size of this value takes: the narrowest whose all-ones value it is below. */
+function vintWidth(value) {
   if (!Number.isSafeInteger(value) || value < 0) throw new TypeError("EBML value is outside its integer range.");
-  for (let width = 1; width <= 8; width++) {
-    if (BigInt(value) >= (1n << BigInt(7 * width)) - 1n) continue;
-    const encoded = Buffer.alloc(width);
-    let bits = BigInt(value) | (1n << BigInt(7 * width));
-    for (let at = width - 1; at >= 0; at--) { encoded[at] = Number(bits & 255n); bits >>= 8n; }
-    return encoded;
+  // 2 ** 56 - 1 is above every safe integer, so eight bytes always hold one.
+  for (let width = 1; width < 8; width++) if (value < 2 ** (7 * width) - 1) return width;
+  return 8;
+}
+
+/** The value as an EBML size at `at`, its width's marker bit set; the next offset. */
+function writeVint(target, at, value) {
+  const width = vintWidth(value);
+  writeUint(target, at, value, width);
+  target[at] |= 1 << (8 - width);
+  return at + width;
+}
+
+/** How many bytes an unsigned integer takes, one at least. */
+function uintWidth(value) {
+  let width = 1;
+  for (let rest = Math.floor(value / 256); rest > 0; rest = Math.floor(rest / 256)) width += 1;
+  return width;
+}
+
+/** The value big-endian in `width` bytes at `at`; the next offset. */
+function writeUint(target, at, value, width) {
+  let rest = value;
+  for (let index = width - 1; index >= 0; index--) {
+    target[at + index] = rest % 256;
+    rest = Math.floor(rest / 256);
   }
-  throw new TypeError("EBML value has no valid width.");
+  return at + width;
+}
+
+function vint(value) {
+  const encoded = Buffer.alloc(vintWidth(value));
+  writeVint(encoded, 0, value);
+  return encoded;
 }
 
 function prefix(id, size) { return Buffer.concat([Buffer.from(id, "hex"), vint(size)]); }
 function element(id, payload) { return Buffer.concat([prefix(id, payload.length), payload]); }
 function textElement(id, text) { return element(id, Buffer.from(text, "utf8")); }
-function signedElement(id, value) {
-  if (!Number.isSafeInteger(value)) throw new TypeError("EBML signed integer is outside its exact range.");
-  const bytes = Buffer.alloc(8);
-  bytes.writeBigInt64BE(BigInt(value));
-  return element(id, bytes);
-}
 function uintElement(id, value) {
   if (!Number.isSafeInteger(value) || value < 0) throw new TypeError("EBML unsigned integer is invalid.");
-  let bits = BigInt(value);
-  const bytes = [];
-  do { bytes.unshift(Number(bits & 255n)); bits >>= 8n; } while (bits > 0n);
-  return element(id, Buffer.from(bytes));
+  const width = uintWidth(value);
+  const bytes = Buffer.alloc(width);
+  writeUint(bytes, 0, value, width);
+  return element(id, bytes);
 }

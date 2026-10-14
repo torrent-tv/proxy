@@ -22,28 +22,27 @@ export function segmentDemands(output, fileIndex, zones) {
   for (let index = 0; index + 1 < grid.length; index++) {
     const from = grid[index], to = grid[index + 1];
     if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from)) throw new Error("An output segment needs a valid interval.");
-    let overlapping;
-    if (ordered) {
-      while (first < zones.length && zones[first].to <= from) first += 1;
-      overlapping = [];
-      for (let at = first; at < zones.length && zones[at].from < to; at += 1) {
-        if (zones[at].priority > 0) overlapping.push(zones[at]);
-      }
-    } else {
-      overlapping = zones.filter(zone => zone.priority > 0 && zone.from < to && zone.to > from);
+    if (ordered) while (first < zones.length && zones[first].to <= from) first += 1;
+    // The zones a segment overlaps are folded as they are met, into numbers:
+    // a list of them, and the lists made of it for each field, were five
+    // arrays for every segment of a film on every pass (r30,
+    // torrent-tv/meta#178).
+    let owner = null, ownerDeadline = Infinity, priority = 0, urgent = false, behind = true, deferred = true;
+    for (let at = ordered ? first : 0; at < zones.length; at += 1) {
+      const zone = zones[at];
+      if (ordered && !(zone.from < to)) break;
+      if (!(zone.priority > 0) || !(zone.from < to && zone.to > from)) continue;
+      // A zone states the deadline of its near edge. A later segment within it
+      // is reached later, at one second of film per second of playback.
+      const deadline = Number.isFinite(zone.deadlineAt) ? zone.deadlineAt + Math.max(0, from - zone.from) * 1000 : Infinity;
+      if (owner === null || deadline < ownerDeadline) { owner = zone; ownerDeadline = deadline; }
+      if (zone.priority > priority) priority = zone.priority;
+      if (zone.urgent) urgent = true;
+      if (!zone.behind) behind = false;
+      if (!zone.deferred) deferred = false;
     }
-    if (!overlapping.length) continue;
-    // A zone states the deadline of its near edge. A later segment within it
-    // is reached later, at one second of film per second of playback.
-    const deadlineOf = zone => Number.isFinite(zone.deadlineAt)
-      ? zone.deadlineAt + Math.max(0, from - zone.from) * 1000 : Infinity;
-    const owner = overlapping.reduce((first, zone) => deadlineOf(zone) < deadlineOf(first) ? zone : first);
-    demands.push({ index, from, to, tracks, owner,
-      priority: Math.max(...overlapping.map(zone => zone.priority)),
-      urgent: overlapping.some(zone => zone.urgent),
-      behind: overlapping.every(zone => zone.behind),
-      deferred: overlapping.every(zone => zone.deferred),
-      deadlineAt: Math.min(...overlapping.map(deadlineOf)) });
+    if (owner === null) continue;
+    demands.push({ index, from, to, tracks, owner, priority, urgent, behind, deferred, deadlineAt: ownerDeadline });
   }
   return demands.sort((left, right) => left.deadlineAt - right.deadlineAt || right.priority - left.priority || left.index - right.index);
 }

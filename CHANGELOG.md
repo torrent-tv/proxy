@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: A pass that turns the priority map into the torrent's demand keeps what does not depend on where a viewer stands — each segment's interval in the source, what it reads and its bytes joined for the torrent — from one pass to the next, folds the map zones a segment overlaps into numbers instead of lists, and completes each demand in place instead of copying it twice. The demands are the same; on a two-hour film a pass was made once a second over 3500 segments, and these parts of it were 13 s of the main thread in fifteen minutes on Home Assistant (#ttv-178).
+
 ## 2.98.1
 
 - **Perf**: The priority map holds what each viewer wants as the rules that say it — where they stand, the urgent allowance, the doubling bands of priority, the pause — and answers for a second, for a stretch and as stretches of one value from them, instead of building arrays one entry per second of film for every viewer and again for the merge. The answers are the same; building, merging and cutting the map of a two-hour film for two viewers took 0.6-0.9 ms and takes 0.03-0.1 ms, and it was built 21-61 times a minute on Home Assistant (#ttv-178).

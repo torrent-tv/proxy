@@ -15,7 +15,9 @@ test("a piece asked early whose last block was held by a slow peer says so", () 
   timings.asked(1, 16_384, "c", 9_000); // the same block asked again of another peer
   timings.arrived(1, 16_384, "c", 14_000);
   const timing = timings.verified(1, 14_010);
-  assert.deepEqual(timing, { askedAgoMs: 13_010, asks: 3, peers: 3, slowestMs: 13_000, slowestPeer: "c", lastInFlightMs: 13_000, lastPeer: "c" });
+  assert.deepEqual(timing, { askedAgoMs: 13_010, asks: 3, peers: 3, slowestMs: 13_000, slowestPeer: "c", lastInFlightMs: 13_000, lastPeer: "c",
+    askedAgain: 1, arrivedTwice: 0 });
+  assert.match(describePieceTiming(timing), /1 block\(s\) asked again, 0 arrived twice/);
   assert.match(describePieceTiming(timing), /first block asked 13\.0s before, 3 block ask\(s\) to 3 peer\(s\), slowest block 13\.0s in flight from c/);
 });
 
@@ -34,4 +36,16 @@ test("a block not asked through the record, or a piece never asked, says nothing
   timings.verified(4, 2);
   assert.equal(timings.verified(4, 3), null);
   assert.equal(describePieceTiming(null), "");
+});
+
+test("a copy of a block that arrives after the first is counted, and does not move the block's time", () => {
+  const timings = new PieceTimings();
+  timings.asked(5, 0, "slow", 0);
+  timings.asked(5, 0, "fast", 3_000);
+  timings.arrived(5, 0, "fast", 3_200);
+  timings.arrived(5, 0, "slow", 9_000);
+  const timing = timings.verified(5, 3_210);
+  assert.equal(timing.arrivedTwice, 1);
+  assert.equal(timing.lastInFlightMs, 3_200, "in flight from the first ask to the first arrival");
+  assert.equal(timing.lastPeer, "fast");
 });

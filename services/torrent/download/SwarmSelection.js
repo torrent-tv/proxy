@@ -46,6 +46,8 @@ export class SwarmSelection {
   #stated = new Map();
   /** Claimants whose windows are currently protected in memory. */
   #protectedInMemory = new Set();
+  /** The pieces of the urgent first class, as last stated: what somebody waits for now. */
+  #required = [];
   #findStore;
 
   /**
@@ -110,7 +112,10 @@ export class SwarmSelection {
         else union.push({ from: range.from, to: range.to, priority });
       }
       for (const range of union) wanted.set(`${range.from}-${range.to}-${priority}`, range);
-      if (priority === 1) this.firstClassPieces = union.map(range => range.from === range.to ? `${range.from}` : `${range.from}-${range.to}`);
+      if (priority === 1) {
+        this.firstClassPieces = union.map(range => range.from === range.to ? `${range.from}` : `${range.from}-${range.to}`);
+        this.#required = strictFirstClass ? union.map(({ from, to }) => ({ from, to })) : [];
+      }
     }
     this.firstClass = first;
 
@@ -150,8 +155,21 @@ export class SwarmSelection {
     return { stated, withdrawn };
   }
 
+  /**
+   * The pieces of the urgent first class as last stated, or none while the
+   * first class is conditional: what somebody is waiting for now, and the
+   * only pieces whose last blocks are worth asking of a second peer
+   * (`TailRepeat`).
+   *
+   * @returns {Array<{ from: number, to: number }>}
+   */
+  requiredPieces() {
+    return this.#required;
+  }
+
   /** Take everything back. The torrent is going, or nobody wants anything. */
   releaseAll() {
+    this.#required = [];
     for (const range of this.#stated.values()) {
       this.#deselect(range);
     }

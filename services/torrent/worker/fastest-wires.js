@@ -37,6 +37,9 @@
  */
 const SHORT_TAIL_BLOCKS = 16;
 
+/** A block of a piece, as `torrent-piece` cuts it (`Piece.BLOCK_LENGTH`): a request's offset over this is its block. */
+const BLOCK_BYTES = 1 << 14;
+
 /**
  * The library's own request entry. Internal, so its absence must be noticed
  * rather than swallowed: without it this lever silently does nothing.
@@ -248,10 +251,10 @@ export function describePieceTail(torrent, pieceIndex) {
  * work, which no average speed can show.
  *
  * The cost is bounded by the same measurement: the tails were 2 to 14 blocks of
- * 512, so 32 to 224 KB against the 8 MiB piece they hold up. At most one
- * duplicate is asked per candidate wire per call, and the caller repeats every
- * half second, so a longer tail is covered across attempts rather than in one
- * burst.
+ * 512, so 32 to 224 KB against the 8 MiB piece they hold up. A block already in
+ * flight on `maxCopies` wires is not asked again, however often this is called:
+ * it is called on every block that arrives (`TailRepeat`), and without that
+ * check each call asked one more copy of the same block.
  *
  * Safe against the completion path: a block that arrives twice is dropped by
  * `Piece.set`, which writes only into an empty slot, and a piece already
@@ -260,17 +263,26 @@ export function describePieceTail(torrent, pieceIndex) {
  *
  * @param {object} torrent
  * @param {number} pieceIndex
- * @returns {{ duplicated: number, missing: number, wires: number }}
+ * @param {object} [options]
+ * @param {number} [options.maxCopies] - How many wires a missing block may be
+ *   in flight on at once: the first request and one copy beside it.
+ * @returns {{ duplicated: number, missing: number, wires: number, unplaced: number }}
  *   `duplicated` counts requests the library actually placed for a block that
- *   was already outstanding elsewhere.
+ *   was already outstanding elsewhere; `unplaced` the blocks in flight on one
+ *   wire alone that no other wire could be asked for now.
  */
-export function duplicateTailFor(torrent, pieceIndex) {
+export function duplicateTailFor(torrent, pieceIndex, { maxCopies = 2 } = {}) {
   const piece = torrent?.pieces?.[pieceIndex];
   const buffer = Array.isArray(piece?._buffer) ? piece._buffer : null;
-  if (!piece || !buffer || typeof piece.cancel !== "function") {
-    return { duplicated: 0, missing: 0, wires: 0 };
+  if (!piece || !buffer || typeof piece.cancel !== "function" || !canPlaceRequests(torrent)) {
+    return { duplicated: 0, missing: 0, wires: 0, unplaced: 0 };
   }
   const chunks = Number.isFinite(piece._chunks) ? piece._chunks : buffer.length;
+  // Most calls are for a piece still arriving in bulk; its own count says so
+  // without walking its blocks or every wire's queue.
+  if (Number.isFinite(piece._buffered) && chunks - piece._buffered > SHORT_TAIL_BLOCKS) {
+    return { duplicated: 0, missing: chunks - piece._buffered, wires: 0, unplaced: 0 };
+  }
   const missing = [];
   for (let index = 0; index < chunks; index += 1) {
     if (!buffer[index]) {
@@ -279,7 +291,7 @@ export function duplicateTailFor(torrent, pieceIndex) {
   }
   const candidates = wiresForPiece(torrent, pieceIndex);
   if (missing.length === 0 || candidates.length === 0) {
-    return { duplicated: 0, missing: missing.length, wires: candidates.length };
+    return { duplicated: 0, missing: missing.length, wires: candidates.length, unplaced: 0 };
   }
 
   // A tail this short is what a blocked read is actually waiting on, and a
@@ -288,31 +300,50 @@ export function duplicateTailFor(torrent, pieceIndex) {
   // bytes that are already coming — measured 2026-08-19, the tails a reader
   // waits on are 2 to 14 blocks of 512.
   if (missing.length > SHORT_TAIL_BLOCKS) {
-    return { duplicated: 0, missing: missing.length, wires: candidates.length };
+    return { duplicated: 0, missing: missing.length, wires: candidates.length, unplaced: 0 };
   }
 
-  let duplicated = 0;
-  // One block per wire: that is what the pipelines can usefully take at once,
-  // and it needs no number of its own.
-  for (let index = 0; index < Math.min(missing.length, candidates.length); index += 1) {
-    // Freeing the reservation is what makes the block askable again; the
-    // request already in flight is deliberately left alone, because the point
-    // is to have two of them.
-    piece.cancel(missing[index]);
-    // `false` is hotswap: the library's own swap must not run on top of this,
-    // or it would free a THIRD wire's block as well.
-    if (torrent._request(candidates[index], pieceIndex, false) === true) {
-      duplicated += 1;
+  // Which wires each missing block is in flight on, read from the wires' own
+  // queues: the library keeps a block's reservation for one wire only, and a
+  // copy asked here is visible nowhere else.
+  const holders = new Map(missing.map(block => [block, new Set()]));
+  for (const wire of Array.isArray(torrent.wires) ? torrent.wires : []) {
+    for (const request of Array.isArray(wire?.requests) ? wire.requests : []) {
+      if (request?.piece !== pieceIndex) continue;
+      holders.get(Math.floor(request.offset / BLOCK_BYTES))?.add(wire);
     }
-    // A refusal means THAT wire's pipeline is full, and says nothing about the
-    // next one's — pipelines are per wire. This used to stop the whole pass on
-    // the first refusal, on the stated reasoning that the remaining wires were
-    // "no emptier", which is an assumption about other peers' queues that
-    // nothing here measures. The block whose reservation was freed stays in the
-    // piece's cancellation stack and is handed to whoever asks next, which is
-    // harmless: it is already in flight elsewhere.
   }
-  return { duplicated, missing: missing.length, wires: candidates.length };
+
+  let duplicated = 0, unplaced = 0;
+  for (const block of missing) {
+    const held = holders.get(block);
+    // Not in flight anywhere: the library's own picker asks for it; a block
+    // nobody has been asked for is not a tail held by a slow peer.
+    if (held.size === 0 || held.size >= maxCopies) continue;
+    let placed = false;
+    for (const wire of candidates) {
+      if (held.has(wire)) continue;
+      // Freeing the reservation is what makes the block askable again; the
+      // request already in flight is deliberately left alone, because the
+      // point is to have two of them.
+      piece.cancel(block);
+      // `false` is hotswap: the library's own swap must not run on top of
+      // this, or it would free a THIRD wire's block as well.
+      if (torrent._request(wire, pieceIndex, false) === true) {
+        held.add(wire);
+        duplicated += 1;
+        placed = true;
+        break;
+      }
+      // Refused before anything was reserved (that wire's pipeline is full):
+      // the freed block is taken back, or the library would hand it to the
+      // next wire that asks, a copy nobody counted. The next wire's pipeline
+      // is its own, so it is still asked.
+      piece.reserve();
+    }
+    if (!placed) unplaced += 1;
+  }
+  return { duplicated, missing: missing.length, wires: candidates.length, unplaced };
 }
 
 /**

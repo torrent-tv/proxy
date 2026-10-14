@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The last blocks of a piece somebody is waiting for are asked of a second peer when one peer holds them: a piece of the urgent first class with at most 16 blocks missing has each block that is in flight on one wire alone asked of another wire that holds the piece, never of a third, and a block freed for a wire that refused is taken back. It is looked at when a block arrives, a peer unchokes or states a piece, a wire joins or closes, a piece is verified or a map is applied, and once more a second later when nobody else could be asked. Nothing had asked a second peer since the blocked-read path was removed (#ttv-95); on Home Assistant a cold 1080p MKV input waited 4.5-11.5 s for single blocks held by one peer (r40). Each verified piece now also says how many of its blocks were asked again and arrived twice, and a line says the copies asked and the blocks that arrived after their piece was complete (#ttv-178).
+
 ## 2.98.14
 
 - **Fix**: Each verified piece says when its first block was asked of the swarm, how many block asks went to how many peers, and how long its slowest and its last block were in flight and from whom; WebTorrent states no outgoing request, so a piece verified last could not be told apart as asked late or held by a slow peer (#ttv-178). The subscription to a request event nothing emits is gone.

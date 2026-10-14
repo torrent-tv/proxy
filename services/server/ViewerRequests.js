@@ -91,7 +91,7 @@ export class ViewerRequests {
   #forecastPieces = new WeakMap();
 
   /**
-   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `disposeSession`, `planEncodersSoon`, `waitUntilReady`, `encodeRuns`, `encodeSpeedReadingOf`, `outputTimes`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
+   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `disposeSession`, `planEncodersSoon`, `waitUntilReady`, `encodeRuns`, `encodeSpeedReadingsOf`, `outputTimes`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
    */
   constructor(host) {
     this.#host = host;
@@ -893,10 +893,12 @@ export class ViewerRequests {
       trend = new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds);
       state.tracks.set(id, trend);
     }
-    const reading = this.#host.encodeSpeedReadingOf?.(output, now) ?? null;
-    if (Number.isFinite(reading?.speed) && reading.speed > 0 && Number.isFinite(reading.at)) {
-      trend.add(reading.at, reading.speed);
-    } else if (!trend.snapshot()) {
+    // Every reading since this trend's last, not the newest one at the poll:
+    // a run that ended between two polls took its readings with it.
+    for (const reading of this.#host.encodeSpeedReadingsOf?.(output, trend.lastAt) ?? []) {
+      if (reading.at <= now) trend.add(reading.at, reading.speed);
+    }
+    if (!trend.snapshot()) {
       // ONLY UNTIL A PIECE IS MEASURED does the prediction stand for the
       // encoder, and it is not kept among the readings. Added on every poll
       // between runs, it put the machine's share of that moment — 1 % at a

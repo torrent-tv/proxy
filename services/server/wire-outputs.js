@@ -11,7 +11,7 @@
 import { logger } from "../../utils/logger.js";
 import { KeyframeTables } from "../media/KeyframeTables.js";
 import { waits } from "./WaitLedger.js";
-import { readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "../encode/host-load.js";
+import { readEndedChildrenCpuSeconds, readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "../encode/host-load.js";
 import { minimumBufferFrom } from "../torrent/supply-margin.js";
 import { PriorityOrchestrator } from "../viewer/PriorityOrchestrator.js";
 import { urgentOutputsReady } from "../viewer/urgent-output-ready.js";
@@ -290,6 +290,7 @@ export function wireOutputs({
   // What the torrent and the proxy itself spend on this host, and how fast each watched torrent moves.
   parts.hostLoad = new HostLoad({
     readMetadataActivity,
+    readEndedChildrenCpuSeconds,
     readMachineState,
     readProcessCpuSeconds,
     readProxyCpuSeconds,

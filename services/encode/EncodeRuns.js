@@ -12,6 +12,7 @@ import { spawn } from "node:child_process";
 import { contentionPenalty } from "./contention.js";
 import { LOOKAHEAD_PAUSE_SECONDS } from "./CushionReport.js";
 import { SpeedReadings } from "./SpeedReadings.js";
+import { nextInputAtFirstPiece } from "./next-input.js";
 import { ENCODE_RUN_STATE, liveRunsOf, runStateOf, wireState } from "./encode-run-state.js";
 import { ENCODE_EXIT } from "./encode-exit.js";
 import { EncodeRun, endOfRun } from "./EncodeRun.js";
@@ -1096,6 +1097,8 @@ export class EncodeRuns {
     // killed mid-piece leaving a partial file — is not a correctness problem
     // either, because the store serves a segment only once its closure is
     // proven, and it is cleared up when the run ends.
+    // Told when this run closes its first piece; see the next stretch below.
+    let atFirstPiece = null;
     const run = new EncodeRun({
       address: session.outputKey ?? session.id,
       encoder: this.#host.videoEncoder,
@@ -1129,7 +1132,12 @@ export class EncodeRuns {
       onProgress: (report) => this.#noteRunProgress(session, run, report),
       // A closed piece moves this encoder forward, perhaps out of the band that
       // led; who has the processor is decided again at once.
-      onProduced: () => this.#host.encodeOrchestrator?.shareTheMachine?.(),
+      onProduced: () => {
+        this.#host.encodeOrchestrator?.shareTheMachine?.();
+        const told = atFirstPiece;
+        atFirstPiece = null;
+        told?.();
+      },
       indexOfName: (name) => session.segmentFormat.segmentIndexFromName(
         session.segmentFormat.servedNameOf?.(name) ?? name),
       // Why this encoder exists, recorded with its argument list. It used to be
@@ -1231,12 +1239,24 @@ export class EncodeRuns {
       // It waits for this run's own stretch to be copied: that copy goes on
       // while the run opens and FFmpeg's reads wait for it, and a second copy
       // beside it on the same thread would slow it (torrent-tv/meta#178).
+      //
+      // And for this run's first piece when the rest of the run leaves the
+      // time to prepare it in (`next-input.js`).
       if (inputEnd < mayReach) {
         const askNext = () => {
           if (this.isLive(session) && run.isAlive) this.#host.encodeInputs?.take(session, inputEnd + 1, mayReach);
         };
-        if (admittedInput.whole) void admittedInput.whole.then(whole => { if (whole) askNext(); });
-        else askNext();
+        const preparedInMs = this.#host.encodeInputs?.preparationMsOf?.(session) ?? null;
+        const speed = Number(this.#host.encodeCost?.speedForOutput?.(session.outputKey));
+        const timeline = session.timeline;
+        const restSeconds = Number(timeline?.publishedStartOf?.(inputEnd + 1)) - Number(timeline?.publishedStartOf?.(safeIndex + 1));
+        const atOnce = !nextInputAtFirstPiece({ preparedInMs, speed, restSeconds });
+        let copied = false, produced = atOnce;
+        const askWhenBoth = () => { if (copied && produced) askNext(); };
+        if (!atOnce) atFirstPiece = () => { produced = true; askWhenBoth(); };
+        const whenCopied = () => { copied = true; askWhenBoth(); };
+        if (admittedInput.whole) void admittedInput.whole.then(whole => { if (whole) whenCopied(); });
+        else whenCopied();
       }
     } else if (admittedInput) {
       run.admittedInputKeys = new Map([[safeIndex, inputKey]]);

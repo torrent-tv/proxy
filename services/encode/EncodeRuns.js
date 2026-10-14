@@ -1319,8 +1319,13 @@ export class EncodeRuns {
   /**
    * How long this run took to open its original input, for sizing the next
    * stretch: from its spawn to the name of its first closed piece, less what
-   * encoding that piece costs at the run's speed — its own where it measured
-   * one, else the output's. Nothing is noted where either is unknown.
+   * encoding that piece costs at a measured speed — the run's own where it
+   * closed two pieces, else the output's newest reading, which is taken
+   * between two closed pieces of a run too. Never a predicted speed: the
+   * output's starting figure, scaled by a machine share that missed short
+   * runs, read 0.08x on Home Assistant and recorded opens of 0.00 s (r41,
+   * torrent-tv/meta#178). Nothing is noted where no speed was measured or the
+   * rest is negative, and the open estimated before stands.
    *
    * @param {object} session
    * @param {import("./EncodeRun.js").EncodeRun} run
@@ -1330,14 +1335,21 @@ export class EncodeRuns {
   #noteOpen(session, run, ended) {
     const grid = session.timeline?.published ?? session.timeline?.boundaries;
     const pieceSeconds = Number(grid?.[run.from + 1]) - Number(grid?.[run.from]);
-    const speed = run.speedX > 0 ? run.speedX : this.#host.encodeOrchestrator.speedOn?.(session.outputKey) ?? 0;
+    const speed = run.speedX > 0 ? run.speedX : this.#speedReadings.windowOf(session).at(-1)?.speed ?? 0;
     // FFmpeg's reads may have waited for the stretch being copied; that wait
     // is the copy's, and the stretch is sized from the open (`run-open.js`).
     const open = runOpenOf({
       firstNamedMs: ended.firstNamedMs, firstNamedWallMs: ended.firstNamedWallMs, startedAt: run.startedAt,
       waitedBefore: run.originalInput?.waitedBefore, pieceSeconds, speed
     });
-    if (!open) return;
+    if (!open) {
+      if (Number.isFinite(ended.firstNamedMs) && pieceSeconds > 0) {
+        this.#host.logger.info(`encode input of run #${run.from}..#${run.to} on ${session.outputKey}: open not measured ` +
+          `(first piece named at ${ended.firstNamedMs}ms, ${pieceSeconds.toFixed(3)}s of film, ` +
+          `${speed > 0 ? `at a measured ${speed.toFixed(2)}x the piece takes longer than that` : "no speed measured between two closed pieces"})`);
+      }
+      return;
+    }
     const { openSeconds, waitedMs } = open;
     this.#host.encodeOrchestrator.noteOpen?.(session.outputKey ?? "", openSeconds);
     this.#host.logger.info(`encode input of run #${run.from}..#${run.to} on ${session.outputKey}: opened in ` +

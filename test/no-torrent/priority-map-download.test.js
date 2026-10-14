@@ -159,3 +159,19 @@ test("a file of unknown length or duration is not guessed at", () => {
     forgetTorrent(torrent);
   }
 });
+
+test("the swarm is told a map when it is applied, not at the next piece verified", () => {
+  // A seek's map was applied and the swarm went on fetching the old first
+  // class for 1.16 s, until a piece happened to be verified (r34,
+  // torrent-tv/meta#178).
+  const torrent = torrentOf({ length: 100 * 1024 });
+  const selected = [];
+  torrent.select = (from, to, priority) => selected.push([from, to, priority]);
+  try {
+    applyPriorityMap.call(null, torrent, 0, [{ byteStart: 10 * 1024, byteEnd: 12 * 1024 - 1, priority: 100, urgent: true, deadlineAt: 1000 }], 100);
+    assert.deepEqual(demandFor(torrent).selection.firstClass, { urgency: Urgency.NEAR, priority: 100 });
+    assert.ok(selected.some(([from, to, priority]) => from === 10 && to === 11 && priority > 0), JSON.stringify(selected));
+  } finally {
+    forgetTorrent(torrent);
+  }
+});

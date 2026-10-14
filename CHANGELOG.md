@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.7
 
 - **Fix**: Bytes of the file arriving while a waiting encoder input is being tried start another try only when the input waits for them: on Home Assistant a held-range check takes about 344 ms, and any piece verified anywhere in the file during it repeated the try (#ttv-178).
 

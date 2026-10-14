@@ -24,6 +24,7 @@ import { withdrawClaim } from "./download/withdraw-claim.js";
 import { deadlineOfMapZone, levelOfMapZone, priorityOfMapZone } from "./map-zones.js";
 import { deriveSourceKey } from "../../utils/torrent-source-key.js";
 import { noteTorrentDestroyed } from "./destroyed-torrents.js";
+import { PieceTimings, describePieceTiming } from "./piece-timing.js";
 
 /** How a window stated from the priority map names itself. */
 const MAP_CLAIMANT = "priority-map";
@@ -1502,21 +1503,35 @@ export class TorrentPool {
     const addedAt = Date.now();
     this.#swarmTimingByTorrent.set(torrent, { addedAt, firstPeerAt: null });
 
-    torrent.on("download-requested", ({ piece, deadlineAt, requestId, peer, queued }) => {
-      logger.info(`download request=${requestId} piece=${piece} deadline=${deadlineAt} peer=${peer} outstanding=${queued}`);
-    });
     torrent.on("download-request-cancelled", ({ piece, offset, length, reason, requestId }) => {
       logger.info(`download request=${requestId ?? `${torrent.infoHash ?? "unknown"}:${piece}:${offset}`} cancel bytes=${length} reason=${reason}`);
     });
     torrent.on("download-request-cancel-failed", ({ piece, offset, length, error }) => {
       logger.warn(`download request=${torrent.infoHash ?? "unknown"}:${piece}:${offset} cancel bytes=${length} failed: ${error}`);
     });
-    // WHEN each piece arrived. The requests above say what was asked for; this
-    // says what came and in which order, which is what decides how far an
-    // encoder reading the file can go before it meets a piece still missing
-    // (torrent-tv/meta#151). One short line per piece: a 2.3 GB film is 563.
+    // WHEN each piece arrived, which decides how far an encoder reading the
+    // file can go before it meets a piece still missing (torrent-tv/meta#151),
+    // and WHY it came when it did: when its first block was asked and how long
+    // its blocks were in flight, and from whom (`piece-timing.js`). One line
+    // per piece: a 2.3 GB film is 563.
+    const timings = new PieceTimings();
+    torrent.on("wire", (wire) => {
+      // WebTorrent asks a wire for a block by calling `request` and states
+      // nothing; a request the wire refuses (choked, closed) is not queued and
+      // not counted.
+      if (typeof wire?.request !== "function") return;
+      const peer = String(wire.remoteAddress ?? "?");
+      const request = wire.request;
+      wire.request = function (index, offset, length, callback) {
+        const queued = this.requests.length;
+        const answer = request.call(this, index, offset, length, callback);
+        if (this.requests.length > queued) timings.asked(index, offset, peer, Date.now());
+        return answer;
+      };
+      wire.on("piece", (index, offset) => timings.arrived(index, offset, peer, Date.now()));
+    });
     torrent.on("verified", (piece) => {
-      logger.info(`download ${label()} verified piece=${piece}`);
+      logger.info(`download ${label()} verified piece=${piece}${describePieceTiming(timings.verified(piece, Date.now()))}`);
     });
 
     // The first connected peer, said once, because the wait for it can BE the

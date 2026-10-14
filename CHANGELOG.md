@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.3
 
 - **Perf**: The Matroska input an encoder reads admitted packets from writes each packet's cluster header into one buffer with plain arithmetic, instead of building every element apart, parsing its id from hex, splitting each number through BigInt and joining the parts. The bytes are the same; writing 12 000 small packets took 168 ms and takes 60 ms, and this writer was 54 s of the main thread in fifteen minutes of a two-hour AVI on Home Assistant (#ttv-178).
 

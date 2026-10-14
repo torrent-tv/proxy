@@ -189,6 +189,9 @@ export function wireOutputs({
     keyframeTables = new KeyframeTables(),
     videoEncoder = null,
     softwarePresetBenchmark = null,
+    // A software preset every picture is encoded at, for runs compared at one
+    // quality (`--pin-preset`); null leaves the choice to the machine.
+    pinnedPreset = null,
     // What every encoder this host may use was qualified and measured to do at
     // startup, by kind (`encode/calibration.js`). Takes the place of the one
     // array above, which a test may still hand in on its own.
@@ -771,8 +774,26 @@ export function wireOutputs({
   // Null where nothing was measured, and then nothing is re-encoded here.
   parts.calibration = calibration ?? null;
   const givenModes = Array.isArray(softwarePresetBenchmark) ? softwarePresetBenchmark : null;
+  // ONE PRESET FOR RUNS COMPARED AT ONE QUALITY. Three runs of one film on one
+  // host opened at `faster`, `veryfast` and `fast`, so no change could be
+  // compared at the same picture (r25, r26, r28, torrent-tv/meta#178). Pinned
+  // here, every decision that prices or chooses a software mode — the choice,
+  // the offer, the machine's admission and the command — sees the one mode,
+  // measured as calibrated. A preset calibration did not qualify is not
+  // pinned: the machine's own list stands, and the log says so.
+  let pinWarned = false;
+  const pinned = (modes) => {
+    if (!pinnedPreset || !Array.isArray(modes) || parts.encoders.current?.kind !== "software") return modes;
+    const kept = modes.filter(mode => mode.preset === pinnedPreset);
+    if (kept.length > 0) return kept;
+    if (!pinWarned) {
+      pinWarned = true;
+      logger.warn(`encode: --pin-preset ${pinnedPreset} names no calibrated mode (${modes.map(mode => mode.preset).join(", ")}); not pinned`);
+    }
+    return modes;
+  };
   Object.defineProperty(parts, "softwarePresetBenchmark", {
-    get: () => (parts.calibration
+    get: () => pinned(parts.calibration
       ? parts.calibration.modesFor(parts.encoders.current?.kind)
       : givenModes),
     enumerable: true

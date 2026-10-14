@@ -127,6 +127,9 @@ export async function startProxyServer({
   deliverySink = false,
   // Seconds of main-thread CPU profile from the first source opened; 0 is off.
   profileStartSeconds = 0,
+  // The one software preset every picture is encoded at, for runs compared at
+  // one quality; null leaves the choice to the machine.
+  pinnedPreset = null,
   // What viewers' connections carry beyond the film, per byte of film; the
   // transport counts it and is built after this server, so it is late-bound.
   serviceShare = () => null,
@@ -798,6 +801,7 @@ export async function startProxyServer({
   });
   let sourcePreparation;
   const outputParts = wireOutputs({
+    pinnedPreset,
     indexMemory,
     serviceShare,
     readMetadataActivity: () => containerOrchestrator.activity(),

@@ -11,6 +11,7 @@ import os from "node:os";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { logger } from "../../../utils/logger.js";
 import { availableShareFrom } from "../available-share.js";
+import { encoderCpuBetween } from "./encoder-cpu.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "../torrent-cost.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT, scatterOf } from "../learned-median.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode-run-state.js";
@@ -532,17 +533,23 @@ export class HostLoad {
    * the only thing that would have taken the next reading.
    */
   async #learnIdleAvailability(watched, suspended) {
-    const system = (await this.#host.readSystemCpu?.()) ?? null;
-    const sample = { takenAt: Date.now(), system, proxyCpuSeconds: this.#host.readProxyCpuSeconds() };
+    const [system, endedChildren] = await Promise.all([
+      this.#host.readSystemCpu?.() ?? null,
+      this.#host.readEndedChildrenCpuSeconds?.() ?? null
+    ]);
+    const sample = { takenAt: Date.now(), system, endedChildren, byPid: new Map(), proxyCpuSeconds: this.#host.readProxyCpuSeconds() };
     const previous = this.#idleAvailabilitySample;
     this.#idleAvailabilitySample = sample;
     if (previous === null) {
       this.hostAvailability = availableShareFrom({});
       return;
     }
+    // Nothing runs at either reading, and a run may still have run between
+    // them: what it used is in the ended-children time (`encoder-cpu.js`).
+    const encoders = encoderCpuBetween(previous, sample);
     const share = this.#host.shareOfMachine(
       { takenAt: previous.takenAt, processCpuSeconds: 0, system: previous.system },
-      { takenAt: sample.takenAt, processCpuSeconds: 0, system: sample.system }
+      { takenAt: sample.takenAt, processCpuSeconds: encoders?.seconds ?? 0, system: sample.system }
     );
     const proxyShare = this.#setAvailability(share, previous, sample);
     // Said while something is watched, so what is free while every encoder
@@ -559,7 +566,7 @@ export class HostLoad {
    * and the processor share divide; `free` is what nothing used over the
    * interval. Unknown stays `n/a`, never zero.
    */
-  async #sayMachine(share, proxyShare, running, suspended) {
+  async #sayMachine(share, proxyShare, running, suspended, incomplete = false) {
     const machine = await this.#host.readMachineState();
     // HOW LATE THIS THREAD'S LOOP RAN over the interval: every answer to FFmpeg
     // and every hand-over of a copy waits for it (torrent-tv/meta#178). Begun at
@@ -574,7 +581,8 @@ export class HostLoad {
     const asPercent = (value) => (value === null || value === undefined ? "n/a" : `${Math.round(value * 100)}%`);
     const free = Number.isFinite(share.systemShare) ? Math.max(0, 1 - share.systemShare) : null;
     logger.info(
-      `host-load: ffmpeg=${asPercent(share.processShare)} proxy=${asPercent(proxyShare)} ` +
+      `host-load: ffmpeg=${incomplete ? `at least ${asPercent(share.processShare)} (a run was not read; availability kept)` : asPercent(share.processShare)} ` +
+      `proxy=${asPercent(proxyShare)} ` +
       `system=${asPercent(share.systemShare)} ` +
       `iowait=${asPercent(share.iowaitShare)} cpu=${machine.megahertz === null ? "n/a" : `${machine.megahertz}MHz`} ` +
       `temp=${machine.celsius === null ? "n/a" : `${machine.celsius}C`} ` +
@@ -646,22 +654,28 @@ export class HostLoad {
     // alone would print something like `ffmpeg=-598%`. Only pids present in
     // BOTH readings are counted, so a process that came or went contributes
     // nothing rather than a lie.
-    const pids = encoding.flatMap((session) => this.#host.liveRunsOf(session).map((run) => run.process?.pid ?? null)).filter((pid) => pid !== null);
-    const [system, ...cpuReadings] = await Promise.all([
+    const runs = encoding.flatMap((session) => this.#host.liveRunsOf(session)).filter((run) => Number.isInteger(run.process?.pid));
+    const [system, endedChildren, ...cpuReadings] = await Promise.all([
       this.#host.readSystemCpu(),
-      ...pids.map((pid) => this.#host.readProcessCpuSeconds(pid))
+      this.#host.readEndedChildrenCpuSeconds?.() ?? null,
+      ...runs.map((run) => this.#host.readProcessCpuSeconds(run.process.pid))
     ]);
     /** @type {Map<number, number>} */
     const byPid = new Map();
-    pids.forEach((pid, index) => {
+    /** @type {Map<number, number>} */
+    const startedAt = new Map();
+    runs.forEach((run, index) => {
       const seconds = cpuReadings[index];
       if (seconds !== null) {
-        byPid.set(pid, seconds);
+        byPid.set(run.process.pid, seconds);
+        startedAt.set(run.process.pid, run.startedAt);
       }
     });
     const sample = {
       takenAt: Date.now(),
       byPid,
+      startedAt,
+      endedChildren,
       system,
       // The proxy's own CPU, across every thread: the torrent, the hashing, the
       // piece store and the delivery. None of it is in the encode budget, and
@@ -674,20 +688,14 @@ export class HostLoad {
     if (previous === null) {
       return false; // the first reading is only something to compare against
     }
-    // Summed over the pids both readings hold, so nothing is measured against a
-    // process that was not there before. Unknown stays unknown: on a host with
-    // no `/proc` there are no readings at all, and the share is null rather
-    // than a confident zero.
-    let encoderDelta = null;
-    for (const [pid, seconds] of sample.byPid) {
-      const before = previous.byPid?.get(pid);
-      if (before !== undefined && seconds >= before) {
-        encoderDelta = (encoderDelta ?? 0) + (seconds - before);
-      }
-    }
+    // Every process counted once, including runs that started or ended between
+    // the readings (`encoder-cpu.js`). Unknown stays unknown: on a host with no
+    // `/proc` there are no readings at all, and the share is null rather than a
+    // confident zero.
+    const encoders = encoderCpuBetween(previous, sample);
     const share = this.#host.shareOfMachine(
-      { takenAt: previous.takenAt, processCpuSeconds: encoderDelta === null ? null : 0, system: previous.system },
-      { takenAt: sample.takenAt, processCpuSeconds: encoderDelta, system: sample.system }
+      { takenAt: previous.takenAt, processCpuSeconds: encoders === null ? null : 0, system: previous.system },
+      { takenAt: sample.takenAt, processCpuSeconds: encoders?.seconds ?? null, system: sample.system }
     );
     if (share === null) {
       this.hostAvailability = availableShareFrom({});
@@ -701,6 +709,12 @@ export class HostLoad {
     // they stopped).
     const suspended = encoding.filter((session) => this.#host.runStateOf(session) === ENCODE_RUN_STATE.SUSPENDED).length;
     const running = encoding.length - suspended;
+    if (encoders && !encoders.complete) {
+      // A lower bound of our own load is not a reading of what other work left
+      // us: the last availability stands, and the line says so.
+      await this.#sayMachine(share, null, running, suspended, true);
+      return false;
+    }
     // Kept for the quality offer, which predicts from a benchmark taken on a
     // QUIET host: the same reading that is printed here says how much of the
     // machine a new encoder could actually have. Only what nobody has been

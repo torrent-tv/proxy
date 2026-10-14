@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The machine's share left to encoders counts every FFmpeg run between two readings: a run that started since the first is counted whole, and one that ended since is counted from the time the kernel keeps for this process's ended children, less what the first reading already counted of it. Only runs present in both readings were counted, so a run that started and ended between two readings 5 s apart left `ffmpeg=0%` beside 6.65 s of its CPU, and that work was taken for other processes' (r41, Home Assistant). A share that cannot be told whole keeps the last availability, and its line says so (#ttv-178).
+
 ## 2.98.15
 
 - **Fix**: An AVI picture's input no longer waits behind the soundtrack's packet table of the whole film. A statement a container answers from what it has already read — the track table, the media facts, and an AVI's source navigation and source ranges once its index is read — is answered beside the file's read queue instead of after every read asked before it; the index is read once for any number of asks at once. On Home Assistant the picture's first input of a cold AVI waited about 4 s behind that table, which it does not use (r38, #ttv-178).

@@ -93,6 +93,34 @@ export async function readProcessCpuSeconds(pid) {
 }
 
 /**
+ * The CPU time every child of this process that has ended has used, from the
+ * `cutime` and `cstime` of `/proc/self/stat`: the kernel adds a child's time
+ * there when the child is waited for, which Node does as soon as it exits.
+ *
+ * What a process that started and ended between two readings of its own pid
+ * cost, which no reading of that pid can say: on Home Assistant a run of one
+ * piece started and ended between two readings 5 s apart, used 6.65 s of CPU,
+ * and both readings said `ffmpeg=0%` (r41, torrent-tv/meta#178).
+ *
+ * @returns {Promise<number | null>} Seconds of CPU, or null where there is no `/proc`.
+ */
+export async function readEndedChildrenCpuSeconds() {
+  try {
+    const text = await readFile("/proc/self/stat", "utf8");
+    const afterComm = text.slice(text.lastIndexOf(")") + 2).trim().split(/\s+/);
+    // After the comm and state fields, cutime is index 13 and cstime index 14.
+    const cutime = Number(afterComm[13]);
+    const cstime = Number(afterComm[14]);
+    if (!Number.isFinite(cutime) || !Number.isFinite(cstime)) {
+      return null;
+    }
+    return (cutime + cstime) / CLOCK_TICKS_PER_SECOND;
+  } catch {
+    return null; // not Linux, or /proc is not mounted
+  }
+}
+
+/**
  * Is this still the machine the benchmarks were taken on: its clock and its
  * temperature.
  *

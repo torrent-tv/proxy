@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.6
 
 - **Perf**: An encoder input waiting for its bytes is tried again only when some of them arrive: the torrent thread names the bytes of each piece it verifies. It was tried at every piece verified anywhere in the file, and a seek's input was prepared 28 times in 8.5 s on Home Assistant, each try asking the torrent thread which ranges it holds (171 ms on average) (#ttv-178).
 - **Fix**: A priority map reaches the swarm when it is applied: the selection of what is fetched first was worked out again only at the next piece verified or the pool's timer, so after a seek on Home Assistant the swarm went on fetching the old first class for 1.16 s (#ttv-178).

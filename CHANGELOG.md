@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.13
 
 - **Fix**: A run's open, from which the next stretch is sized, leaves out the time FFmpeg waited for the stretch to be copied again. The wait was taken up to the run's time to its first piece used as a moment on the wall clock, which lay before every wait, so none was ever left out (#ttv-178).
 

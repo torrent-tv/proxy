@@ -16,8 +16,8 @@ import { handleMediaGet } from "./routes/media/get.js";
 import { ProbeRequests } from "./services/media/ProbeRequests.js";
 import { IndexMemory } from "./services/storage/IndexMemory.js";
 import { probePackets } from "./services/media/probe-packets.js";
-import { segmentDemands, sourceDeadline } from "./services/viewer/segment-demands.js";
-import { expandToTargetInputs } from "./services/viewer/target-input-expansion.js";
+import { trackChoicesOf } from "./services/viewer/segment-demands.js";
+import { PlaybackProjection } from "./services/torrent/PlaybackProjection.js";
 import { SegmentInputTable } from "./services/viewer/segment-input-table.js";
 import { SourcePreparation } from "./services/viewer/SourcePreparation.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
@@ -62,7 +62,6 @@ import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
 import { containerOrchestrator, CONTAINER_HEAD_BYTES, describeWorkTags } from "./services/media/ContainerOrchestrator.js";
 import { readPlaybackDeclarations } from "./services/media/read-playback-declarations.js";
 import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
-import { passInputs, samePass } from "./services/viewer/playback-pass.js";
 import { nativeSourceMap, nativeOriginalSourceMap } from "./services/viewer/NativeSourceMap.js";
 import { MediaReadRequests } from "./services/media/MediaReadRequests.js";
 import { SegmentInputs } from "./services/media/SegmentInputs.js";
@@ -188,7 +187,8 @@ export async function startProxyServer({
       downloadMaps.retire(sourceKey);
       for (const key of segmentSourceRanges.keys()) if (key.startsWith(`${sourceKey}:`)) segmentSourceRanges.delete(key);
       for (const key of segmentReadings.keys()) if (key.startsWith(`${sourceKey}:`)) segmentReadings.delete(key);
-      for (const key of resolvedPasses.keys()) if (key.startsWith(`${sourceKey}:`)) resolvedPasses.delete(key);
+      for (const key of playbackProjections.keys()) if (key.startsWith(`${sourceKey}:`)) playbackProjections.delete(key);
+      for (const key of madeRates.keys()) if (key.startsWith(`${sourceKey}:`)) madeRates.delete(key);
       segmentInputs.forget(sourceKey);
       outputParts.encodeInputs?.bytesChanged();
     },
@@ -487,37 +487,67 @@ export async function startProxyServer({
     records.set(demand.index, record);
     return record;
   };
-  /**
-   * The last complete pass over each file, by file: what it was worked out
-   * from and what it resolved (`playback-pass.js`); forgotten with the source.
-   */
-  const resolvedPasses = new Map();
+  /** What the torrent is told of each played file, kept from map to map (`PlaybackProjection`); forgotten with the source. */
+  const playbackProjections = new Map();
   /** Which source bytes each segment of an output reads, for the forecast (`segment-input-table.js`). */
   const segmentInputs = new SegmentInputTable();
-  // WHAT THE PASSES COST, said once a minute: how many were taken whole from
-  // the last one and how many worked out again, how many segments and ranges
-  // those went through, how many zones they built, and the time from a pass's
-  // start to its result — which includes waits for reads, so it bounds the
-  // main thread's share rather than measuring it. A pass worked out again
-  // whose zones state the same bytes as the last is the repeated work worth
-  // removing; how often that happens is what the map's own "unchanged not
-  // sent" count says (torrent-tv/meta#178 review).
-  const passCosts = { since: Date.now(), reused: 0, worked: 0, incomplete: 0, segments: 0, ranges: 0, zones: 0, built: 0, buildMs: 0, ms: 0, maxMs: 0 };
-  const notePass = ({ reused = false, complete = true, segments = 0, ranges = 0, zones = 0, ms = 0 }) => {
-    if (reused) passCosts.reused += 1;
-    else {
-      passCosts.worked += 1;
-      if (!complete) passCosts.incomplete += 1;
-      passCosts.segments += segments; passCosts.ranges += ranges; passCosts.zones += zones;
-      passCosts.ms += ms; passCosts.maxMs = Math.max(passCosts.maxMs, ms);
+  /** An output's cut grid, checked once for each timeline. */
+  const checkedGrids = new WeakMap();
+  const gridOf = (output) => {
+    const timeline = output.timeline;
+    if (!timeline || typeof timeline !== "object") return null;
+    if (checkedGrids.has(timeline)) return checkedGrids.get(timeline);
+    const grid = timeline.published ?? timeline.boundaries;
+    if (!Array.isArray(grid)) {
+      checkedGrids.set(timeline, null);
+      return null;
     }
+    for (let index = 0; index + 1 < grid.length; index++) {
+      if (!Number.isFinite(grid[index]) || !Number.isFinite(grid[index + 1]) || !(grid[index + 1] > grid[index])) {
+        throw new Error("An output segment needs a valid interval.");
+      }
+    }
+    checkedGrids.set(timeline, grid);
+    return grid;
+  };
+  /**
+   * How many bytes a second of an output's film takes, from what it has made,
+   * read again only when what it has made changes (`SegmentStore.revisionOf`):
+   * summed over every made segment on every pass, it was a walk of the whole
+   * film a second (torrent-tv/meta#178).
+   */
+  const madeRates = new Map();
+  const bytesPerSecondOf = (output, revision) => {
+    const kept = madeRates.get(output.outputKey);
+    if (kept && kept.revision === revision && kept.timeline === output.timeline) return kept.bytesPerSecond;
+    let bytes = 0, seconds = 0;
+    for (const [index, size] of outputParts.segmentStore.sizesOf(output.outputKey)) {
+      const span = output.timeline.publishedStartOf(index + 1) - output.timeline.publishedStartOf(index);
+      if (span > 0) { bytes += size; seconds += span; }
+    }
+    const bytesPerSecond = seconds > 0 ? bytes / seconds : null;
+    madeRates.set(output.outputKey, { revision, timeline: output.timeline, bytesPerSecond });
+    return bytesPerSecond;
+  };
+  // WHAT THE PASSES COST, said once a minute: how many maps were taken, how
+  // many segments a map made the projection work out again and how many of
+  // those maps it worked out whole, how many segments had their ranges worked
+  // out, the windows told, and the time from a pass's start to its result —
+  // which includes waits for reads, so it bounds the main thread's share
+  // rather than measuring it (torrent-tv/meta#178).
+  const passCosts = { since: Date.now(), passes: 0, whole: 0, reworked: 0, resolved: 0, windows: 0, ms: 0, maxMs: 0 };
+  const notePass = ({ whole = false, reworked = 0, resolved = 0, windows = 0, ms = 0 }) => {
+    passCosts.passes += 1;
+    if (whole) passCosts.whole += 1;
+    passCosts.reworked += reworked; passCosts.resolved += resolved; passCosts.windows += windows;
+    passCosts.ms += ms; passCosts.maxMs = Math.max(passCosts.maxMs, ms);
     const now = Date.now();
     if (now - passCosts.since < 60_000) return;
-    logger.info(`download map passes in ${((now - passCosts.since) / 1000).toFixed(1)}s: ${passCosts.reused} taken whole from the last, ` +
-      `${passCosts.worked} worked out (${passCosts.incomplete} incomplete) over ${passCosts.segments} segment(s) and ${passCosts.ranges} range(s), ` +
-      `giving ${passCosts.zones} zone(s); ${Math.round(passCosts.ms)}ms from start to result in all, longest ${Math.round(passCosts.maxMs)}ms; ` +
-      `${passCosts.built} zone list(s) built for the map in ${Math.round(passCosts.buildMs)}ms`);
-    Object.assign(passCosts, { since: now, reused: 0, worked: 0, incomplete: 0, segments: 0, ranges: 0, zones: 0, built: 0, buildMs: 0, ms: 0, maxMs: 0 });
+    logger.info(`download map passes in ${((now - passCosts.since) / 1000).toFixed(1)}s: ${passCosts.passes} map(s), ` +
+      `${passCosts.whole} worked out whole, ${passCosts.reworked} segment(s) worked out again, ` +
+      `${passCosts.resolved} segment(s) had their ranges worked out, ${passCosts.windows} window(s) told; ` +
+      `${Math.round(passCosts.ms)}ms from start to result in all, longest ${Math.round(passCosts.maxMs)}ms`);
+    Object.assign(passCosts, { since: now, passes: 0, whole: 0, reworked: 0, resolved: 0, windows: 0, ms: 0, maxMs: 0 });
   };
   const downloadMaps = new DownloadMaps({
     // The ranges a picture reads at open are named again by every segment;
@@ -530,11 +560,16 @@ export async function startProxyServer({
     publish: (map) => torrentPool.setPriorityMap({ ...map, zones: withoutRepeatedZones(map.zones) }),
     // And what is sent is packed: a stretch of one level and priority is one
     // window, not one zone per range of each of its segments
-    // (`coalescedZones`, torrent-tv/meta#178).
+    // (`coalescedZones`, torrent-tv/meta#178). The playback zones come packed
+    // already from the projection; this packs them with the native ones.
     pack: (zones) => coalescedZones(zones),
     log: (line) => logger.info(line),
     resolvePlayback: async (map) => {
-      if (map.zones.length === 0) return [];
+      const fileKey = `${map.sourceKey}:${map.fileIndex}`;
+      if (map.zones.length === 0) {
+        playbackProjections.get(fileKey)?.clear();
+        return [];
+      }
       const params = await containerOver(map);
       if (!params || !map.isCurrent()) return [];
       const tracks = await containerOrchestrator.inspect(params, "tracks");
@@ -548,67 +583,47 @@ export async function startProxyServer({
       // ranges closer than a piece hold the same pieces as one.
       const pieceLength = Number(torrentPool.knownTorrent(map.sourceKey)?.pieceLength);
       const passStartedAt = performance.now();
-      let rangeCount = 0;
-      const converted = [];
-      const demands = [];
-      // What each output's next run would copy, asked of the swarm as one group
-      // with its first segment (`target-input-expansion.js`).
-      const targets = new Map();
-      const expanded = () => {
-        const startedAt = performance.now();
-        const zones = expandToTargetInputs(converted, outputKey => targets.get(outputKey) ?? null);
-        passCosts.built += 1;
-        passCosts.buildMs += performance.now() - startedAt;
-        return zones;
-      };
+      // THE PROJECTION IS KEPT while what it was made from stands: the file's
+      // tracks, where its clock starts and how the torrent fetches. Any of them
+      // changed, every segment's ranges are other ranges.
+      let projection = playbackProjections.get(fileKey);
+      if (!projection || projection.trackList !== tracks.value || projection.shift !== shift ||
+        !Object.is(projection.pieceLength, pieceLength)) {
+        projection?.clear();
+        projection = new PlaybackProjection();
+        Object.assign(projection, { trackList: tracks.value, shift, pieceLength });
+        playbackProjections.set(fileKey, projection);
+      }
+      // Every output of this file somebody is watching, with what decides how
+      // long its segments take to make and deliver, what it has made, and what
+      // its next run would copy.
+      const played = [];
+      /** By output: what its segments read and how they are looked up. */
+      const readers = new Map();
       for (const output of outputParts.outputs.values()) {
         if (output.file.sourceKey !== map.sourceKey) continue;
         const consumers = [...outputParts.viewers.forOutput(output).values()].filter(viewer =>
           viewer.isPresent() && !outputParts.outputs.supersededBy(output, viewer.activeVariantId ?? null));
         if (consumers.length === 0) continue;
-        targets.set(output.outputKey, outputParts.encodeInputs?.targetInputBytes?.(output) ?? null);
-        const inventory = outputParts.segmentStore.sizesOf(output.outputKey);
-        let bytes = 0, seconds = 0;
-        for (const [index, size] of inventory) {
-          const span = output.timeline.publishedStartOf(index + 1) - output.timeline.publishedStartOf(index);
-          if (span > 0) { bytes += size; seconds += span; }
-        }
+        const choices = trackChoicesOf(output, map.fileIndex);
+        if (choices.length === 0) continue;
+        const grid = gridOf(output);
+        if (!grid) continue;
+        const revision = outputParts.segmentStore.revisionOf(output.outputKey);
         const links = consumers.map(viewer => viewer.linkReading()?.linkMbps)
           .filter(value => Number.isFinite(value) && value > 0);
-        const encodeSpeed = outputParts.encodeCost.latestSpeedReadingOf(output)?.speed;
-        const linkMbps = links.length ? Math.min(...links) : null;
-        const records = segmentRecordsOf(map, output);
-        const facts = { timeline: output.timeline, trackList: tracks.value, shift, map };
-        // Each demand is this pass's own object (`segmentDemands`), so it is
-        // completed in place rather than copied.
-        for (const demand of segmentDemands(output, map.fileIndex, map.zones)) {
-          if (inventory.has(demand.index)) continue;
-          const deadlineAt = sourceDeadline(demand, { encodeSpeed,
-            outputBytes: seconds > 0 ? bytes / seconds * (demand.to - demand.from) : null, linkMbps });
-          const record = segmentRecordOf(records, demand, facts);
-          demand.leadSeconds = Number.isFinite(demand.deadlineAt) ? Math.max(0, (demand.deadlineAt - deadlineAt) / 1000) : 0;
-          demand.deadlineAt = deadlineAt;
-          demand.outputKey = output.outputKey;
-          demand.sourceInterval = record.sourceInterval;
-          demand.record = record;
-          demands.push(demand);
-        }
+        played.push({ outputKey: output.outputKey, grid,
+          encodeSpeed: outputParts.encodeCost.latestSpeedReadingOf(output)?.speed,
+          bytesPerSecond: bytesPerSecondOf(output, revision), linkMbps: links.length ? Math.min(...links) : null,
+          readyRevision: revision, ready: () => outputParts.segmentStore.sizesOf(output.outputKey),
+          target: outputParts.encodeInputs?.targetInputBytes?.(output) ?? null });
+        readers.set(output.outputKey, { records: segmentRecordsOf(map, output), choices,
+          facts: { timeline: output.timeline, trackList: tracks.value, shift, map } });
       }
-      demands.sort((left, right) => left.deadlineAt - right.deadlineAt || right.priority - left.priority || left.index - right.index);
-      // WHAT THIS PASS IS WORKED OUT FROM, compared with the last complete pass
-      // over the file (`resolvedPasses`): the outputs and their targets, how the
-      // torrent fetches and where the file's clock starts, and every segment
-      // asked for, in the order of its deadline, with its level and priority.
-      const fileKey = `${map.sourceKey}:${map.fileIndex}`;
-      const pass = { tracks: tracks.value, ...passInputs({ pieceLength, shift, targets, demands }) };
-      const last = resolvedPasses.get(fileKey);
-      if (samePass(last, pass)) {
-        notePass({ reused: true });
-        return last.result;
-      }
-      // Kept only from a pass that worked every segment out; one that met a
-      // reading not there yet is worked out again until it is.
-      let complete = true;
+      // WHAT THE MAP CHANGED, and only that, is worked out again here.
+      projection.update({ zones: map.zones, outputs: played });
+      const reworked = projection.lastUpdate;
+      let resolved = 0;
       // A container that names the bytes of an interval from an index it holds
       // answers every segment by arithmetic: once that index is read
       // ("source-navigation"), the ranges are computed here directly instead of
@@ -628,22 +643,21 @@ export async function startProxyServer({
       // two-hour AVI (torrent-tv/meta#178).
       const waiting = new Set();
       const turn = takeTurns();
-      /** One download interval per map zone, shared by the segments it owns: read, never changed. */
-      const downloadIntervals = new Map();
-      const downloadIntervalOf = (owner) => {
-        let interval = downloadIntervals.get(owner);
-        if (!interval) downloadIntervals.set(owner, interval = { from: owner.from, to: owner.to });
-        return interval;
-      };
-      for (const zone of demands) {
+      // ONLY THE SEGMENTS WHOSE RANGES ARE NOT KNOWN are worked out, in the
+      // order the swarm is to fetch them.
+      for (const zone of projection.unresolved()) {
         if (!map.isCurrent()) return [];
-        // WHAT A SEGMENT READS IS WORKED OUT ONCE, not on every publication
-        // (`segmentRecordOf`). Rebuilt for every segment of the film on every
-        // map, this pass held the main thread up to 1.5 s at a time on Home
-        // Assistant (torrent-tv/meta#178).
-        const { record } = zone;
+        const reader = readers.get(zone.outputKey);
+        if (!reader) continue;
+        // WHAT A SEGMENT READS IS WORKED OUT ONCE (`segmentRecordOf`). Rebuilt
+        // for every segment of the film on every map, this pass held the main
+        // thread up to 1.5 s at a time on Home Assistant (torrent-tv/meta#178).
+        const record = segmentRecordOf(reader.records, { index: zone.index, tracks: reader.choices }, reader.facts);
         const reading = record.reading;
-        if (!reading) continue;
+        if (!reading) {
+          projection.setUnreadable(zone.outputKey, zone.index);
+          continue;
+        }
         const { wanted, modes, interval, rangesKey } = reading;
         const convert = ranges => {
           if (record.ranges !== ranges || record.pieceLength !== pieceLength) {
@@ -652,23 +666,14 @@ export async function startProxyServer({
             record.joined = joinedWithinPieces(ranges, pieceLength);
           }
           const joined = record.joined;
-          rangeCount += joined.length;
           // What the segment reads is kept for the forecast in a table of its
           // own, whatever form the torrent is told it in.
           if (record.registered !== joined) {
             segmentInputs.set(map.sourceKey, map.fileIndex, zone.outputKey, zone.index, joined);
             record.registered = joined;
           }
-          // ONE ZONE FOR THE SEGMENT, its demand stated once for all the
-          // ranges it reads. The demand — level, priority, deadline, the map
-          // zone it belongs to — is this pass's; the ranges are the list kept
-          // for the segment, unchanged from pass to pass. A zone for each
-          // range copied the demand into every one: ten thousand objects a
-          // pass over a two-hour AVI, made again 21-61 times a minute on Home
-          // Assistant (r26, torrent-tv/meta#178).
-          converted.push({ index: zone.index, from: zone.from, to: zone.to, priority: zone.priority, urgent: zone.urgent,
-            behind: zone.behind, deferred: zone.deferred, deadlineAt: zone.deadlineAt, leadSeconds: zone.leadSeconds,
-            outputKey: zone.outputKey, downloadInterval: downloadIntervalOf(zone.owner), ranges: joined });
+          projection.setRanges(zone.outputKey, zone.index, joined);
+          resolved += 1;
         };
         // The bytes one segment needs are a fact of the file and the output, so
         // they are worked out once. A whole film is thousands of segments and
@@ -677,10 +682,10 @@ export async function startProxyServer({
         // were never asked for (Home Assistant 2026-10-08, torrent-tv/meta#151).
         const known = record.ranges ?? segmentSourceRanges.get(rangesKey);
         if (known) { convert(known); continue; }
-        if (waiting.has(zone.outputKey)) { complete = false; continue; }
+        if (waiting.has(zone.outputKey)) continue;
         // What is resolved so far is stated before a lower zone is worked out
         // (DownloadMaps, torrent-tv/meta#178).
-        map.workingOut?.(zone.priority, expanded);
+        map.workingOut?.(zone.priority, () => projection.windows());
         if (direct) {
           // Asked per zone too: a soundtrack of an AVI is read from its own
           // packets, which the same index states (torrent-tv/meta#166).
@@ -710,10 +715,9 @@ export async function startProxyServer({
           requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
           demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
         if (!map.isCurrent()) return [];
-        if (!intervalParams) { complete = false; continue; }
+        if (!intervalParams) continue;
         const navigation = await containerOrchestrator.inspect(intervalParams, "source-navigation");
         if (navigation.kind !== "result") {
-          complete = false;
           if (navigation.kind === "needs-ranges" || navigation.kind === "needs-memory") waiting.add(zone.outputKey);
           continue;
         }
@@ -721,16 +725,15 @@ export async function startProxyServer({
         const packets = await containerOrchestrator.inspect(intervalParams, originalRanges ? "source-ranges" : "packets");
         if (!map.isCurrent()) return [];
         if (packets.kind === "needs-memory") waiting.add(zone.outputKey);
-        if (packets.kind !== "result") { complete = false; continue; }
+        if (packets.kind !== "result") continue;
         const input = originalRanges ? packets.value : new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
-        if (input.kind !== "result") { complete = false; continue; }
+        if (input.kind !== "result") continue;
         segmentSourceRanges.set(rangesKey, input.ranges);
         convert(input.ranges);
       }
-      const result = expanded();
-      notePass({ complete, segments: converted.length, ranges: rangeCount, zones: result.length, ms: performance.now() - passStartedAt });
-      if (complete) resolvedPasses.set(fileKey, { ...pass, result });
-      else resolvedPasses.delete(fileKey);
+      const result = projection.windows();
+      notePass({ whole: reworked.whole, reworked: reworked.segments, resolved, windows: result.length,
+        ms: performance.now() - passStartedAt });
       return result;
     }
   });
@@ -1001,6 +1004,7 @@ export async function startProxyServer({
           mediaReads.retain(sourceKey, fileIndex, params => params.requestId?.startsWith("prepare:"));
           if (!outputParts.viewers.forSource(sourceKey).length) probeReads.forget(sourceKey, fileIndex);
           await downloadMaps.forget(sourceKey, fileIndex, { keepPreparation: true });
+          playbackProjections.get(`${sourceKey}:${fileIndex}`)?.clear();
           return;
         }
         await downloadMaps.playback({ sourceKey, fileIndex, durationSeconds, zones });

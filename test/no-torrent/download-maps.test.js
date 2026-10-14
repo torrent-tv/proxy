@@ -572,8 +572,9 @@ test("native zones wanted within some seconds are packed again on each publicati
 });
 
 test("a pass that hands back the zones it resolved before is not packed again", async () => {
-  // `resolvedPasses` in server.js hands back the last pass's zones when the
-  // pass is worked out from the same things (torrent-tv/meta#178).
+  // A resolver that hands back the zones it resolved before — the projection
+  // in server.js hands back its windows while nothing in them has changed
+  // (torrent-tv/meta#178).
   let packed = 0;
   const resolved = [{ from: 0, to: 10, priority: 100, urgent: true, deadlineAt: 5_000, outputKey: "out", index: 0, byteStart: 0, byteEnd: 999 }];
   const maps = new DownloadMaps({ publish: async () => undefined, pack: zones => { packed += 1; return coalescedZones(zones, 0); },
@@ -670,4 +671,41 @@ test("a segment whose map zone moved its bounds keeps its bytes stated, and is s
   finish();
   await moving;
   assert.deepEqual(stated(), [[0, 99, 95], [1000, 1999, 95]]);
+});
+
+test("windows a resolver keeps current stand as they are until it states them again", async () => {
+  // The projection of a file's segments (`PlaybackProjection`) brings its
+  // windows to each map itself, so a new map neither withdraws nor reprices
+  // them meanwhile, an early statement is not doubled with the windows stated
+  // before, and windows already packed are not packed again
+  // (torrent-tv/meta#178).
+  const sent = [];
+  let packed = 0;
+  let release = null;
+  let windows = [{ byteStart: 0, byteEnd: 999, priority: 100, urgent: true, deadlineAt: 5_000, standing: true }];
+  const maps = new DownloadMaps({ publish: async map => sent.push(map), pack: zones => { packed += 1; return coalescedZones(zones, 0); },
+    resolvePlayback: async map => {
+      if (release) await new Promise(resolve => { const go = release; release = null; go(resolve); });
+      map.workingOut(100, () => windows);
+      return windows;
+    } });
+  const file = { sourceKey: "source", fileIndex: 0, durationSeconds: 30 };
+  await maps.playback({ ...file, zones: [{ from: 0, to: 10, priority: 100, urgent: true, deadlineAt: 5_000 }] });
+  assert.equal(packed, 0, "windows packed by their resolver are not packed again");
+  let finish = null;
+  release = resolve => { finish = resolve; };
+  // A seek far away: the windows stand while the pass is under way.
+  const moving = maps.playback({ ...file, zones: [{ from: 20, to: 30, priority: 100, urgent: true, deadlineAt: 9_000 }] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [0]);
+  windows = [{ byteStart: 2000, byteEnd: 2999, priority: 100, urgent: true, deadlineAt: 9_000, standing: true }];
+  const before = sent.length;
+  finish();
+  await moving;
+  assert.ok(sent.length > before);
+  for (const map of sent.slice(before)) {
+    assert.deepEqual(map.zones.map(zone => zone.byteStart), [2000], "the early statement is not doubled with the windows before");
+  }
+  assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [2000], "the windows stated now, not with the ones before");
+  assert.equal(packed, 0);
 });

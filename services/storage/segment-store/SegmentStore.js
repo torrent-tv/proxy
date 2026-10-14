@@ -139,6 +139,9 @@ export class SegmentStore {
    */
   #inits = new Map();
 
+  /** The last number handed out by `revisionOf`'s readings. */
+  #revisions = 0;
+
   /** Told of every segment published, whatever it is. @type {Set<(key: string, index: number) => void>} */
   #publishedListeners = new Set();
 
@@ -332,7 +335,8 @@ export class SegmentStore {
       this.#held.delete(key);
       return empty;
     }
-    const contents = { readAt: mtime, byNumber, sizes, bytes, unproven: highest, largest, followed: watched };
+    const contents = { readAt: mtime, byNumber, sizes, bytes, unproven: highest, largest, followed: watched,
+      revision: ++this.#revisions };
     this.#held.set(key, contents);
     return contents;
   }
@@ -361,6 +365,7 @@ export class SegmentStore {
       return;
     }
     contents.bytes += size - (contents.sizes.get(index) ?? 0);
+    contents.revision = ++this.#revisions;
     contents.byNumber.set(index, full);
     contents.sizes.set(index, size);
     if (index > contents.unproven) contents.unproven = index;
@@ -381,6 +386,7 @@ export class SegmentStore {
       return;
     }
     contents.bytes -= contents.sizes.get(index) ?? 0;
+    contents.revision = ++this.#revisions;
     contents.byNumber.delete(index);
     contents.sizes.delete(index);
     if (contents.unproven === index) contents.unproven = Math.max(-1, ...contents.byNumber.keys());
@@ -438,6 +444,20 @@ export class SegmentStore {
    */
   sizesOf(key) {
     return new Map(this.refresh(key).sizes ?? []);
+  }
+
+  /**
+   * A number that moves whenever what this output holds changes, and only
+   * then: whoever keeps a reading of `sizesOf` reads it again when this moves
+   * rather than on every question. Unique across outputs and across the
+   * lifetimes of one output's directory, so a directory made again does not
+   * repeat an earlier number (torrent-tv/meta#178).
+   *
+   * @param {string} key
+   * @returns {number}
+   */
+  revisionOf(key) {
+    return this.refresh(key).revision ?? 0;
   }
 
   /**

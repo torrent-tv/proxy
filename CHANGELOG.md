@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.10
 
 - **Fix**: The start forecast summarizes the output's whole window of encoder speed readings on each poll, in the order they were taken: two runs of one output can report out of order, and a summary kept and added to dropped the reading told second and taken first (#ttv-178).
 

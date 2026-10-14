@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.0
 
 - **Fix**: Preparing a quality step the master lists but the offer no longer holds is answered as not available now (409, with the heights offered) instead of "no such variant". The proxy can withdraw its ask while the page is already preparing the step: on Home Assistant 360p was asked for, the offer moved back to 400p two seconds later, and the page's preparation arriving after it was refused as if the step did not exist (#ttv-178).
 - **Fix**: Choosing the preset of a new picture output prices decoding from this file's own measured cost where its encoder has already been read, as the opening of the output does; the choice used the startup model in its place. Each choice is logged once with what it was made from: the sizes and presets priced and their speeds, the speed they had to clear, the decode cost used, the machine's free share and the work already committed. Three runs of one film on Home Assistant opened at three presets and nothing said why (#ttv-178).

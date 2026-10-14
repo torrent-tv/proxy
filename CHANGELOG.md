@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.14
 
 - **Fix**: Each verified piece says when its first block was asked of the swarm, how many block asks went to how many peers, and how long its slowest and its last block were in flight and from whom; WebTorrent states no outgoing request, so a piece verified last could not be told apart as asked late or held by a slow peer (#ttv-178). The subscription to a request event nothing emits is gone.
 

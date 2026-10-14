@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.18
 
 - **Fix**: A block of a waited piece is asked of a second peer only once its request to the first has been out a wire's queue time (1 s, what WebTorrent sizes a queue to), and the tail is looked at again the moment such a block becomes late. Copied as soon as the tail was short, 12-16 blocks of nearly every piece were asked twice and 82 of 215 copies arrived after their piece was complete (r41, Home Assistant, #ttv-178).
 

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.12
 
 - **Fix**: The encoder plan scores "never" as one figure for every arrangement it compares, later than any encoder can arrive: capped at the film's length, an encoder making the film behind the viewer at 0.57x scored the same as none and was stopped before its first piece, then started again when the speed read 1.9x — thirteen times in three minutes on Home Assistant, each start copying 108-122 MB of input (#ttv-178).
 

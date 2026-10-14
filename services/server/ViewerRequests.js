@@ -61,6 +61,27 @@ export class ViewerRequests {
   /** @type {WeakMap<object, Map<string, object>>} */
   #rateStateBySession = new WeakMap();
   /**
+   * What the start forecasts cost, said once a minute: how many there were,
+   * their time on the main thread, and for each track whether the times of its
+   * pieces were kept from the last poll or why they were worked out again. In
+   * r37 the forecast took 19.2 s of Home Assistant's main thread in 15 minutes
+   * and the times were mostly worked out again (torrent-tv/meta#178).
+   */
+  #forecastCosts = { since: Date.now(), polls: 0, ms: 0, maxMs: 0, times: new Map() };
+
+  #noteForecast(ms, reasons) {
+    const costs = this.#forecastCosts;
+    costs.polls += 1; costs.ms += ms; costs.maxMs = Math.max(costs.maxMs, ms);
+    for (const reason of reasons) costs.times.set(reason, (costs.times.get(reason) ?? 0) + 1);
+    const now = Date.now();
+    if (now - costs.since < 60_000) return;
+    logger.info(`start forecasts in ${((now - costs.since) / 1000).toFixed(1)}s: ${costs.polls}, ` +
+      `${Math.round(costs.ms)}ms in all, ${(costs.ms / costs.polls).toFixed(1)}ms each, longest ${Math.round(costs.maxMs)}ms; ` +
+      `times of a track's pieces: ${[...costs.times].map(([reason, count]) => `${reason} ${count}`).join(", ")}`);
+    Object.assign(costs, { since: now, polls: 0, ms: 0, maxMs: 0, times: new Map() });
+  }
+
+  /**
    * The pieces of each output as the start forecast read them last (see
    * `#segmentsOf`), and what the forecast keeps of their time geometry while
    * they stand (`playback-readiness.js` `timescaleOfPieces`).
@@ -717,7 +738,10 @@ export class ViewerRequests {
     // fetched whole by the page before it is chosen, so it never matches here.
     const subtitle = viewer?.subtitle?.sourceKey === session.file.sourceKey &&
       viewer.subtitle.fileIndex === session.file.fileIndex ? viewer.subtitle : null;
-    const forecast = withSubtitleReadiness(this.#host.playbackReadiness.predict(input), subtitle,
+    const startedAt = performance.now();
+    const predicted = this.#host.playbackReadiness.predict(input);
+    this.#noteForecast(performance.now() - startedAt, tracks.map(track => track.geometry?.reason ?? "none"));
+    const forecast = withSubtitleReadiness(predicted, subtitle,
       subtitle ? this.#host.subtitleReadyFor?.(viewer) !== false : true);
     forecast.operations = outputs.flatMap((output, index) => {
       const common = { speed: this.#host.playbackReadiness.forecastRate(tracks[index].readings, now, 0, "piece"),

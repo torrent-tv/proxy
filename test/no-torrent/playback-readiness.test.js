@@ -847,6 +847,30 @@ test("a track's time geometry kept between polls is the one worked out anew", ()
   poll(s => { s.tracks[0].segments[2].endSeconds = 7.5; });
   poll(s => { s.tracks[0].segments[3].startSeconds = 7.5; });
   poll(s => { s.tracks[0].segments[1].index = 5; });
-  poll(s => { s.tracks[0].segments[2] = { ...s.tracks[0].segments[2], sourceInputs: [{ sourceId: "source", ranges: [{ start: 6, end: 7 }] }] }; });
   poll(s => { s.bufferedAheadSeconds = 0.30000000000000004; });
+});
+
+test("a piece whose inputs are told again keeps its times, and is read with its new inputs", () => {
+  // The download map tells a piece's torrent inputs again, and the piece is a
+  // new object with the same times: in r37 most polls placed every piece of the
+  // film again (torrent-tv/meta#178).
+  const state = input({ durationSeconds: 12 });
+  const [first] = state.tracks[0].segments;
+  first.mediaRanges = servedMs([42, 4042]);
+  state.tracks[0].segments = [first,
+    { index: 1, startSeconds: 4, endSeconds: 8, sourceInputs: [{ sourceId: "source", ranges: [{ start: 0, end: 4 }] }] },
+    { index: 2, startSeconds: 8, endSeconds: 12, sourceInputs: [{ sourceId: "source", ranges: [{ start: 0, end: 4 }] }] }];
+  state.tracks[0].clientRanges = [{ start: 0, end: 0.5 }];
+  Object.assign(state.sources[0], { complete: false, fileOffset: 0, fileLength: 100, pieceLength: 4,
+    residence: [{ location: "memory", start: 0, end: 5 }],
+    downloadRateReadings: [{ at: state.now - 1_000, value: 1 }, { at: state.now, value: 1 }] });
+  const geometry = {};
+  const kept = () => predictPlaybackReadiness({ ...state, tracks: state.tracks.map(track => ({ ...track, geometry })) });
+  const before = kept();
+  const times = geometry.placed;
+  state.tracks[0].segments[2] = { ...state.tracks[0].segments[2], sourceInputs: [{ sourceId: "source", ranges: [{ start: 60, end: 64 }] }] };
+  const after = kept();
+  assert.equal(geometry.placed, times, "the times are the ones kept");
+  assert.notDeepEqual(after, before, "bytes not held yet move the answer");
+  assert.deepEqual(after, predictPlaybackReadiness(state));
 });

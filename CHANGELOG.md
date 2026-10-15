@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.3
 
 - **Fix**: The piece ending where a viewer stands is wanted for every soundtrack, encoded or copied, and not only for copied ones: an encoded soundtrack is cut at a frame of the encoder, 21.3 ms of AAC, and its pieces end past their published edge too. On Home Assistant, with 2.99.2, a seek to 1000.000 s of a Matroska film made the picture's #95 in 6.4 s and left the AAC soundtrack's #95 unmade (r44, #ttv-178).
 

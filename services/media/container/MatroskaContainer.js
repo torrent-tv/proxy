@@ -680,6 +680,26 @@ export class MatroskaContainer extends Container {
     return cues.points.some(point => point.positions.some(position => !video || position.track === video.trackNumber));
   }
 
+  /**
+   * Whether `statement` is answered from what this container has already
+   * read, so it may be answered beside a read of the same file in progress
+   * (`ContainerOrchestrator.inspect`), as an AVI's are. The picture's
+   * ranges are arithmetic over the Cues once they are read; asked behind a
+   * soundtrack's packet walk in the file's one queue, the picture's next
+   * input after a seek was ready only after the sound's, one piece every
+   * 7-8 s, where the two had been prepared side by side every 2 s (r57 against
+   * r50, torrent-tv/meta#178).
+   *
+   * @param {string} statement
+   * @returns {boolean}
+   */
+  answersWithoutReading(statement) {
+    if (statement === "media-info") return this.mediaInfo?.durationSeconds != null;
+    if (statement === "source-navigation") return this.#cues !== undefined && this.#tracks !== null;
+    if (statement === "source-ranges") return this.#sourceSeekPoints !== null;
+    return false;
+  }
+
   async readMappedSourceRanges(interval) { return this.readSourceRanges(interval); }
 
   /**

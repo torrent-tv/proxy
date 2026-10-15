@@ -43,7 +43,16 @@ function recordedTracks(tracks, trackIds) {
  * @returns {Promise<"covered" | "until" | "end">}
  */
 export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, trackIds, interval, packetMemory, state, until = null, isCovered = null }) {
-  const reader = new ElementReader({ read: readRange, fileSize, portionBytes });
+  // INSIDE A CLUSTER EVERY BLOCK HEADER IS READ, so its bytes are read a
+  // portion at a time up to the cluster's end, and never past it. Read a
+  // header at a time, each a read of a few bytes from the torrent thread, the
+  // soundtrack's second piece of a copied 1080p film took 29.6 s on Home
+  // Assistant while that thread was downloading (r52, torrent-tv/meta#178).
+  // Between clusters only their headers are read; where a portion is not all
+  // downloaded, only the bytes a header needs are read and asked for.
+  let readableUntil = null;
+  const reader = new ElementReader({ read: readRange, fileSize, portionBytes, prefetch: true, narrowWhenMissing: true,
+    readableUntil: start => readableUntil ?? start });
   const declared = recordedTracks(tracks, trackIds);
   if (!state.packets) {
     state.packets = new Map([...declared.keys()].map(id => [id, new PacketRecords(packetMemory)]));
@@ -64,6 +73,7 @@ export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, l
     }
     const limit = element.end ?? layout.segmentEnd;
     if (!state.cluster) state.cluster = { element, cursor: element.dataOffset, clusterTicks: null };
+    readableUntil = limit;
     let { cursor, clusterTicks } = state.cluster;
     while (cursor < limit) {
       const child = await validHeader(reader, cursor, limit);
@@ -120,6 +130,7 @@ export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, l
     at = element.end ?? cursor;
     state.at = at;
     state.cluster = null;
+    readableUntil = null;
   }
   if (at < layout.segmentEnd) return "until";
   state.reachedEnd = true;

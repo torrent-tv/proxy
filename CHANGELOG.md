@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A waiting viewer's start-forecast answer no longer waits for the torrent thread to work out a fresh arrival forecast: it is answered with the last finished one, which states when it was made, and a newer one is worked out beside it whenever the maps change or a piece arrives. On Home Assistant, 83-94 % busy, that wait took 3-11.6 s of each answer for about a quarter of a second of work, and the picture stood 52.5 s after a seek to 100 s (r51, #ttv-178).
+
 ## 2.99.10
 
 - **Chore**: Every start-forecast answer says where its time went: waiting for the torrent thread's source stats and its arrival forecast, the stream rate, the start forecast, and in all. On Home Assistant a held viewer's answer took 11.2 s while its forecast took 0.1-0.4 s and it crossed the connection in 21 ms (r50, #ttv-178).

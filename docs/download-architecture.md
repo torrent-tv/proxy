@@ -68,8 +68,11 @@ A piece without a measured supplier leaves it and every later piece unknown;
 observed complete queues remain usable. The estimate
 is conditional on continued supply and successful verification. It never issues
 requests or replaces WebTorrent's picker.
-Concurrent source reports share one forecast; a changed or withdrawn map
-invalidates that forecast. Unknown arrival affects the estimate, not download
+Source reports are answered with the last finished forecast, which states
+when it was made; a newer one is worked out beside them, one at a time, once
+the maps change, storage is withdrawn or a piece arrives. A forecast whose maps
+change while it is worked out is not kept. Only a report made before any
+forecast has finished waits for one. Unknown arrival affects the estimate, not download
 selection or encoder admission of bytes that have actually arrived.
 
 ## Storage and input

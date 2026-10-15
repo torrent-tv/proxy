@@ -251,11 +251,18 @@ export function predictPlaybackReadiness(input = {}) {
     const processingCoverage = numericCoverage((Array.isArray(track.processingRanges) ? track.processingRanges : [])
       .filter(range => Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.end > range.start));
     const measuredBitsPerMediaSecond = state.bitsPerMediaSecond;
+    const trackSources = Array.isArray(track.sourceIds) ? track.sourceIds : [];
     for (const segment of segments) {
-      // Media the page already holds is not transferred again.
-      const needed = segment.ranges.filter((range) => compare(range.end, at) > 0);
-      if (segment.ranges.length > 0 && needed.every((range) =>
-        contains(state.clientRanges, latest(range.start, at), range.end))) {
+      // Media the page already holds is not transferred again: every range of
+      // the piece still ahead of the viewer lies inside what the page holds.
+      let held = segment.ranges.length > 0;
+      for (const range of segment.ranges) {
+        if (compare(range.end, at) > 0 && !contains(state.clientRanges, latest(range.start, at), range.end)) {
+          held = false;
+          break;
+        }
+      }
+      if (held) {
         continue;
       }
       const exactBytes = sizeOf(track.segmentSizesBytes, segment.index);
@@ -275,28 +282,30 @@ export function predictPlaybackReadiness(input = {}) {
       const remainingProcessing = uncoveredIntervals({ start: workStart, end: segment.endSeconds }, processingCoverage);
       const encodeWork = produced ? 0 : remainingProcessing.reduce((sum, part) => sum + part.end - part.start, 0);
 
-      const sourceByteIntervals = new Map();
+      let sourceByteIntervals = NO_SOURCE_BYTES;
       if (!produced && encodeWork > 0) {
+        // Each source the piece reads, in order and once: the track's own, then
+        // those its inputs name. Gathered with loops and no copies, because
+        // this runs for every piece still to play on every poll of a waiting
+        // viewer, and the sets and filtered lists it built were a quarter of
+        // the forecast's time on a two-hour film (torrent-tv/meta#178).
         const exactInputs = Array.isArray(segment.sourceInputs) ? segment.sourceInputs : null;
-        const requiredSources = new Set([
-          ...(Array.isArray(track.sourceIds) ? track.sourceIds : []),
-          ...(exactInputs ?? []).map(input => input?.sourceId)
-        ]);
-        for (const sourceId of requiredSources) {
+        const count = trackSources.length + (exactInputs?.length ?? 0);
+        for (let place = 0; place < count; place += 1) {
+          const sourceId = place < trackSources.length ? trackSources[place]
+            : exactInputs[place - trackSources.length]?.sourceId;
+          if (namedBefore(sourceId, place, trackSources, exactInputs)) continue;
           const source = sourceState.get(sourceId);
           if (!source) {
             unknownReason ??= "source-measurement-unavailable";
           } else if (source.source.complete !== true) {
-            if (exactInputs) {
-              const inputs = exactInputs.filter(input => input?.sourceId === sourceId);
-              const ranges = inputs.flatMap(input => Array.isArray(input.ranges) ? input.ranges : []);
-              if (!ranges.length || inputs.some(input => !Array.isArray(input.ranges) || !input.ranges.length) ||
-                  ranges.some(range => !range || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) || range.start < 0 || range.end <= range.start)) {
-                unknownReason ??= "source-input-ranges-unavailable";
-              } else sourceByteIntervals.set(sourceId, ranges);
-              continue;
+            const ranges = exactInputs ? inputRangesOf(exactInputs, sourceId) : null;
+            if (ranges === null) {
+              unknownReason ??= "source-input-ranges-unavailable";
+            } else {
+              if (sourceByteIntervals === NO_SOURCE_BYTES) sourceByteIntervals = new Map();
+              sourceByteIntervals.set(sourceId, ranges);
             }
-            unknownReason ??= "source-input-ranges-unavailable";
           }
         }
       }
@@ -456,10 +465,14 @@ export function predictPlaybackReadiness(input = {}) {
     const prepared = state.clientRanges.map((range) => ({ ...range }));
     const lastRange = state.segments.at(-1).ranges.at(-1);
     const trackEnd = lastRange ? earliest(end, lastRange.end) : end;
+    // What the page holds without a gap from the viewer only changes when a
+    // piece is added to it, so the end after one piece is the end before the
+    // next.
+    let after = contiguousEnd(delivered, at);
     for (const completion of completions.filter((item) => item.trackIndex === trackIndex)) {
-      const before = contiguousEnd(delivered, at);
+      const before = after;
       for (const range of completion.segment.ranges) addMediaRange(delivered, range);
-      const after = contiguousEnd(delivered, at);
+      after = contiguousEnd(delivered, at);
       const ahead = secondsAhead(earliest(before, trackEnd), at);
       constrain(completion.at - ahead, "delivery", trackIndex, completion.segment.index, completion.at, ahead, false);
       if (compare(after, before) <= 0 && completion.segment.ranges.some(({ start }) => compare(start, before) > 0)) {
@@ -468,7 +481,7 @@ export function predictPlaybackReadiness(input = {}) {
         return result(false, null, buffered, reserve, null, 'media-continuity-unavailable', preparedSegments);
       }
     }
-    if (compare(contiguousEnd(delivered, at), trackEnd) < 0) {
+    if (compare(after, trackEnd) < 0) {
       // Everything this track still needs has been delivered in the schedule
       // and its media still stops short of the end: a hole between ranges
       // already held, which no arrival crosses.
@@ -805,6 +818,41 @@ function latestArrival(interval, ranges = []) {
     if (ranges[index].end > interval.start) finish = Math.max(finish, ranges[index].finish);
   }
   return finish;
+}
+
+/** A piece that reads no source byte still to arrive; never written to. */
+const NO_SOURCE_BYTES = new Map();
+
+/**
+ * Whether the source named at `place` of a piece's sources — the track's own,
+ * then those its inputs name — was named at an earlier place.
+ */
+function namedBefore(sourceId, place, trackSources, exactInputs) {
+  for (let earlier = 0; earlier < place; earlier += 1) {
+    const named = earlier < trackSources.length ? trackSources[earlier]
+      : exactInputs[earlier - trackSources.length]?.sourceId;
+    if (named === sourceId) return true;
+  }
+  return false;
+}
+
+/**
+ * The byte ranges a piece reads of one source, in the order its inputs state
+ * them, or null when an input of that source states none or one that is not a
+ * non-empty run of whole bytes.
+ */
+function inputRangesOf(exactInputs, sourceId) {
+  let ranges = null;
+  for (const input of exactInputs) {
+    if (input?.sourceId !== sourceId) continue;
+    if (!Array.isArray(input.ranges) || input.ranges.length === 0) return null;
+    for (const range of input.ranges) {
+      if (!range || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) ||
+          range.start < 0 || range.end <= range.start) return null;
+    }
+    ranges = ranges === null ? input.ranges : ranges.concat(input.ranges);
+  }
+  return ranges;
 }
 
 /** Exact gaps in sorted disjoint numeric coverage, without per-range splitting. */

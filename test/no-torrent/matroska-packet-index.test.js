@@ -47,16 +47,20 @@ test("an EBML header needs only its own bytes, independently of its body", async
   await assert.rejects(reader.data(header), BytesUnavailable);
 });
 
-test("Matroska packet indexing reads block fields without reading a frame body", async () => {
-  const bytes = cluster([element([0xa3], Buffer.from([0x81, 0, 0, 0x80, 11]))]);
-  const frameAt = bytes.length - 1;
-  const over = params(bytes, [{ trackNumber: 1, type: "video", defaultDurationSeconds: 0.04 }]);
-  // The frame body is not downloaded: a portion read that covers it is
-  // refused, and indexing reads the headers alone without asking for it.
+test("a missing part of a cluster is asked for up to the cluster's end and never past it", async () => {
+  const first = cluster([element([0xa3], Buffer.from([0x81, 0, 0, 0x80, 11]))]);
+  const bytes = Buffer.concat([first, cluster([element([0xa3], Buffer.from([0x81, 0, 0, 0x80, 22]))])]);
+  const frameAt = first.length - 1;
+  const over = params(bytes, [{ trackNumber: 1, type: "video", defaultDurationSeconds: 0.04, reorderDepth: 0 }]);
+  over.interval = { from: 0, to: 0.04, trackIds: [1] };
   over.readRange = async (a, b) => {
     if (b >= frameAt && a <= frameAt) throw new BytesUnavailable(a, b, 0);
     return bytes.subarray(a, b + 1);
   };
+  const refused = await readMatroskaPackets(over).then(() => null, error => error);
+  assert.ok(refused instanceof BytesUnavailable);
+  assert.ok(refused.end < first.length, "nothing past the first cluster is asked for");
+  over.readRange = async (a, b) => bytes.subarray(a, b + 1);
   const index = await readMatroskaPackets(over);
   assert.deepEqual(index.inputFor({ trackId: 1, from: 0, to: 0.04 }).packets[0].ranges, [[frameAt, frameAt]]);
 });
@@ -147,13 +151,17 @@ test("Matroska resumes inside a Cluster without repeating completed block header
       if (b >= available) throw new BytesUnavailable(a, b, 0);
       return bytes.subarray(a, b + 1);
     } };
-  await assert.rejects(readMatroskaPackets(over), BytesUnavailable);
-  assert.equal(state.cluster.cursor, secondAt);
-  assert.equal(state.packets.get(1).length, 1);
+  // A cluster not all downloaded is asked for to its end, and nothing in it is
+  // recorded until it is: the walk stays at the block it reached.
+  const refused = await readMatroskaPackets(over).then(() => null, error => error);
+  assert.ok(refused instanceof BytesUnavailable);
+  assert.equal(refused.end, bytes.length - 1);
+  const cursor = state.cluster.cursor;
+  assert.ok(cursor <= secondAt);
   requested.length = 0;
   available = bytes.length;
   const index = await readMatroskaPackets(over);
-  assert.ok(requested.every(at => at >= secondAt));
+  assert.ok(requested.every(at => at >= cursor));
   assert.deepEqual(index.inputFor({ trackId: 1, from: 0, to: 0.08 }).packets.map(packet => packet.pts), [0, 0.04]);
 });
 
@@ -171,7 +179,7 @@ test("derived packet durations are corrected when a later indexed packet has an 
   assert.equal(state.packets.get(2).durationAt(0), 0.05);
 });
 
-test("Matroska admits an interval after codec-bounded lookahead without reading the remaining file", async () => {
+test("Matroska admits an interval after codec-bounded lookahead without reading the next cluster", async () => {
   const blocks = [0, 120, 40, 80, 160, 200].map((time, position) =>
     element([0xa3], Buffer.from([0x81, time >> 8, time & 255, position === 0 ? 0x80 : 0, position])));
   const bytes = cluster(blocks);
@@ -182,11 +190,21 @@ test("Matroska admits an interval after codec-bounded lookahead without reading 
     if (b >= unavailableAt) throw new BytesUnavailable(a, b, 0);
     return bytes.subarray(a, b + 1);
   };
-  const index = await readMatroskaPackets(over);
-  assert.equal(index.isComplete(), false);
+  // The rest of the cluster is asked for before the interval is admitted: its
+  // headers are read a portion at a time (torrent-tv/meta#178).
+  await assert.rejects(readMatroskaPackets(over), BytesUnavailable);
+  await assert.rejects(readMatroskaPackets({ ...over, state: {}, tracks: [{ ...over.tracks[0], reorderDepth: undefined }] }), BytesUnavailable);
+  const whole = Buffer.concat([bytes, cluster([element([0xa3], Buffer.from([0x81, 1, 0, 0x80, 9]))])]);
+  over.readRange = async (a, b) => {
+    if (b >= bytes.length) throw new BytesUnavailable(a, b, 0);
+    return whole.subarray(a, b + 1);
+  };
+  over.fileSize = whole.length;
+  over.layout = { ...over.layout, segmentEnd: whole.length };
+  over.state = {};
+  const index = await readMatroskaPackets({ ...over, endSeconds: null });
   const input = index.inputFor({ trackId: 1, from: 0, to: 0.08 });
   assert.equal(input.kind, "result");
   assert.deepEqual(input.packets.map(packet => packet.pts), [0, 0.12, 0.04]);
   assert.equal(index.inputFor({ trackId: 1, from: 0.08, to: 0.2 }).kind, "needs-index");
-  await assert.rejects(readMatroskaPackets({ ...over, tracks: [{ ...over.tracks[0], reorderDepth: undefined }] }), BytesUnavailable);
 });

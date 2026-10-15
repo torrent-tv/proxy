@@ -105,3 +105,14 @@ test("an indexed AVI says its sound table would wait only while it is unbuilt an
     await fs.rm(absolute, { recursive: true, force: true });
   }
 });
+
+test("a soundtrack read from its packets is answered with the bytes its table is read from", async () => {
+  // r53 (torrent-tv/meta#178): told only the packets once a walk found them,
+  // the start forecast never stood and a copied 1080p film did not start.
+  const container = { ...stubContainer({ wouldWait: false, table: Promise.resolve(index) }),
+    packetWalkRanges: async interval => ({ kind: "result", ranges: [[interval.from * 100, interval.to * 100]] }) };
+  const answer = await directSegmentInput(container, { interval: { from: 4, to: 8, trackIds: [1] }, tracks: [sound], mode: () => "copy" },
+    () => assert.fail("nothing is waited for"));
+  assert.deepEqual(answer.ranges, [[400, 800]]);
+  assert.deepEqual(container.asked, [], "no table is read for the map");
+});

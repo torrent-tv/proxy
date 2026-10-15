@@ -14,7 +14,8 @@
 import { SegmentInputs } from "./SegmentInputs.js";
 
 /**
- * @param {object} container - Has `supportsOriginalSourceRanges`, `readSourceRanges` and `readPacketIndex`.
+ * @param {object} container - Has `supportsOriginalSourceRanges`, `readSourceRanges` and `readPacketIndex`;
+ *   `packetWalkRanges` where a packet table is read from bytes the container can name in advance.
  * @param {{ interval: object, tracks: object[], mode: (track: object) => string }} segment
  * @param {(built: Promise<void>) => void} whenBuilt - Given a promise that settles when a table
  *   still being built is built or refused, when the answer is "pending".
@@ -23,6 +24,14 @@ import { SegmentInputs } from "./SegmentInputs.js";
  */
 export async function directSegmentInput(container, { interval, tracks, mode }, whenBuilt) {
   if (await container.supportsOriginalSourceRanges(interval) === true) return container.readSourceRanges(interval);
+  // A soundtrack read from its own packets is prepared by walking the
+  // clusters that hold them, so those are the bytes it waits for: the map and
+  // the start forecast are told them, as for the picture. Told only the
+  // packets once the walk had found them, a far piece's bytes were unknown
+  // until downloaded, the forecast never stood, and a copied 1080p film did not
+  // start in 275 s (r53, torrent-tv/meta#178).
+  const walked = await container.packetWalkRanges?.(interval);
+  if (walked) return walked;
   // The table is begun, or joined, and not waited for.
   if (container.packetTableWouldWait?.() === true) {
     whenBuilt(container.readPacketIndex(interval).then(() => undefined, () => undefined));

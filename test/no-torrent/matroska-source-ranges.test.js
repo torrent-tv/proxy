@@ -113,4 +113,11 @@ test("a soundtrack alone is read from its own packets, not from the picture's cl
   assert.equal(input.kind, "result");
   const bytes = input.ranges.reduce((sum, [start, end]) => sum + end - start + 1, 0);
   assert.ok(bytes < picture, `the sound's input holds no picture block: ${bytes} bytes`);
+  // What the map and the start forecast are told: the clusters the table is
+  // read from, which hold every packet of the input.
+  const walked = await container.packetWalkRanges({ from: 6, to: 10, trackIds: [2] });
+  assert.deepEqual(walked, await container.readSourceRanges({ from: 6, to: 10, trackIds: [2] }));
+  for (const [start, end] of input.ranges) {
+    assert.ok(walked.ranges.some(([from, to]) => from <= start && end <= to), `${start}-${end} lies in the walked clusters`);
+  }
 });

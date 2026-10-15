@@ -682,6 +682,18 @@ export class MatroskaContainer extends Container {
 
   async readMappedSourceRanges(interval) { return this.readSourceRanges(interval); }
 
+  /**
+   * The bytes a packet table of `interval` is read from: the clusters the
+   * Cues name for it, as for the original file. Every block header in them is
+   * read, and the headers lie throughout. Null without Cues, where the walk
+   * itself finds what it needs.
+   */
+  async packetWalkRanges(interval) {
+    if (!await this.supportsOriginalSourceRanges()) return null;
+    const ranges = await this.readSourceRanges(interval);
+    return ranges.kind === "result" ? ranges : null;
+  }
+
   async readSourceRanges(interval) {
     if (!Number.isFinite(interval?.from) || !Number.isFinite(interval?.to) || interval.to <= interval.from) {
       throw new TypeError("Source ranges require a finite increasing interval.");

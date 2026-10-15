@@ -176,3 +176,20 @@ test("the server's round-trip probe is echoed at once on the connection it came 
   server.socket.send(JSON.stringify({ type: "rtt-probe", sentAt: 1234 }));
   await waitFor(() => server.received.some((m) => m.type === "rtt-echo" && m.sentAt === 1234), "the echo");
 });
+
+test("a proxy that is stopping says so, not that a replacement carries its tunnel", async (t) => {
+  // r48 (torrent-tv/meta#178): the add-on was restarted, its log said the
+  // tunnel was handed over, and viewers found no proxy at all.
+  const registry = await startRegistry();
+  /** @type {string[]} */
+  const lines = [];
+  const client = createTunnelClient({ serverUrl: registry.url, proxyId: "p1", token: "t", proxyPort: 9090,
+    onLog: (line) => lines.push(line), connectionLifetimeMs: 60_000 });
+  t.after(() => registry.close());
+  client.connect();
+  await waitFor(() => registry.accepted.length === 1 && registry.accepted[0].socket.readyState === 1, "the connection");
+  client.disconnect();
+  await waitFor(() => lines.some((line) => line.startsWith("Tunnel closed")), "the closing line");
+  assert.ok(lines.some((line) => line.includes("this proxy is stopping")));
+  assert.equal(lines.some((line) => line.includes("handed over")), false);
+});

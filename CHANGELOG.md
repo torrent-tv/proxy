@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.12
 
 - **Fix**: A start-forecast answer no longer counts missing bytes as held because their forecast arrival time has passed: a piece still missing after its forecast time is unknown and estimated from the measured rate, and a forecast is used only for the map and withdrawals it was worked out on. No answer waits for a forecast any more, and a failed one is logged instead of left as an unhandled rejection (#ttv-178).
 

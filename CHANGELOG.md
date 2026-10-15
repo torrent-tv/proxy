@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A Matroska film starts again. Proxy 2.99.6 read a Matroska soundtrack from its own packets; on Home Assistant their table was refused memory, the soundtrack's first run was given one piece and never closed it, and the film never started (r47, #ttv-178). The soundtrack is read from the original file again.
+
 ## 2.99.6
 
 - **Fix**: A Matroska film's soundtrack is read from its own packets, as an AVI's is, instead of from the original file's clusters with the picture in them. On Home Assistant a soundtrack run read 260 MB of source for 23 pieces and 38 MB for one piece of 171 KB of sound, and its piece came 2.6 s after the picture's (r44, r46, #ttv-178).

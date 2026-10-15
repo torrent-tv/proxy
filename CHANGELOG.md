@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.4
 
 - **Fix**: The start forecast no longer builds a set, filtered lists and a map for every piece still to play on every poll of a waiting viewer, nor walks what the page holds twice per piece; it gives the same answers in about two thirds of the time. On a model of a two-hour AVI after a seek back to 100 s it took 38 ms instead of 52-60 ms on a desktop; on Home Assistant a forecast took 186-442 ms and up to 1370 ms, 5.4 s of the main thread in the minute of a cold start (r43, #ttv-178).
 

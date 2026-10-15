@@ -582,6 +582,10 @@ export class ViewerRequests {
 
   async #playbackReadinessFor(session, consumerId, progress, outputMbps) {
     const now = Date.now();
+    // WHERE AN ANSWER'S TIME GOES, said with each answer. On Home Assistant a
+    // held viewer's answer took 11.2 s while its forecast took 0.1-0.4 s and
+    // the answer crossed the connection in 21 ms (r50, torrent-tv/meta#178).
+    const parts = { enteredAt: performance.now(), statsMs: 0, workerForecastMs: 0, qualityMs: 0 };
     const viewer = consumerId ? this.#host.viewers.get(consumerId) : null;
     const viewerReading = viewer?.linkReading() ?? null;
     const measurement = this.#rateStateFor(session, consumerId);
@@ -629,12 +633,15 @@ export class ViewerRequests {
           continue;
         }
         let stats = null;
+        const statsAt = performance.now();
         try {
           stats = await this.#host.getSourceStats?.(output.file.sourceKey, fileIndex,
             { forecast: !sourceForecasts.has(output.file.sourceKey) }) ?? null;
         } catch {
           stats = null;
         }
+        parts.statsMs += performance.now() - statsAt;
+        parts.workerForecastMs += Number(stats?.forecastMs) || 0;
         if (!sourceForecasts.has(output.file.sourceKey)) sourceForecasts.set(output.file.sourceKey, stats?.downloadForecast ?? { ranges: [] });
         const sharedForecast = sourceForecasts.get(output.file.sourceKey);
         const downloadForecast = sharedForecast.global ? { measuredAt: sharedForecast.measuredAt,
@@ -655,9 +662,11 @@ export class ViewerRequests {
         });
       }
 
+      const qualityAt = performance.now();
       const observedMbps = output === session
         ? outputMbps
         : await this.#host.quality.observedStreamMbps(output);
+      parts.qualityMs += performance.now() - qualityAt;
       const liveRuns = this.#host.encodeRuns.liveRunsOf?.(output) ?? [];
       const processingStarted = liveRuns.some(({ progress }) => progress.processedSeconds > progress.startPositionSeconds);
       const startedAt = liveRuns.find(({ startedAt }) => startedAt > 0)?.startedAt ?? now;
@@ -734,7 +743,11 @@ export class ViewerRequests {
       viewer.subtitle.fileIndex === session.file.fileIndex ? viewer.subtitle : null;
     const startedAt = performance.now();
     const predicted = this.#host.playbackReadiness.predict(input);
-    this.#noteForecast(performance.now() - startedAt, tracks.map(track => track.geometry?.reason ?? "none"));
+    const predictMs = performance.now() - startedAt;
+    this.#noteForecast(predictMs, tracks.map(track => track.geometry?.reason ?? "none"));
+    logger.info(`readiness parts ${session.id} consumer=${consumerId}: source stats ${Math.round(parts.statsMs)}ms ` +
+      `(the torrent thread's arrival forecast ${Math.round(parts.workerForecastMs)}ms), stream rate ${Math.round(parts.qualityMs)}ms, ` +
+      `start forecast ${Math.round(predictMs)}ms, in all ${Math.round(performance.now() - parts.enteredAt)}ms`);
     const forecast = withSubtitleReadiness(predicted, subtitle,
       subtitle ? this.#host.subtitleReadyFor?.(viewer) !== false : true);
     forecast.operations = outputs.flatMap((output, index) => {

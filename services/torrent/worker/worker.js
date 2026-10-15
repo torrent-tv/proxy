@@ -472,7 +472,9 @@ async function runCommand(command, params, id) {
       // second interruption has been seen: one wait shows no interval, and an
       // interval invented from one point is exactly what this work removes.
       const file = Array.isArray(torrent?.files) ? torrent.files[params.fileIndex] : null;
+      const forecastAt = performance.now();
       const forecast = file && params.forecast === true ? (await forecastDownloads()).get(torrent) : null;
+      const forecastMs = params.forecast === true ? performance.now() - forecastAt : 0;
       const stats = pool.getFileStats(torrent, params.fileIndex);
       const ranges = [];
       if (forecast) for (const [piece, availableAt] of forecast.arrivals) {
@@ -485,7 +487,10 @@ async function runCommand(command, params, id) {
         ...(params.forecast === true ? { downloadForecast: {
           measuredAt: forecast?.measuredAt ?? Date.now(), global: true, ranges
         } } : {}),
-        supply: supplyFiguresFor(torrent?.infoHash, file?.name, params.segmentSeconds ?? 4)
+        supply: supplyFiguresFor(torrent?.infoHash, file?.name, params.segmentSeconds ?? 4),
+        // How long this answer waited for the arrival forecast, which the
+        // caller says beside its own time (ViewerRequests, torrent-tv/meta#178).
+        forecastMs
       };
     }
 

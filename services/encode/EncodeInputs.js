@@ -335,6 +335,18 @@ export class EncodeInputs {
   }
 
   /**
+   * What a stretch is sized from, for an output that may not exist yet: the
+   * recent copy rate in bytes per millisecond, and the memory encoder inputs
+   * may hold, each null while not known (`effective-speed.js`).
+   *
+   * @returns {{ copyBytesPerMs: number | null, capacityBytes: number | null }}
+   */
+  stretchTerms() {
+    const capacity = this.#capacity();
+    return { copyBytesPerMs: middleOf(this.#copyRates), capacityBytes: Number.isFinite(capacity) ? capacity : null };
+  }
+
+  /**
    * @param {object} output
    * @returns {number | null}
    */

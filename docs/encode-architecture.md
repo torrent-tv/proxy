@@ -296,6 +296,45 @@ product configuration.
    their next report asks again until they do. A move DOWN was started because
    their buffer would run dry, so it is made the moment the piece is ready.
 
+## A move between two speed settings of one size (torrent-tv/meta#178)
+
+The speed setting of a software encode is part of an output too, so a viewer
+whose picture this machine makes slower than realtime is moved, by the same
+move as between two limits, onto ANOTHER output of the same size and limit at
+a faster setting (`Renditions.preparePresetSwitch`); the move records that it
+changes the setting, so their link carrying the output on screen does not
+cancel it.
+
+1. **Which setting.** Down: the best setting faster than the one on screen that
+   this machine holds; up: the next better one only, once the viewer has room
+   to spare (`#roomToSpare`). Each candidate is priced by
+   `EncodeCost.presetSpeedOf`: the startup measurement of that mode at this
+   frame, this file's decoding as measured on it, the family's other work and
+   the share of the machine left to encoders — and no faster than that mode
+   was seen running alone here on comparable material, so a setting a viewer
+   was moved off is not priced back above realtime. Then over a run, its open
+   included: `effectiveSpeed = film / (open + film / processing)`
+   (`quality/effective-speed.js`), at this output's measured open and the
+   stretch its inputs give. No ratio between two modes is applied to the whole
+   of FFmpeg's work.
+2. **Only where segments carry their own parameter sets.** An fMP4 segment is
+   read against the init the player fetched once, and another setting changes
+   the parameter sets in it; MPEG-TS has no init. Under fMP4 the move is
+   refused before anything is prepared, and the lever is the height.
+3. **In the budget's order.** For the machine: a faster setting, then a lower
+   height. Back up: a higher limit, then a better setting, then a taller height.
+   The preparation is counted where it already is: a move down is started when
+   the buffer would run dry before another output is ready, a move up only with
+   a cushion that outlasts that time, and either holds a place on the machine
+   only if the admission gives it one.
+
+The first choice of a setting, when an output is opened
+(`EncodeCost.chooseEncodeBudget`), is priced over a run in the same way, at the
+host's open and the stretch the inputs size; before a copy rate is measured
+the stretch is not known and a mode is priced on encoding alone, because the
+first runs of a cold start are short for want of bytes, not because of the
+mode.
+
 ## When the quality budget moves a viewer (roadmap item 98)
 
 The page has no quality control: the quality is always automatic. What moves a
@@ -323,7 +362,9 @@ viewer is decided here, per viewer, and each part of it is a measurement.
    two readings catch only the rise or the fall. The time to readiness is the
    observed preparation time of another output of this mode, else this host's
    measured first-segment time. The levers: for the link, a lower limit of the
-   same height, then a lower height; for the machine, a lower height. A lower
+   same height, then a lower height; for the machine, a faster speed setting
+   of the same size where its segments carry their own parameter sets, then a
+   lower height. A lower
    height is asked of the player as URGENT — their page switches as soon as the
    rung is ready, without waiting for a cushion. Where nothing can be prepared
    they stay on what they are given, with no message.

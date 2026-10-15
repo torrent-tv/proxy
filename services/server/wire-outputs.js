@@ -79,6 +79,7 @@ import { EncodeRuns } from "../encode/EncodeRuns.js";
 import { EncodeInputs } from "../encode/EncodeInputs.js";
 import { OutputTimes } from "../encode/OutputTimes.js";
 import { HostLoad } from "../encode/quality/HostLoad.js";
+import { runFilmSeconds } from "../encode/quality/effective-speed.js";
 import { ColdStarts, secondsToFirstPiece } from "../encode/quality/ColdStarts.js";
 import { BUDGET_CHECK_INTERVAL_MS, QualityController } from "../encode/quality/QualityController.js";
 import { EncodeOrchestrator } from "../encode/EncodeOrchestrator.js";
@@ -435,6 +436,14 @@ export function wireOutputs({
     // under, the segment they were last given, the move being prepared, and
     // whether a segment is closed on the output being prepared.
     limitsFor: (frame, file) => parts.limitsFor(frame, file),
+    // A move between two speed settings of the size on a viewer's screen
+    // (torrent-tv/meta#178): the settings this machine measured, in quality
+    // order; what one of them would do here for an output, over a run; and
+    // the speed this file's supply asks of it.
+    presetLadder: () => (parts.encoders.current?.kind === "software" && Array.isArray(parts.softwarePresetBenchmark)
+      ? parts.softwarePresetBenchmark.map((entry) => entry.preset) : []),
+    presetSpeedOf: (output, preset) => parts.encodeCost.presetSpeedOf(output, preset, { segmentSeconds: parts.segmentDurationSec }),
+    requiredSpeedOf: (output) => parts.hostLoad.requiredSpeedFor(output.file.sourceKey, output.file.fileIndex) ?? 1,
     heightsChosenAs: (consumerId, outputKey) => heightsChosenAs(parts.viewers, consumerId, outputKey),
     highestGivenSegmentOf: (consumerId, askedHeight) => highestGivenSegmentOf(parts.viewers, consumerId, askedHeight),
     sameHeightSwitchOf: (consumerId) => sameHeightSwitchOf(parts.viewers, consumerId),
@@ -889,6 +898,20 @@ export function wireOutputs({
     encodersRunningNow: () => parts.encodeOrchestrator.runningCount(),
     torrentCostSecFor: (session) => parts.hostLoad.torrentCostSecFor(session),
     runsFor: (session) => parts.encodeRuns.runsOf(session),
+    // A run's open and the film its input holds (`effective-speed.js`): the
+    // output's own open, else the host's, and the stretch the inputs size.
+    // Not known before a copy rate is measured: the inputs then give one
+    // piece, but a mode is chosen for the whole film, and the first runs of a
+    // cold start are short for want of bytes, not because of the mode. Priced
+    // as runs of one 4 s piece at the host's 3.21 s open, even `ultrafast` at
+    // 4.79x would make 0.99x, and the choice would fall to the lowest rung.
+    runShapeFor: ({ outputKey, sourceBytesPerSecond, segmentSeconds }) => {
+      const open = parts.encodeOrchestrator?.openOf(outputKey ?? "") ?? null;
+      const { copyBytesPerMs = null, capacityBytes = null } = parts.encodeInputs?.stretchTerms?.() ?? {};
+      if (!open || !(copyBytesPerMs > 0)) return null;
+      return { openSeconds: open.seconds,
+        filmSeconds: runFilmSeconds({ copyBytesPerMs, openSeconds: open.seconds, capacityBytes, sourceBytesPerSecond, segmentSeconds }) };
+    },
     stateFor: (session) => parts.encodeRuns.runStateOf(session)
   });
   // WHICH HEIGHTS ARE ON THE MENU, which is the arithmetic above plus three
@@ -1163,6 +1186,9 @@ export function wireOutputs({
     // screen, prepared and moved to without their player being told.
     prepareSameHeightSwitch: (output, consumerId, direction, reason) =>
       parts.renditions.prepareSameHeightSwitch(output, consumerId, direction, reason),
+    // And on the machine: another speed setting of that size (torrent-tv/meta#178).
+    preparePresetSwitch: (output, consumerId, direction, reason) =>
+      parts.renditions.preparePresetSwitch(output, consumerId, direction, reason),
     sameHeightSwitchPending: (consumerId) => parts.renditions.sameHeightSwitchPending(consumerId),
     sameHeightSwitchDirection: (consumerId) => parts.renditions.sameHeightSwitchDirection(consumerId),
     cancelSameHeightSwitch: (consumerId, reason) => parts.renditions.cancelSameHeightSwitch(consumerId, reason),

@@ -408,10 +408,10 @@ export class Renditions {
    * those would not be a step of it.
    *
    * @param {HlsSession} base
-   * @param {{ height: number, startSeconds: number, mode: "auto" | "manual", linkMbps: number | null, consumerId: string, capKbps: number | null }} params
+   * @param {{ height: number, startSeconds: number, mode: "auto" | "manual", linkMbps: number | null, consumerId: string, capKbps: number | null, preset?: string | null }} params
    * @returns {object}
    */
-  #stepOpening(base, { height, startSeconds, mode, linkMbps, consumerId, capKbps }) {
+  #stepOpening(base, { height, startSeconds, mode, linkMbps, consumerId, capKbps, preset = null }) {
     return {
       sourceKey: base.file.sourceKey,
       fileIndex: base.file.fileIndex,
@@ -442,6 +442,9 @@ export class Renditions {
       // A limit named outright, or null for the rule to choose one. Named, it
       // is answered with that limit or not at all (`output-format.js`).
       capKbps,
+      // A speed setting named outright, or null for the one this machine holds
+      // at the size (torrent-tv/meta#178).
+      preset,
       // The soundtrack THIS viewer hears, which is part of what their link
       // has to carry and need not be the one the picture was opened with.
       viewerAudio: this.#viewerAudioOf(base, consumerId),
@@ -525,6 +528,7 @@ export class Renditions {
     if (!encode || !encode.rateControl) {
       return refuse("the output on screen has no limit to change (a copy, or a hardware encode)");
     }
+    const changes = "limit";
     const askedHeights = this.#host.heightsChosenAs(consumerId, current.outputKey ?? "");
     if (askedHeights.length === 0) {
       return refuse("no height is chosen as the output on screen");
@@ -546,9 +550,9 @@ export class Renditions {
         ? `no lower limit of ${encode.height}p is admitted by this viewer's link`
         : `no higher limit of ${encode.height}p is admitted by this viewer's link, or ${encode.height}p is at its highest`);
     }
-    let prepared;
-    try {
-      prepared = await this.#host.createOrGetSession(this.#stepOpening(base, {
+    return this.#beginMove({
+      base, current, consumerId, askedHeights, direction, reasonText, changes,
+      opening: this.#stepOpening(base, {
         height: encode.height,
         startSeconds: this.#host.viewerPositionOf(base.id, consumerId),
         // Exactly the size on screen: a move between limits never changes it,
@@ -557,10 +561,124 @@ export class Renditions {
         linkMbps,
         consumerId,
         capKbps: target
-      }));
+      }),
+      what: `${encode.height}p at ${target}kbps`,
+      matches: (prepared) => prepared?.height === encode.height && prepared?.width === encode.width &&
+        prepared?.rateControl?.maxrateKbps === maxrateKbpsFor(target),
+      described: `${encode.height}p, ${target}kbps`
+    });
+  }
+
+  /**
+   * Begin moving this viewer onto another speed setting of the encoder, at the
+   * size and limit on their screen (torrent-tv/meta#178).
+   *
+   * The same move as between two limits (`prepareSameHeightSwitch`): the
+   * address does not change, and the output on their screen changes once the
+   * segment they will ask for next is closed on the new one.
+   *
+   * WHICH SETTING. Down, when this machine makes their picture slower than
+   * realtime: the best setting faster than the one on screen that this
+   * machine holds here over a run, its open included
+   * (`EncodeCost.presetSpeedOf`); a smaller picture comes after it. Up,
+   * when they have room to spare: the next better setting only, and only if
+   * this machine holds it the same way. Every setting is priced by the whole
+   * model of what its encoding costs here, never by a ratio applied to what
+   * the setting on screen was measured doing.
+   *
+   * @param {HlsSession} named - The output the browser addresses.
+   * @param {string} consumerId
+   * @param {"down" | "up"} direction
+   * @param {string} reasonText - Why, for the log.
+   * @returns {Promise<{ started: boolean, reason: string, noPlace?: boolean }>}
+   */
+  async preparePresetSwitch(named, consumerId, direction, reasonText) {
+    const base = named ? this.#host.outputs.pictureOf(named) : null;
+    const refuse = (reason) => ({ started: false, reason });
+    if (!consumerId || !base) {
+      return refuse("nobody named, or no picture");
+    }
+    if (!this.#host.outputs.publishesVariants(base)) {
+      return refuse("this stream publishes no variants");
+    }
+    if (this.#host.sameHeightSwitchOf(consumerId)) {
+      return refuse("a move is already being prepared for this viewer");
+    }
+    const current = this.#host.activeOutputFor({ base, consumerId, outputs: this.#host.outputs });
+    const encode = current?.spec?.video?.encode ?? null;
+    const ladder = this.#host.presetLadder?.() ?? [];
+    const at = encode?.preset ? ladder.indexOf(encode.preset) : -1;
+    if (!encode || at < 0) {
+      return refuse("the output on screen has no speed setting of this machine's encoder to change");
+    }
+    // A container with an init is read against the init the player fetched
+    // once, and that init holds the encoder's parameter sets, which another
+    // speed setting changes (the reference count, among others): the move
+    // would be refused at the init's check once prepared. Segments that carry
+    // their own parameter sets (MPEG-TS) have no init to disagree with.
+    if (current.segmentFormat?.initFileName) {
+      return refuse(`${current.segmentFormat.id ?? "this format"} segments are read against one init, which another speed setting does not match`);
+    }
+    const askedHeights = this.#host.heightsChosenAs(consumerId, current.outputKey ?? "");
+    if (askedHeights.length === 0) {
+      return refuse("no height is chosen as the output on screen");
+    }
+    const bar = this.#host.requiredSpeedOf?.(base) ?? 1;
+    const priced = [];
+    const holds = (preset) => {
+      const speed = this.#host.presetSpeedOf?.(current, preset) ?? null;
+      priced.push(`${preset}=${speed ? `${speed.effective.toFixed(2)}x` : "unpriced"}`);
+      return speed !== null && speed.effective >= bar;
+    };
+    // The ladder is in quality order: the faster settings come after the one on screen.
+    const target = direction === "down"
+      ? ladder.slice(at + 1).find(holds)
+      : (at > 0 && holds(ladder[at - 1]) ? ladder[at - 1] : undefined);
+    if (target === undefined) {
+      return refuse(`no ${direction === "down" ? "faster" : "better"} setting than ${encode.preset} holds ` +
+        `${bar.toFixed(2)}x at ${encode.width}x${encode.height} here (${priced.join(", ") || "none"})`);
+    }
+    // The limit on screen goes with the picture: only the setting changes.
+    const limit = encode.rateControl
+      ? this.#host.limitsFor({ width: encode.width, height: encode.height }, base.file)
+        .find((one) => Number.isFinite(one) && maxrateKbpsFor(one) === encode.rateControl.maxrateKbps) ?? null
+      : null;
+    return this.#beginMove({
+      base, current, consumerId, askedHeights, direction, changes: "preset",
+      reasonText: `${reasonText}; priced ${priced.join(", ")} against ${bar.toFixed(2)}x`,
+      opening: this.#stepOpening(base, {
+        height: encode.height,
+        startSeconds: this.#host.viewerPositionOf(base.id, consumerId),
+        mode: "manual",
+        linkMbps: this.#host.linkMbpsOf(base, consumerId),
+        consumerId,
+        capKbps: limit,
+        preset: target
+      }),
+      what: `${encode.height}p at ${target}`,
+      matches: (prepared) => prepared?.height === encode.height && prepared?.width === encode.width &&
+        prepared?.preset === target &&
+        (prepared?.rateControl?.maxrateKbps ?? null) === (encode.rateControl?.maxrateKbps ?? null),
+      described: `${encode.height}p, ${encode.preset} → ${target}`
+    });
+  }
+
+  /**
+   * The rest of a move onto another output of the size on a viewer's screen,
+   * whatever differs — the limit or the speed setting: open it, check it is
+   * what was asked, ask the machine for a place, and record the move.
+   *
+   * @param {object} move
+   * @returns {Promise<{ started: boolean, reason: string, noPlace?: boolean }>}
+   */
+  async #beginMove({ base, current, consumerId, askedHeights, direction, changes, reasonText, opening, what, matches, described }) {
+    const refuse = (reason) => ({ started: false, reason });
+    let prepared;
+    try {
+      prepared = await this.#host.createOrGetSession(opening);
     } catch (error) {
       if (error?.code === OUTPUT_UNAVAILABLE) {
-        return refuse(`the ${target}kbps output of ${encode.height}p does not suit this viewer: ${error.details?.reason ?? ""}`);
+        return refuse(`the output of ${what} does not suit this viewer: ${error.details?.reason ?? ""}`);
       }
       throw error;
     }
@@ -568,15 +686,8 @@ export class Renditions {
     if (!this.#host.encodeRuns.isLive(base) || !prepared) {
       return refuse("the picture ended while the output was being made");
     }
-    const preparedEncode = prepared.spec?.video?.encode ?? null;
-    if (
-      prepared === current ||
-      preparedEncode?.height !== encode.height ||
-      preparedEncode?.width !== encode.width ||
-      preparedEncode?.rateControl?.maxrateKbps !== maxrateKbpsFor(target) ||
-      !isSameMaterial(prepared.spec, base.spec)
-    ) {
-      return refuse(`what was opened (${prepared.outputKey}) is not ${encode.height}p at ${target}kbps of this picture`);
+    if (prepared === current || !matches(prepared.spec?.video?.encode ?? null) || !isSameMaterial(prepared.spec, base.spec)) {
+      return refuse(`what was opened (${prepared.outputKey}) is not ${what} of this picture`);
     }
     // An output whose encoding has failed for good will close no segment, so a
     // move onto it would wait for ever — and, cancelled on that failure, be
@@ -606,7 +717,7 @@ export class Renditions {
     // with the picture, and the choice about to point at it is looked up among
     // this picture's steps and not found.
     if (prepared !== base) {
-      prepared.variantHeight ??= encode.height;
+      prepared.variantHeight ??= current.spec.video.encode.height;
       this.#host.outputs.markStep(prepared);
     }
     this.#host.noteSameHeightSwitch(consumerId, {
@@ -614,6 +725,9 @@ export class Renditions {
       outputId: prepared.id,
       outputKey: prepared.outputKey ?? "",
       direction,
+      // What the move changes, which says what may undo it: a lower limit is
+      // for their link, a faster setting for this machine.
+      changes,
       reason: reasonText,
       since: Date.now()
     });
@@ -625,7 +739,7 @@ export class Renditions {
     this.#host.planEncodersSoon();
     this.#host.logger.info(
       `transcode ${base.id} preparing ${consumerId}'s move ${direction} from ${current.outputKey} to ` +
-      `${prepared.outputKey} (${encode.height}p, ${target}kbps): ${reasonText}`
+      `${prepared.outputKey} (${described}): ${reasonText}`
     );
     // It may already be made there — another viewer on it, or material kept.
     this.#reconsiderSameHeightSwitch(base, consumerId, null);
@@ -836,7 +950,7 @@ export class Renditions {
       this.#cancelSameHeightSwitch(base, consumerId, "the output being prepared no longer suits this viewer's link");
       return;
     }
-    if (move.direction === "down" && this.#suitsViewer(current, base, consumerId).suits) {
+    if (move.direction === "down" && move.changes !== "preset" && this.#suitsViewer(current, base, consumerId).suits) {
       this.#cancelSameHeightSwitch(base, consumerId, "this viewer's link carries the output on screen again");
       return;
     }

@@ -120,6 +120,7 @@ export class OutputOpening {
    * @param {number}  [options.audioTrackIndex=0]        - Type-relative audio track to map (0:a:N).
    * @param {boolean} [options.exactSize=false]           - Produce the target box exactly (capped to source), with no budget downscale and no runtime downswitch. Says nothing about who asked: every rung of a master sets it.
    * @param {number | null} [options.capKbps=null]        - Nominal bitrate limit in kbit/s; null for the size's own. Above the size's own it is refused.
+   * @param {string | null} [options.preset=null]         - Speed setting of a software encode at a size produced exactly; null for the one this machine holds. Part of the output's identity.
    * @param {{ width: number, height: number } | null} [options.visiblePicture=null] - The picture as the requesting viewer sees it, in physical pixels. With no target box given, a re-encoded picture's box is the smallest rung whose frame is not smaller than this (roadmap item 98).
    * @returns {Promise<{ output: EncodedOutput, existed: boolean, audio: { trackIndex: number, transcode: boolean }, verdict: object | null }>}
    */
@@ -163,6 +164,9 @@ export class OutputOpening {
     // The nominal bitrate limit asked for, in kbit/s, or null for the size's
     // own. Part of the output's identity: another limit is another output.
     capKbps = null,
+    // The speed setting asked for, or null for the one the machine holds at
+    // the size. Named only with a size produced exactly (torrent-tv/meta#178).
+    preset = null,
     // The soundtrack THIS viewer receives with the picture — from this output
     // or beside it — as `{ transcode, entry }`. Left out, the one this
     // request names is theirs. A step opened on a viewer's behalf passes the
@@ -561,12 +565,18 @@ export class OutputOpening {
         observedDecodeCostSec: this.#host.encodeCost.decodeCostFor(file.key)?.costSec ?? null,
         requiredSpeed: this.#host.hostLoad.requiredSpeedFor(sourceKey, fileIndex)
       },
-      chooseBudget: (params) => this.#host.encodeCost.chooseEncodeBudget(params),
+      // Each mode priced over a run, its open included: the file's rate says
+      // how much film the stretch an input is sized to holds.
+      chooseBudget: (params) => this.#host.encodeCost.chooseEncodeBudget({ ...params, run: {
+        sourceBytesPerSecond: file.megabitsPerSecond > 0 ? file.megabitsPerSecond * 125000 : null,
+        segmentSeconds: this.#host.segmentDurationSec
+      } }),
       machineAdmission: this.#host.admission
         ? (candidate) => this.#host.admission.previewCandidate(candidate, file)
         : null,
       tonemap: applyTonemap,
       capKbps,
+      preset: forceExactSize ? preset : null,
       limitsFor: (frame) => this.#host.limitsFor(frame, file),
       audioLoad: viewerAudio !== undefined
         ? soundtrackLoadOf(viewerAudio?.entry ?? null, viewerAudio ? viewerAudio.transcode : null)

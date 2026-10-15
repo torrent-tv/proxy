@@ -63,6 +63,7 @@ import { activeOutputFor } from "../../services/viewer/active-output.js";
 import { EncodeAdmission } from "../../services/encode/EncodeAdmission.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { mpegtsFormat } from "../../services/encode/segment-formats/mpegts.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { maxrateKbpsFor, nominalKbpsFor, softwareRateControlFor } from "../../services/encode/args.js";
 
@@ -93,15 +94,16 @@ function linkJustFor(limit) {
  * One output of the picture: 720p at a limit, on the even grid, shaped as
  * production shapes it.
  *
- * @param {{ id: string, file: object, limit: number }} what
+ * @param {{ id: string, file: object, limit: number, preset?: string | null, format?: object }} what
  * @returns {object}
  */
-function outputAt({ id, file, limit }) {
+function outputAt({ id, file, limit, preset = null, format = fmp4Format }) {
   const width = 1280;
   const spec = outputSpec({
     transcodeVideo: true,
     width,
     height: HEIGHT,
+    preset,
     rateControl: softwareRateControlFor({ width, height: HEIGHT, fps: 24, source: SOURCE, capKbps: limit })
   });
   return {
@@ -110,7 +112,7 @@ function outputAt({ id, file, limit }) {
     spec,
     outputKey: spec.toKey(),
     timeline: { cutGrid: "uniform", segmentCount: SEGMENTS },
-    segmentFormat: fmp4Format,
+    segmentFormat: format,
     output: { encodeHeight: HEIGHT }
   };
 }
@@ -124,7 +126,7 @@ function outputAt({ id, file, limit }) {
 function pictureAtNominal(how = {}) {
   const file = new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" })
     .learn({ durationSeconds: SEGMENTS * SEGMENT_SECONDS, height: 1080, width: 1920, bitrateKbps: 4200, audioTracks: [] });
-  const base = outputAt({ id: BASE_ID, file, limit: NOMINAL });
+  const base = outputAt({ id: BASE_ID, file, limit: NOMINAL, preset: how.preset ?? null, format: how.format });
   const outputs = new OutputCatalog();
   outputs.set(BASE_ID, base);
   const viewers = new Viewers();
@@ -185,6 +187,12 @@ function pictureAtNominal(how = {}) {
     chooseOutput: (consumerId, height, key) => chooseOutput(viewers, consumerId, height, key),
     noteServingVerdict: (consumerId, verdict) => noteServingVerdict(viewers, consumerId, verdict),
     limitsFor: () => LIMITS,
+    // The speed settings this machine measured, in quality order, and what
+    // each would do here over a run, as `EncodeCost.presetSpeedOf` answers.
+    presetLadder: () => how.ladder ?? [],
+    presetSpeedOf: (_output, preset) => (how.presetSpeeds?.[preset] === undefined
+      ? null : { processing: how.presetSpeeds[preset], effective: how.presetSpeeds[preset] }),
+    requiredSpeedOf: () => 1,
     heightsChosenAs: (consumerId, key) => heightsChosenAs(viewers, consumerId, key),
     highestGivenSegmentOf: (consumerId, height) => highestGivenSegmentOf(viewers, consumerId, height),
     sameHeightSwitchOf: (consumerId) => sameHeightSwitchOf(viewers, consumerId),
@@ -206,7 +214,8 @@ function pictureAtNominal(how = {}) {
     // the key is the output's identity, as `OutputOpening` has it.
     createOrGetSession: async (request) => {
       opened.push(request);
-      const probe = outputAt({ id: "probe", file, limit: request.capKbps ?? NOMINAL });
+      const preset = request.preset ?? how.preset ?? null;
+      const probe = outputAt({ id: "probe", file, limit: request.capKbps ?? NOMINAL, preset, format: how.format });
       const existing = [...outputs.values()].find((output) => output.outputKey === probe.outputKey);
       if (existing) {
         if (Number.isInteger(how.preclosedIndex)) {
@@ -215,7 +224,7 @@ function pictureAtNominal(how = {}) {
         return existing;
       }
       made += 1;
-      const output = outputAt({ id: `${String(made).padStart(8, "9")}00000000`, file, limit: request.capKbps ?? NOMINAL });
+      const output = outputAt({ id: `${String(made).padStart(8, "9")}00000000`, file, limit: request.capKbps ?? NOMINAL, preset, format: how.format });
       outputs.set(output.id, output);
       if (Number.isInteger(how.preclosedIndex)) {
         closed.add(`${output.outputKey}#${how.preclosedIndex}`);
@@ -661,4 +670,64 @@ test("a move up can be taken back by the budget, for that viewer alone", async (
   renditions.cancelSameHeightSwitch("viewer-a", "the room went");
   assert.equal(sameHeightSwitchOf(viewers, "viewer-a"), null);
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), lowest.outputKey, "they stay where they are");
+});
+
+// torrent-tv/meta#178: a picture this machine makes slower than realtime is
+// moved first to a faster speed setting of the size on screen, priced by the
+// whole model of what it costs here over a run, and moved back up one setting
+// when there is room.
+const LADDER = ["fast", "faster", "veryfast", "superfast", "ultrafast"];
+
+test("a machine-bound viewer is moved to the best faster setting this machine holds, at the same size and limit", async () => {
+  const { renditions, viewers, base, close, given, outputs, opened } = pictureAtNominal({
+    format: mpegtsFormat, preset: "faster", ladder: LADDER, presetSpeeds: { fast: 0.7, faster: 0.9, veryfast: 0.95, superfast: 1.3, ultrafast: 2.4 }
+  });
+  given("viewer-a", 10);
+  const move = await renditions.preparePresetSwitch(base, "viewer-a", "down", "slow");
+  assert.equal(move.started, true, move.reason);
+  const prepared = outputs.get(sameHeightSwitchOf(viewers, "viewer-a").outputId);
+  assert.equal(prepared.spec.video.encode.preset, "superfast", "the best setting that holds realtime, not the fastest");
+  assert.equal(prepared.spec.video.encode.height, HEIGHT);
+  assert.equal(prepared.spec.video.encode.rateControl.maxrateKbps, base.spec.video.encode.rateControl.maxrateKbps, "the limit on screen goes with it");
+  assert.equal(opened.at(-1).capKbps, NOMINAL);
+  close(prepared, 11);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "moved once the next segment is closed there");
+});
+
+test("no faster setting that holds realtime moves nothing, and says what each was priced at", async () => {
+  const { renditions, viewers, base } = pictureAtNominal({
+    format: mpegtsFormat, preset: "faster", ladder: LADDER, presetSpeeds: { veryfast: 0.8, superfast: 0.9 }
+  });
+  const move = await renditions.preparePresetSwitch(base, "viewer-a", "down", "slow");
+  assert.equal(move.started, false);
+  assert.match(move.reason, /veryfast=0\.80x, superfast=0\.90x, ultrafast=unpriced/);
+  assert.equal(sameHeightSwitchOf(viewers, "viewer-a"), null);
+});
+
+test("the way back up is the next better setting only, and only where it holds realtime", async () => {
+  const held = pictureAtNominal({ format: mpegtsFormat, preset: "veryfast", ladder: LADDER, presetSpeeds: { fast: 1.5, faster: 1.2 } });
+  const up = await held.renditions.preparePresetSwitch(held.base, "viewer-a", "up", "room");
+  assert.equal(up.started, true, up.reason);
+  assert.equal(held.outputs.get(sameHeightSwitchOf(held.viewers, "viewer-a").outputId).spec.video.encode.preset, "faster",
+    "one setting at a time");
+  const short = pictureAtNominal({ format: mpegtsFormat, preset: "veryfast", ladder: LADDER, presetSpeeds: { faster: 0.97 } });
+  const refused = await short.renditions.preparePresetSwitch(short.base, "viewer-a", "up", "room");
+  assert.equal(refused.started, false);
+  const best = pictureAtNominal({ format: mpegtsFormat, preset: "fast", ladder: LADDER, presetSpeeds: {} });
+  assert.equal((await best.renditions.preparePresetSwitch(best.base, "viewer-a", "up", "room")).started, false, "fast is the best there is");
+});
+
+test("an output with no measured speed setting has none to change", async () => {
+  const { renditions, base } = pictureAtNominal({ format: mpegtsFormat, ladder: LADDER, presetSpeeds: { ultrafast: 3 } });
+  const move = await renditions.preparePresetSwitch(base, "viewer-a", "down", "slow");
+  assert.equal(move.started, false);
+  assert.match(move.reason, /no speed setting/);
+});
+
+test("segments read against one init are not moved to another speed setting", async () => {
+  const { renditions, viewers, base } = pictureAtNominal({ preset: "faster", ladder: LADDER, presetSpeeds: { veryfast: 2 } });
+  const move = await renditions.preparePresetSwitch(base, "viewer-a", "down", "slow");
+  assert.equal(move.started, false);
+  assert.match(move.reason, /one init/);
+  assert.equal(sameHeightSwitchOf(viewers, "viewer-a"), null, "nothing was prepared");
 });

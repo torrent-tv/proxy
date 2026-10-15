@@ -62,6 +62,7 @@ import { computeOutputDimensions, TRANSCODE_FPS } from "../args.js";
 import { logger } from "../../../utils/logger.js";
 import { qualityStateOf } from "./OutputQualityState.js";
 import { audioReadingFor } from "../audio-work-rate.js";
+import { effectiveSpeed } from "./effective-speed.js";
 
 export class EncodeCost {
   /**
@@ -125,6 +126,54 @@ export class EncodeCost {
       state.predictedMode = entry.preset;
       state.predictedSpeedWhenOffered = this.#speedOnThisMachine({ ...priced, benchmark: [entry] });
     }
+  }
+
+  /**
+   * What this output's picture would do at another speed setting of its
+   * encoder, at the same size, on this machine as it is: the startup
+   * measurement of THAT mode at this frame, this file's decoding as measured
+   * on it, and everything else this family runs — the output itself left out,
+   * since the candidate takes its place. Then the same over a run, its open
+   * included (`effective-speed.js`), at this output's own measured open and the
+   * stretch its inputs give. No ratio between two modes is applied to the
+   * whole of FFmpeg's work: the decoding, the copy of the input and the
+   * contention do not get faster with the preset (review of r41,
+   * torrent-tv/meta#178).
+   *
+   * @param {object} session - A re-encoded picture.
+   * @param {string} preset
+   * @param {{ segmentSeconds: number }} run
+   * @returns {{ processing: number, effective: number, openSeconds: number | null, filmSeconds: number | null } | null}
+   *   Null where the mode is not measured at this size, or something running is unpriced.
+   */
+  presetSpeedOf(session, preset, { segmentSeconds }) {
+    const encode = session?.spec?.video?.encode ?? null;
+    const benchmark = this.#host().benchmark;
+    const entry = Array.isArray(benchmark) ? modeEntryFor(benchmark, preset) : null;
+    if (!encode || !entry || throughputAt(entry, { width: encode.width, height: encode.height }) === null) return null;
+    const own = processCanBeSignalled(this.#stateFor(session)) ? this.#pictureCostOf(session) : 0;
+    const processing = this.#speedOnThisMachine({
+      benchmark: [entry],
+      source: session.file?.decode ?? null,
+      width: encode.width,
+      height: encode.height,
+      fps: Number(encode.fps) || TRANSCODE_FPS,
+      observedDecodeCostSec: this.decodeCostFor(session.file?.key ?? "")?.costSec ?? null,
+      concurrentCostSec: Math.max(0, this.committedCostOf(session) - own)
+    });
+    if (!(processing > 0)) return null;
+    // WHAT THIS MODE WAS SEEN DOING HERE, alone, on material no easier than
+    // this: no better here than that. A setting a viewer was moved off for
+    // running below realtime is then not priced back above it by the model.
+    const encodeOf = { ...encode, preset };
+    const seen = correctForAvailability(this.#host().observedAloneSpeed?.({ spec: { video: { encode: encodeOf } },
+      file: session.file }), this.#host().availability);
+    const held = Number.isFinite(seen) && seen > 0 ? Math.min(processing, seen) : processing;
+    const megabits = Number(session.file?.megabitsPerSecond);
+    const shape = this.#runShapeFor({ outputKey: session.outputKey ?? null,
+      sourceBytesPerSecond: megabits > 0 ? megabits * 125000 : null, segmentSeconds });
+    return { processing: held, effective: shape ? effectiveSpeed({ processingSpeed: held, ...shape }) : held,
+      openSeconds: shape?.openSeconds ?? null, filmSeconds: shape?.filmSeconds ?? null };
   }
 
   /**
@@ -200,6 +249,7 @@ export class EncodeCost {
   #torrentCostSecFor;
   #runsFor;
   #stateFor;
+  #runShapeFor;
 
   /**
    * @param {{
@@ -209,10 +259,12 @@ export class EncodeCost {
    *   encodersRunningNow: () => number,
    *   torrentCostSecFor: (session: object) => number,
    *   runsFor: (output: object) => object[],
-   *   stateFor: (output: object) => string
+   *   stateFor: (output: object) => string,
+   *   runShapeFor?: (run: { outputKey: string | null, sourceBytesPerSecond: number | null, segmentSeconds: number }) =>
+   *     { openSeconds: number, filmSeconds: number } | null
    * }} deps
    */
-  constructor({ outputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, runsFor, stateFor }) {
+  constructor({ outputs, host, runningEncoders, encodersRunningNow, torrentCostSecFor, runsFor, stateFor, runShapeFor = () => null }) {
     this.#outputs = outputs;
     // Asked at the moment of the question, not copied: the share of the machine
     // that is free is re-read every few seconds, and a copy taken when this was
@@ -229,6 +281,7 @@ export class EncodeCost {
     }
     this.#runsFor = runsFor;
     this.#stateFor = stateFor;
+    this.#runShapeFor = runShapeFor;
   }
 
   /**
@@ -1092,7 +1145,15 @@ export class EncodeCost {
    * (no video transcode, hardware encoder, or missing benchmark/source size) —
    * the encode then keeps the ceiling resolution and the default preset.
    *
-   * @param {{ transcodeVideo: boolean, targetWidth: number, targetHeight: number, sourceWidth: number | null, sourceHeight: number | null, outputFps: number, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null }} params
+   * EACH MODE IS PRICED WITH ITS RUN'S OPEN (`effective-speed.js`): a run
+   * opens its input before it encodes the stretch it is given, so a mode that
+   * encodes just above realtime falls below it over a short stretch. Priced on
+   * encoding alone, `fast` was chosen on Home Assistant at 1.03x and its runs
+   * of one piece took 5.9-7.5 s for 4 s of film (r41, torrent-tv/meta#178).
+   * `run` names the output's file rate and piece length; without it each mode
+   * is priced on encoding alone.
+   *
+   * @param {{ transcodeVideo: boolean, targetWidth: number, targetHeight: number, sourceWidth: number | null, sourceHeight: number | null, outputFps: number, source?: { megapixelsPerSecond: number, megabitsPerSecond: number } | null, run?: { sourceBytesPerSecond: number | null, segmentSeconds: number } | null }} params
    * @returns {{ width: number, height: number, preset: string } | null}
    */
   chooseEncodeBudget({
@@ -1104,7 +1165,8 @@ export class EncodeCost {
     outputFps,
     source = null,
     requiredSpeed = null,
-    observedDecodeCostSec = null
+    observedDecodeCostSec = null,
+    run = null
   }) {
     if (!transcodeVideo || this.#host().encoderKind !== "software" || !this.#host().benchmark) {
       return null;
@@ -1118,10 +1180,12 @@ export class EncodeCost {
     // opening had it and the choice priced decoding from the startup model
     // instead (review of r28, torrent-tv/meta#178).
     const decodeCostSec = Number.isFinite(observedDecodeCostSec) && observedDecodeCostSec > 0 ? observedDecodeCostSec : null;
+    // The output does not exist yet: its open is the host's (`RunCosts.openOf`).
+    const shape = run ? this.#runShapeFor({ outputKey: null, ...run }) : null;
     /** Every size and preset the choice priced, with the speed it was priced at. */
     const considered = [];
     const speedForPreset = (benchmark, frame, outputPixelsPerSec) => {
-      const speed = concurrentCostSec === null ? null : this.#speedOnThisMachine({
+      const processing = concurrentCostSec === null ? null : this.#speedOnThisMachine({
         benchmark,
         source,
         width: frame.width,
@@ -1130,7 +1194,8 @@ export class EncodeCost {
         observedDecodeCostSec: decodeCostSec,
         concurrentCostSec
       });
-      considered.push({ preset: benchmark[0]?.preset, width: frame.width, height: frame.height, speed });
+      const speed = shape ? effectiveSpeed({ processingSpeed: processing, ...shape }) : processing;
+      considered.push({ preset: benchmark[0]?.preset, width: frame.width, height: frame.height, speed, processing });
       return speed;
     };
     const choice = chooseSoftwareEncodeSettings(
@@ -1144,10 +1209,12 @@ export class EncodeCost {
     // r28, torrent-tv/meta#178).
     if (choice) {
       const availability = this.#host().availability;
-      const priced = considered.map(({ preset, width, height, speed }) =>
-        `${width}x${height} ${preset}=${Number.isFinite(speed) ? `${speed.toFixed(2)}x` : "unpriced"}`).join(", ");
+      const priced = considered.map(({ preset, width, height, speed, processing }) =>
+        `${width}x${height} ${preset}=${Number.isFinite(speed) ? `${speed.toFixed(2)}x` : "unpriced"}` +
+        (shape && Number.isFinite(processing) ? ` (${processing.toFixed(2)}x encoding)` : "")).join(", ");
+      const opened = shape ? `each run opening in ${shape.openSeconds.toFixed(2)}s for ${shape.filmSeconds.toFixed(1)}s of film; ` : "";
       logger.info(`encode choice: ${choice.width}x${choice.height}@${Number(outputFps).toFixed(3)} ${choice.preset} against ${choice.bar.toFixed(2)}x; ` +
-        `priced ${priced}; decoding ${decodeCostSec === null ? "from the startup model" : `${decodeCostSec.toFixed(4)} s per second, measured on this file`}; ` +
+        `priced ${priced}; ${opened}decoding ${decodeCostSec === null ? "from the startup model" : `${decodeCostSec.toFixed(4)} s per second, measured on this file`}; ` +
         `machine ${availability?.known ? `${Math.round(availability.share * 100)}% to spare` : "share unknown"}; ` +
         `committed work ${concurrentCostSec === null ? "unmeasured" : `${concurrentCostSec.toFixed(3)} s per second`}`);
     }

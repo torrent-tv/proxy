@@ -307,6 +307,15 @@ export class QualityController {
       logger.info(`[budget] transcode ${session.id} no step up for ${consumerId}: ${move.reason}`);
       return;
     }
+    // Then a better speed setting of the same size, the way back from a move
+    // to a faster one, and the best picture of that size this machine holds
+    // (torrent-tv/meta#178).
+    if (this.#host.preparePresetSwitch) {
+      const better = await this.#host.preparePresetSwitch(session, consumerId, "up", reasonText);
+      if (better.started || better.noPlace) {
+        return;
+      }
+    }
     // One rung at a time: the lowest height above the one on screen, never
     // above the source (upscaling invents detail and costs more than the source
     // itself). A rung this host has been measured failing at is not offered
@@ -519,6 +528,15 @@ export class QualityController {
         return true;
       }
       logger.info(`[budget] transcode ${session.id} ${reasonText}: no lower limit to move to (${move.reason})`);
+    }
+    // For the machine, first a faster speed setting of the size on their
+    // screen, which keeps their picture's size (torrent-tv/meta#178).
+    if (machineShort && this.#host.preparePresetSwitch) {
+      const move = await this.#host.preparePresetSwitch(session, consumerId, "down", `machine-bound ${reasonText}`);
+      if (move.started) {
+        return true;
+      }
+      logger.info(`[budget] transcode ${session.id} ${reasonText}: no faster setting to move to (${move.reason})`);
     }
     const base = this.#host.outputs.pictureOf(session);
     if (this.#askLowerHeight(session, `${linkShort ? "viewer-link-bound" : "machine-bound"} ${reasonText}`, [consumerId], {

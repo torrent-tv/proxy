@@ -181,3 +181,43 @@ test("the soundtrack the viewer hears counts toward what their link carries", ()
     "with the sound it no longer fits"
   );
 });
+
+// torrent-tv/meta#178: a viewer moved to another speed setting of the size
+// they watch is given exactly that setting, at a size produced exactly.
+test("a speed setting named in the request is the one given, and only where it was measured at that size", () => {
+  const frame = { width: 1280, height: 720 };
+  const fast = 1280 * 720 * 24 * 4;
+  const benchmark = [
+    { preset: "fast", pixelsPerSec: fast, bySize: [{ ...frame, pixelsPerSec: fast }], interpolationError: null },
+    { preset: "veryfast", pixelsPerSec: fast * 2, bySize: [{ ...frame, pixelsPerSec: fast * 2 }], interpolationError: null }
+  ];
+  const named = (preset, keys = []) => decideOutputFormat({
+    encodesPicture: true,
+    exact: true,
+    target: frame,
+    source: { ...SOURCE, megabitsPerSecond: 8, decode: null },
+    fps: 24,
+    encoder: SOFTWARE,
+    benchmark,
+    cost: { decodeModel: null, observedDecodeCostSec: null, requiredSpeed: null },
+    chooseBudget: () => null,
+    tonemap: false,
+    preset,
+    specWith: (encode) => new OutputSpec({
+      sourceKey: "torrent:abc",
+      segmentFormatId: "mpegts",
+      grid: new CutGrid({ kind: "uniform", fileIndex: 0 }),
+      video: new VideoOutput({ fileIndex: 0, encode }),
+      audio: new AudioOutput({ fileIndex: 0, trackIndex: 0, transcode: true })
+    }),
+    serving: { mode: "manual", linkMbps: null, keys, readyAt: () => true }
+  });
+  const plain = named(null);
+  assert.equal(plain.spec.video.encode.preset, "fast", "the best setting this machine holds, when none is named");
+  const moved = named("veryfast", [plain.spec.toKey()]);
+  assert.equal(moved.reusedKey, null, "the output being left is not handed back");
+  assert.equal(moved.spec.video.encode.preset, "veryfast");
+  const unmeasured = named("ultrafast");
+  assert.equal(unmeasured.spec, null);
+  assert.match(unmeasured.unavailable.reason, /ultrafast is not measured at 1280x720/);
+});

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.6
 
 - **Fix**: A Matroska film's soundtrack is read from its own packets, as an AVI's is, instead of from the original file's clusters with the picture in them. On Home Assistant a soundtrack run read 260 MB of source for 23 pieces and 38 MB for one piece of 171 KB of sound, and its piece came 2.6 s after the picture's (r44, r46, #ttv-178).
 

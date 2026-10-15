@@ -338,7 +338,8 @@ export function bufferOf(viewers, output, consumerId, spanSec) {
   }
   const trend = viewer.bufferTrend(spanSec);
   const held = Number.isFinite(viewer.bufferedSeconds) ? Math.max(0, viewer.bufferedSeconds) : 0;
-  return { bufferedSec: held, slope: trend?.slope ?? null, reportGapSec: trend?.reportGapSec ?? 0 };
+  return { bufferedSec: held, slope: trend?.slope ?? null, reportGapSec: trend?.reportGapSec ?? 0,
+    positionSec: viewer.positionSeconds() ?? null };
 }
 
 /**

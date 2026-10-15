@@ -20,6 +20,13 @@
  *
  * A time to ready that is not known is not assumed to be short: with nothing to
  * show there is time left, a draining buffer is a threat.
+ *
+ * A BUFFER HOLDING THE REST OF THE FILM IS NO THREAT: it drains because the
+ * film ends, and no output can add to it. Field r43 (Home Assistant,
+ * 2026-10-15): the last two minutes of an AVI were read as a draining buffer,
+ * a faster setting was prepared 53 times and given up each time with nothing
+ * left to give, and the player was asked for 240p eight times
+ * (torrent-tv/meta#178).
  */
 
 /**
@@ -31,14 +38,19 @@
  *   two reports.
  * @param {number | null} params.secondsToReady - How long the new output would
  *   take to close the piece the viewer needs; null when not known.
+ * @param {number | null} [params.remainingSec] - The film left after where the
+ *   viewer stands; null when not known.
  * @returns {{ threat: boolean, secondsToEmpty: number | null }}
  */
-export function drainThreat({ bufferedSec, slope, reportGapSec, secondsToReady }) {
+export function drainThreat({ bufferedSec, slope, reportGapSec, secondsToReady, remainingSec = null }) {
   if (!Number.isFinite(slope) || slope >= 0) {
     return { threat: false, secondsToEmpty: null };
   }
   const held = Number.isFinite(bufferedSec) && bufferedSec > 0 ? bufferedSec : 0;
   const secondsToEmpty = held / -slope;
+  if (Number.isFinite(remainingSec) && held >= remainingSec) {
+    return { threat: false, secondsToEmpty };
+  }
   if (!Number.isFinite(secondsToReady) || secondsToReady < 0) {
     return { threat: true, secondsToEmpty };
   }

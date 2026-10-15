@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A viewer whose buffer holds the rest of the film is no longer read as running dry: their buffer drains because the film ends, and no output can add to it. On Home Assistant the last two minutes of an AVI were taken for a machine-bound viewer, a faster speed setting was prepared 53 times and given up each time with nothing left of the film to give, and the player was asked for 240p eight times (r43, #ttv-178).
+
 ## 2.99.1
 
 - **Fix**: A seek to the published start of a piece of a copied picture no longer leaves the picture standing: a copied piece runs past its published end, the player then asks for the piece before the one the viewer stands in, and that piece was neither made nor downloaded. The piece ending where a viewer stands is now wanted by the encode plan and the download map for every output that copies a stream, picture or sound — before, only for copied sound. On Home Assistant a seek to 1000.000 s of a Matroska film asked for #95 on both tracks, nothing made it, and the picture stood 131 s (r43, #ttv-178).

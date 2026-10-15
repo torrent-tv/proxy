@@ -48,10 +48,13 @@ export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, l
   // header at a time, each a read of a few bytes from the torrent thread, the
   // soundtrack's second piece of a copied 1080p film took 29.6 s on Home
   // Assistant while that thread was downloading (r52, torrent-tv/meta#178).
-  // Between clusters only their headers are read; where a portion is not all
-  // downloaded, only the bytes a header needs are read and asked for.
+  // A portion not all downloaded is asked for whole and the walk goes on from
+  // the same block once it is: read on header by header up to the gap, a walk
+  // held the file's reads 50 s and the picture's input waited behind it
+  // (r54). The headers lie throughout the portion, so it is all needed.
+  // Between clusters only their headers are read.
   let readableUntil = null;
-  const reader = new ElementReader({ read: readRange, fileSize, portionBytes, prefetch: true, narrowWhenMissing: true,
+  const reader = new ElementReader({ read: readRange, fileSize, portionBytes, prefetch: true,
     readableUntil: start => readableUntil ?? start });
   const declared = recordedTracks(tracks, trackIds);
   if (!state.packets) {

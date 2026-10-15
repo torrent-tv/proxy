@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A Matroska packet table no longer reads a cluster header by header up to a part not yet downloaded: it asks for the rest of the cluster and goes on from the same block once it is there. Reading on to the gap a header at a time, the soundtrack's walk held the file's reads 50-55 s after a seek to 1000 s, and the picture's input waited behind it (r54, #ttv-178).
+
 ## 2.99.15
 
 - **Fix**: A Matroska soundtrack read from its own packets is told to the download map and the start forecast as the clusters its packet table is read from, named by the Cues in advance, as the picture's are; the encoder is still given the sound's packets alone. Told only the packets a walk had found, a far piece's bytes were unknown until downloaded, the start forecast answered "source input ranges unavailable" throughout, and a copied 1080p film opened cold on 2.99.14 first moved after 398 s (r53, #ttv-178).

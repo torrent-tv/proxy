@@ -1,4 +1,4 @@
-## Unreleased
+## 2.98.19
 
 - **Fix**: The download map no longer waits for an AVI soundtrack's packet table while it is being built: the soundtrack's segments wait, and the picture's are stated to the swarm at once; the map is built again when the table is. On Home Assistant the map waited 3.2 s for the table, and the picture's next piece was asked for 4.0 s after its input asked for it (r42, #ttv-178).
 

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.8
 
 - **Fix**: The forecast of when a torrent's pieces arrive no longer adds them up one after another at the speed of each piece's own holders: pieces held by different peers come together, and none comes sooner than the supply of every peer able to bring them carries the bytes ahead of it. On Home Assistant a two-hour film's soundtrack was forecast to be made in 127 838 s at 2.33 MB/s, and a seek to 1000 s was held 39 s on that forecast (r49, #ttv-178).
 

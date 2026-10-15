@@ -28,7 +28,7 @@ import { Readable } from "node:stream";
 import { heldFileBytes } from "./held-file-bytes.js";
 import { createSendStream } from "./channel.js";
 import { readFragments, supplyFiguresFor } from "./piece-reader.js";
-import { demandFor, forecastDownloads, selectionLimitOf } from "../download/registry.js";
+import { demandFor, downloadForecastOf, onForecastFailure, selectionLimitOf } from "../download/registry.js";
 import { heldRangesOf, ownsItsMemory, readHeldBytes, readHeldRanges } from "./held-bytes.js";
 import { CompletedFiles, completedFilesRoot } from "../../storage/files/CompletedFiles.js";
 import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../../storage/files/piece-from-whole-file.js";
@@ -78,6 +78,8 @@ const { SharedPieceStore, collectStoreStats, findSharedStore, machineReserveByte
 // costs the few milliseconds of a DNS answer, once, on a thread that has not
 // been asked for anything yet.
 const dhtBootstrap = await resolveDhtBootstrap();
+
+onForecastFailure(error => logger.warn(`download: the arrival forecast failed, the last one stands: ${error?.stack ?? error}`));
 
 const pool = new TorrentPool({
   memoryBytes: workerData?.memoryBytes,
@@ -473,7 +475,7 @@ async function runCommand(command, params, id) {
       // interval invented from one point is exactly what this work removes.
       const file = Array.isArray(torrent?.files) ? torrent.files[params.fileIndex] : null;
       const forecastAt = performance.now();
-      const forecast = file && params.forecast === true ? (await forecastDownloads()).get(torrent) : null;
+      const forecast = file && params.forecast === true ? downloadForecastOf(torrent) : null;
       const forecastMs = params.forecast === true ? performance.now() - forecastAt : 0;
       const stats = pool.getFileStats(torrent, params.fileIndex);
       const ranges = [];

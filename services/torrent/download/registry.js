@@ -20,6 +20,7 @@ import { SwarmSelection } from "./SwarmSelection.js";
 import { SelectionLimit } from "./SelectionLimit.js";
 import { futureDownload } from "./FutureDownload.js";
 import { urgencyName } from "../demand/index.js";
+import { pieceStoreOf } from "../piece-store-of.js";
 
 /** @type {WeakMap<object, { register: DemandRegister, selection: SwarmSelection }>} */
 const byTorrent = new WeakMap();
@@ -30,44 +31,117 @@ let publishingSelections = false;
 /** What the last reconciliation told the swarm to fetch first, for the pool to say. */
 let firstClassStated = "none";
 
-/** The last forecast that finished on the maps it was begun on, and how to tell it still describes them. */
+/**
+ * The last forecast that finished on the maps it was begun on: its result, the
+ * demand and withdrawal revisions of each torrent it was worked out on, and
+ * whether nothing has changed since; overdue once a missing piece outlived its
+ * forecast time.
+ *
+ * @type {{ result: Map<object, { measuredAt: number, arrivals: Map<number, number | null> }>,
+ *   versions: Map<object, { demand: number, withdrawal: number }>, describes: () => boolean, overdue?: boolean } | null}
+ */
 let latestForecast = null;
+/** Who is told that a forecast failed: this layer decides from demand and storage and writes no log of its own. */
+let reportForecastFailure = () => {};
 
 /**
- * The arrival forecast of every live download map, shared by concurrent file
- * reports.
+ * Say where a failed forecast is reported.
  *
- * ANSWERED WITH THE LAST ONE FINISHED. Each forecast states when it was made
- * (`measuredAt`), and a newer one is worked out beside the answer whenever the
- * maps or the held pieces have changed since, one at a time. Awaited afresh on
- * every report, it held a waiting viewer's answer 3-11.6 s on Home Assistant
- * while it took about a quarter of a second of work, the machine 83-94 % busy:
- * the page asks again only once answered, so the hold after a seek to 100 s
- * lasted 52.5 s (r51, torrent-tv/meta#178). Only the first report waits, when
- * there is no forecast yet. A forecast whose maps change while it is worked out
- * is not kept.
- *
- * @returns {Promise<Map<object, { measuredAt: number, arrivals: Map<number, number | null> }>>}
+ * @param {(error: unknown) => void} report
+ * @returns {void}
  */
-export function forecastDownloads() {
-  if (!futurePending && !latestForecast?.isCurrent()) {
-    const entries = [...live];
-    const revisions = entries.map(entry => entry.register.revision);
-    const withdrawals = entries.map(entry => entry.withdrawalRevision);
-    const verified = entries.map(entry => entry.verifiedRevision);
-    const isCurrent = () => entries.length === live.size && !entries.some((entry, index) =>
-        !live.has(entry) || entry.register.revision !== revisions[index] ||
-        entry.withdrawalRevision !== withdrawals[index]);
-    // Kept while no piece has arrived either: a piece forecast to come has
-    // either come, or its time is past and it must be forecast again.
-    const describes = () => isCurrent() && entries.every((entry, index) => entry.verifiedRevision === verified[index]);
-    futurePending = futureDownload(entries, { isCurrent }).then(result => {
-      if (!isCurrent()) return new Map();
-      latestForecast = { result, isCurrent: describes };
-      return result;
-    }).finally(() => { futurePending = null; });
+export function onForecastFailure(report) {
+  reportForecastFailure = report;
+}
+
+/**
+ * When this torrent's wanted pieces are forecast to be held, as far as the last
+ * finished forecast says so for the map it now has; null when that forecast
+ * does not describe it.
+ *
+ * NEVER AWAITED. Awaited afresh on every report, the forecast held a waiting
+ * viewer's answer 3-11.6 s on Home Assistant while it took about a quarter of a
+ * second of work, the machine 83-94 % busy: the page asks again only once
+ * answered, so the hold after a seek to 100 s lasted 52.5 s (r51,
+ * torrent-tv/meta#178). A newer forecast is worked out beside the answer,
+ * one at a time, whenever the maps, the withdrawals or the held pieces have
+ * changed since the last one.
+ *
+ * ONLY FOR THE MAP IT WAS WORKED OUT ON. The order pieces come in follows the
+ * map, so a forecast made before the map changed says nothing of the new one,
+ * and neither does one made before a piece was withdrawn: that piece goes back
+ * into the queue ahead of others. Such a torrent gets null, and the caller
+ * estimates its missing bytes from the measured rate, as before any forecast.
+ *
+ * AND WHAT IS HELD IS READ NOW, FROM THE STORE. A piece held now is available
+ * now whatever was forecast. A piece still missing whose forecast time has
+ * passed did not come when forecast — its peer stopped, or it failed
+ * verification — and is unknown, not available: read as `max(0, at - now)`,
+ * 2.99.11's stale time made a missing piece count as held.
+ *
+ * @param {object} torrent
+ * @param {{ now?: number, findStore?: (torrent: object) => object | null }} [options]
+ * @returns {{ measuredAt: number, arrivals: Map<number, number | null> } | null}
+ */
+export function downloadForecastOf(torrent, { now = Date.now(), findStore = pieceStoreOf } = {}) {
+  const entry = byTorrent.get(torrent);
+  if (!entry) return null;
+  refreshForecast();
+  const forecast = latestForecast?.result.get(torrent);
+  const version = latestForecast?.versions.get(entry);
+  if (!forecast || !version || version.demand !== entry.register.revision ||
+      version.withdrawal !== entry.withdrawalRevision) return null;
+  const store = findStore(torrent);
+  const arrivals = new Map();
+  let overdue = false;
+  for (const [piece, at] of forecast.arrivals) {
+    const held = store?.locationOf ? store.locationOf(piece) !== "missing" : torrent.bitfield?.get(piece) === true;
+    if (!held && Number.isFinite(at) && at <= now) overdue = true;
+    arrivals.set(piece, held ? now : Number.isFinite(at) && at > now ? at : null);
   }
-  return latestForecast ? Promise.resolve(latestForecast.result) : futurePending;
+  // A piece that did not come when forecast is a change no event announces:
+  // the next forecast is begun on it, as on one.
+  if (overdue) {
+    latestForecast.overdue = true;
+    refreshForecast();
+  }
+  return { measuredAt: forecast.measuredAt, arrivals };
+}
+
+/**
+ * Begin a forecast of every live map unless one is being worked out or the
+ * last one still describes them.
+ *
+ * A failed forecast is said and leaves the last one in place; the next report
+ * begins another. Left unhandled, its rejection would end nobody's wait and
+ * reach the thread's own handler as an unhandled rejection.
+ *
+ * @returns {void}
+ */
+function refreshForecast() {
+  if (futurePending || (latestForecast?.describes() && !latestForecast.overdue)) return;
+  const entries = [...live];
+  const revisions = entries.map(entry => entry.register.revision);
+  const withdrawals = entries.map(entry => entry.withdrawalRevision);
+  const verified = entries.map(entry => entry.verifiedRevision);
+  const isCurrent = () => entries.length === live.size && !entries.some((entry, index) =>
+      !live.has(entry) || entry.register.revision !== revisions[index] ||
+      entry.withdrawalRevision !== withdrawals[index]);
+  // Worked out again once a piece has arrived as well: the pieces queued
+  // behind it now come sooner.
+  const describes = () => isCurrent() && entries.every((entry, index) => entry.verifiedRevision === verified[index]);
+  const versions = new Map(entries.map((entry, index) =>
+    [entry, { demand: revisions[index], withdrawal: withdrawals[index] }]));
+  futurePending = futureDownload(entries, { isCurrent }).then(result => {
+    if (isCurrent()) latestForecast = { result, versions, describes };
+  }, error => {
+    try { reportForecastFailure(error); } catch { /* a failing report must not end the next forecast */ }
+  }).finally(() => { futurePending = null; });
+}
+
+/** The forecast being worked out, for checks that wait for it to finish. */
+export function forecastSettled() {
+  return futurePending ?? Promise.resolve();
 }
 
 /**

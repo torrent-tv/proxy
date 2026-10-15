@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.9
 
 - **Fix**: A proxy that is stopping logs that it closes its tunnel, instead of that a replacement carries it; on Home Assistant the add-on was restarted, the log said the tunnel was handed over, and viewers found no proxy for a minute (r48, #ttv-178).
 

@@ -44,7 +44,8 @@ import { ContainerTrack } from "../tracks/ContainerTrack.js";
 import { iterateElements, readFloat, readUint } from "./ebml-reader.js";
 import { ElementReader } from "./ebml-stream.js";
 import { firstFrameOffset, readBlockHeader, walkHeldClusters } from "./matroska-clusters.js";
-import { readMatroskaPackets } from "./matroska-packets.js";
+import { buildMatroskaIndex, matroskaIntervalCovered, walkMatroskaPackets } from "./matroska-packets.js";
+import { PacketRecordsChain } from "./PacketRecordsChain.js";
 import { RetainedReads } from "./RetainedReads.js";
 import { isUnavailable } from "./unavailable.js";
 import {
@@ -153,7 +154,17 @@ export class MatroskaContainer extends Container {
   /** @type {Array<import("../tracks/ContainerTrack.js").ContainerTrack> | null} */
   #tracks = null;
   #packets = null;
-  #packetStates = new Map();
+  /**
+   * Per track, the readings of its packets in file order: each began where a
+   * request first needed it, records that track alone, and adjoins the next
+   * once it reaches it. One table per track per stretch of the file, and no
+   * packet in two of them (torrent-tv/meta#178).
+   *
+   * @type {Map<number, Array<{ startAt: number, at: number, cluster: object | null, packets: Map<number, import("./PacketRecords.js").PacketRecords>, next?: object, reachedEnd?: boolean }>>}
+   */
+  #packetReadings = new Map();
+  /** Per track, the walk under way: one at a time, so two cannot record one block. */
+  #packetWalks = new Map();
 
   /**
    * The Cues reading: undefined until read, null when the file has none.
@@ -175,8 +186,8 @@ export class MatroskaContainer extends Container {
   }
 
   packetIndexBytes() {
-    return [...this.#packetStates.values()].reduce((sum, state) => sum +
-      [...(state.packets?.values() ?? [])].reduce((bytes, records) => bytes + records.allocatedBytes, 0), 0);
+    return [...this.#packetReadings.values()].flat().reduce((sum, reading) => sum +
+      [...(reading.packets?.values() ?? [])].reduce((bytes, records) => bytes + records.allocatedBytes, 0), 0);
   }
 
   static detect(head) {
@@ -653,15 +664,19 @@ export class MatroskaContainer extends Container {
    * One preceding cluster retains preroll; one following cluster covers demux
    * lookahead beyond the presentation cut. No packet payload is parsed here.
    */
-  async supportsOriginalSourceRanges() {
+  async supportsOriginalSourceRanges(interval = null) {
     const cues = await this.readCues();
     if (!cues?.points.length) return false;
     const video = ContainerTrack.firstUsable(await this.readTracks(), "video");
-    // A soundtrack alone is read from the original file too, picture clusters
-    // included (38 MB for one piece of 171 KB of sound, r46). Read from its own
-    // packets (proxy 2.99.6), the soundtrack's packet table was refused memory
-    // on Home Assistant, its first run was given one piece and never closed
-    // it, and no Matroska film started (r47, torrent-tv/meta#178).
+    // Sound alone is read from its own packets, as an AVI's is
+    // (`AviContainer`). From the original file it was given whole clusters,
+    // picture included: 260 MB for 23 pieces of a soundtrack, 38 MB for one of
+    // 171 KB, on Home Assistant (r44, r46). Proxy 2.99.6 did so and no film
+    // started: every stretch the download map asked for kept a table for every
+    // track, 38.7 MB in a minute (r47); the soundtrack is now one chain of
+    // tables of its own (`#readTrackPackets`, torrent-tv/meta#178). Asked of
+    // the file as a whole, the answer is the picture's.
+    if (video && interval?.trackIds?.length && !interval.trackIds.includes(video.trackNumber)) return false;
     return cues.points.some(point => point.positions.some(position => !video || position.track === video.trackNumber));
   }
 
@@ -741,25 +756,108 @@ export class MatroskaContainer extends Container {
     if (!layout) throw new Error("Matroska Segment is absent.");
     const tracks = await this.readTracks();
     const info = await this.readMediaInfo();
-    const start = await this.#packetStart(layout, tracks, interval);
-    // Reuse a contiguous reading that has already reached this cue. A seek
-    // across an unindexed gap gets its own reading instead of walking the gap.
-    let state = [...this.#packetStates.values()]
-      .filter(one => one.startAt <= start && one.at >= start)
-      .sort((a, b) => b.startAt - a.startAt)[0];
-    if (!state) {
-      state = { startAt: start, at: start };
-      this.#packetStates.set(start, state);
+    const declared = new Map(tracks.filter(track => ["video", "audio", "subtitle"].includes(track.type))
+      .map(track => [track.trackNumber, track]));
+    // The tracks this request reads: those it names, the picture and sound
+    // when it names none, and every track for the whole file.
+    const requested = [...declared.values()].filter(track => interval?.trackIds ? interval.trackIds.includes(track.trackNumber)
+      : !interval || ["video", "audio"].includes(track.type));
+    const start = interval ? await this.#packetStart(layout, tracks, interval) : (layout.firstClusterAt ?? layout.segmentEnd);
+    // The last frame ends where the film does, on the packets' own clock.
+    const endSeconds = info.durationSeconds === null ? null : info.durationSeconds + (info.startTimeSeconds ?? 0);
+    const streams = new Map();
+    const complete = new Set();
+    let whole = true;
+    for (const track of requested) {
+      const chain = await this.#readTrackPackets(layout, tracks, track, start, interval);
+      streams.set(track.trackNumber, chain.records);
+      if (chain.reachesEnd) complete.add(track.trackNumber);
+      if (!chain.reachesEnd || chain.startAt !== layout.firstClusterAt) whole = false;
     }
-    const index = await readMatroskaPackets({ readRange: this.readRange,
-      fileSize: this.fileSize, portionBytes: this.portionBytes, layout, tracks,
-      // The last frame ends where the film does, on the packets' own clock.
-      endSeconds: info.durationSeconds === null ? null : info.durationSeconds + (info.startTimeSeconds ?? 0),
-      interval, state, packetMemory: this.packetMemory });
-    if (index.isComplete() && state.startAt === layout.firstClusterAt) {
-      this.#packets = index;
-    }
+    const index = buildMatroskaIndex({ declared, streams, endSeconds, complete, covered: interval ?? null,
+      packetMemory: this.packetMemory });
+    if (!interval && whole) this.#packets = index;
     return index;
+  }
+
+  /**
+   * One track's packets from `start` on, read as far as the interval needs.
+   *
+   * The reading that holds `start` goes on; with none, one begins there. A
+   * reading that reaches the next begins nothing new: the two adjoin and the
+   * walk goes on where the next one stopped. Before this, every request the
+   * download map made for a stretch not yet read began a reading of its own
+   * with a table for every track of the file; a 25-minute film's soundtrack
+   * asked 147 of them and held 38.7 MB of mostly empty tables in its first
+   * minute, and the rest was refused memory (r47, torrent-tv/meta#178).
+   *
+   * @returns {Promise<{ records: PacketRecordsChain, startAt: number, reachesEnd: boolean }>}
+   */
+  async #readTrackPackets(layout, tracks, track, start, interval) {
+    const id = track.trackNumber;
+    const previous = this.#packetWalks.get(id) ?? Promise.resolve();
+    let finished;
+    const walk = previous.then(() => new Promise(resolve => { finished = resolve; }));
+    this.#packetWalks.set(id, walk);
+    await previous;
+    try {
+      const readings = this.#packetReadings.get(id) ?? [];
+      this.#packetReadings.set(id, readings);
+      const position = reading => reading.cluster ? reading.cluster.cursor : reading.at;
+      let first = readings.find(reading => reading.startAt <= start && position(reading) >= start);
+      if (!first) {
+        first = { startAt: start, at: start, cluster: null };
+        readings.push(first);
+        readings.sort((left, right) => left.startAt - right.startAt);
+      }
+      const chainOf = () => {
+        const parts = [first];
+        while (parts.at(-1).next) parts.push(parts.at(-1).next);
+        return parts;
+      };
+      const viewOf = parts => new PacketRecordsChain(parts.map(reading => reading.packets?.get(id))
+        .filter(Boolean));
+      // Asked after every block of a walk: the reading being extended answers
+      // alone once it holds the packets the question looks at.
+      const declared = new Map([[id, track]]);
+      const asked = interval ? { ...interval, trackIds: [id] } : null;
+      const depth = track.type === "video" ? track.reorderDepth : 0;
+      let current = null;
+      const covered = () => {
+        if (!asked) return false;
+        const own = current?.packets?.get(id);
+        if (own && Number.isSafeInteger(depth) && own.length > depth) {
+          return matroskaIntervalCovered(declared, new Map([[id, own]]), asked);
+        }
+        const parts = chainOf();
+        if (!parts.every(reading => reading.packets)) return false;
+        return matroskaIntervalCovered(declared, new Map([[id, viewOf(parts)]]), asked);
+      };
+      for (;;) {
+        current = chainOf().at(-1);
+        if (current.reachedEnd) break;
+        const following = readings.find(reading => reading.startAt > current.startAt);
+        const outcome = await walkMatroskaPackets({ readRange: this.readRange, fileSize: this.fileSize,
+          portionBytes: this.portionBytes, layout, tracks, trackIds: [id], interval, packetMemory: this.packetMemory,
+          state: current, until: following?.startAt ?? null, isCovered: covered });
+        if (outcome !== "until") break;
+        current.next = following;
+      }
+      // The request reads as far as its interval reaches, not every reading
+      // adjoined since: each of its packets is looked at once per request.
+      const parts = chainOf();
+      if (asked && Number.isSafeInteger(depth)) {
+        const reaching = parts.findIndex(reading => {
+          const own = reading.packets.get(id);
+          return own.length > depth && matroskaIntervalCovered(declared, new Map([[id, own]]), asked);
+        });
+        if (reaching >= 0) parts.length = reaching + 1;
+      }
+      return { records: viewOf(parts), startAt: first.startAt, reachesEnd: parts.at(-1).reachedEnd === true };
+    } finally {
+      finished();
+      if (this.#packetWalks.get(id) === walk) this.#packetWalks.delete(id);
+    }
   }
 
   async #packetStart(layout, tracks, interval) {

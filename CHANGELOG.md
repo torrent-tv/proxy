@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.17
 
 - **Fix**: A soundtrack run fed packet by packet no longer waits for its next input before ending the piece it holds: it is given the next input only when that is already prepared, and the one after is begun at once; otherwise the run ends and publishes its piece. Waited for, the next input held each piece back for as long as preparing it took, up to 14 s, and the picture stood at 61.8 s of a copied 1080p film (r54, r55, #ttv-178).
 

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A Matroska film's soundtrack is read from its own packets, as an AVI's is, instead of from the original file's clusters with the picture in them. On Home Assistant a soundtrack run read 260 MB of source for 23 pieces and 38 MB for one piece of 171 KB of sound, and its piece came 2.6 s after the picture's (r44, r46, #ttv-178).
+
 ## 2.99.5
 
 - **Fix**: A forecast answer, a seek's acknowledgement and every other control message no longer wait seconds behind video already handed to the connection. libdatachannel keeps one queue for all channels of a connection, and usrsctp's send buffer was sized by the 16 MiB message limit; a response now hands its next frame only once the library has passed every earlier one to usrsctp, and the message limit is libdatachannel's default 256 KiB, which leaves usrsctp its 1 MiB buffer. On Home Assistant the probes on all three channels stood 2.8-5.1 s behind while copied 1080p pieces crossed, and a viewer whose picture was buffered was started that much later: 4.2 s at a cold start, 2.8 s after a seek (r46, #ttv-178).

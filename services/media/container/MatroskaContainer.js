@@ -653,10 +653,16 @@ export class MatroskaContainer extends Container {
    * One preceding cluster retains preroll; one following cluster covers demux
    * lookahead beyond the presentation cut. No packet payload is parsed here.
    */
-  async supportsOriginalSourceRanges() {
+  async supportsOriginalSourceRanges(interval = null) {
     const cues = await this.readCues();
     if (!cues?.points.length) return false;
     const video = ContainerTrack.firstUsable(await this.readTracks(), "video");
+    // Sound alone is read from its own packets, as an AVI's is
+    // (`AviContainer`). From the original file it was given whole clusters,
+    // picture included: 260 MB for 23 pieces of a soundtrack, 38 MB for one of
+    // 171 KB, on Home Assistant (r44, r46, torrent-tv/meta#178). Asked of the
+    // file as a whole, the answer is the picture's.
+    if (video && interval?.trackIds?.length && !interval.trackIds.includes(video.trackNumber)) return false;
     return cues.points.some(point => point.positions.some(position => !video || position.track === video.trackNumber));
   }
 

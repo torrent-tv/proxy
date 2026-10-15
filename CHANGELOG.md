@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.0
 
 - **New**: A viewer whose picture this machine makes slower than realtime is moved, without their player being told, to a faster speed setting of the same size and limit before a smaller picture is asked for, and back up one setting when they have room to spare. Each setting is priced by the whole model of its encoding here — its startup measurement at that size, this file's measured decoding, the other work running, the free share of the machine, and no faster than it was seen running alone here — over a run, its open included: `film / (open + film / processing)`. Only for segments that carry their own parameter sets (MPEG-TS): an fMP4 segment is read against one init, which another setting does not match (#ttv-178).
 - **Fix**: The first speed setting and size of an output are priced over a run, its open included, at the host's open and the stretch its inputs size, once a copy rate is measured. Priced on encoding alone, `fast` was chosen on Home Assistant at 1.03x and its runs of one piece took 5.9-7.5 s for 4 s of film (r41, #ttv-178).

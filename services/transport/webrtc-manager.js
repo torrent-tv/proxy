@@ -26,16 +26,20 @@ const ICE_SERVERS = ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3
 const PORT_PREDICTION_WINDOW = 16;
 
 // Max size of a single data-channel message the proxy advertises (SDP
-// `a=max-message-size`) and will accept. The browser caps `channel.send()` at
-// the REMOTE's advertised value, so this is what lets the browser send a large
-// request body in one message — notably registering a source, whose body is
-// the base64-encoded .torrent. A big multi-season pack's .torrent (thousands of
-// piece hashes) can be hundreds of KB (e.g. Poirot: 420 KB → ~560 KB base64),
-// which exceeds libdatachannel's ~256 KB default and made `send()` throw
-// "message larger than max-message-size". 16 MB is a generous ceiling (memory
-// is allocated per actual message, not reserved). Responses (proxy→browser)
-// are already safe — they stream in small reader-sized chunks.
-const MAX_DC_MESSAGE_BYTES = 16 * 1024 * 1024;
+// `a=max-message-size`) and will accept: libdatachannel's own default.
+//
+// It was 16 MiB so that a page could send a large .torrent in one message
+// (Poirot: ~560 KB base64). The page has cut every request body above 128 KiB
+// into 64 KiB frames since server 0.8.58 (`REQUEST_CHUNK_BYTES`), and the
+// proxy's responses go in reader-sized frames, so no message needs more.
+//
+// What 16 MiB also did: libdatachannel sizes usrsctp's send buffer to at least
+// this value (`SctpTransport`, v0.24.2), and its queue is shared by every
+// channel of a connection. A forecast answer or a probe then waited behind up
+// to 16 MiB of video: 2.8-5.1 s on Home Assistant while copied 1080p pieces
+// crossed (r46, torrent-tv/meta#178). At the default the buffer is the 1 MiB
+// libdatachannel gives usrsctp (`SctpTransport::SetSettings`).
+const MAX_DC_MESSAGE_BYTES = 256 * 1024;
 
 /**
  * Build predicted srflx ICE candidates for a symmetric NAT.

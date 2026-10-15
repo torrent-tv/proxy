@@ -1,3 +1,8 @@
+## Unreleased
+
+- **Fix**: A forecast answer, a seek's acknowledgement and every other control message no longer wait seconds behind video already handed to the connection. libdatachannel keeps one queue for all channels of a connection, and usrsctp's send buffer was sized by the 16 MiB message limit; a response now hands its next frame only once the library has passed every earlier one to usrsctp, and the message limit is libdatachannel's default 256 KiB, which leaves usrsctp its 1 MiB buffer. On Home Assistant the probes on all three channels stood 2.8-5.1 s behind while copied 1080p pieces crossed, and a viewer whose picture was buffered was started that much later: 4.2 s at a cold start, 2.8 s after a seek (r46, #ttv-178).
+- **Chore**: The `[net-debug] sent` line names the request id, so the page's line for the same answer can be read beside it (#ttv-178).
+
 ## 2.99.4
 
 - **Fix**: The start forecast no longer builds a set, filtered lists and a map for every piece still to play on every poll of a waiting viewer, nor walks what the page holds twice per piece; it gives the same answers in about two thirds of the time. On a model of a two-hour AVI after a seek back to 100 s it took 38 ms instead of 52-60 ms on a desktop; on Home Assistant a forecast took 186-442 ms and up to 1370 ms, 5.4 s of the main thread in the minute of a cold start (r43, #ttv-178).

@@ -11,7 +11,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Timeline, Timelines } from "../../services/encode/output/Timeline.js";
+import { piecesRunPastEnd, Timeline, Timelines } from "../../services/encode/output/Timeline.js";
+import { outputSpec } from "./helpers/output-spec.js";
 import { PacketIndex } from "../../services/media/container/PacketIndex.js";
 import { mapForViewer, mergeMaps } from "../../services/viewer/PriorityMap.js";
 
@@ -141,4 +142,14 @@ test("a copied piece is wanted by the second its end falls in, because a copy ru
     { from: 0, to: 0, priority: 1, withinSeconds: Number.POSITIVE_INFINITY, urgent: false, behind: true },
     { from: 1, to: 2, priority: 100, withinSeconds: 0, urgent: false, behind: false }
   ]);
+});
+
+test("a copied picture's pieces run past their end, as a copied soundtrack's do", () => {
+  // Field r43: a seek to 1000.000 s, the published start of a copied Matroska
+  // picture's piece #96, asked for #95 on both tracks (torrent-tv/meta#178).
+  assert.equal(piecesRunPastEnd(outputSpec({ transcodeVideo: false, transcodeAudio: true })), true, "a copied picture");
+  assert.equal(piecesRunPastEnd(outputSpec({ transcodeVideo: true, transcodeAudio: false })), true, "a copied soundtrack");
+  assert.equal(piecesRunPastEnd(outputSpec({ audioOnly: true, transcodeAudio: false })), true);
+  assert.equal(piecesRunPastEnd(outputSpec({ transcodeVideo: true, transcodeAudio: true })), false, "nothing copied");
+  assert.equal(piecesRunPastEnd(outputSpec({ audioOnly: true, transcodeAudio: true })), false);
 });

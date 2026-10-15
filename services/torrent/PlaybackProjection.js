@@ -267,11 +267,18 @@ class RangeEntry {
 
 /** One output segment as the projection holds it. */
 class Segment {
-  constructor(output, index, from, to) {
+  constructor(output, index, from, to, reach = to) {
     this.output = output;
     this.index = index;
     this.from = from;
     this.to = to;
+    /**
+     * Up to which second the map's zones are read for it: its end, and for a
+     * piece that copies a stream the second its end falls in as well, as the
+     * encode plan reads it (`Timeline.inSegments`): the player asks a viewer
+     * standing at its end for this piece, and its bytes are fetched for them.
+     */
+    this.reach = reach;
     /** Whether a zone of the map overlaps it. */
     this.demanded = false;
     /** Whether the output has it made. */
@@ -304,13 +311,16 @@ class Segment {
 
 /** One output: its grid, how long its segments take to make and deliver, what is made, and its next input. */
 class OutputState {
-  constructor(outputKey, grid) {
+  constructor(outputKey, grid, runsPastEnd = false) {
     this.outputKey = outputKey;
     this.grid = grid;
+    this.runsPastEnd = runsPastEnd;
     /** @type {Segment[]} */
     this.segments = [];
     for (let index = 0; index + 1 < grid.length; index++) {
-      this.segments.push(new Segment(this, index, grid[index], grid[index + 1]));
+      const end = grid[index + 1];
+      this.segments.push(new Segment(this, index, grid[index], end,
+        runsPastEnd && index + 2 < grid.length ? Math.max(end, Math.floor(end) + 1) : end));
     }
     this.encodeSpeed = undefined;
     this.bytesPerSecond = undefined;
@@ -370,7 +380,7 @@ export class PlaybackProjection {
    * @param {object} params
    * @param {Array<{ from: number, to: number, priority: number, urgent?: boolean, behind?: boolean, deferred?: boolean,
    *   deadlineAt?: number }>} params.zones - The file's map zones, deadlines as instants.
-   * @param {Array<{ outputKey: string, grid: number[], encodeSpeed?: number, bytesPerSecond?: number | null,
+   * @param {Array<{ outputKey: string, grid: number[], runsPastEnd?: boolean, encodeSpeed?: number, bytesPerSecond?: number | null,
    *   linkMbps?: number | null, readyRevision: unknown, ready: () => Map<number, number>,
    *   target: number | null }>} params.outputs - Every output of the file somebody is watching, with
    *   what decides how long its segments take to make and deliver (`sourceDeadline`), what it has made
@@ -391,13 +401,13 @@ export class PlaybackProjection {
     for (const info of outputs) {
       seen.add(info.outputKey);
       let output = this.#outputs.get(info.outputKey);
-      if (output && output.grid !== info.grid) {
+      if (output && (output.grid !== info.grid || output.runsPastEnd !== Boolean(info.runsPastEnd))) {
         this.#dropOutput(output);
         output = undefined;
       }
       const fresh = !output;
       if (fresh) {
-        output = new OutputState(info.outputKey, info.grid);
+        output = new OutputState(info.outputKey, info.grid, Boolean(info.runsPastEnd));
         this.#outputs.set(info.outputKey, output);
       }
       // How long a segment of it takes to make and deliver.
@@ -426,7 +436,9 @@ export class PlaybackProjection {
         for (const segment of output.segments) if (this.#demand(segment, zones, ordered, nextBase, leadMoved)) reworked++;
       } else {
         for (const { from, to } of stretches) {
-          for (let index = segmentAt(output.grid, from); index < output.segments.length && output.segments[index].from < to; index++) {
+          // A piece reaching past its end is read for the stretch after it too.
+          for (let index = Math.max(0, segmentAt(output.grid, from) - (output.runsPastEnd ? 1 : 0));
+            index < output.segments.length && output.segments[index].from < to; index++) {
             if (this.#demand(output.segments[index], zones, ordered, nextBase, false)) reworked++;
           }
         }
@@ -542,7 +554,7 @@ export class PlaybackProjection {
   #demand(segment, zones, ordered, base, leadMoved) {
     // The zones it overlaps, folded as they are met.
     let owner = null, ownerDeadline = Infinity, priority = 0, urgent = false, behind = true, deferred = true;
-    const { from, to } = segment;
+    const { from, reach: to } = segment;
     for (let at = ordered ? firstEndingAfter(zones, from) : 0; at < zones.length; at += 1) {
       const zone = zones[at];
       if (ordered && !(zone.from < to)) break;
@@ -592,8 +604,8 @@ export class PlaybackProjection {
     let owner = null, ownerDeadline = Infinity;
     for (let at = this.#ordered ? firstEndingAfter(zones, segment.from) : 0; at < zones.length; at += 1) {
       const zone = zones[at];
-      if (this.#ordered && !(zone.from < segment.to)) break;
-      if (!(zone.priority > 0) || !(zone.from < segment.to && zone.to > segment.from)) continue;
+      if (this.#ordered && !(zone.from < segment.reach)) break;
+      if (!(zone.priority > 0) || !(zone.from < segment.reach && zone.to > segment.from)) continue;
       const deadline = Number.isFinite(zone.deadlineAt) ? zone.deadlineAt + Math.max(0, segment.from - zone.from) * 1000 : Infinity;
       if (owner === null || deadline < ownerDeadline) { owner = zone; ownerDeadline = deadline; }
     }

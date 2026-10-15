@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.7
 
 - **Fix**: A Matroska film starts again. Proxy 2.99.6 read a Matroska soundtrack from its own packets; on Home Assistant their table was refused memory, the soundtrack's first run was given one piece and never closed it, and the film never started (r47, #ttv-178). The soundtrack is read from the original file again.
 

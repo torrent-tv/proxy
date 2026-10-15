@@ -40,9 +40,13 @@ function recordedTracks(tracks, trackIds) {
  * Only the named tracks are recorded: a soundtrack read on its own kept the
  * picture's table as well, half of 37.9 MB on r47's order (torrent-tv/meta#178).
  *
+ * `readsThrough(start)` is one past the last byte the walk will read from
+ * `start` on, where the caller knows it: those are read a portion at a time
+ * across clusters too.
+ *
  * @returns {Promise<"covered" | "until" | "end">}
  */
-export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, trackIds, interval, packetMemory, state, until = null, isCovered = null }) {
+export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, trackIds, interval, packetMemory, state, until = null, isCovered = null, readsThrough = null }) {
   // INSIDE A CLUSTER EVERY BLOCK HEADER IS READ, so its bytes are read a
   // portion at a time up to the cluster's end, and never past it. Read a
   // header at a time, each a read of a few bytes from the torrent thread, the
@@ -55,7 +59,7 @@ export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, l
   // Between clusters only their headers are read.
   let readableUntil = null;
   const reader = new ElementReader({ read: readRange, fileSize, portionBytes, prefetch: true,
-    readableUntil: start => readableUntil ?? start });
+    readableUntil: start => Math.max(readableUntil ?? start, readsThrough?.(start) ?? start) });
   const declared = recordedTracks(tracks, trackIds);
   if (!state.packets) {
     state.packets = new Map([...declared.keys()].map(id => [id, new PacketRecords(packetMemory)]));

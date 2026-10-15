@@ -85,3 +85,25 @@ test("the first class spans torrents and withholds lower classes everywhere", t 
   first.torrent.emit("verified", 1);
   assert.deepEqual(third.torrent._selections._items, [{ from: 2, to: 2, priority: 1 }]);
 });
+
+test("a report is answered with the last finished forecast while a newer one is worked out", async t => {
+  // Awaited afresh on every report, the forecast held a waiting viewer's
+  // answer 3-11.6 s on a busy Home Assistant (r51, torrent-tv/meta#178).
+  const entry = source(t);
+  state(entry.register, 1);
+  // Each turn lets the forecast worked out beside the answers run.
+  const next = async () => { await new Promise(resolve => setImmediate(resolve)); return forecastDownloads(); };
+  let first;
+  do first = await next(); while (!first.has(entry.torrent));
+  state(entry.register, 2);
+  const answered = await forecastDownloads();
+  assert.equal(answered, first, "the finished forecast answers at once");
+  let newer;
+  do newer = await next(); while (newer === first);
+  assert.equal(newer.get(entry.torrent).arrivals.size, 2, "and the newer one follows the changed map");
+  entry.held.add(1);
+  entry.torrent.emit("verified", 1);
+  let afterArrival;
+  do afterArrival = await next(); while (afterArrival === newer);
+  assert.ok(afterArrival.has(entry.torrent), "an arrived piece has the forecast worked out again");
+});

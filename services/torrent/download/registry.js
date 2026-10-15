@@ -30,19 +30,44 @@ let publishingSelections = false;
 /** What the last reconciliation told the swarm to fetch first, for the pool to say. */
 let firstClassStated = "none";
 
-/** Concurrent file reports share one snapshot of every live download map. */
+/** The last forecast that finished on the maps it was begun on, and how to tell it still describes them. */
+let latestForecast = null;
+
+/**
+ * The arrival forecast of every live download map, shared by concurrent file
+ * reports.
+ *
+ * ANSWERED WITH THE LAST ONE FINISHED. Each forecast states when it was made
+ * (`measuredAt`), and a newer one is worked out beside the answer whenever the
+ * maps or the held pieces have changed since, one at a time. Awaited afresh on
+ * every report, it held a waiting viewer's answer 3-11.6 s on Home Assistant
+ * while it took about a quarter of a second of work, the machine 83-94 % busy:
+ * the page asks again only once answered, so the hold after a seek to 100 s
+ * lasted 52.5 s (r51, torrent-tv/meta#178). Only the first report waits, when
+ * there is no forecast yet. A forecast whose maps change while it is worked out
+ * is not kept.
+ *
+ * @returns {Promise<Map<object, { measuredAt: number, arrivals: Map<number, number | null> }>>}
+ */
 export function forecastDownloads() {
-  if (!futurePending) {
+  if (!futurePending && !latestForecast?.isCurrent()) {
     const entries = [...live];
     const revisions = entries.map(entry => entry.register.revision);
     const withdrawals = entries.map(entry => entry.withdrawalRevision);
+    const verified = entries.map(entry => entry.verifiedRevision);
     const isCurrent = () => entries.length === live.size && !entries.some((entry, index) =>
         !live.has(entry) || entry.register.revision !== revisions[index] ||
         entry.withdrawalRevision !== withdrawals[index]);
-    futurePending = futureDownload(entries, { isCurrent }).then(result =>
-      isCurrent() ? result : new Map()).finally(() => { futurePending = null; });
+    // Kept while no piece has arrived either: a piece forecast to come has
+    // either come, or its time is past and it must be forecast again.
+    const describes = () => isCurrent() && entries.every((entry, index) => entry.verifiedRevision === verified[index]);
+    futurePending = futureDownload(entries, { isCurrent }).then(result => {
+      if (!isCurrent()) return new Map();
+      latestForecast = { result, isCurrent: describes };
+      return result;
+    }).finally(() => { futurePending = null; });
   }
-  return futurePending;
+  return latestForecast ? Promise.resolve(latestForecast.result) : futurePending;
 }
 
 /**
@@ -58,10 +83,11 @@ export function demandFor(torrent) {
   }
   const register = new DemandRegister();
   const selection = new SwarmSelection({ torrent, register });
-  const entry = { torrent, register, selection, limit: new SelectionLimit({ torrent, register, selection }), withdrawalRevision: 0 };
+  const entry = { torrent, register, selection, limit: new SelectionLimit({ torrent, register, selection }), withdrawalRevision: 0,
+    verifiedRevision: 0 };
   byTorrent.set(torrent, entry);
   live.add(entry);
-  entry.onBytesChanged = () => reconcileAll();
+  entry.onBytesChanged = () => { entry.verifiedRevision++; reconcileAll(); };
   entry.onWithdrawn = () => { entry.withdrawalRevision++; reconcileAll(); };
   torrent.on?.("verified", entry.onBytesChanged);
   torrent.on?.("piece-withdrawn", entry.onWithdrawn);

@@ -58,11 +58,14 @@ marks missing blocked-read ranges through the public API.
 FutureDownload observes outstanding peer queues, advertised pieces and measured
 peer rates. Complete queues provide a piece's arrival. For unrequested blocks,
 the public map establishes the order between bands, including required times
-when priorities tie; every piece in a band uses
-the completion time of that whole band, because the native picker determines
-the order within it. Service times are summed across torrents instead of spending
-the same supply concurrently. A piece without a measured supplier leaves its
-band and later bands unknown; observed complete queues remain usable. The estimate
+when priorities tie, and a band's pieces come in index order, as the native
+`sequential` picker takes them. A piece is brought by the peers that hold it and
+may be asked for it, together, each from when it has brought what came before
+it; and no sooner than the measured supply of every such peer, across torrents,
+carries all the bytes ahead of it. Pieces with one holder are therefore
+summed one after another, and pieces with different holders come in parallel.
+A piece without a measured supplier leaves it and every later piece unknown;
+observed complete queues remain usable. The estimate
 is conditional on continued supply and successful verification. It never issues
 requests or replaces WebTorrent's picker.
 Concurrent source reports share one forecast; a changed or withdrawn map

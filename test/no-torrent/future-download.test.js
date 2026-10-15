@@ -92,7 +92,20 @@ test("global bands do not spend the same measured supply concurrently", async ()
     byteEnd: 6 * BLOCK - 1, priority: 10, urgency: 0 });
   const result = await futureDownload([second, first], { now: 500, findStore: () => null });
   assert.deepEqual([...result.get(first.torrent).arrivals.values()], [2500, 4500, 6500]);
-  assert.deepEqual([...result.get(second.torrent).arrivals.values()], [8500, 10500, 12500]);
+  // The second torrent's own peer is free from the start, but the supply both
+  // peers measure, two blocks a second, carries the first band's six blocks
+  // before this band's: its first piece cannot come before 4 s.
+  assert.deepEqual([...result.get(second.torrent).arrivals.values()], [4500, 6500, 8500]);
+});
+
+test("pieces held by different peers come together, not one after another", async () => {
+  // A two-hour film's far pieces, each with a few unchoked holders, summed one
+  // after another: 127 838 s at 2.33 MB/s, and a seek held 39 s (r49,
+  // torrent-tv/meta#178).
+  const entry = state();
+  entry.torrent.wires = [0, 1, 2].map(held => ({ requests: [], downloadSpeed: () => BLOCK,
+    peerPieces: { get: index => index === held } }));
+  assert.deepEqual([...(await forecast(entry)).arrivals.values()], [2500, 2500, 2500]);
 });
 
 test("an unadvertised piece prevents a band estimate while observed queues remain usable", async () => {

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A soundtrack run fed packet by packet no longer waits for its next input before ending the piece it holds: it is given the next input only when that is already prepared, and the one after is begun at once; otherwise the run ends and publishes its piece. Waited for, the next input held each piece back for as long as preparing it took, up to 14 s, and the picture stood at 61.8 s of a copied 1080p film (r54, r55, #ttv-178).
+
 ## 2.99.16
 
 - **Fix**: The start forecast's download service of a source is never below what the swarm carried. Measured only where our selection held no connection back, it read 0 B/s from a stretch with nothing to ask while the torrent downloaded 5-18 MB/s, and after a seek to 1000 s the viewer was held on "service not advancing" (r54, #ttv-178).

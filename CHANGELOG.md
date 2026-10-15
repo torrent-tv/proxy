@@ -1,5 +1,6 @@
 ## 2.99.18
 
+- **Fix**: A Matroska file's picture ranges, arithmetic over its Cues once read, are answered beside a soundtrack's packet walk of the same file instead of behind it in the file's one queue of reads. Behind it, after a seek to 1000 s the picture's next input was ready only after the sound's, one piece every 7-8 s where the two had been prepared side by side every 2 s, and the picture stopped five times (r57 against r50, #ttv-178).
 - **Perf**: A Matroska soundtrack piece's packet table reads the bytes the Cues name for it a portion at a time across clusters, a few reads of the torrent thread instead of about four per cluster. Each read waited for that thread's loop, 0.5-0.8 s late on Home Assistant, and a piece took 7-12 s to prepare with every byte held (r56, #ttv-178).
 
 ## 2.99.17

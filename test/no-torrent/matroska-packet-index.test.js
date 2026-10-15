@@ -51,8 +51,10 @@ test("Matroska packet indexing reads block fields without reading a frame body",
   const bytes = cluster([element([0xa3], Buffer.from([0x81, 0, 0, 0x80, 11]))]);
   const frameAt = bytes.length - 1;
   const over = params(bytes, [{ trackNumber: 1, type: "video", defaultDurationSeconds: 0.04 }]);
+  // The frame body is not downloaded: a portion read that covers it is
+  // refused, and indexing reads the headers alone without asking for it.
   over.readRange = async (a, b) => {
-    assert.ok(b < frameAt || a > frameAt, "The frame body is not metadata demand.");
+    if (b >= frameAt && a <= frameAt) throw new BytesUnavailable(a, b, 0);
     return bytes.subarray(a, b + 1);
   };
   const index = await readMatroskaPackets(over);

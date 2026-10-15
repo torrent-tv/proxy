@@ -164,3 +164,15 @@ test("two reads of one track at once record each block once", async t => {
   const counted = tables();
   assert.equal(counted.unique, counted.stored);
 });
+
+test("a downloaded cluster is walked in portions, not a read per block header", async () => {
+  let reads = 0;
+  const { container, sound } = await over({ held: () => { reads++; return true; } });
+  reads = 0;
+  const index = await container.readPacketIndex(soundOf(3));
+  assert.equal(inputOf(index, sound, 3).kind, "result");
+  // Five clusters of about 280 blocks each are walked: three reads for each
+  // cluster's header and one for its contents, where every block header took
+  // reads of its own.
+  assert.ok(reads <= 25, `${reads} reads`);
+});

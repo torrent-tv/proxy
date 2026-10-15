@@ -19,6 +19,7 @@
  */
 
 import { readVint } from "./ebml-reader.js";
+import { isUnavailable } from "./unavailable.js";
 
 /** An element id is at most four bytes and a size at most eight (RFC 8794 §4). */
 export const MAX_HEADER_BYTES = 12;
@@ -64,6 +65,10 @@ export class ElementReader {
   /** @type {number} */
   #windowAt = 0;
 
+  /** Below this position a portion was found missing: read exactly there. */
+  #exactBefore = -1;
+  #narrow;
+
   /**
    * @param {object} params
    * @param {(start: number, end: number) => Promise<Buffer>} params.read - Answers
@@ -79,8 +84,13 @@ export class ElementReader {
    *   last byte that can be read from `start` in one go. A read of what is
    *   downloaded must not run a prefetch past the end of the downloaded run,
    *   or a cluster that is whole would fail for the bytes after it.
+   * @param {boolean} [params.narrowWhenMissing] - When a prefetched portion is
+   *   not all downloaded, read only the bytes asked for, and read exactly up to
+   *   the end of that portion: what is not downloaded yet is then only what is
+   *   needed, and the bytes before it are read.
    */
-  constructor({ read, fileSize, portionBytes = Number.POSITIVE_INFINITY, prefetch = false, readableUntil }) {
+  constructor({ read, fileSize, portionBytes = Number.POSITIVE_INFINITY, prefetch = false, readableUntil, narrowWhenMissing = false }) {
+    this.#narrow = narrowWhenMissing;
     this.#read = read;
     this.#fileSize = fileSize;
     this.#readableUntil = typeof readableUntil === "function" ? readableUntil : () => fileSize;
@@ -110,8 +120,15 @@ export class ElementReader {
       return window.subarray(start - this.#windowAt, end - this.#windowAt);
     }
     const reach = Math.min(this.#fileSize, Math.max(end, this.#readableUntil(start)));
-    const span = this.#prefetch ? Math.max(end - start, Math.min(this.#portion, reach - start)) : end - start;
-    const got = await this.#read(start, start + span - 1);
+    const span = this.#prefetch && start >= this.#exactBefore ? Math.max(end - start, Math.min(this.#portion, reach - start)) : end - start;
+    let got;
+    try {
+      got = await this.#read(start, start + span - 1);
+    } catch (error) {
+      if (!this.#narrow || span === end - start || !isUnavailable(error)) throw error;
+      this.#exactBefore = start + span;
+      got = await this.#read(start, end - 1);
+    }
     this.#window = got;
     this.#windowAt = start;
     return got.subarray(0, end - start);

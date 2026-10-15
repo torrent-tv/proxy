@@ -21,6 +21,7 @@ import { computeOutputDimensions } from "./args.js";
 import { buildAdmittedCommand } from "./admitted-command.js";
 import { buildOriginalCommand } from "./source-command.js";
 import { writeAdmittedInput } from "./AdmittedInput.js";
+import { nextPacketInputs } from "./next-packet-input.js";
 import { cutOf, cutShiftOf, judgeNeighbors, judgePiece, leadingSecondsOf, lacksOnlyItsLeadingPictures } from "./piece-completeness.js";
 import { leadingPictures, presentationSegment } from "./segment-formats/presentation-segment.js";
 import { InputFailures, failedAdmittedInput } from "./InputFailures.js";
@@ -1262,23 +1263,23 @@ export class EncodeRuns {
       }
     } else if (admittedInput) {
       run.admittedInputKeys = new Map([[safeIndex, inputKey]]);
-      let nextIndex = startIndex + 1;
+      const nextIndex = startIndex + 1;
       const canAppend = index => this.isLive(session) && run.isAlive &&
         this.#host.encodeOrchestrator.wantedSegmentsOn(session.outputKey).some(window => index >= window.from && index <= window.to) &&
         !this.liveRunsOf(session).some(other => other !== run && index >= other.from && index <= other.to) &&
         !this.#host.producedNumbers(session).includes(index);
+      // Only an input already prepared is appended, and the one after it is
+      // begun at once (`next-packet-input.js`).
+      const following = nextPacketInputs({ take: index => this.#host.encodeInputs.take(session, index, index),
+        canAppend, first: nextIndex, last: ordered?.to ?? startIndex });
       void writeAdmittedInput(admittedInput, run.process.stdin, { next: async () => {
-        if (nextIndex > (ordered?.to ?? startIndex) || !canAppend(nextIndex)) return null;
-        const next = await this.#host.encodeInputs.acquire(session, nextIndex, nextIndex);
-        if (!next) return null;
-        if (!canAppend(nextIndex)) { next.release(); return null; }
-        run.admittedInputKeys.set(nextIndex, this.#inputFailures.key(next, inputParameters));
-        run.to = nextIndex++;
+        const next = following.next(index => { run.to = index; });
+        if (next) run.admittedInputKeys.set(run.to, this.#inputFailures.key(next, inputParameters));
         return next;
-      }, waiting: waits => { if (waits) run.inputWaitBegins(); else run.inputWaitEnds(); } }).catch(error => {
+      } }).catch(error => {
         this.#host.logger.warn(`encode input output=${session.outputKey} segment=${safeIndex} write failed: ${error.message}`);
         run.process?.stdin?.destroy();
-      });
+      }).finally(() => following.release());
     }
     this.#runsByInputToken.set(inputToken, run);
     this.#host.encodersChanged?.();

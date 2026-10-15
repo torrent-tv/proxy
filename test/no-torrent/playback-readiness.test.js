@@ -874,3 +874,40 @@ test("a piece whose inputs are told again keeps its times, and is read with its 
   assert.notDeepEqual(after, before, "bytes not held yet move the answer");
   assert.deepEqual(after, predictPlaybackReadiness(state));
 });
+
+test("a forecast time already past does not make missing bytes held", () => {
+  // 2.99.11 read a stale arrival as `max(0, at - now)`: a piece forecast to
+  // come, whose peer then stopped, counted as held (torrent-tv/meta#178).
+  const now = 10_000;
+  const readings = [{ at: now - 1_000, value: 10 }, { at: now, value: 10 }];
+  const forecast = predictPlaybackReadiness({
+    now,
+    positionSeconds: 0,
+    durationSeconds: 4,
+    bufferedAheadSeconds: 0,
+    bufferLimitSeconds: 4,
+    reserveSeconds: 4,
+    lookaheadSeconds: 4,
+    requiredAudio: false,
+    sources: [{
+      id: "shared",
+      complete: false,
+      bytesPerMediaSecond: 1,
+      downloadForecast: { ranges: [{ start: 0, end: 4, availableAt: now - 1000 }] }
+    }],
+    tracks: [{
+      id: "video",
+      sourceIds: ["shared"],
+      processedSeconds: 0,
+      bitsPerMediaSecond: 80,
+      readings,
+      segments: [{ index: 0, startSeconds: 0, endSeconds: 4, sourceInputs: [{ sourceId: "shared", ranges: [{ start: 0, end: 4 }] }] }],
+      readySegmentIndices: [],
+      segmentSizesBytes: new Map([[0, 40]])
+    }],
+    linkReadings: [{ at: now - 1_000, value: 10_000 }, { at: now, value: 10_000 }]
+  });
+
+  assert.equal(forecast.ready, false);
+  assert.equal(forecast.reason, "download-rate-unavailable");
+});

@@ -350,7 +350,12 @@ export function predictPlaybackReadiness(input = {}) {
       for (const range of source.downloadForecast.ranges ?? []) {
         if (!Number.isFinite(range?.availableAt) || !Number.isSafeInteger(range.start) ||
           !Number.isSafeInteger(range.end) || range.start < 0 || range.end <= range.start) continue;
-        const arrival = Math.max(0, (range.availableAt - now) / 1000);
+        // A forecast time already past says nothing of when the bytes come:
+        // held bytes are in the residence, and missing ones are estimated
+        // below. Read as an arrival at zero, a piece forecast to come and
+        // still missing counted as held (torrent-tv/meta#178).
+        if (range.availableAt <= now) continue;
+        const arrival = (range.availableAt - now) / 1000;
         // The entire protocol piece becomes readable after verification;
         // bytes inside it never arrive proportionally to their file address.
         sourceByteService.get(id).push({ start: range.start, end: range.end, begin: arrival, finish: arrival });

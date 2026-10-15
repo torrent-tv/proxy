@@ -3,6 +3,12 @@
 import { IndexMemoryUnavailable } from "./memory-unavailable.js";
 
 const BLOCK_BYTES = 65536;
+// A table's first blocks, of records and of their addresses, and each block
+// after it twice the one before, up to BLOCK_BYTES. Taken whole from the first
+// record, the 128 KiB of a table that held a few hundred records was most of a
+// Matroska soundtrack read in stretches: 144 tables of one 25-minute film held
+// 18.9 MB for 3.7 MB of records (r47 reproduced, torrent-tv/meta#178).
+const FIRST_BLOCK_BYTES = 4096;
 const ADDRESS_BYTES = 8;
 const HEADER_BYTES = 56;
 
@@ -78,6 +84,12 @@ export class PacketRecords {
       const block = this.#blocks[blockIndex];
       this.#blocks.length = blockIndex + 1;
       this.#addresses.length = Math.ceil(value * ADDRESS_BYTES / BLOCK_BYTES);
+      // The last address block back to the size its records need, as it grew.
+      const lastAddresses = this.#addresses.at(-1);
+      const neededAddresses = ((value - 1) % (BLOCK_BYTES / ADDRESS_BYTES) + 1) * ADDRESS_BYTES;
+      let addressBytes = FIRST_BLOCK_BYTES;
+      while (addressBytes < neededAddresses) addressBytes *= 2;
+      if (lastAddresses.length > addressBytes) this.#addresses[this.#addresses.length - 1] = Buffer.from(lastAddresses.subarray(0, addressBytes));
       const flags = block.readUInt32LE(at + 48);
       this.#used = at + HEADER_BYTES + block.readUInt32LE(at + 52) * 16 + ((flags & 2) ? 32 : 0) + ((flags & 8) ? 4 : 0) + ((flags & 16) ? 4 : 0);
       this.#bytes = [...this.#blocks, ...this.#addresses].reduce((sum, buffer) => sum + buffer.length, 0);
@@ -121,17 +133,25 @@ export class PacketRecords {
     const bytes = HEADER_BYTES + packet.ranges.length * 16 + (packet.expectedHash ? 32 : 0) + (packet.streamId !== undefined ? 4 : 0) + (packet.decodeFromIndex !== undefined ? 4 : 0);
     let block = this.#blocks.at(-1);
     const newBlock = !block || block.length - this.#used < bytes;
+    const blockBytes = newBlock ? Math.max(bytes, Math.min(BLOCK_BYTES, block ? block.length * 2 : FIRST_BLOCK_BYTES)) : 0;
     const perAddressBlock = BLOCK_BYTES / ADDRESS_BYTES;
     const addressBlockIndex = Math.floor(this.#length / perAddressBlock);
-    const newAddresses = !this.#addresses[addressBlockIndex];
-    const growth = (newBlock ? Math.max(BLOCK_BYTES, bytes) : 0) + (newAddresses ? BLOCK_BYTES : 0);
+    const addressAt = (this.#length % perAddressBlock) * ADDRESS_BYTES;
+    const heldAddresses = this.#addresses[addressBlockIndex];
+    // An address block is the same span of records at any size; a full one
+    // below BLOCK_BYTES is copied into one twice its size.
+    const addressBytes = !heldAddresses ? FIRST_BLOCK_BYTES
+      : addressAt >= heldAddresses.length ? Math.min(BLOCK_BYTES, heldAddresses.length * 2) : 0;
+    const newAddresses = addressBytes > 0;
+    const addressGrowth = newAddresses ? addressBytes - (heldAddresses?.length ?? 0) : 0;
+    const growth = blockBytes + addressGrowth;
     const prepaid = Math.min(growth, this.#prepaid);
     if (growth > prepaid && !this.#reserve(growth - prepaid)) throw new IndexMemoryUnavailable(growth - prepaid);
     this.#prepaid -= prepaid;
     let payloadAllocation, addressAllocation;
     try {
-      if (newBlock) payloadAllocation = Buffer.alloc(Math.max(BLOCK_BYTES, bytes));
-      if (newAddresses) addressAllocation = Buffer.alloc(BLOCK_BYTES);
+      if (newBlock) payloadAllocation = Buffer.alloc(blockBytes);
+      if (newAddresses) addressAllocation = Buffer.alloc(addressBytes);
     } catch (error) {
       if (growth) this.#release(growth);
       throw error;
@@ -143,11 +163,11 @@ export class PacketRecords {
       this.#used = 0;
     }
     if (newAddresses) {
-      this.#addresses.push(addressAllocation);
-      this.#bytes += BLOCK_BYTES;
+      heldAddresses?.copy(addressAllocation);
+      this.#addresses[addressBlockIndex] = addressAllocation;
+      this.#bytes += addressGrowth;
     }
     const address = this.#addresses[addressBlockIndex];
-    const addressAt = (this.#length % perAddressBlock) * ADDRESS_BYTES;
     address.writeUInt32LE(this.#blocks.length - 1, addressAt);
     address.writeUInt32LE(this.#used, addressAt + 4);
     const at = this.#used;

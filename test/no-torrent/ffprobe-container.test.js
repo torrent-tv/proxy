@@ -23,15 +23,16 @@ test("retained demuxer facts and the final index share admitted memory without d
       } }) });
   await assert.rejects(container.readPacketIndex(), IndexMemoryUnavailable);
   assert.equal(held, 0);
-  allowance = 131072;
+  // A table's first record takes 8 KiB: one table fits, a second does not.
+  allowance = 8192;
   requests.memoryChanged();
   await assert.rejects(container.readPacketIndex(), IndexMemoryUnavailable);
-  assert.equal(held, 131072);
-  allowance = 262144;
+  assert.equal(held, 8192);
+  allowance = 16384;
   requests.memoryChanged();
   const index = await container.readPacketIndex();
   assert.equal(index.inputFor({ trackId: 1, from: 0, to: 0.2 }).packets.length, 2);
-  assert.equal(held, 131072);
+  assert.equal(held, 8192);
   assert.equal(scans, 2);
   assert.equal(await container.readPacketIndex(), index);
 });

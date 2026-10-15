@@ -27,22 +27,24 @@ test("packet growth is admitted atomically before allocating data or address sto
     return true;
   }, release: bytes => { held -= bytes; } });
   const packet = { pts: 0, duration: 0.1, keyframe: true, ranges: [[0, 1]] };
-  assert.throws(() => records.push(packet), error => error instanceof IndexMemoryUnavailable && error.bytes === 131072);
+  // A first record takes the first block of records and of their addresses.
+  assert.throws(() => records.push(packet), error => error instanceof IndexMemoryUnavailable && error.bytes === 8192);
   assert.equal(records.length, 0);
   assert.equal(records.allocatedBytes, 0);
   assert.equal(held, 0);
-  allowance = 131072;
+  allowance = 8192;
   records.push(packet);
-  const limit = Math.floor(65536 / 72);
+  const limit = Math.floor(4096 / 72);
   for (let index = 1; index < limit; index++) records.push(packet);
   assert.equal(held, records.allocatedBytes);
-  assert.throws(() => records.push(packet), IndexMemoryUnavailable);
+  // The next block is twice the first.
+  assert.throws(() => records.push(packet), error => error instanceof IndexMemoryUnavailable && error.bytes === 8192);
   assert.equal(records.length, limit);
-  allowance += 65536;
+  allowance += 8192;
   records.push(packet);
   assert.equal(held, records.allocatedBytes);
   records.length = 1;
-  assert.equal(held, 131072);
+  assert.equal(held, 8192);
   records.length = 0;
   assert.equal(held, 0);
 });

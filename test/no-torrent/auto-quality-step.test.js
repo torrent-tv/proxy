@@ -767,3 +767,49 @@ test("a machine below realtime whose viewer's buffer is filling moves nothing", 
 
   assert.ok(!(manager.viewers.get("viewer").qualityAsk?.height < 720), "no step down while the buffer grows");
 });
+
+// torrent-tv/meta#178: for the machine, a faster speed setting of the size on
+// screen is tried before a smaller picture, and on the way back up a better
+// setting of that size before a taller picture.
+test("a machine-bound viewer is moved to a faster setting of the same size before a smaller picture is asked for", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const asked = [];
+  manager.renditions.preparePresetSwitch = async (_output, consumerId, direction) => {
+    asked.push(`${consumerId}:${direction}`);
+    return { started: true, reason: "" };
+  };
+  measureSpeed([...session.runs][0], 0.7);
+  drainingReports(manager.viewers.get("viewer"), 80);
+  await manager.quality.noteViewerReported(session.id, "viewer");
+  assert.deepEqual(asked, ["viewer:down"]);
+  assert.equal(manager.viewers.get("viewer").qualityAsk ?? null, null, "no smaller picture is asked for while a faster setting is prepared");
+});
+
+test("on the way back up a better setting of the size on screen comes before a taller picture", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const asked = [];
+  manager.renditions.preparePresetSwitch = async (_output, consumerId, direction) => {
+    asked.push(`${consumerId}:${direction}`);
+    return { started: true, reason: "" };
+  };
+  session.variantHeight = 480;
+  session.encodeWidth = 854;
+  session.encodeHeight = 480;
+  measureSpeed([...session.runs][0], 2.4);
+  qualityStateOf(session).lastAloneSpeed = 2.4;
+  manager.encodeOrchestrator.noteStartupCosts({ firstByteWaitSec: 8.4, killCostSec: 0 });
+  fillingReports(manager.viewers.get("viewer"), null);
+  await manager.quality.noteViewerReported(session.id, "viewer");
+  assert.deepEqual(asked, ["viewer:up"]);
+  assert.equal(manager.viewers.get("viewer").qualityAsk ?? null, null, "the taller picture waits for the better setting");
+});

@@ -37,6 +37,7 @@
 import { computeOutputDimensions, nominalKbpsFor, softwareRateControlFor } from "../args.js";
 import { buildResolutionLadder, canSustainOutput, pickSoftwarePreset } from "../hwaccel.js";
 import { OutputSpec } from "../output/OutputSpec.js";
+import { throughputAt } from "../throughput.js";
 import { chooseServingOutput, nextRungAreaBelow, servingCandidates } from "./serving-output.js";
 import { linkAnswerFigures, linkCouldCarry, linkRefusalReason, loadOf, videoLoadOfSpec } from "./link-budget.js";
 
@@ -56,6 +57,10 @@ import { linkAnswerFigures, linkCouldCarry, linkRefusalReason, loadOf, videoLoad
  * @param {boolean} params.tonemap
  * @param {number | null} [params.capKbps] - A nominal limit asked for outright;
  *   above the size's own it is refused (`softwareRateControlFor`).
+ * @param {string | null} [params.preset] - A speed setting asked for outright,
+ *   at a size produced exactly: a viewer moved to another mode of the size they
+ *   watch (torrent-tv/meta#178). One this encoder did not measure at that size
+ *   is not given.
  * @param {(frame: { width: number, height: number }, source: object) => Array<number | null>} [params.limitsFor] -
  *   The nominal limit derived from this source's picture rate and frame area.
  * @param {import("./link-budget.js").LoadPart | null} [params.audioLoad] - The
@@ -84,6 +89,7 @@ export function decideOutputFormat({
   chooseBudget,
   tonemap,
   capKbps = null,
+  preset = null,
   limitsFor = (frame, source) => [nominalKbpsFor(frame, {
     width: source.width, height: source.height, pictureKbps: source.pictureKbps
   })],
@@ -175,11 +181,19 @@ export function decideOutputFormat({
     }
     return canSustainOutput({ benchmark, ...priced, outputPixelsPerSec: w * h * fps, frame: { width: w, height: h } }).sustainable;
   };
-  const presetFor = (w, h) => (budget && w === width && h === height
-    ? budget.preset
-    : measured && w > 0
-      ? pickSoftwarePreset(benchmark, w * h * fps, priced, { width: w, height: h })
-      : null);
+  const presetNamed = typeof preset === "string" && preset.length > 0;
+  if (presetNamed && !(measured && benchmark.some((entry) => entry.preset === preset &&
+    throughputAt(entry, { width, height }) !== null))) {
+    return { ...refused(specWith(null), null, `the speed setting ${preset} is not measured at ${width}x${height} on this machine`),
+      unavailable: { reason: `the speed setting ${preset} is not measured at ${width}x${height} on this machine`, figures: null, bound: "machine" } };
+  }
+  const presetFor = (w, h) => (presetNamed && w === width && h === height
+    ? preset
+    : budget && w === width && h === height
+      ? budget.preset
+      : measured && w > 0
+        ? pickSoftwarePreset(benchmark, w * h * fps, priced, { width: w, height: h })
+        : null);
   const budgetFor = (spec) => {
     const encode = spec.video?.encode;
     if (!budget || !encode) {
@@ -226,7 +240,8 @@ export function decideOutputFormat({
   // leaving. An output with exactly this limit is still reused: it has the same
   // key, and the key is what `OutputOpening` looks up.
   const limitNamed = capKbps !== null && capKbps !== undefined;
-  if (ceiling && !limitNamed) {
+  // And so is a speed setting named: the output being left suits them too.
+  if (ceiling && !limitNamed && !presetNamed) {
     const served = chooseServingOutput({
       mode: serving.mode,
       wanted: { width, height },

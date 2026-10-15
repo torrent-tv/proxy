@@ -75,9 +75,17 @@ test("a soundtrack read in the download map's order keeps one table per stretch,
   // Nothing held but the declarations and where the first cluster begins: the map's first pass begins a reading
   // for every piece and none of them records anything.
   let heldClusters = new Set();
-  const clusterOf = at => data.clusterAt.findLastIndex(start => start <= at);
-  const { container, sound } = await over({ held: from => from < data.clusterAt[0] + 24 || from >= data.cuesAt ||
-    heldClusters.has(clusterOf(from)) });
+  // A read answers only when every cluster it touches is held; the
+  // declarations, the first cluster's header and the Cues always are.
+  const { container, sound } = await over({ held: (from, to) => {
+    for (let cluster = 0; cluster < data.clusterAt.length; cluster++) {
+      const begin = data.clusterAt[cluster], end = data.clusterAt[cluster + 1] ?? data.cuesAt;
+      if (to < begin || from >= end || heldClusters.has(cluster)) continue;
+      if (cluster === 0 && to < begin + 24) continue;
+      return false;
+    }
+    return true;
+  } });
   for (let piece = 0; piece < SEGMENTS; piece++) {
     await assert.rejects(container.readPacketIndex(soundOf(piece)), BytesUnavailable);
   }

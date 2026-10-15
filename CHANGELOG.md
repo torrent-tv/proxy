@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: A Matroska soundtrack piece's packet table reads the bytes the Cues name for it a portion at a time across clusters, a few reads of the torrent thread instead of about four per cluster. Each read waited for that thread's loop, 0.5-0.8 s late on Home Assistant, and a piece took 7-12 s to prepare with every byte held (r56, #ttv-178).
+
 ## 2.99.17
 
 - **Fix**: A soundtrack run fed packet by packet no longer waits for its next input before ending the piece it holds: it is given the next input only when that is already prepared, and the one after is begun at once; otherwise the run ends and publishes its piece. Waited for, the next input held each piece back for as long as preparing it took, up to 14 s, and the picture stood at 61.8 s of a copied 1080p film (r54, r55, #ttv-178).

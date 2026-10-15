@@ -834,6 +834,17 @@ export class MatroskaContainer extends Container {
       const declared = new Map([[id, track]]);
       const asked = interval ? { ...interval, trackIds: [id] } : null;
       const depth = track.type === "video" ? track.reorderDepth : 0;
+      // WHERE THE WALK WILL READ, as the Cues name it (`packetWalkRanges`):
+      // read a portion at a time across cluster boundaries too. Read a
+      // cluster's header and its contents apart, a soundtrack piece took
+      // about sixteen reads of the torrent thread, each waiting for its loop
+      // (0.5-0.8 s late on Home Assistant), and 7-12 s to prepare with every
+      // byte held (r56, torrent-tv/meta#178).
+      const walked = interval ? await this.packetWalkRanges(interval) : null;
+      const readsThrough = walked ? start => {
+        const range = walked.ranges.find(([from, to]) => from <= start && start <= to);
+        return range ? range[1] + 1 : null;
+      } : null;
       let current = null;
       const covered = () => {
         if (!asked) return false;
@@ -851,7 +862,7 @@ export class MatroskaContainer extends Container {
         const following = readings.find(reading => reading.startAt > current.startAt);
         const outcome = await walkMatroskaPackets({ readRange: this.readRange, fileSize: this.fileSize,
           portionBytes: this.portionBytes, layout, tracks, trackIds: [id], interval, packetMemory: this.packetMemory,
-          state: current, until: following?.startAt ?? null, isCovered: covered });
+          state: current, until: following?.startAt ?? null, isCovered: covered, readsThrough });
         if (outcome !== "until") break;
         current.next = following;
       }

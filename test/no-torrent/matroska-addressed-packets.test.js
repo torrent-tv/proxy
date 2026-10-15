@@ -94,14 +94,14 @@ test("a Matroska file without Cues still walks actual structural headers", async
   assert.equal(index.boundsOf(1).start, 0);
 });
 
-test("an addressed Matroska read resumes after its selected structural bytes arrive", async () => {
+test("an addressed Matroska read waits for its selected bytes and then reads them in a few portions", async () => {
   const data = source();
   let missing = true;
   const unavailableAt = data.clusterAt[4];
   const reads = [];
   const container = await containerOver(data, async (from, to) => {
     reads.push(from);
-    if (missing && from >= unavailableAt && from < data.clusterAt[5]) throw new BytesUnavailable(from, to, 0);
+    if (missing && to >= unavailableAt && from < data.clusterAt[5]) throw new BytesUnavailable(from, to, 0);
     return data.file.subarray(from, to + 1);
   });
   // One track: each track's packets are a reading of their own.
@@ -110,5 +110,7 @@ test("an addressed Matroska read resumes after its selected structural bytes arr
   reads.length = 0;
   const index = await container.readPacketIndex({ from: 4, to: 5, trackIds: [1] });
   assert.equal(index.inputFor({ trackId: 1, from: 4, to: 5, mode: "copy" }).kind, "result");
-  assert.ok(reads.every(from => from >= unavailableAt));
+  // The bytes the Cues name for the interval are read a portion at a time,
+  // across clusters, not a read per header (r56, torrent-tv/meta#178).
+  assert.ok(reads.length <= 4, `${reads.length} reads`);
 });

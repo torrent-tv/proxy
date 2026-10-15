@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.13
 
 - **Fix**: A Matroska soundtrack read on its own (an audio-only output) is read from its own packets again, without the picture's clusters: from the original file one 10-second piece of 171 KB of sound took 38 MB of source (r46). 2.99.6 did so and no film started, because every stretch the download map asked for kept a packet table for every track of the file; reproduced on r47's order, that is 288 tables, 79 508 packets stored twice and 37.9 MB. Each track's packets are now kept in readings that adjoin instead of overlapping, the picture's are not kept for a soundtrack, and a table starts at 8 KiB instead of 128 KiB: the same reproduction keeps 144 tables, no packet twice, 4.9 MB (#ttv-178).
 

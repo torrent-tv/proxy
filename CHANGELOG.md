@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A seek to the published start of a piece of a copied picture no longer leaves the picture standing: a copied piece runs past its published end, the player then asks for the piece before the one the viewer stands in, and that piece was neither made nor downloaded. The piece ending where a viewer stands is now wanted by the encode plan and the download map for every output that copies a stream, picture or sound — before, only for copied sound. On Home Assistant a seek to 1000.000 s of a Matroska film asked for #95 on both tracks, nothing made it, and the picture stood 131 s (r43, #ttv-178).
+
 ## 2.99.0
 
 - **New**: A viewer whose picture this machine makes slower than realtime is moved, without their player being told, to a faster speed setting of the same size and limit before a smaller picture is asked for, and back up one setting when they have room to spare. Each setting is priced by the whole model of its encoding here — its startup measurement at that size, this file's measured decoding, the other work running, the free share of the machine, and no faster than it was seen running alone here — over a run, its open included: `film / (open + film / processing)`. Only for segments that carry their own parameter sets (MPEG-TS): an fMP4 segment is read against one init, which another setting does not match (#ttv-178).

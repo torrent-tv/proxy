@@ -107,7 +107,11 @@ test("what a viewer waits for reaches the plan without their name", (t) => {
   // band begins, and that there is film in front of it.
   const wanted = manager.encodeOrchestrator.wantedSegmentsOn(KEY);
   const first = [...wanted].sort((left, right) => right.priority - left.priority)[0];
-  assert.equal(first.from, 5, "where they are");
+  // The output copies the picture, and they stand at 20 s, the published start
+  // of #5: the piece ending there is asked for too, because a copied piece runs
+  // past its end and the player asks for it (`piecesRunPastEnd`, field r43,
+  // torrent-tv/meta#178).
+  assert.equal(first.from, 4, "where they are, and the copied piece ending there");
   assert.ok(wanted.some((zone) => zone.to > 5), "and the cushion in front of them");
 });
 

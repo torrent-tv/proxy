@@ -25,6 +25,7 @@ import { cutOf, cutShiftOf, judgeNeighbors, judgePiece, leadingSecondsOf, lacksO
 import { leadingPictures, presentationSegment } from "./segment-formats/presentation-segment.js";
 import { InputFailures, failedAdmittedInput } from "./InputFailures.js";
 import { readProcessCpuSeconds } from "./host-load.js";
+import { piecesRunPastEnd } from "./output/Timeline.js";
 
 
 /**
@@ -599,7 +600,7 @@ export class EncodeRuns {
         timeline?.inSegments?.(
           this.#host.priority.mapForOutput(address),
           Number(timeline?.segmentCount) || 0,
-          { runsPastEnd: Boolean(spec?.audio) && spec?.transcodesAudio !== true }
+          { runsPastEnd: piecesRunPastEnd(spec) }
         ) ?? []
       );
     }

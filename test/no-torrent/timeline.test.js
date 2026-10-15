@@ -144,12 +144,14 @@ test("a copied piece is wanted by the second its end falls in, because a copy ru
   ]);
 });
 
-test("a copied picture's pieces run past their end, as a copied soundtrack's do", () => {
+test("a copied picture's pieces run past their end, as a soundtrack's do however it is made", () => {
   // Field r43: a seek to 1000.000 s, the published start of a copied Matroska
   // picture's piece #96, asked for #95 on both tracks (torrent-tv/meta#178).
   assert.equal(piecesRunPastEnd(outputSpec({ transcodeVideo: false, transcodeAudio: true })), true, "a copied picture");
   assert.equal(piecesRunPastEnd(outputSpec({ transcodeVideo: true, transcodeAudio: false })), true, "a copied soundtrack");
   assert.equal(piecesRunPastEnd(outputSpec({ audioOnly: true, transcodeAudio: false })), true);
-  assert.equal(piecesRunPastEnd(outputSpec({ transcodeVideo: true, transcodeAudio: true })), false, "nothing copied");
-  assert.equal(piecesRunPastEnd(outputSpec({ audioOnly: true, transcodeAudio: true })), false);
+  // r44: the soundtrack, AAC encoded from the film, asked for #95 as well.
+  assert.equal(piecesRunPastEnd(outputSpec({ audioOnly: true, transcodeAudio: true })), true, "an encoded soundtrack");
+  assert.equal(piecesRunPastEnd(outputSpec({ transcodeVideo: true, audioSeparate: true })), false,
+    "a re-encoded picture alone, a keyframe at every cut");
 });

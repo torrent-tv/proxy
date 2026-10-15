@@ -34,7 +34,7 @@ test("fragmented MP4 retains exact sample addresses, clocks and decoded picture 
   const broken = new Mp4Container({ fileSize: damaged.length,
     readRange: async (a, b) => damaged.subarray(a, b + 1) });
   await assert.rejects(broken.readPacketIndex(), /child exceeds its parent/);
-  allowed = held + bytes.readUInt32BE(firstMoof) + 131072;
+  allowed = held + bytes.readUInt32BE(firstMoof) + 8192;
   await assert.rejects(limited.readPacketIndex(), IndexMemoryUnavailable);
   assert.equal(held, declarations, "a refused fragment returns partial packet and temporary allocations");
   allowed = Infinity;

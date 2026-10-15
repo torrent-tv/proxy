@@ -7,20 +7,28 @@ import { PacketRecords } from "../../services/media/container/PacketRecords.js";
 import { IndexMemoryUnavailable } from "../../services/media/container/memory-unavailable.js";
 
 test("a memory shortage inside a laced block rolls back every frame before retry", async () => {
-  let allowance = 131072, held = 0;
+  let allowance = Infinity, held = 0;
   const records = new PacketRecords({ reserve: bytes => {
     if (held + bytes > allowance) return false;
     held += bytes;
     return true;
   }, release: bytes => { held -= bytes; } });
-  const previousLength = Math.floor(65536 / 72) - 1;
-  for (let index = 0; index < previousLength; index++) records.push({ pts: -1, duration: 0.02, ranges: [[0, 0]] });
+  // Records up to one short of a full block: the lace's first frame fits, its
+  // second needs a block the allowance refuses.
+  const filler = { pts: -1, duration: 0.02, ranges: [[0, 0]] };
+  records.push(filler);
+  const first = records.allocatedBytes;
+  while (records.allocatedBytes === first) records.push(filler);
+  const previousLength = records.length - 2;
+  records.length = previousLength;
+  allowance = held;
+  const refusedAt = held;
   const bytes = cluster([element([0xa3], Buffer.from([0x81, 0, 0, 0x84, 2, 1, 2, 3]))]);
   const over = { ...params(bytes, [{ trackNumber: 1, type: "audio", defaultDurationSeconds: 0.02 }]),
     state: { packets: new Map([[1, records]]), at: 0 } };
   await assert.rejects(readMatroskaPackets(over), IndexMemoryUnavailable);
   assert.equal(records.length, previousLength);
-  assert.equal(held, 131072);
+  assert.equal(held, refusedAt);
   allowance += 65536;
   await readMatroskaPackets(over);
   assert.equal(records.length, previousLength + 3);

@@ -104,10 +104,11 @@ test("an addressed Matroska read resumes after its selected structural bytes arr
     if (missing && from >= unavailableAt && from < data.clusterAt[5]) throw new BytesUnavailable(from, to, 0);
     return data.file.subarray(from, to + 1);
   });
-  await assert.rejects(container.readPacketIndex({ from: 4, to: 5 }), BytesUnavailable);
+  // One track: each track's packets are a reading of their own.
+  await assert.rejects(container.readPacketIndex({ from: 4, to: 5, trackIds: [1] }), BytesUnavailable);
   missing = false;
   reads.length = 0;
-  const index = await container.readPacketIndex({ from: 4, to: 5 });
+  const index = await container.readPacketIndex({ from: 4, to: 5, trackIds: [1] });
   assert.equal(index.inputFor({ trackId: 1, from: 4, to: 5, mode: "copy" }).kind, "result");
   assert.ok(reads.every(from => from >= unavailableAt));
 });

@@ -1,4 +1,5 @@
 import { PacketRecords } from "./PacketRecords.js";
+import { PacketRecordsChain } from "./PacketRecordsChain.js";
 import { IndexMemoryUnavailable } from "./memory-unavailable.js";
 import { isMp3Codec, mp3PacketFacts } from "./mp3-packet-dependencies.js";
 
@@ -95,13 +96,19 @@ export class PacketIndex {
     }
   }
 
-  /** The progressive parser and its interval views share one packet allocation. */
+  /**
+   * The progressive parser and its interval views share one packet allocation.
+   * A chain of a container's own tables was checked record by record as each
+   * was written; read again in full for every request, a two-hour soundtrack
+   * would be 340 thousand records per request (torrent-tv/meta#178).
+   */
   sharePackets(id, records) {
     const track = this.#track(id);
-    if (track.complete || track.packets.length || !(records instanceof PacketRecords)) {
+    const chain = records instanceof PacketRecordsChain;
+    if (track.complete || track.packets.length || !(records instanceof PacketRecords || chain)) {
       throw new TypeError("Only an empty unfinished track may adopt packet records.");
     }
-    for (const packet of records) validatePacket(packet);
+    if (!chain) for (const packet of records) validatePacket(packet);
     track.packets.dispose();
     track.packets = records;
   }

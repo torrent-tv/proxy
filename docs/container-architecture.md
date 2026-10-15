@@ -58,7 +58,14 @@ across unavailable bytes and allocation refusal. Failed partial records roll
 back before another attempt.
 
 Matroska finds its Segment and following elements by their exact EBML headers;
-unneeded payloads are skipped. AVI walks RIFF lists and indexed or sequential
+unneeded payloads are skipped. A Matroska file with Cues is read by its picture from the
+original file; a soundtrack read on its own (an audio-only output) is read from
+its own packets. Each track's packets are kept in readings that begin where a
+request first needs them, record that track alone and adjoin the next reading
+once they reach it, so a stretch is read once whatever order the download map
+asks for it in; a request reads the readings it spans as one list
+(`PacketRecordsChain`). A packet table's blocks start at 4 KiB and double to
+64 KiB. AVI walks RIFF lists and indexed or sequential
 media chunks, including AVIX continuations. An AVI with an `idx1` or OpenDML
 index is not reassembled: `avi-index.js` holds its packet addresses in typed
 arrays and FFmpeg reads the original file (`docs/download-architecture.md`).

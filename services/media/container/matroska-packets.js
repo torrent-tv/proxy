@@ -10,17 +10,51 @@ const CLUSTER = 0x1f43b675;
 const LEVEL_ONE = new Set([CLUSTER, 0x1c53bb6b, 0x114d9b74, 0x1549a966, 0x1654ae6b, 0x1043a770, 0x1941a469, 0x1254c367]);
 
 /** Index frame addresses by reading structural headers, never frame bodies. */
-export async function readMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, endSeconds, interval, packetMemory, state = {} }) {
+export async function readMatroskaPackets(params) {
+  const { tracks, endSeconds, interval, packetMemory, state = {} } = params;
+  const outcome = await walkMatroskaPackets({ ...params, state });
+  const declared = recordedTracks(tracks, params.trackIds);
+  const complete = outcome === "end";
+  return buildMatroskaIndex({ declared, streams: state.packets, endSeconds,
+    complete: complete ? new Set(declared.keys()) : new Set(), covered: complete ? null : interval, packetMemory });
+}
+
+/**
+ * The tracks a walk records: every media track, or only those named.
+ *
+ * @param {object[]} tracks
+ * @param {number[]} [trackIds]
+ * @returns {Map<number, object>}
+ */
+function recordedTracks(tracks, trackIds) {
+  return new Map(tracks.filter(track => ["video", "audio", "subtitle"].includes(track.type) &&
+    (!trackIds || trackIds.includes(track.trackNumber))).map(track => [track.trackNumber, track]));
+}
+
+/**
+ * Walk the clusters from where `state` stopped, recording the packets of the
+ * tracks it records, until the interval is covered (`isCovered`, by default
+ * over this state's own records), the walk reaches `until` — where another
+ * reading of the same tracks begins — or the segment ends.
+ *
+ * Only the named tracks are recorded: a soundtrack read on its own kept the
+ * picture's table as well, half of 37.9 MB on r47's order (torrent-tv/meta#178).
+ *
+ * @returns {Promise<"covered" | "until" | "end">}
+ */
+export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, trackIds, interval, packetMemory, state, until = null, isCovered = null }) {
   const reader = new ElementReader({ read: readRange, fileSize, portionBytes });
-  const declared = new Map(tracks.filter(track => ["video", "audio", "subtitle"].includes(track.type)).map(track => [track.trackNumber, track]));
+  const declared = recordedTracks(tracks, trackIds);
   if (!state.packets) {
     state.packets = new Map([...declared.keys()].map(id => [id, new PacketRecords(packetMemory)]));
     state.at ??= layout.firstClusterAt ?? layout.segmentEnd;
   }
   const packets = state.packets;
-  if (intervalCovered(declared, packets, interval)) return buildIndex(declared, packets, endSeconds, false, interval, packetMemory);
+  const covered = isCovered ?? (() => intervalCovered(declared, packets, interval));
+  const limit = Math.min(until ?? layout.segmentEnd, layout.segmentEnd);
+  if (covered()) return "covered";
   let at = state.at;
-  while (at < layout.segmentEnd) {
+  while (at < limit) {
     const element = state.cluster?.element ?? await validHeader(reader, at, layout.segmentEnd);
     if (element.id !== CLUSTER) {
       if (element.end === null) throw new Error("An unknown-sized Matroska element is not a Cluster.");
@@ -80,14 +114,16 @@ export async function readMatroskaPackets({ readRange, fileSize, portionBytes, l
       cursor = child.end;
       state.cluster.cursor = cursor;
       state.cluster.clusterTicks = clusterTicks;
-      if (intervalCovered(declared, packets, interval)) return buildIndex(declared, packets, endSeconds, false, interval, packetMemory);
+      if (covered()) return "covered";
     }
     if (cursor <= at) throw new Error("Matroska packet walk did not advance.");
     at = element.end ?? cursor;
     state.at = at;
     state.cluster = null;
   }
-  return buildIndex(declared, packets, endSeconds, true, undefined, packetMemory);
+  if (at < layout.segmentEnd) return "until";
+  state.reachedEnd = true;
+  return "end";
 }
 
 function paddingForFrame(seconds, duration, count, frame) {
@@ -110,17 +146,28 @@ function intervalCovered(declared, packets, interval) {
   });
 }
 
-function buildIndex(declared, packets, endSeconds, complete, interval, packetMemory) {
+/** Whether the interval's requested tracks reach past its end; exported for a container's own chains. */
+export { intervalCovered as matroskaIntervalCovered };
+
+/**
+ * A packet index over the given streams of the declared tracks.
+ *
+ * `complete` names the tracks no packet follows; `covered` is the interval
+ * the other requested tracks are known to reach past. A declared track with no
+ * stream is declared empty.
+ */
+export function buildMatroskaIndex({ declared, streams, endSeconds, complete, covered, packetMemory }) {
   const index = new PacketIndex();
   for (const [id, track] of declared) {
     index.declareTrack(id, { type: track.type, codecId: track.codecId, codecRanges: track.codecRanges ?? [], prerollSeconds: track.seekPrerollSeconds ?? 0, reorderDepth: track.reorderDepth ?? 0 });
-    const stream = packets.get(id);
+    const stream = streams.get(id);
+    if (!stream) continue;
     let needsFollowing = false;
     for (let position = 0; position < stream.length; position++) {
       if (stream.durationAt(position) === 0 || stream.derivedDurationAt(position)) { needsFollowing = true; break; }
     }
     if (needsFollowing) {
-      const endFor = followingPacketTime(stream, complete ? endSeconds : null, packetMemory);
+      const endFor = followingPacketTime(stream, complete.has(id) ? endSeconds : null, packetMemory);
       try { for (let position = 0; position < stream.length; position++) {
         if (stream.durationAt(position) !== 0 && !stream.derivedDurationAt(position)) continue;
         const pts = stream.ptsAt(position), end = endFor(pts);
@@ -128,9 +175,9 @@ function buildIndex(declared, packets, endSeconds, complete, interval, packetMem
       } } finally { endFor.dispose(); }
     }
     index.sharePackets(id, stream);
-    if (complete) index.complete(id);
-    else if (interval.trackIds ? interval.trackIds.includes(id) : ["video", "audio"].includes(track.type)) {
-      index.coverThrough(id, interval.to);
+    if (complete.has(id)) index.complete(id);
+    else if (covered && (covered.trackIds ? covered.trackIds.includes(id) : ["video", "audio"].includes(track.type))) {
+      index.coverThrough(id, covered.to);
     }
   }
   return index;

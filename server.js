@@ -65,6 +65,7 @@ import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
 import { nativeSourceMap, nativeOriginalSourceMap } from "./services/viewer/NativeSourceMap.js";
 import { MediaReadRequests } from "./services/media/MediaReadRequests.js";
 import { SegmentInputs } from "./services/media/SegmentInputs.js";
+import { directSegmentInput } from "./services/media/direct-segment-input.js";
 import { ContainerTrack } from "./services/media/tracks/ContainerTrack.js";
 import { pauseCoefficient, viewerStartsOn } from "./services/viewer/PriorityMap.js";
 import { coalescing } from "./utils/coalesce.js";
@@ -551,6 +552,17 @@ export async function startProxyServer({
       `${Math.round(passCosts.ms)}ms from start to result in all, longest ${Math.round(passCosts.maxMs)}ms`);
     Object.assign(passCosts, { since: now, passes: 0, whole: 0, reworked: 0, resolved: 0, windows: 0, ms: 0, maxMs: 0 });
   };
+  // A container whose packet table a pass did not wait for builds the map
+  // again once, when the table is built or refused (`directSegmentInput`).
+  const refreshAfterTable = new WeakSet();
+  const refreshWhenBuilt = (container, built, { sourceKey, fileIndex }) => {
+    if (refreshAfterTable.has(container)) return;
+    refreshAfterTable.add(container);
+    void built.then(() => {
+      refreshAfterTable.delete(container);
+      return downloadMaps.refresh(sourceKey, fileIndex);
+    }).catch(error => logger.warn(`download map after a packet table: ${error?.message ?? error}`));
+  };
   const downloadMaps = new DownloadMaps({
     // The ranges a picture reads at open are named again by every segment;
     // only the zone the swarm would rank first is sent (torrent-tv/meta#166).
@@ -693,13 +705,15 @@ export async function startProxyServer({
           // packets, which the same index states (torrent-tv/meta#166).
           let value = null;
           try {
-            if (await direct.supportsOriginalSourceRanges(interval) === true) value = await direct.readSourceRanges(interval);
-            else {
-              const index = await direct.readPacketIndex(interval);
-              await index.prepareAudioDependencies?.(interval, direct.readRange);
-              value = new SegmentInputs({ index, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
-            }
+            value = await directSegmentInput(direct, { interval, tracks: wanted, mode: track => modes.get(track) },
+              built => refreshWhenBuilt(direct, built, map));
           } catch { value = null; }
+          // A table still being built holds this output's segments, and only
+          // this output's: the map is built again when it is.
+          if (value?.kind === "pending") {
+            waiting.add(zone.outputKey);
+            continue;
+          }
           // The pass shares the thread in equal turns (`takeTurns`): in one
           // stretch the first pass over a film's 4000 zones held the main thread
           // for all of its work, and handed back after every zone it took

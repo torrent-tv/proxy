@@ -944,6 +944,25 @@ export class ViewerRequests {
     }
     // Totals that went back belong to a torrent added again: read on from them.
     if (limit) source.limit = limit;
-    return source.free.snapshot() ?? source.delivered.snapshot();
+    return sourceService(source.free.snapshot(), source.delivered.snapshot());
   }
+}
+
+/**
+ * The download service a source's forecast runs on: what the swarm carried
+ * while our selection held none of its connections back, but never less than
+ * what it carried in all. A stretch our selection held nothing back can be a
+ * moment with nothing to ask, and its rate then measures our asking: after a
+ * seek to 1000 s the forecast read 0 B/s from such a stretch while the torrent
+ * downloaded 5-18 MB/s, answered "service not advancing", and held the viewer
+ * (r54, torrent-tv/meta#178). What the swarm did carry, it can carry.
+ *
+ * @param {object | null} free - A rate summary (`RateTrend.snapshot`).
+ * @param {object | null} delivered
+ * @returns {object | null}
+ */
+export function sourceService(free, delivered) {
+  if (!free) return delivered;
+  if (!delivered) return free;
+  return delivered.lastValue > free.lastValue ? delivered : free;
 }

@@ -63,3 +63,12 @@ test("a steady drain reads as the rate it drains at", () => {
   const readings = [0, 5, 10].map((second) => ({ at: second * 1000, seconds: 30 - second }));
   assert.equal(bufferTrend(readings, 4).slope, -1);
 });
+
+test("a buffer holding the rest of the film is no threat however it drains", () => {
+  // Field r43 (torrent-tv/meta#178): 115.6 s held with 108 s of film left,
+  // draining because the film ends.
+  assert.equal(drainThreat({ bufferedSec: 115.6, slope: -1, reportGapSec: 1.5, secondsToReady: 200, remainingSec: 108 }).threat, false);
+  assert.equal(drainThreat({ bufferedSec: 100, slope: -1, reportGapSec: 1.5, secondsToReady: 200, remainingSec: 108 }).threat, true,
+    "film beyond the buffer still has to come");
+  assert.equal(drainThreat({ bufferedSec: 100, slope: -1, reportGapSec: 1.5, secondsToReady: 200 }).threat, true, "and with the rest not known");
+});

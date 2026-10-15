@@ -496,7 +496,11 @@ export class QualityController {
       bufferedSec: buffer?.bufferedSec ?? 0,
       slope: buffer?.slope ?? null,
       reportGapSec: buffer?.reportGapSec ?? 0,
-      secondsToReady: this.#secondsToReady(session)
+      secondsToReady: this.#secondsToReady(session),
+      // What is left of the film after them: a buffer holding all of it drains
+      // because the film ends.
+      remainingSec: Number.isFinite(buffer?.positionSec) && session.file?.durationSeconds > 0
+        ? Math.max(0, session.file.durationSeconds - buffer.positionSec) : null
     });
     if (!threat) {
       return false;

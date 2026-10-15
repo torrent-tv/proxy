@@ -43,24 +43,29 @@
  */
 
 /**
- * Whether an output's pieces copy a stream, picture or sound, and so may hold
- * a little past their published end: a copy ends at the first packet boundary
- * at or after it, and the player places the next piece where this one truly
- * ends (hls.js `updateFragPTSDTS`). A viewer standing at a published edge is
- * then asked for by the piece BEFORE it.
+ * Whether an output's pieces may hold a little past their published end: a
+ * piece ends at the first frame boundary at or after it, and the player places
+ * the next piece where this one truly ends (hls.js `updateFragPTSDTS`). A
+ * viewer standing at a published edge is then asked for by the piece BEFORE
+ * it. True of a copied picture, whose pieces end at a packet, and of sound
+ * however it is made: copied sound ends at a packet, and encoded sound at a
+ * frame of the encoder — 1024 samples of AAC, 21.3 ms at 48 kHz. Only a
+ * re-encoded picture, given a keyframe at every cut, ends where it is published.
  *
  * Field 2026-10-09, MP3 copied out of an AVI: a seek to 4000 s asked for the
  * piece ending at 4000 s. Field r43 (Home Assistant, 2026-10-15), a copied
  * Matroska picture: a seek to 1000.000 s, the published start of #96, asked for
  * #95 on both tracks; the picture's pieces were not counted as copies, nothing
- * made #95, and the picture stood 131 s until the viewer moved
- * (torrent-tv/meta#178).
+ * made #95, and the picture stood 131 s until the viewer moved. With the
+ * picture counted (r44), its #95 was made in 6.4 s and the soundtrack's, AAC
+ * encoded from the film (`its muxer counts cuts -0.021333s`), was still not
+ * made (torrent-tv/meta#178).
  *
  * @param {{ video?: object | null, audio?: object | null, transcodesVideo?: boolean, transcodesAudio?: boolean } | null | undefined} spec
  * @returns {boolean}
  */
 export function piecesRunPastEnd(spec) {
-  return (Boolean(spec?.video) && spec.transcodesVideo !== true) || (Boolean(spec?.audio) && spec.transcodesAudio !== true);
+  return (Boolean(spec?.video) && spec.transcodesVideo !== true) || Boolean(spec?.audio);
 }
 
 export class Timeline {

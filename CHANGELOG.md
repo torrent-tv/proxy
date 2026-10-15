@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The piece ending where a viewer stands is wanted for every soundtrack, encoded or copied, and not only for copied ones: an encoded soundtrack is cut at a frame of the encoder, 21.3 ms of AAC, and its pieces end past their published edge too. On Home Assistant, with 2.99.2, a seek to 1000.000 s of a Matroska film made the picture's #95 in 6.4 s and left the AAC soundtrack's #95 unmade (r44, #ttv-178).
+
 ## 2.99.2
 
 - **Fix**: A viewer whose buffer holds the rest of the film is no longer read as running dry: their buffer drains because the film ends, and no output can add to it. On Home Assistant the last two minutes of an AVI were taken for a machine-bound viewer, a faster speed setting was prepared 53 times and given up each time with nothing left of the film to give, and the player was asked for 240p eight times (r43, #ttv-178).

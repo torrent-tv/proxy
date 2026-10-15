@@ -313,6 +313,14 @@ export function createTunnelClient({
           signalRoutes.delete(sessionId);
         }
       }
+      // Closed because this proxy is stopping (`disconnect`), which clears the
+      // connection before its close arrives. Read as a handover, a stopping
+      // proxy said a replacement carried its tunnel while viewers found no
+      // proxy at all (r48, torrent-tv/meta#178).
+      if (stopped) {
+        log(`Tunnel closed (code=${event.code}): this proxy is stopping.`);
+        return;
+      }
       // A connection this one replaced. The server closes it as soon as the
       // replacement registers, which is the whole point of renewing early —
       // there is nothing to report and nothing to reconnect, because the tunnel

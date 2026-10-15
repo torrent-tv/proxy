@@ -1248,7 +1248,9 @@ export function createDataChannelHandler({
           const loop = eventLoopDelay();
           const mbps = elapsedMs > 0 ? (totalBytes * 8) / (elapsedMs * 1000) : 0;
           log(
-            `[net-debug] sent ${path}${queryInfo} bytes=${totalBytes} fetchMs=${fetchMs} ` +
+            // The request's own id, so the page's line for the same answer can
+            // be read beside this one without comparing two machines' clocks.
+            `[net-debug] sent ${path}${queryInfo} requestId=${requestId} bytes=${totalBytes} fetchMs=${fetchMs} ` +
               `ttfbMs=${firstByteMs} sendMs=${elapsedMs} chunks=${chunks} ` +
               // The size of one message, so a reading can be attributed to the
               // size it was taken at rather than to the run it came from.
@@ -1335,54 +1337,86 @@ export function createDataChannelHandler({
   }
 
   /**
-   * Resolve once the channel's outgoing buffer has drained below the low-water
-   * mark. No-op (resolves immediately) when the buffer is already small or the
-   * channel does not expose buffer APIs. The previous implementation resolved
-   * after {@link DC_BUFFER_DRAIN_TIMEOUT_MS} even though the buffer was still
-   * high, so the send loop kept queueing into a wedged channel and the queue
-   * grew to 399 MB (field 2026-09-06). This version waits until the buffer
-   * actually drains, polling as a fallback for a missed low-water event, and
-   * never resolves while the channel is still holding bytes above the low-water
-   * mark.
+   * The send loops waiting on each channel for its library queue to empty. The
+   * native channel has one low-water callback, so it is set once per channel
+   * and wakes every loop waiting on it; each then reads the queue itself.
+   *
+   * @type {WeakMap<DataChannel, Set<() => void>>}
+   */
+  const drainWaiters = new WeakMap();
+
+  /**
+   * @param {DataChannel} channel
+   * @returns {Set<() => void> | null} Null for a channel that cannot say when its queue empties.
+   */
+  function drainWaitersOf(channel) {
+    let waiters = drainWaiters.get(channel);
+    if (waiters) return waiters;
+    if (typeof channel.onBufferedAmountLow !== "function" || typeof channel.setBufferedAmountLowThreshold !== "function") {
+      return null;
+    }
+    waiters = new Set();
+    drainWaiters.set(channel, waiters);
+    channel.setBufferedAmountLowThreshold(0);
+    channel.onBufferedAmountLow(() => {
+      for (const wake of [...waiters]) wake();
+    });
+    return waiters;
+  }
+
+  /**
+   * Resolve once the library holds nothing of this channel's that usrsctp has
+   * not yet taken, or the request is cancelled.
+   *
+   * WHY EMPTY, AND NOT A HIGH-WATER MARK. libdatachannel keeps ONE queue for
+   * every channel of a connection, first in first out (`SctpTransport::send`,
+   * v0.24.2), and usrsctp's own send buffer sits after it. A control answer —
+   * the forecast a held viewer waits for, a seek's acknowledgement — waits
+   * behind everything handed over before it, on every channel. With the 8 MiB
+   * mark this was, and with usrsctp's buffer sized by the 16 MiB message limit,
+   * probes on all three channels stood 2.8-5.1 s behind on Home Assistant while
+   * copied 1080p pieces of 11-12 MB crossed, and a viewer whose picture was
+   * already buffered was started that much later (r46, torrent-tv/meta#178).
+   * usrsctp's own buffer keeps the wire busy while this loop is away; whether
+   * it is deep enough for the rate and this thread's pauses is read from the
+   * `sent` line's rate and event-loop figures, not assumed.
+   *
+   * Cancellation ends the wait at once; elapsed time alone never resumes
+   * sending, so a wedged channel does not grow a queue (399 MB, field
+   * 2026-09-06).
    *
    * @param {DataChannel} channel
+   * @param {AbortSignal} signal
    * @returns {Promise<void>}
    */
   function waitForBufferDrain(channel, signal) {
     return new Promise((resolve) => {
       try {
-        if (signal.aborted || typeof channel.bufferedAmount !== "function" || channel.bufferedAmount() <= DC_BUFFER_HIGH_WATER) {
+        if (signal.aborted || typeof channel.bufferedAmount !== "function" || channel.bufferedAmount() <= 0) {
           resolve();
           return;
         }
-        let poll = null;
+        const waiters = drainWaitersOf(channel);
         let settled = false;
         const done = () => {
           if (settled) return;
           settled = true;
-          if (poll) clearInterval(poll);
+          waiters?.delete(wake);
           signal.removeEventListener("abort", done);
           resolve();
         };
-        signal.addEventListener("abort", done, { once: true });
-        // The native channel exposes one callback for all requests. Sampling
-        // avoids one request replacing another's callback. Cancellation ends
-        // the wait immediately; elapsed time alone never resumes sending.
-        poll = setInterval(() => {
+        const wake = () => {
           try {
-            if (channel.bufferedAmount() <= DC_BUFFER_LOW_WATER) {
-              done();
-            }
+            if (channel.bufferedAmount() <= 0) done();
           } catch {
             done();
           }
-        }, 50);
-        if (typeof poll.unref === "function") poll.unref();
-        // Guard against a race where the buffer drained between the check above
-        // and registering the callback (the low-water event would never fire).
-        if (channel.bufferedAmount() <= DC_BUFFER_LOW_WATER) {
-          done();
-        }
+        };
+        signal.addEventListener("abort", done, { once: true });
+        waiters?.add(wake);
+        // The queue may have emptied between the first reading and the
+        // registration, when no further low-water event would come.
+        wake();
         if (signal.aborted) done();
       } catch {
         resolve();
@@ -1461,6 +1495,3 @@ const TRANSPORT_HEARTBEAT_MS = 5_000;
 // registry does not end a healthy watch.
 const TRANSPORT_UNKNOWN_HEARTBEATS = 3;
 const SEND_QUEUE_STUCK_MS = 5_000;
-const DC_BUFFER_HIGH_WATER = 8 * 1024 * 1024;
-/** Resume sending once the channel buffer drains to this many bytes. */
-const DC_BUFFER_LOW_WATER = 1 * 1024 * 1024;

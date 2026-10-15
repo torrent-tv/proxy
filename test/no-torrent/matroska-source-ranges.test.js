@@ -4,7 +4,6 @@ import { MatroskaContainer } from "../../services/media/container/MatroskaContai
 import { buildMatroska, trackEntry, clusterData, pictureBlock, element } from "./helpers/matroska-file.js";
 import { ContainerOrchestrator } from "../../services/media/ContainerOrchestrator.js";
 import { FFMPEG_STREAM_SEARCH_SECONDS } from "../../services/media/container/ffmpeg-stream-search.js";
-import { SegmentInputs } from "../../services/media/SegmentInputs.js";
 
 test("original ranges retain every declared tail element and retry its unavailable header", async () => {
   const declarations = [0x1254c367, 0x1043a770, 0x1941a469].map(id => ({ id,
@@ -88,29 +87,16 @@ test("a Matroska file without Cues retains its existing indexed-input path", asy
   assert.equal((await container.readSourceRanges({ from: 0, to: 1 })).kind, "needs-index");
 });
 
-test("a soundtrack alone is read from its own packets, not from the picture's clusters", async () => {
-  // Each cluster holds 2 MiB of picture and 1 KiB of sound, as a copied 1080p
-  // film does at a far larger scale: 38 MB of source for 171 KB of sound per
-  // piece on Home Assistant (r44, r46, torrent-tv/meta#178).
-  const picture = 2 * 1024 * 1024, sound = 1024;
+test("a soundtrack alone is read from the original file while its packet table has no memory of its own", async () => {
+  // Read from its own packets (proxy 2.99.6), the soundtrack's table was
+  // refused memory on Home Assistant and no Matroska film started (r47,
+  // torrent-tv/meta#178).
   const source = buildMatroska({ tracks: [trackEntry({ number: 1, type: 1, codecId: "V_VP8" }),
     trackEntry({ number: 2, type: 2, codecId: "A_AC3" })],
-  clusters: Array.from({ length: 8 }, (_, index) => ({ ticks: index * 2000, data: clusterData({ ticks: index * 2000,
-    blocks: [pictureBlock({ track: 1, payload: Buffer.alloc(picture) }), pictureBlock({ track: 2, payload: Buffer.alloc(sound, 1) })] }) })),
+  clusters: Array.from({ length: 4 }, (_, index) => ({ ticks: index * 2000, data: clusterData({ ticks: index * 2000,
+    blocks: [pictureBlock({ track: 1, payload: Buffer.alloc(4096) }), pictureBlock({ track: 2, payload: Buffer.alloc(256, 1) })] }) })),
   cues: [1] });
   const container = new MatroskaContainer({ fileSize: source.file.length, portionBytes: 4096,
     readRange: async (start, end) => source.file.subarray(start, end + 1) });
-
-  assert.equal(await container.supportsOriginalSourceRanges(), true, "the file as a whole answers as its picture");
-  assert.equal(await container.supportsOriginalSourceRanges({ from: 6, to: 10, trackIds: [1, 2] }), true);
-  assert.equal(await container.supportsOriginalSourceRanges({ from: 6, to: 10, trackIds: [2] }), false,
-    "the soundtrack alone is not read from the original file");
-
-  const tracks = await container.readTracks();
-  const soundtrack = tracks.find(track => track.trackNumber === 2);
-  const index = await container.readPacketIndex({ from: 6, to: 10, trackIds: [2] });
-  const input = new SegmentInputs({ index, tracks: [soundtrack] }).forInterval({ from: 6, to: 10, mode: "transcode" });
-  assert.equal(input.kind, "result");
-  const bytes = input.ranges.reduce((sum, [start, end]) => sum + end - start + 1, 0);
-  assert.ok(bytes < picture, `the sound's input holds no picture block: ${bytes} bytes`);
+  assert.equal(await container.supportsOriginalSourceRanges({ from: 2, to: 4, trackIds: [2] }), true);
 });

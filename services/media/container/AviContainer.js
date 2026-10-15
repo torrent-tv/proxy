@@ -199,6 +199,20 @@ export class AviContainer extends Container {
     return false;
   }
 
+  /**
+   * Whether reading the sound's packet table now would wait for it to be
+   * built: the index is read, the table is not, and no refusal of memory for
+   * it stands. A reader with other work may go on with it instead. Field r42
+   * (Home Assistant, 2026-10-14): the download map waited 3.2 s for the
+   * table, between the soundtrack's first segment and the picture's next
+   * ones, and the swarm was asked for the picture's next piece only after it
+   * (torrent-tv/meta#178).
+   */
+  packetTableWouldWait() {
+    if (!this.#index || this.#packets || this.#scan) return false;
+    return this.#soundPacketsRefused === null || this.packetMemory?.fits?.(this.#soundPacketsRefused) !== false;
+  }
+
   /** The index, read from the file; see `#readIndex`. */
   async #readIndexOnce() {
     const tracks = await this.readTracks();

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.3
 
 - **Removed**: Option `--input-stretch-bytes <bytes>` (2.101.0). Home Assistant runs with 128 MiB stretches on a 1080p MKV gave no gain over the measured size: five times more stops, slower seeks to 1000 s and 8-16% more processor at the same peak memory, so the comparison it was for is over (#ttv-182).
 - **Fix**: Where a container's CPU quota or CPU set gives this process fewer cores than the host has, the share of the machine an encoder gets, what other work leaves the proxy, and the share divided out of every startup measurement are fractions of those cores: the host's other work takes only what the host lacks, and the proxy's own draw is taken from the quota. Before, all three were fractions of the host, so a busy neighbour cut predictions the quota was never short of, and the proxy's own draw was counted as a fraction of the host. A software encoder's stored figures are keyed by that number of cores where it binds. Without a quota or CPU set smaller than the host, nothing changes (#ttv-180).

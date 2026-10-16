@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: A file's fingerprint names both missing edges at once, so a cold start asks the swarm for the file's last piece with its first. Asked only after the first had arrived, the last piece — which also holds a Matroska film's Cues — came 2.4 s later, and the start waited for it (r66, #ttv-178).
+
 ## 2.100.5
 
 - **Fix**: A Matroska soundtrack's packet walk for a piece begins at the Cluster that holds the first frame it needs, not one Cluster earlier; only a picture needs the Cluster before its cue. Begun earlier, a soundtrack walk started before the bytes the picture's input had copied for the same piece, and 101 of 166 walks from those copies stopped at once (r65, #ttv-178).

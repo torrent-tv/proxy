@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A soundtrack input's line says how long its packet walk waited for the same track's earlier walks and what it read of the file, and a walk from the picture's copy says whether memory or the copy stopped it. Walked from the copy, a soundtrack piece still took 0.9-12.6 s and no line said where (r62, #ttv-178).
+
 ## 2.100.1
 
 - **Fix**: A piece is written to disk in one write instead of 512 KiB at a time. Each part waited for a turn of the torrent thread's loop, which ran about a second late while downloading, so pieces arriving at 20 MB/s waited for their writes: 1.1 GB of them in that thread's memory at once on Home Assistant (r61, #ttv-178).

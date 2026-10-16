@@ -789,8 +789,10 @@ export class MatroskaContainer extends Container {
    *   A walk whose request is no longer current stops between clusters and
    *   answers null. `readRange`, when given, is where this one walk reads
    *   instead of the file's own reader; what it does not hold is unavailable.
+   *   `account`, when given, is told how long each track's walk waited for
+   *   that track's earlier walks and what it read (`lockMs`, `reads`, `bytes`).
    */
-  async readPacketIndex(interval, { isCurrent, readRange } = {}) {
+  async readPacketIndex(interval, { isCurrent, readRange, account } = {}) {
     if (this.#packets) return this.#packets;
     const layout = await this.#segmentLayout();
     if (!layout) throw new Error("Matroska Segment is absent.");
@@ -810,7 +812,7 @@ export class MatroskaContainer extends Container {
     let whole = true;
     for (const track of requested) {
       const chain = await this.#readTrackPackets(layout, tracks, track, start, interval, isCurrent,
-        readRange ? strictReader(readRange, this.fileSize) : this.readRange);
+        readRange ? strictReader(readRange, this.fileSize) : this.readRange, account);
       if (!chain) return null;
       streams.set(track.trackNumber, chain.records);
       if (chain.reachesEnd) complete.add(track.trackNumber);
@@ -835,15 +837,17 @@ export class MatroskaContainer extends Container {
    *
    * @param {{ from: number, to: number, trackIds: number[] }} interval
    * @param {(start: number, end: number) => Buffer | null} readRange - Null where it does not hold the bytes.
-   * @returns {Promise<boolean>} Whether the interval's packets are recorded.
+   * @returns {Promise<"walked" | "missing" | "memory">} Whether the
+   *   interval's packets are recorded, or what stopped the walk: bytes the
+   *   copy does not hold, or memory refused.
    */
   async learnPackets(interval, readRange) {
     try {
-      return await this.readPacketIndex(interval, { readRange }) !== null;
+      return await this.readPacketIndex(interval, { readRange }) !== null ? "walked" : "missing";
     } catch (error) {
-      // What the copy does not hold, or memory refused: the sound's own walk
-      // reads it later, from where this one stopped.
-      if (isUnavailable(error) || error instanceof IndexMemoryUnavailable) return false;
+      // The sound's own walk reads the rest later, from where this one stopped.
+      if (isUnavailable(error)) return "missing";
+      if (error instanceof IndexMemoryUnavailable) return "memory";
       throw error;
     }
   }
@@ -861,13 +865,21 @@ export class MatroskaContainer extends Container {
    *
    * @returns {Promise<{ records: PacketRecordsChain, startAt: number, reachesEnd: boolean }>}
    */
-  async #readTrackPackets(layout, tracks, track, start, interval, isCurrent, read) {
+  async #readTrackPackets(layout, tracks, track, start, interval, isCurrent, reader, account = null) {
     const id = track.trackNumber;
     const previous = this.#packetWalks.get(id) ?? Promise.resolve();
     let finished;
     const walk = previous.then(() => new Promise(resolve => { finished = resolve; }));
     this.#packetWalks.set(id, walk);
+    const waitedFrom = Date.now();
     await previous;
+    const read = account ? async (start, end) => {
+      const bytes = await reader(start, end);
+      account.reads += 1;
+      account.bytes += bytes.length;
+      return bytes;
+    } : reader;
+    if (account) account.lockMs += Date.now() - waitedFrom;
     try {
       const readings = this.#packetReadings.get(id) ?? [];
       this.#packetReadings.set(id, readings);

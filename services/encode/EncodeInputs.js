@@ -648,6 +648,9 @@ function describeTiming(timing, now) {
     `${timing.resolutions} resolution(s) ${timing.resolveMs}ms ` +
     `(${timing.reads} file read(s): queued ${timing.queuedMs}ms, reading ${timing.readMs}ms), ` +
     `held ranges ${timing.heldMs}ms, budget ${timing.budgetMs}ms` +
+    // Where a packet input's walk spent its read: waiting for the same
+    // track's earlier walks, or reading the file (r62, torrent-tv/meta#178).
+    (timing.walk ? `; packet walk waited ${timing.walk.lockMs}ms for its track and read ${timing.walk.reads} time(s), ${timing.walk.bytes} bytes of the file` : "") +
     (timing.openApproximate ? "; sized by the host's startup open, this output has not opened yet" : "");
 }
 

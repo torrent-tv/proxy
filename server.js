@@ -892,6 +892,7 @@ export async function startProxyServer({
         const params = await containerOver({ sourceKey: output.file.sourceKey, fileIndex });
         if (!params) return { kind: "needs-source" };
         if (timing) {
+          params.walkAccount = timing.walk ??= { lockMs: 0, reads: 0, bytes: 0 };
           params.onTimed = (_statement, waitedMs, readMs) => {
             timing.reads += 1;
             timing.queuedMs += waitedMs;
@@ -974,7 +975,9 @@ export async function startProxyServer({
         const startedAt = Date.now();
         void container.learnPackets({ from: source.input.from, to: source.input.to, trackIds: [...sounds] }, read).then(learned =>
           logger.info(`encode input #${from}..#${to} of ${output.outputKey}: soundtrack packets of track(s) ${[...sounds].join(",")} ` +
-            `over ${source.input.from.toFixed(3)}-${source.input.to.toFixed(3)}s ${learned ? "walked" : "not all walked"} from its copy in ${Date.now() - startedAt}ms`),
+            `over ${source.input.from.toFixed(3)}-${source.input.to.toFixed(3)}s ` +
+            (learned === "walked" ? "walked" : `not all walked (${learned === "memory" ? "memory refused" : "the copy does not hold the rest"})`) +
+            ` from its copy in ${Date.now() - startedAt}ms`),
         error => logger.warn(`encode input #${from}..#${to} of ${output.outputKey}: walking the soundtrack from its copy failed: ${error?.message ?? error}`));
       }
     },

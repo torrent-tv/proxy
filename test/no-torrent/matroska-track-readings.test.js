@@ -232,3 +232,21 @@ test("what the copy does not hold is walked later from the file, from where the 
   const counted = tables();
   assert.equal(counted.unique, counted.stored, "nothing recorded twice");
 });
+
+test("a walk over a copy that ends inside the next cluster reads up to the copy's end, not a portion past it", async () => {
+  // r63 (torrent-tv/meta#178): the picture's copy ends 1 MB into the cluster
+  // after its piece, and a walk asking for a portion to that cluster's end
+  // found the copy short and left the rest to the torrent thread.
+  const end = data.clusterAt[8] + 2000;
+  const held = (start, last) => last < end || start >= data.cuesAt;
+  const copy = (start, last) => held(start, last) ? data.file.subarray(start, last + 1) : null;
+  const holdsUntil = start => start < end ? end : start >= data.cuesAt ? data.file.length : null;
+  const { container: without } = await over();
+  assert.equal(await without.learnPackets(soundOf(3), copy), "missing", "without the bound it asks past the copy");
+  let reads = 0;
+  const { container, sound } = await over({ held: () => { reads++; return true; } });
+  assert.equal(await container.learnPackets(soundOf(3), copy, holdsUntil), "walked");
+  reads = 0;
+  assert.equal(inputOf(await container.readPacketIndex(soundOf(3)), sound, 3).kind, "result");
+  assert.equal(reads, 0);
+});

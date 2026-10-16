@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A soundtrack walked from the picture's copy reads up to the copy's end what it needs instead of asking for a portion past it. The copy ends 1 MB into the next cluster, 38 of 167 such walks stopped there, and each of those soundtrack pieces read 4-8 MB more through the torrent thread, 0.5-5 s (r63, #ttv-178).
+
 ## 2.100.2
 
 - **Fix**: A soundtrack input's line says how long its packet walk waited for the same track's earlier walks and what it read of the file, and a walk from the picture's copy says whether memory or the copy stopped it. Walked from the copy, a soundtrack piece still took 0.9-12.6 s and no line said where (r62, #ttv-178).

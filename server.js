@@ -978,22 +978,26 @@ export async function startProxyServer({
           return answer && typeof answer.then !== "function" && answer.end === end ? answer.bytes : null;
         };
         const holdsUntil = start => {
+          if (input.heldUntil) return input.heldUntil(source.fileIndex, start);
           const range = source.input.ranges.find(([first, last]) => first <= start && start <= last);
           return range ? range[1] + 1 : null;
         };
         const startedAt = Date.now();
+        const releaseInput = input.retain?.();
         void container.learnPackets({ from: source.input.from, to: source.input.to, trackIds: [...sounds] }, read, holdsUntil).then(learned =>
           logger.info(`encode input #${from}..#${to} of ${output.outputKey}: soundtrack packets of track(s) ${[...sounds].join(",")} ` +
             `over ${source.input.from.toFixed(3)}-${source.input.to.toFixed(3)}s ` +
             (learned === "walked" ? "walked" : `not all walked (${learned === "memory" ? "memory refused" : "the copy does not hold the rest"})`) +
             ` from its copy in ${Date.now() - startedAt}ms`),
-        error => logger.warn(`encode input #${from}..#${to} of ${output.outputKey}: walking the soundtrack from its copy failed: ${error?.message ?? error}`));
+        error => logger.warn(`encode input #${from}..#${to} of ${output.outputKey}: walking the soundtrack from its copy failed: ${error?.message ?? error}`))
+          .finally(() => releaseInput?.());
       }
     },
     readEncodeRanges: async (source, ranges, maxBytes) => {
       const torrent = torrentPool.knownTorrent(source.sourceKey);
       return torrent ? torrentPool.readHeldRangesOf(torrent, source.fileIndex, ranges, maxBytes) : null;
     },
+    openEncodeWholeFile: source => torrentPool.acquireWholeFile(source),
     // Which bytes of a file are downloaded whole now — what an original
     // input's stretch may extend over. A snapshot: the copy that follows
     // holds the pieces it reads, and refuses where one has gone since.
@@ -1036,6 +1040,7 @@ export async function startProxyServer({
     wholeFiles: typeof torrentPool.allowWholeFileBytes === "function"
       ? {
           held: () => torrentPool.wholeFileBytes ?? 0,
+          required: () => torrentPool.wholeFileRequiredBytes ?? 0,
           allow: (bytes) => torrentPool.allowWholeFileBytes(bytes),
           root: completedFilesRoot()
         }

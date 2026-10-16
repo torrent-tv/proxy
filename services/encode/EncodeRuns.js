@@ -1220,7 +1220,11 @@ export class EncodeRuns {
               `ended at ${Date.now() - run.startedAt}ms` + describeTaken(reads.answers, run.startedAt, ended.firstNamedWallMs));
           }
           this.#noteOpen(session, run, ended);
-          admittedInput.release();
+          void Promise.resolve(admittedInput.release()).then(() => {
+            this.#host.logger.info(`encode input storage of run #${run.from}..#${run.to} on ${session.outputKey}: ` +
+              `input ${admittedInput.bytes} bytes, copied ${admittedInput.copiedBytes ?? 0}, ` +
+              `shared ${admittedInput.sharedBytes ?? 0}, disk ${admittedInput.diskBytes ?? 0} bytes`);
+          });
         }
         this.#sayRunCpu(session, run);
         this.noteRunEnded(session, run, ended);

@@ -1,5 +1,6 @@
 import { admitInput } from "./AdmittedInput.js";
 import { admitOriginalInput, originalInputBytes } from "./OriginalInput.js";
+import { OriginalInputStore } from "./OriginalInputStore.js";
 
 /**
  * How many recent readings a learned figure here is taken from: long enough
@@ -32,6 +33,7 @@ export class EncodeInputs {
   #preparedIn = new WeakMap();
   #memoryRevision = 0;
   #held = 0;
+  #shared = new OriginalInputStore({ changed: () => queueMicrotask(() => this.memoryChanged()) });
   #allowed = 0;
   /** What each preparing request asks of memory: all it would use, and the least it can run with. */
   #wanted = new Map();
@@ -46,6 +48,7 @@ export class EncodeInputs {
   #openOf;
   #resolve;
   #read;
+  #openWholeFile;
   #heldRanges;
   #revise;
   #changed;
@@ -63,12 +66,13 @@ export class EncodeInputs {
    */
   #stretchCopied;
 
-  constructor({ resolve, readRanges, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
+  constructor({ resolve, readRanges, openWholeFile = null, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
     rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now, stretchCopied = () => {} }) {
     this.#stretchCopied = stretchCopied;
     this.#openOf = openOf;
     this.#resolve = resolve;
     this.#read = readRanges;
+    this.#openWholeFile = openWholeFile;
     this.#heldRanges = heldRanges;
     this.#revise = reviseBudget;
     this.#changed = changed;
@@ -95,7 +99,7 @@ export class EncodeInputs {
     const serves = request.serves ?? request.from;
     const rank = this.#rankAt(request.output, serves);
     this.#log(`encode input #${request.from}..#${request.to} of ${request.output.outputKey ?? request.output.id}: ${state}` +
-      ` (held ${this.#held} of ${this.#allowed} allowed; for #${serves}` +
+      ` (held ${this.held()} of ${this.#allowed} allowed; for #${serves}` +
       `${rank ? `, rank ${rank.rank} of ${rank.topRank}` : ""})${detail}`);
   }
 
@@ -120,10 +124,10 @@ export class EncodeInputs {
     }
   }
 
-  held() { return this.#held; }
-  wanted() { return this.#held + [...this.#wanted.values()].reduce((sum, asked) => sum + asked.wanted, 0); }
+  held() { return this.#held + this.#shared.bytes; }
+  wanted() { return this.held() + [...this.#wanted.values()].reduce((sum, asked) => sum + asked.wanted, 0); }
   required() {
-    let bytes = this.#held;
+    let bytes = this.#held + this.#shared.required;
     for (const [key, asked] of this.#wanted) {
       // The encode plan already chose this finite input. Its least runnable
       // part must fit before production can advance, even when playback has
@@ -137,6 +141,7 @@ export class EncodeInputs {
   allow(bytes) {
     const changed = this.#allowed !== Math.max(0, bytes);
     this.#allowed = Math.max(0, bytes);
+    this.#shared.trim(this.#allowed - this.#held);
     if (changed) this.memoryChanged();
   }
 
@@ -320,6 +325,7 @@ export class EncodeInputs {
       this.#wanted.delete(key);
       request.result?.release?.();
     }
+    this.#shared.forget(output);
   }
 
   /**
@@ -409,7 +415,23 @@ export class EncodeInputs {
       if (resolved.kind !== "result") {
         result = resolved;
       } else if (resolved.sources?.every(source => source.input.original === true)) {
-        result = await this.#admitStretch(request, resolved.sources);
+        const sharing = resolved.sources.every(source => Array.isArray(source.input.commonRanges));
+        if (sharing) this.#shared.retain(request.output, resolved.sources);
+        const files = new Map();
+        let unpin = () => {};
+        try {
+          for (const source of resolved.sources) {
+            const file = await this.#openWholeFile?.(source);
+            if (file && file.length === source.input.fileLength) files.set(source.fileIndex, file);
+            else if (file) await file.release();
+            if (this.#requests.get(request.key) !== request) return;
+          }
+          if (sharing) unpin = this.#shared.protect(resolved.sources.filter(source => !files.has(source.fileIndex)));
+          result = await this.#admitStretch(request, resolved.sources, files);
+        } finally {
+          unpin();
+          if (result?.kind !== "result") await Promise.all([...files.values()].map(file => file.release()));
+        }
         if (!result) return;
       } else {
         result = await admitInput({ sources: resolved.sources, readRanges: this.#read, reserve: this.#reserveFor(request) });
@@ -475,7 +497,9 @@ export class EncodeInputs {
 
   /** Take `bytes` of the allowance for this request now, or answer null. */
   #hold(request, bytes) {
-    if (this.#requests.get(request.key) !== request || this.#allowed - this.#held < bytes) return null;
+    if (this.#requests.get(request.key) !== request) return null;
+    this.#shared.trim(this.#allowed - this.#held - bytes);
+    if (this.#allowed - this.held() < bytes) return null;
     this.#wanted.delete(request.key);
     this.#held += bytes;
     let released = false;
@@ -497,8 +521,11 @@ export class EncodeInputs {
    *
    * @returns {Promise<object | undefined>} Undefined when the request was withdrawn.
    */
-  async #admitStretch(request, firstSources) {
+  async #admitStretch(request, firstSources, files = new Map()) {
     const { output, from } = request;
+    const sharing = files.size > 0 || firstSources.every(source => Array.isArray(source.input.commonRanges));
+    const inMemory = sources => sources.filter(source => !files.has(source.fileIndex));
+    const memoryBytes = sources => sharing ? this.#shared.bytesNeeded(inMemory(sources)) : originalInputBytes(sources);
     // Record existing decisions only: diagnostics must not resolve another
     // interval or ask storage for an additional availability reading.
     const probes = [], reservations = [];
@@ -515,12 +542,13 @@ export class EncodeInputs {
       }
       return stretches.get(end);
     };
-    const fits = async (end, maxBytes) => {
+    const fits = async (end, maxBytes, memory = false) => {
       const stretch = await at(end);
-      const withinLimit = Boolean(stretch) && stretch.bytes <= maxBytes;
+      const withinLimit = Boolean(stretch) && (memory ? memoryBytes(stretch.sources) <= maxBytes && stretch.bytes <= (target ?? minimum) : stretch.bytes <= maxBytes);
       const result = !stretch ? "unresolved" : !withinLimit ? "size"
-        : await this.#present(stretch.sources, held, request.timing) ? "fits" : "missing-bytes";
-      probes.push({ end, limitBytes: maxBytes, bytes: stretch?.bytes ?? null, result });
+        : await this.#present(stretch.sources, held, request.timing, files) ? "fits" : "missing-bytes";
+      probes.push({ end, limitBytes: maxBytes, bytes: stretch?.bytes ?? null, result,
+        ...(sharing ? { bound: memory ? "memory" : "target", memoryBytes: stretch ? memoryBytes(stretch.sources) : null } : {}) });
       return result === "fits";
     };
     // Grows by doubling and then halves back: a handful of resolutions find
@@ -534,17 +562,17 @@ export class EncodeInputs {
       const covering = await at(serves);
       if (covering) { floor = serves; minimum = covering.bytes; }
     }
-    const longest = async maxBytes => {
+    const longest = async (maxBytes, memory = false) => {
       let good = floor, bad = null, step = 1;
       while (bad === null) {
         const end = good + step;
         if (end > request.to) bad = request.to + 1;
-        else if (await fits(end, maxBytes)) { good = end; step *= 2; }
+        else if (await fits(end, maxBytes, memory)) { good = end; step *= 2; }
         else bad = end;
       }
       while (bad - good > 1) {
         const middle = Math.floor((good + bad) / 2);
-        if (await fits(middle, maxBytes)) good = middle; else bad = middle;
+        if (await fits(middle, maxBytes, memory)) good = middle; else bad = middle;
       }
       return good;
     };
@@ -554,24 +582,26 @@ export class EncodeInputs {
     let end = target === null || this.#heldRanges === null ? floor : await longest(target);
     const targetEnd = end;
     if (this.#requests.get(request.key) !== request) return undefined;
-    this.#wanted.set(request.key, { wanted: stretches.get(end).bytes, required: minimum });
+    const minimumMemory = () => memoryBytes(stretches.get(floor).sources);
+    this.#wanted.set(request.key, { wanted: memoryBytes(stretches.get(end).sources), required: minimumMemory() });
     await this.#spent(request.timing, "budgetMs", () => this.#revise());
     if (this.#requests.get(request.key) !== request) return undefined;
     const capacity = this.#capacity();
-    if (capacity !== null && minimum > capacity && this.#urgent(output, from)) {
-      return { kind: "terminal", reason: "source-input-exceeds-memory-capacity", bytes: minimum, capacity };
+    const minimumCapacity = originalInputBytes(inMemory(stretches.get(floor).sources));
+    if (capacity !== null && minimumCapacity > capacity && this.#urgent(output, from)) {
+      return { kind: "terminal", reason: "source-input-exceeds-memory-capacity", bytes: minimumCapacity, capacity };
     }
-    const roomNow = () => Math.min(capacity ?? Number.POSITIVE_INFINITY, this.#allowed - this.#held);
+    const roomNow = () => Math.min(capacity ?? Number.POSITIVE_INFINITY, this.#allowed - this.held());
     let room = roomNow();
     let result;
     for (;;) {
-      if (minimum > room) {
+      if (minimumMemory() > room) {
         // Wait for memory with the least it can run with, not the larger stretch.
-        this.#wanted.set(request.key, { wanted: minimum, required: minimum });
-        return { kind: "needs-memory", bytes: minimum };
+        this.#wanted.set(request.key, { wanted: minimumMemory(), required: minimumMemory() });
+        return { kind: "needs-memory", bytes: minimumMemory() };
       }
-      if (stretches.get(end).bytes > room) {
-        end = await longest(Math.min(target ?? minimum, room));
+      if (memoryBytes(stretches.get(end).sources) > room) {
+        end = await longest(sharing ? room : Math.min(target ?? minimum, room), sharing);
         if (this.#requests.get(request.key) !== request) return undefined;
       }
       const chosen = stretches.get(end);
@@ -581,17 +611,26 @@ export class EncodeInputs {
       // it waits for the bytes as one read of everything used to. Field
       // 2026-10-12: a cold MKV's first piece was answered, its stretch read
       // found pieces missing, and the run was refused for good (torrent-tv/meta#178).
-      if (this.#heldRanges !== null && !await this.#present(chosen.sources, held, request.timing)) {
+      if (this.#heldRanges !== null && !await this.#present(chosen.sources, held, request.timing, files)) {
         const [first] = chosen.sources;
         return { kind: "needs-bytes", sourceKey: first.sourceKey, fileIndex: first.fileIndex, ranges: first.input.ranges,
           // Every source of the stretch, so the bytes of any of them wake it.
           awaiting: chosen.sources.map(source => ({ sourceKey: source.sourceKey, fileIndex: source.fileIndex, ranges: source.input.ranges })) };
       }
       if (this.#requests.get(request.key) !== request) return undefined;
-      this.#wanted.set(request.key, { wanted: chosen.bytes, required: chosen.bytes });
-      result = await admitOriginalInput({ sources: chosen.sources, readRanges: this.#read, now: this.#now,
+      const needed = memoryBytes(chosen.sources);
+      this.#wanted.set(request.key, { wanted: needed, required: needed });
+      if (sharing) {
+        const reservation = { bytes: needed, minimumMemoryBytes: minimumMemory(), allowed: this.#allowed, held: this.held(), capacity, room: roomNow(), end };
+        const storage = this.#shared.acquire(inMemory(chosen.sources), roomNow(), { readRanges: this.#read, now: this.#now });
+        reservations.push({ ...reservation, admitted: storage !== null });
+        if (storage) {
+          this.#wanted.delete(request.key);
+          result = await admitOriginalInput({ sources: chosen.sources, storage, files, now: this.#now });
+        } else result = { kind: "needs-memory", bytes: needed };
+      } else result = await admitOriginalInput({ sources: chosen.sources, readRanges: this.#read, now: this.#now,
         reserve: async bytes => {
-          const reservation = { bytes, allowed: this.#allowed, held: this.#held, capacity,
+          const reservation = { bytes, allowed: this.#allowed, held: this.held(), capacity,
             room: roomNow(), end };
           const release = this.#hold(request, bytes);
           reservations.push({ ...reservation, admitted: typeof release === "function" });
@@ -603,11 +642,12 @@ export class EncodeInputs {
       if (result.kind !== "needs-memory" || this.#requests.get(request.key) !== request || roomNow() >= room) break;
       room = roomNow();
     }
-    if (result.kind === "needs-memory") this.#wanted.set(request.key, { wanted: minimum, required: minimum });
+    if (result.kind === "needs-memory") this.#wanted.set(request.key, { wanted: minimumMemory(), required: minimumMemory() });
     if (result.kind === "result") {
       this.#log(`encode input selection of ${addressOf(output)}: ${JSON.stringify({
         from, requestedTo: request.to, serves, floor, targetEnd, chosenEnd: end,
         targetBytes: target, minimumBytes: minimum, inputBytes: result.bytes,
+        ...(sharing ? { minimumMemoryBytes: reservations.at(-1)?.minimumMemoryBytes ?? null, reservedMemoryBytes: reservations.at(-1)?.bytes ?? null } : {}),
         copyBytesPerMs: sizing?.copyBytesPerMs ?? null, openSeconds: sizing?.openSeconds ?? null,
         openMeasured: sizing?.openMeasured ?? null, reservations, probes
       })}`);
@@ -616,13 +656,13 @@ export class EncodeInputs {
       // is the whole copy's, learned once it is done.
       const copied = result.whole ?? Promise.resolve(true);
       void copied.then(whole => {
-        if (whole && result.copyMs > 0) keep(this.#copyRates, result.bytes / result.copyMs);
-        if (whole) {
+        if (whole && result.copyMs > 0 && result.copiedBytes > 0) keep(this.#copyRates, result.copiedBytes / result.copyMs);
+        if (whole && result.copiedBytes + result.sharedBytes > 0) {
           try { this.#stretchCopied(output, from, end, result); }
           catch (error) { this.#log(`encode input #${from}..#${end} of ${addressOf(output)}: what was told of its copy failed: ${error?.message ?? error}`); }
         }
         this.#log(`encode input #${from}..#${end} of ${addressOf(output)}: ` + (whole
-          ? `stretch copied, ${result.bytes} bytes in ${result.copyMs}ms of copying since it was admitted`
+          ? `stretch copied, ${result.bytes} bytes in ${result.copyMs}ms of copying since it was admitted; copied ${result.copiedBytes}, shared ${result.sharedBytes}, disk ${result.diskBytes} bytes`
           : result.copyFailed?.() ? "the stretch could not be copied: a piece it needs is no longer held"
             : "released before its stretch was copied"));
       });
@@ -631,12 +671,21 @@ export class EncodeInputs {
   }
 
   /** Whether every range of these sources is downloaded whole now. */
-  async #present(sources, held, timing) {
+  async #present(sources, held, timing, files = new Map()) {
     for (const source of sources) {
+      if (files.has(source.fileIndex)) continue;
       const name = `${source.sourceKey}:${source.fileIndex}`;
       if (!held.has(name)) held.set(name, await this.#spent(timing, "heldMs", () => Promise.resolve().then(() => this.#heldRanges(source)).catch(() => null)) ?? []);
-      const ranges = held.get(name);
-      if (!source.input.ranges.every(([start, end]) => ranges.some(([first, last]) => first <= start && last >= end))) return false;
+      const ranges = [...held.get(name), ...this.#shared.available(source)].sort((a, b) => a[0] - b[0]);
+      if (!source.input.ranges.every(([start, end]) => {
+        let at = start;
+        for (const [first, last] of ranges) {
+          if (first > at) return false;
+          if (last >= at) at = last + 1;
+          if (at > end) return true;
+        }
+        return false;
+      })) return false;
     }
     return true;
   }

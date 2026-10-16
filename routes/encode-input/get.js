@@ -1,4 +1,5 @@
 import { parseRange } from "../../utils/parse-range.js";
+import { Readable } from "node:stream";
 
 /** FFmpeg reads only original byte ranges already owned by its live run. */
 export async function handleEncodeInputGet(req, reply, { inputOf, refused = () => {} }) {
@@ -53,10 +54,12 @@ export async function handleEncodeInputGet(req, reply, { inputOf, refused = () =
   const socket = req.raw?.socket;
   const writtenBefore = socket?.bytesWritten ?? 0;
   reply.raw?.once?.("close", () => {
+    held.release?.();
     input.noteAnswer?.({ fileIndex, start: range.start, end: held.end,
       written: Math.max(0, (socket?.bytesWritten ?? writtenBefore) - writtenBefore),
       handedOver: reply.raw?.writableFinished === true });
   });
-  return reply.code(206).header("Content-Length", String(held.bytes.length))
-    .header("Content-Range", `bytes ${range.start}-${held.end}/${length}`).send(held.bytes);
+  return reply.code(206).header("Content-Length", String(held.size ?? held.bytes.length))
+    .header("Content-Range", `bytes ${range.start}-${held.end}/${length}`)
+    .send(held.stream ?? (held.chunks ? Readable.from(held.chunks, { objectMode: false }) : held.bytes));
 }

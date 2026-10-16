@@ -230,6 +230,7 @@ export function wireOutputs({
     readMetadataActivity = null,
     sourceInputsFor = null,
     readEncodeRanges = null,
+    openEncodeWholeFile = null,
     stretchCopied = () => {},
     readEncodeHeldRanges = null,
     encodeInputs = null,
@@ -1117,6 +1118,7 @@ export function wireOutputs({
   parts.encodeInputs = encodeInputs ?? (typeof resolveEncodeInput === "function" ? new EncodeInputs({
     resolve: resolveEncodeInput,
     readRanges: readEncodeRanges,
+    openWholeFile: openEncodeWholeFile,
     heldRanges: readEncodeHeldRanges,
     stretchCopied,
     reviseBudget: () => parts.machineBudget.revise("memory", "admitted encode inputs"),

@@ -94,6 +94,9 @@ export const Command = {
   READ_HELD: "read-held",
   /** Acquire all source pieces of an admitted input before copying its ranges. */
   READ_HELD_RANGES: "read-held-ranges",
+  /** Pin a completed file; only a matching release permits its eviction. */
+  ACQUIRE_WHOLE_FILE: "acquire-whole-file",
+  RELEASE_WHOLE_FILE: "release-whole-file",
 
   /** Shut the client down, optionally deleting downloaded data. */
   /**

@@ -150,6 +150,9 @@ async function checkAvi(directory, file, { duration, audio, timeBase, copyable, 
     trackIds: tracks.filter(track => track.type === type).map(track => track.trackNumber) });
   const source = await rangesOf("video");
   assert.equal(source.kind, "result");
+  const early = await container.readSourceRanges({ from: 0, to: 2, trackIds: idsOf("video") });
+  assert.deepEqual(source.commonRanges, early.commonRanges, "AVI names common parts before merging with interval bytes");
+  assert.notDeepEqual(source.intervalRanges, early.intervalRanges);
   // The run holds the interval, not the film: no packet ten to twenty seconds on is named.
   const far = lines(spawnSync(ffprobe.path, ["-v", "error", "-show_entries", "packet=dts_time,pos", "-of", "csv=p=0", file],
     { encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024 }).stdout).map(line => line.split(",").map(Number))

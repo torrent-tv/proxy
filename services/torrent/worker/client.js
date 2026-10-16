@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { logger, writeAlreadyDecided } from "../../../utils/logger.js";
 import { createCaller, createReceiveStream, workerReplyError } from "./channel.js";
 import { Command, Event } from "./protocol.js";
+import { openCompletedInputFile } from "./completed-input-file.js";
 
 const WORKER_URL = new URL("./worker.js", import.meta.url);
 /**
@@ -106,6 +107,29 @@ export class TorrentWorkerClient {
    * @type {Map<string, { path: string, length: number, name: string }>}
    */
   wholeFiles = new Map();
+  #wholeInputPins = new Map();
+
+  get wholeFileRequiredBytes() {
+    const files = new Map();
+    for (const file of this.#wholeInputPins.values()) files.set(JSON.stringify([file.sourceKey, file.fileIndex]), file.length);
+    return [...files.values()].reduce((sum, length) => sum + length, 0);
+  }
+
+  /** No source is opened or revived: only the worker's completed-file store answers. */
+  async acquireWholeFile({ sourceKey, fileIndex }) {
+    if (!this.#wholeFileOf(sourceKey, fileIndex)) return null;
+    const file = await this.#caller.call(Command.ACQUIRE_WHOLE_FILE, { sourceKey, fileIndex });
+    if (!file) {
+      this.wholeFiles.delete(`${String(sourceKey).slice("torrent:".length).toLowerCase()}/${fileIndex}`);
+      return null;
+    }
+    this.#wholeInputPins.set(file.token, { sourceKey, fileIndex, length: file.length });
+    this.wholeFileBytes = file.heldBytes;
+    return openCompletedInputFile(file, async () => {
+      try { this.wholeFileBytes = await this.#caller.call(Command.RELEASE_WHOLE_FILE, { token: file.token }); }
+      finally { this.#wholeInputPins.delete(file.token); }
+    });
+  }
 
   /** @type {(event: { sourceKey: string, fileIndex: number, trackIndex: number, cues: object[], language: string }) => void} */
   /** @type {(event: { sourceKey: string, fileIndexes: number[] }) => void} */

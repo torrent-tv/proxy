@@ -147,6 +147,7 @@ export function wireMachineBudget({
       name: "whole files",
       resource: filesOn,
       held: () => wholeFiles.held?.() ?? 0,
+      required: () => wholeFiles.required?.() ?? 0,
       // A whole file is worth keeping while anybody may read it again, and
       // there is no smaller honest answer than "all of them" — like the rest,
       // it is cut in proportion.

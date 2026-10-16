@@ -127,6 +127,27 @@ test("a paused run is tried when a fraction of a core free is more than it draws
   assert.equal(tight.runs, false);
 });
 
+test("a run started beside a measured leader is judged as a try, not paused first and tried a second later", () => {
+  // Home Assistant r80: each short soundtrack run the plan started was paused
+  // at once by the urgency rule and let go on the next reading.
+  const rule = new PauseRule();
+  const leader = run("L");
+  const started = run("r");
+  feed(rule, leader, 1, [2, 2, 2].map((speed) => ({ cores: 3, speed, running: [leader] })));
+  const verdict = judge(rule, { leader, run: started, need: Number.POSITIVE_INFINITY, free: 0.13, running: [leader, started], now: 4000 });
+  assert.equal(verdict.runs, true);
+  assert.match(verdict.because, /tried beside the leader: 0\.13 cores are free/);
+  // Once let go, it runs until it has been measured beside the leader.
+  const next = judge(rule, { leader, run: started, need: Number.POSITIVE_INFINITY, free: 0, running: [leader, started], now: 5000 });
+  assert.equal(next.runs, true);
+  assert.match(next.because, /being measured beside the leader/);
+  // Where the try condition fails, the pause gives its reason.
+  const tight = run("tight");
+  const held = judge(rule, { leader, run: tight, need: 2, free: 0, running: [leader, tight], now: 4000 });
+  assert.equal(held.runs, false);
+  assert.match(held.because, /0\.00 cores are free/);
+});
+
 test("work whose whole remaining stretch costs less than the leader's scatter is never paused", () => {
   const rule = new PauseRule();
   const leader = run("L");

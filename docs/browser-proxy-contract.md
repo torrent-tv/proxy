@@ -93,15 +93,19 @@ soundtracks the viewer can choose from.
 
 ## Separate WebRTC control connection
 
-The media SDP answer advertises `separateControl: true`. A page that sees this
+The media SDP answer advertises `separateControl: 2`. A page that sees this
 creates a second `RTCPeerConnection` to the same proxy, carrying only the reliable,
 ordered `proxy-control` data channel. Its offers, answers and ICE candidates carry
 an opaque `connectionId`, unique for each control connection attempt. Signals
-without that field retain their existing media meaning. The signalling server
-forwards these fields unchanged over the existing browser socket and proxy tunnel.
+without that field retain their existing media meaning. Control uses its own
+browser signalling socket through the existing route and proxy tunnel, so its
+next connection can be established even after the media signalling socket has
+closed during a server release. Established data channels survive signalling
+loss. Version `true` was the earlier capability restricted to the media socket;
+pages requiring independent signalling treat that value as legacy.
 
 The proxy addresses transport counters by the media signalling session id or, for
-control, `<sessionId>/<connectionId>`. Only one control generation per media
+control, `<sessionId>/<connectionId>`. Only one control generation per signalling
 session is retained. A replacement closes its predecessor; late candidates and
 close events from that predecessor cannot affect the replacement or media peer.
 

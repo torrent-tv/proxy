@@ -502,21 +502,13 @@ export class QualityController {
       remainingSec: Number.isFinite(buffer?.positionSec) && session.file?.durationSeconds > 0
         ? Math.max(0, session.file.durationSeconds - buffer.positionSec) : null
     });
-    // A viewer whose picture has not moved yet — at the start or after a seek —
-    // is held for the material a draining buffer would run out of, while their
-    // buffer grows: the trend says nothing about them. The same two reasons
-    // then decide. Held this way on Home Assistant, a picture made at 0.92-0.96x
-    // was moved to a faster setting 11 s after the start, which had waited 30 s
-    // for it (r70, torrent-tv/meta#178).
-    const held = !threat && buffer?.waiting === true;
-    if (!threat && !held) {
+    if (!threat) {
       return false;
     }
-    const why = held ? "their picture is held" : "their buffer is draining";
     // Whatever else happens, a step UP prepared for them is not what they need.
-    this.#dropUpAsk(session, consumerId, why);
+    this.#dropUpAsk(session, consumerId, "their buffer is draining");
     if (this.#host.sameHeightSwitchDirection(consumerId) === "up") {
-      this.#host.cancelSameHeightSwitch(consumerId, why);
+      this.#host.cancelSameHeightSwitch(consumerId, "their buffer is draining");
     }
     const report = this.#host.linkReportOf(session, consumerId);
     const observed = report ? await this.observedStreamMbps(session) : null;
@@ -532,8 +524,7 @@ export class QualityController {
     const reasonText =
       (linkShort ? `link=${report.linkMbps.toFixed(2)}Mbps stream=${observed.toFixed(2)}Mbps ` : "") +
       (machineShort ? `CPU-bound speed=${speed.toFixed(2)}x ` : "") +
-      `buffer=${(buffer?.bufferedSec ?? 0).toFixed(1)}s ` +
-      (held ? "held before it moves " : `empty in ${secondsToEmpty === null ? "?" : secondsToEmpty.toFixed(1)}s `) +
+      `buffer=${(buffer?.bufferedSec ?? 0).toFixed(1)}s empty in ${secondsToEmpty === null ? "?" : secondsToEmpty.toFixed(1)}s ` +
       `for ${consumerId}`;
     if (linkShort) {
       const move = await this.#host.prepareSameHeightSwitch(session, consumerId, "down", `viewer-link-bound ${reasonText}`);

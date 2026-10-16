@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A viewer held before their picture moves is no longer moved to a faster speed setting; only a viewer whose buffer is draining is, as before 2.100.9. Held after a seek on Home Assistant, a viewer was moved from a piece past the one they were waiting for, the output they left stopped making that piece, and the picture stood for good; at the cold start the move was refused anyway, since a second encoder beside the first would have slowed every output to 0.53x (r71, #ttv-178).
+
 ## 2.100.9
 
 - **Fix**: A viewer whose picture has not moved yet, at the start or after a seek, is moved to a faster speed setting of the same size when this machine makes the picture slower than realtime, as a viewer whose buffer is draining already was. Waiting, the buffer grows and moved nothing: on Home Assistant an AVI re-encoded at 0.92-0.96x held its start 30 s and was moved to the faster setting 11 s after it had started (r70, #ttv-178).

@@ -91,6 +91,33 @@ load has no figure; `figures.videoClass` and `figures.audioClass` are
 `"unknown"` for that part, and `figures.soundtracks` is the number of
 soundtracks the viewer can choose from.
 
+## Separate WebRTC control connection
+
+The media SDP answer advertises `separateControl: true`. A page that sees this
+creates a second `RTCPeerConnection` to the same proxy, carrying only the reliable,
+ordered `proxy-control` data channel. Its offers, answers and ICE candidates carry
+an opaque `connectionId`, unique for each control connection attempt. Signals
+without that field retain their existing media meaning. The signalling server
+forwards these fields unchanged over the existing browser socket and proxy tunnel.
+
+The proxy addresses transport counters by the media signalling session id or, for
+control, `<sessionId>/<connectionId>`. Only one control generation per media
+session is retained. A replacement closes its predecessor; late candidates and
+close events from that predecessor cannot affect the replacement or media peer.
+
+Media paths (`/transcode/`, `/stream`) and chunked large request bodies use the
+media association. Small API requests and their complete responses use control.
+The page identifies the same viewer on both associations, using the existing
+many-connections-to-one-viewer presence relation. Closing either association alone
+does not release a viewer still present on the other. Probes, counters and silence
+decisions are separate for each association.
+
+Initial connection preparation waits for both required channels. Established
+control loss rejects only requests sent on that channel and starts independent
+control connection preparation. Sent actions are never replayed automatically.
+Old proxies that omit the capability keep control on the media peer; old pages
+continue to work without sending `connectionId`.
+
 ## Session control and media files
 
 | Request | Meaning |

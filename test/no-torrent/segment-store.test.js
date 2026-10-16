@@ -420,3 +420,20 @@ test("a piece renamed into place by its muxer is found when asked for, before th
   writeFileSync(path.join(dir, fmp4Format.segmentFileName(6)), Buffer.alloc(0));
   assert.equal(store.pathOf(KEY, 6), null, "a file of no bytes is still no segment");
 });
+
+test("an output this store publishes is answered from its record, without looking at the disk", (t) => {
+  // r61 (torrent-tv/meta#178): every question about a piece not made looked
+  // at the disk, for every output, 12.6 s of 300 s of the main thread.
+  const { store, root } = storeInATempRoot();
+  t.after(() => { store.dropAll("the check is over"); rmSync(root, { recursive: true, force: true }); });
+  const dir = store.directoryFor(KEY);
+  store.useFormat(KEY, fmp4Format);
+  store.refresh(KEY);
+  writeFileSync(path.join(dir, "making-0-00000.mp4"), Buffer.alloc(20));
+  assert.equal(store.publish(KEY, "making-0-00000.mp4", fmp4Format), "segment-00000.mp4");
+  assert.ok(store.pathOf(KEY, 0), "a published piece is found");
+  // Not how a piece of such an output arrives: written behind the store's
+  // back, it shows the store did not look before the watch could tell it.
+  writeSegment(dir, 1, 20);
+  assert.equal(store.pathOf(KEY, 1), null, "a piece the store was not told of is not looked for");
+});

@@ -12,6 +12,7 @@ import test from "node:test";
 
 import { freeShareDuring, readProcessCpuSeconds, readSystemCpu, sampleHost, shareOfMachine } from "../../services/encode/host-load.js";
 import { HostLoad } from "../../services/encode/quality/HostLoad.js";
+import { logger } from "../../utils/logger.js";
 
 test("metadata parsing never becomes this process's base draw", async t => {
   let now = 0, cpu = 0, epoch = 0, active = false;
@@ -234,4 +235,51 @@ test("a run that ends while its processor is being read does not throw the readi
   });
   t.mock.method(os, "cpus", () => new Array(4).fill({}));
   await load.reportHostLoad();
+});
+
+test("each run's CPU per second of film over an interval is said with the runs beside it, and used by nothing", async t => {
+  // torrent-tv/meta#180, phase 1: `k` in CPU seconds per second of film,
+  // beside the processor's bound and measured free amount on the machine line.
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+  const lines = [];
+  t.mock.method(logger, "info", (line) => lines.push(line));
+  const picture = { process: { pid: 11 }, startedAt: 0, from: 3, to: 9, progress: { processedSeconds: 100, startPositionSeconds: 100 } };
+  const sound = { process: { pid: 12 }, startedAt: 0, from: 1, to: 1, progress: { processedSeconds: 0, startPositionSeconds: 0 } };
+  const cpu = new Map([[11, 0], [12, 0]]);
+  const sessions = new Map([
+    ["v", { id: "v", outputKey: "v", spec: { transcodesVideo: true } }],
+    ["a", { id: "a", outputKey: "a", spec: { carries: "audio-only" } }]
+  ]);
+  let busy = 0;
+  const load = new HostLoad({
+    outputs: sessions, runStateOf: () => "PRODUCING",
+    liveRunsOf: (session) => (session.id === "v" ? [picture] : [sound]),
+    readProxyCpuSeconds: () => 0,
+    readSystemCpu: async () => ({ busySeconds: busy, idleSeconds: 0, iowaitSeconds: 0 }),
+    readProcessCpuSeconds: async (pid) => cpu.get(pid),
+    readEndedChildrenCpuSeconds: async () => 0,
+    readMachineState: async () => ({ megahertz: null, celsius: null }),
+    shareOfMachine: (before, after) => shareOfMachine(before, after, 4),
+    sampleProcessor: () => ({ takenAt: now, bound: { cores: 4, parallelism: 4, quotaCores: null, source: "cores" }, cgroup: null, idleSeconds: null }),
+    processorBetween: (before, after, measured) => ({ bound: after.bound, freeCores: (1 - measured.systemShare) * measured.hostCores,
+      freeSource: "/proc/stat", cgroupUsedCores: null, throttledPeriods: null, throttledSeconds: null }),
+    describeProcessor: (reading) => ` free-cores=${reading.freeCores.toFixed(2)}`
+  });
+  t.mock.method(os, "cpus", () => new Array(4).fill({}));
+  await load.reportHostLoad();
+  // Five seconds: the picture 7.4 CPU-s for 5 s of film, the sound 0.1 CPU-s for 4 s.
+  now += 5000; busy += 10;
+  cpu.set(11, 7.4); cpu.set(12, 0.1);
+  picture.progress.processedSeconds = 105; sound.progress.processedSeconds = 4;
+  await load.reportHostLoad();
+  const runCosts = lines.find((line) => line.startsWith("processor: run cost"));
+  assert.equal(runCosts,
+    "processor: run cost over 5.0s: v #3..#9 decode k=1.480 CPU-s per film-s (7.40 CPU-s, 5.00 film-s, speed 1.00x, 1.48 cores), beside 1 [audio]; " +
+    "a #1..#1 audio k=0.025 CPU-s per film-s (0.10 CPU-s, 4.00 film-s, speed 0.80x, 0.02 cores), beside 1 [decode]");
+  const machine = lines.find((line) => line.startsWith("host-load:"));
+  // 10 of 20 core-seconds busy: two cores idle.
+  assert.match(machine, / free-cores=2\.00/);
+  // Phase 1 decides nothing: the availability is today's arithmetic alone.
+  assert.equal(load.hostAvailability.known, true);
 });

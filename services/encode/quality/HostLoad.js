@@ -16,6 +16,7 @@ import { baseDrawFrom, costPerMegabyteFrom } from "../torrent-cost.js";
 import { medianOf, movedBeyondScatter, READINGS_KEPT, scatterOf } from "../learned-median.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode-run-state.js";
 import { SourceFiles } from "../../media/SourceFile.js";
+import { costKindForSession } from "./EncodeCost.js";
 
 /**
  * What the torrent thread says of itself over one interval: how late its event
@@ -537,7 +538,8 @@ export class HostLoad {
       this.#host.readSystemCpu?.() ?? null,
       this.#host.readEndedChildrenCpuSeconds?.() ?? null
     ]);
-    const sample = { takenAt: Date.now(), system, endedChildren, byPid: new Map(), proxyCpuSeconds: this.#host.readProxyCpuSeconds() };
+    const sample = { takenAt: Date.now(), system, endedChildren, byPid: new Map(), proxyCpuSeconds: this.#host.readProxyCpuSeconds(),
+      processor: this.#host.sampleProcessor?.() ?? null };
     const previous = this.#idleAvailabilitySample;
     this.#idleAvailabilitySample = sample;
     if (previous === null) {
@@ -556,7 +558,7 @@ export class HostLoad {
     // stands is seen beside what it is free for (torrent-tv/meta#178); a proxy
     // nobody watches stays quiet.
     if (share !== null && watched) {
-      await this.#sayMachine(share, proxyShare, 0, suspended);
+      await this.#sayMachine(share, proxyShare, 0, suspended, false, this.#processorLine(previous, sample, share, proxyShare));
     }
   }
 
@@ -566,7 +568,7 @@ export class HostLoad {
    * and the processor share divide; `free` is what nothing used over the
    * interval. Unknown stays `n/a`, never zero.
    */
-  async #sayMachine(share, proxyShare, running, suspended, incomplete = false) {
+  async #sayMachine(share, proxyShare, running, suspended, incomplete = false, processor = "") {
     const machine = await this.#host.readMachineState();
     // HOW LATE THIS THREAD'S LOOP RAN over the interval: every answer to FFmpeg
     // and every hand-over of a copy waits for it (torrent-tv/meta#178). Begun at
@@ -591,8 +593,72 @@ export class HostLoad {
       // What the offer will multiply a prediction by, in the same line as the
       // readings it comes from.
       ` available=${asPercent(this.hostAvailability.share)} for-encoders=${asPercent(this.hostAvailability.forEncoders)}` +
-      ` free=${asPercent(free)}` + late
+      ` free=${asPercent(free)}` + processor + late
     );
+  }
+
+  /**
+   * The processor's upper bound and its measured free amount over the same
+   * interval, for the machine's line (torrent-tv/meta#180, phase 1). Read
+   * beside today's figures and used by no decision; empty where the host does
+   * not take these readings.
+   *
+   * @param {{ processor?: object | null }} previous
+   * @param {{ processor?: object | null }} sample
+   * @param {{ processShare: number | null, systemShare: number | null }} share
+   * @param {number | null} proxyShare
+   * @returns {string}
+   */
+  #processorLine(previous, sample, share, proxyShare) {
+    if (typeof this.#host.processorBetween !== "function" || typeof this.#host.describeProcessor !== "function") {
+      return "";
+    }
+    const ourShare = Number.isFinite(proxyShare) && Number.isFinite(share.processShare) ? proxyShare + share.processShare : null;
+    return this.#host.describeProcessor(this.#host.processorBetween(previous.processor, sample.processor, {
+      systemShare: share.systemShare,
+      ourShare,
+      hostCores: Math.max(1, os.cpus().length)
+    }));
+  }
+
+  /**
+   * What each run's FFmpeg spent per second of film over the interval between
+   * two readings, with the runs beside it (torrent-tv/meta#180, phase 1).
+   *
+   * In CPU seconds per second of film (`k`), which is not the unit of
+   * `EncodeCost` (seconds of the whole machine per second of film, from
+   * speed): a run that uses all it is given has `cost = k / cores`. A `k` read
+   * beside other runs already carries their contention, so it is said with
+   * them; a run is alone only when no other run was alive at either reading.
+   * Only runs read at both ends that made film in between are said. For the
+   * log only.
+   *
+   * @param {{ takenAt: number, byPid: Map<number, number>, runs?: Map<number, { film: number | null, label: string, kind: string }> }} previous
+   * @param {{ takenAt: number, byPid: Map<number, number>, runs?: Map<number, { film: number | null, label: string, kind: string }> }} sample
+   */
+  #sayRunCosts(previous, sample) {
+    if (!previous.runs || !sample.runs) return;
+    const elapsedSec = (sample.takenAt - previous.takenAt) / 1000;
+    if (!(elapsedSec > 0)) return;
+    const alive = new Map([...previous.runs, ...sample.runs]);
+    const said = [];
+    for (const [pid, run] of sample.runs) {
+      const before = previous.runs.get(pid);
+      const cpuNow = sample.byPid.get(pid);
+      const cpuBefore = previous.byPid.get(pid);
+      if (!before || !Number.isFinite(cpuNow) || !Number.isFinite(cpuBefore) || cpuNow < cpuBefore) continue;
+      if (!Number.isFinite(run.film) || !Number.isFinite(before.film)) continue;
+      const film = run.film - before.film;
+      if (!(film > 0)) continue;
+      const cpu = cpuNow - cpuBefore;
+      const beside = [...alive].filter(([other]) => other !== pid).map(([, other]) => other.kind);
+      said.push(`${run.label} ${run.kind} k=${(cpu / film).toFixed(3)} CPU-s per film-s ` +
+        `(${cpu.toFixed(2)} CPU-s, ${film.toFixed(2)} film-s, speed ${(film / elapsedSec).toFixed(2)}x, ` +
+        `${(cpu / elapsedSec).toFixed(2)} cores), beside ${beside.length}` + (beside.length > 0 ? ` [${beside.join(", ")}]` : ""));
+    }
+    if (said.length > 0) {
+      logger.info(`processor: run cost over ${elapsedSec.toFixed(1)}s: ${said.join("; ")}`);
+    }
   }
 
   /**
@@ -658,9 +724,17 @@ export class HostLoad {
     // that ends meanwhile drops its process, and read after the await it threw
     // `Cannot read properties of null (reading 'pid')`, seven times in one
     // field session, each losing that reading (r64, torrent-tv/meta#178).
-    const runs = encoding.flatMap((session) => this.#host.liveRunsOf(session))
+    // With the film each has made and what it is, for its cost over the
+    // interval (torrent-tv/meta#180).
+    const runs = encoding.flatMap((session) => this.#host.liveRunsOf(session)
       .filter((run) => Number.isInteger(run.process?.pid))
-      .map((run) => ({ pid: run.process.pid, startedAt: run.startedAt }));
+      .map((run) => ({
+        pid: run.process.pid,
+        startedAt: run.startedAt,
+        film: filmMadeBy(run),
+        label: `${session.outputKey ?? session.id} #${run.from}..#${run.to}`,
+        kind: costKindForSession(session)
+      })));
     const [system, endedChildren, ...cpuReadings] = await Promise.all([
       this.#host.readSystemCpu(),
       this.#host.readEndedChildrenCpuSeconds?.() ?? null,
@@ -670,12 +744,15 @@ export class HostLoad {
     const byPid = new Map();
     /** @type {Map<number, number>} */
     const startedAt = new Map();
+    /** @type {Map<number, { film: number | null, label: string, kind: string }>} */
+    const runsByPid = new Map();
     runs.forEach((run, index) => {
       const seconds = cpuReadings[index];
       if (seconds !== null) {
         byPid.set(run.pid, seconds);
         startedAt.set(run.pid, run.startedAt);
       }
+      runsByPid.set(run.pid, { film: run.film, label: run.label, kind: run.kind });
     });
     const sample = {
       takenAt: Date.now(),
@@ -687,7 +764,9 @@ export class HostLoad {
       // piece store and the delivery. None of it is in the encode budget, and
       // on the addon host it is most of what the machine does while encoders
       // are suspended.
-      proxyCpuSeconds: this.#host.readProxyCpuSeconds()
+      proxyCpuSeconds: this.#host.readProxyCpuSeconds(),
+      runs: runsByPid,
+      processor: this.#host.sampleProcessor?.() ?? null
     };
     const previous = this.#hostLoadSample;
     this.#hostLoadSample = sample;
@@ -699,6 +778,7 @@ export class HostLoad {
     // `/proc` there are no readings at all, and the share is null rather than a
     // confident zero.
     const encoders = encoderCpuBetween(previous, sample);
+    this.#sayRunCosts(previous, sample);
     const share = this.#host.shareOfMachine(
       { takenAt: previous.takenAt, processCpuSeconds: encoders === null ? null : 0, system: previous.system },
       { takenAt: sample.takenAt, processCpuSeconds: encoders?.seconds ?? null, system: sample.system }
@@ -718,7 +798,7 @@ export class HostLoad {
     if (encoders && !encoders.complete) {
       // A lower bound of our own load is not a reading of what other work left
       // us: the last availability stands, and the line says so.
-      await this.#sayMachine(share, null, running, suspended, true);
+      await this.#sayMachine(share, null, running, suspended, true, this.#processorLine(previous, sample, share, null));
       return false;
     }
     // Kept for the quality offer, which predicts from a benchmark taken on a
@@ -726,7 +806,7 @@ export class HostLoad {
     // machine a new encoder could actually have. Only what nobody has been
     // charged for is subtracted — see `encode/available-share.js`.
     const proxyShare = this.#setAvailability(share, previous, sample);
-    await this.#sayMachine(share, proxyShare, running, suspended);
+    await this.#sayMachine(share, proxyShare, running, suspended, false, this.#processorLine(previous, sample, share, proxyShare));
     return false;
   }
 
@@ -755,4 +835,16 @@ export class HostLoad {
       ? perMegabyte * megabytesPerSecond
       : 0;
   }
+}
+
+/**
+ * The film a run has made since it started, from its progress, or null before
+ * it has said any.
+ *
+ * @param {{ progress?: { processedSeconds?: number, startPositionSeconds?: number } }} run
+ * @returns {number | null}
+ */
+function filmMadeBy(run) {
+  const made = Number(run.progress?.processedSeconds) - Number(run.progress?.startPositionSeconds ?? 0);
+  return Number.isFinite(made) && made >= 0 ? made : null;
 }

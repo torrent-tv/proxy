@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.8
 
 - **Fix**: Release an encoder input answer when its HTTP connection closed while its deferred copy was pending; explicitly destroy offset-read streams on response close so cancelled reads cannot retain a completed file (#ttv-181).
 

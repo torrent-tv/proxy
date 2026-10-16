@@ -286,11 +286,14 @@ function middleAndScatter(values) {
  * @param {(line: string) => void} params.log
  * @param {() => Array<{ pid: number, label: string, film: number | null }>} params.ffmpegRuns - The encoders running now, with the film each has made.
  * @param {() => boolean} [params.detailed]
+ * @param {(seconds: Map<number, { label: string, cores: number, speed: number | null }>) => void} [params.onRunSeconds] -
+ *   Each second's readings of every run, by process, for whoever decides
+ *   from them (`EncodeOrchestrator.noteRunSeconds`, torrent-tv/meta#180).
  * @param {number} [params.everyMs]
  * @param {number} [params.sayEveryMs]
  * @returns {{ stop: () => void }}
  */
-export function startProcessorReport({ log, ffmpegRuns, detailed = () => false, everyMs = 1000, sayEveryMs = 60_000 }) {
+export function startProcessorReport({ log, ffmpegRuns, detailed = () => false, onRunSeconds = () => {}, everyMs = 1000, sayEveryMs = 60_000 }) {
   let previous = null;
   let series = [];
   /** @type {Map<number, { label: string, cores: number[], speed: number[] }>} */
@@ -305,6 +308,15 @@ export function startProcessorReport({ log, ffmpegRuns, detailed = () => false, 
     const shares = previous ? sharesBetween(previous, now) : null;
     const perRun = previous ? runSecondsBetween(previous, now) : new Map();
     previous = now;
+    if (perRun.size > 0) {
+      // A fault in whoever decides from the readings must not end the
+      // readings, nor reach the timer as an uncaught exception.
+      try {
+        onRunSeconds(perRun);
+      } catch (error) {
+        log(`processor: run seconds not handled: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     if (!shares) return;
     series.push(shares);
     for (const [pid, second] of perRun) {

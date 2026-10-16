@@ -24,7 +24,8 @@
  */
 
 import { CoverageMap } from "./CoverageMap.js";
-import { firstUnmetWant, planEncoders } from "./EncodePlan.js";
+import { deadlineReaderFor, firstUnmetWant, planEncoders } from "./EncodePlan.js";
+import { PauseRule } from "./PauseRule.js";
 import { endOfRun } from "./EncodeRun.js";
 import { ENCODE_EXIT } from "./encode-exit.js";
 import { affordableRuns } from "./run-budget.js";
@@ -138,12 +139,18 @@ export class EncodeOrchestrator {
    * viewer was stopped for waited 59 s behind a picture that had long left
    * the urgent band (Home Assistant 2026-10-12, torrent-tv/meta#178).
    *
-   * @type {Map<string, { urgent: boolean, priority: number }>}
+   * @type {Map<string, { urgent: boolean, priority: number, from: number }>}
    */
   #heldBack = new Map();
 
   /** What a stop and a start have cost on this host. */
   #costs = new RunCosts();
+
+  /**
+   * Whether a less urgent encoder runs beside the leading one, from what
+   * running it was measured to do (torrent-tv/meta#180, phase 4).
+   */
+  #pauseRule = new PauseRule();
 
   /**
    * What starting and stopping an encoder was measured to cost on this host,
@@ -228,6 +235,9 @@ export class EncodeOrchestrator {
    *   this one may be asked about encoders with no ledger, no clock and no
    *   viewer anywhere. Absent, the line simply does not carry it.
    * @param {SegmentCoverage | null} [params.segmentCoverage]
+   * @param {{ freeCores: () => number | null, otherCores: () => number | null } | null} [params.processor] -
+   *   The processor left free and the processor other work takes, in cores
+   *   (`ProcessorBudget`); absent, both are unknown.
    */
   constructor({
     maxRunsFor,
@@ -242,6 +252,7 @@ export class EncodeOrchestrator {
     inputsUnplaced = null,
     describeWaits = null,
     admission = null,
+    processor = null,
     logger,
     now
   }) {
@@ -250,6 +261,7 @@ export class EncodeOrchestrator {
     // encoder that would slow everybody below realtime. Absent in a check that
     // is about one output, and then only the per-output limit binds.
     this.admission = admission && typeof admission.placesFor === "function" ? admission : null;
+    this.processor = processor && typeof processor.freeCores === "function" ? processor : null;
     this.#describeWaits = typeof describeWaits === "function" ? describeWaits : () => "";
     // Only the segment facts and operations this planner needs cross the
     // storage boundary; the concrete storage remains in the server assembly.
@@ -665,7 +677,7 @@ export class EncodeOrchestrator {
   /**
    * The most urgent band a live encoder stands in, over every output.
    *
-   * @returns {{ urgent: boolean, priority: number, address: string, index: number } | null}
+   * @returns {{ urgent: boolean, priority: number, address: string, index: number, run: object } | null}
    */
   #leadingBand() {
     let leading = null;
@@ -673,7 +685,7 @@ export class EncodeOrchestrator {
       for (const run of runs) {
         if (!run.isAlive || run.isStopping) continue;
         const band = this.#bandAt(address, run.head);
-        if (!leading || compareUrgency(band, leading) < 0) leading = { ...band, address, index: run.head };
+        if (!leading || compareUrgency(band, leading) < 0) leading = { ...band, address, index: run.head, run };
       }
     }
     return leading;
@@ -696,6 +708,13 @@ export class EncodeOrchestrator {
    * Paused rather than lowered in priority: a lowered priority cannot be raised
    * again without `CAP_SYS_NICE`, which the add-on's container does not have
    * (Home Assistant 2026-10-10: `renice 0` after `renice 19` left 19).
+   *
+   * AND PAUSED ONLY WHERE RUNNING IT WAS MEASURED TO COST THE LEADER
+   * (torrent-tv/meta#180, phase 4). Behind the leader is the condition, not
+   * the verdict: `PauseRule` lets a less urgent encoder run while the leader
+   * still makes what its deadlines need, and pauses it once the leader's own
+   * readings say it does not. Without readings to judge from, behind is paused
+   * as before.
    */
   shareTheMachine() {
     const leading = this.#leadingBand();
@@ -704,19 +723,123 @@ export class EncodeOrchestrator {
       this.#placeHeldBack(null);
       return;
     }
+    const now = this.now();
+    const running = this.#runningNow();
+    const need = this.#needOf(leading);
+    const free = this.#processorReading("freeCores");
+    const others = this.#processorReading("otherCores");
     for (const [address, runs] of this.#runs) {
       for (const run of runs) {
         if (!run.isAlive || run.isStopping || typeof run.pause !== "function") continue;
         const behind = compareUrgency(this.#bandAt(address, run.head), leading) > 0;
-        if (behind && run.isSuspended !== true) {
-          run.pause(`#${run.head} of ${address} is wanted less urgently than #${leading.index} of ${leading.address}, ` +
-            `which is being made`);
-        } else if (!behind && run.isSuspended === true) {
-          run.resume(`nothing more urgent than #${run.head} of ${address} is being made`);
+        if (!behind) {
+          if (run.isSuspended === true) run.resume(`nothing more urgent than #${run.head} of ${address} is being made`);
+          continue;
+        }
+        const urgency = `#${run.head} of ${address} is wanted less urgently than #${leading.index} of ${leading.address}`;
+        const verdict = this.#pauseRule.judge({
+          leader: leading.run, band: leading, run, address, need, remainingFilm: this.#remainingFilm(run), free, others, running, now
+        });
+        if (verdict === null) {
+          if (run.isSuspended !== true) run.pause(`${urgency}, which is being made`);
+        } else if (verdict.runs && run.isSuspended === true) {
+          run.resume(`${urgency}, and runs beside it: ${verdict.because}`);
+        } else if (!verdict.runs && run.isSuspended !== true) {
+          run.pause(`${urgency}, which is being made: ${verdict.because}`);
         }
       }
     }
     this.#placeHeldBack(leading);
+  }
+
+  /**
+   * One second of each encoder's processor and speed, by process
+   * (`storage/processor-report.js`): what `PauseRule` judges from. Who has the
+   * processor is decided again after it.
+   *
+   * @param {Map<number, { cores: number, speed: number | null }>} seconds
+   * @param {number} [at]
+   */
+  noteRunSeconds(seconds, at = this.now()) {
+    if (!(seconds instanceof Map) || seconds.size === 0) return;
+    const running = this.#runningNow();
+    let noted = false;
+    for (const runs of this.#runs.values()) {
+      for (const run of runs) {
+        const reading = seconds.get(run.process?.pid);
+        // A paused process draws nothing and makes nothing: its second says
+        // nothing about what it costs when it runs.
+        if (!reading || !run.isAlive || run.isSuspended === true) continue;
+        this.#pauseRule.noteSecond(run, { at, cores: reading.cores, speed: reading.speed }, running, run.isWaitingForInput === true);
+        noted = true;
+      }
+    }
+    if (noted) this.shareTheMachine();
+  }
+
+  /** @returns {Set<object>} Every encoder running now, not paused. */
+  #runningNow() {
+    const running = new Set();
+    for (const runs of this.#runs.values()) {
+      for (const run of runs) if (run.isAlive && !run.isStopping && run.isSuspended !== true) running.add(run);
+    }
+    return running;
+  }
+
+  /**
+   * The speed the leading run's deadlines ask for: over every number it has
+   * left, the film up to it over the time until it is needed. Infinite where a
+   * viewer already waits for one of them; 0 where none is due.
+   *
+   * @param {{ address: string, run: object }} leading
+   * @returns {number}
+   */
+  #needOf({ address, run }) {
+    const seconds = this.segmentSeconds;
+    if (!(seconds > 0)) return Number.POSITIVE_INFINITY;
+    const dueIn = deadlineReaderFor(this.#demand.mapOn(address), seconds);
+    let need = 0;
+    for (let index = run.head; index <= run.to; index += 1) {
+      const due = dueIn(index);
+      if (!Number.isFinite(due)) break;
+      if (due <= 0) return Number.POSITIVE_INFINITY;
+      need = Math.max(need, ((index - run.head + 1) * seconds) / due);
+    }
+    return need;
+  }
+
+  /**
+   * @param {object} run
+   * @returns {number} Film seconds it has left to make; infinite with no end.
+   */
+  #remainingFilm(run) {
+    return Number.isFinite(run.to) ? Math.max(0, run.to - run.head + 1) * this.segmentSeconds : Number.POSITIVE_INFINITY;
+  }
+
+  /**
+   * @param {"freeCores" | "otherCores"} name
+   * @returns {number | null}
+   */
+  #processorReading(name) {
+    const value = this.processor?.[name]?.();
+    return Number.isFinite(value) ? value : null;
+  }
+
+  /**
+   * Why a start at `from` on `address` would be paused the moment it exists,
+   * or null: behind the leader, and not let go by `PauseRule`.
+   *
+   * @param {string} address
+   * @param {number} from
+   * @returns {string | null}
+   */
+  #holdReason(address, from) {
+    const leading = this.#leading;
+    if (!leading?.run || compareUrgency(this.#bandAt(address, from), leading) <= 0) return null;
+    const verdict = this.#pauseRule.wouldStart({
+      leader: leading.run, address, need: this.#needOf(leading), free: this.#processorReading("freeCores")
+    });
+    return verdict.runs ? null : verdict.because;
   }
 
   /**
@@ -728,7 +851,7 @@ export class EncodeOrchestrator {
    */
   #placeHeldBack(leading) {
     for (const [address, band] of [...this.#heldBack]) {
-      if (leading && compareUrgency(band, leading) > 0) continue;
+      if (leading && compareUrgency(band, leading) > 0 && this.#holdReason(address, band.from) !== null) continue;
       this.#heldBack.delete(address);
       this.#reconcileOne(address);
     }
@@ -824,7 +947,11 @@ export class EncodeOrchestrator {
       // was measured it holds the largest reading rather than continuing a curve
       // nothing observed.
       contentionPenaltyFor: (others) => contentionPenalty(others, this.contentionPenalties).penalty,
-      speedX
+      speedX,
+      // A START THE PAUSE RULE WOULD PAUSE AT ONCE IS NOT MADE: the encoder
+      // would hold a process and its input for nothing. The plan returns it as
+      // `hold`, and it is placed when the rule lets it go (`#placeHeldBack`).
+      holdStart: (from) => this.#holdReason(address, from)
     });
 
     // A move is the plan taking a running encoder away from where it already
@@ -869,13 +996,10 @@ export class EncodeOrchestrator {
         `live=${JSON.stringify(live.map((run) => ({ from: run.from, to: run.to, head: run.head, speedX: run.speedX })))}`
       );
     }
-    // A START BEHIND WHAT IS BEING MADE ELSEWHERE IS NOT MADE: the encoder would
-    // be paused the moment it exists (`shareTheMachine`), holding a process and
-    // its input for nothing. It is placed when nothing more urgent is in hand.
+    // A start held by the plan is placed when the pause rule lets it go.
     let heldBack = null;
     for (const action of actions) {
-      if (action.type === "start" && this.#leading &&
-          compareUrgency(this.#bandAt(address, action.from), this.#leading) > 0) {
+      if (action.type === "hold") {
         heldBack = action;
         continue;
       }
@@ -946,7 +1070,7 @@ export class EncodeOrchestrator {
     // a 159 090-line file, 31 % of the log, all of one wedge.
     const wanting = firstUnmetWant(coverage, windows);
     const stillRunning = this.runsOn(address).filter((run) => run.isAlive);
-    if (heldBack) this.#heldBack.set(address, this.#bandAt(address, heldBack.from));
+    if (heldBack) this.#heldBack.set(address, { ...this.#bandAt(address, heldBack.from), from: heldBack.from });
     else this.#heldBack.delete(address);
     if (wanting === null || stillRunning.length > 0) {
       this.#lastUnmet.delete(address);
@@ -956,7 +1080,7 @@ export class EncodeOrchestrator {
         this.#lastUnmet.set(address, said);
         this.logger.info(
           `encode: #${heldBack.from} of ${address} waits — #${this.#leading?.index} of ` +
-          `${this.#leading?.address} is wanted more urgently and is being made`
+          `${this.#leading?.address} is wanted more urgently and is being made (${heldBack.because})`
         );
       }
     } else if (this.#lastUnmet.get(address) !== wanting) {
@@ -1184,6 +1308,7 @@ export class EncodeOrchestrator {
       this.#lastProgress.set(ended.address, progress);
     }
     this.#costs.note(ended);
+    if (ended.run) this.#pauseRule.forget(ended.run, ended.address);
     // Exactly one ending is normal — the run reached the end of the stretch it
     // was given and closed its last file. Every other leaves a piece open, and
     // that piece is under this run's OWN working name, so clearing up after it

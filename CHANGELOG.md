@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: An encoder making something less urgent than the leading one is paused only where running it was measured to cost the leader: it runs while the leader still makes the speed its deadlines need, or, with a viewer waiting, while neither the leader's speed nor its processor falls below what it was without it by more than its second-to-second scatter (on Home Assistant a short run's speed scattered by as much as its median, its cores by 0.02-0.2). A paused encoder is tried again when the free processor exceeds what it drew, or the leader has speed to spare; a pause for a measured slowdown is remembered until the leader's band, the encoders running or the other work's draw changes, so the same load gives at most one try and one pause. Work whose whole remaining stretch costs less processor than the leader's scatter over one second is never paused. A start the rule would pause at once is held by the plan itself (`hold`). Without per-second readings of the leader (no `/proc`), the urgency rule of before applies unchanged (#ttv-180).
+
 ## 2.101.3
 
 - **Removed**: Option `--input-stretch-bytes <bytes>` (2.101.0). Home Assistant runs with 128 MiB stretches on a 1080p MKV gave no gain over the measured size: five times more stops, slower seeks to 1000 s and 8-16% more processor at the same peak memory, so the comparison it was for is over (#ttv-182).

@@ -1076,6 +1076,9 @@ export function wireOutputs({
     makeRun: ({ address, from, to, because }) => parts.encodeRuns.makeRunAt(address, from, to, because),
     segmentSeconds: parts.segmentDurationSec,
     contentionPenalties: parts.processor.penalties,
+    // The processor left free and what other work takes, for the pause rule
+    // (torrent-tv/meta#180, phase 4).
+    processor: parts.processor,
     startingSpeedFor: (address) => parts.encodeCost.speedForOutput(address),
     segmentCoverage,
     // HOW IT ASKS TO DECIDE AGAIN. A plan that refuses to place anything

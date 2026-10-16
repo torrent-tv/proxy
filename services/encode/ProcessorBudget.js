@@ -23,7 +23,7 @@ import { correctForAvailability, leftForEncoders } from "./available-share.js";
 import { contentionPenalty } from "./contention.js";
 
 export class ProcessorBudget {
-  /** @type {() => ({ share: number, forEncoders?: number, known: boolean } | null | undefined)} */
+  /** @type {() => ({ share: number, forEncoders?: number, known: boolean, freeCores?: number | null, otherCores?: number | null } | null | undefined)} */
   #reading;
 
   /** @type {import("./contention.js").ContentionPenalties | null} */
@@ -72,6 +72,27 @@ export class ProcessorBudget {
    */
   speedOf(aloneSpeed) {
     return correctForAvailability(aloneSpeed, this.availability());
+  }
+
+  /**
+   * The processor left free over the latest reading, in cores, or null where
+   * it was not read (torrent-tv/meta#180, phase 4).
+   *
+   * @returns {number | null}
+   */
+  freeCores() {
+    const free = this.availability()?.freeCores;
+    return Number.isFinite(free) ? free : null;
+  }
+
+  /**
+   * The processor other work took over the latest reading, in cores, or null.
+   *
+   * @returns {number | null}
+   */
+  otherCores() {
+    const others = this.availability()?.otherCores;
+    return Number.isFinite(others) ? others : null;
   }
 
   /**

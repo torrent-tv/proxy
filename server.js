@@ -1159,7 +1159,9 @@ export async function startProxyServer({
         film: Number(run.progress?.processedSeconds) - Number(run.progress?.startPositionSeconds ?? 0)
       })))
       .filter((run) => Number.isInteger(run.pid)),
-    detailed: () => startupProfile.active()
+    detailed: () => startupProfile.active(),
+    // What the pause rule judges from (torrent-tv/meta#180, phase 4).
+    onRunSeconds: (seconds) => outputParts.encodeOrchestrator?.noteRunSeconds(seconds)
   });
   // What the last life of this process left on the disk. The kernel kills this
   // one often enough for that to be an ordinary state rather than an odd one —

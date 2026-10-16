@@ -92,6 +92,16 @@ export class RunClock {
   }
 
   /**
+   * Whether an input read of this run is waiting for bytes now, whether or
+   * not the process is also stopped.
+   *
+   * @returns {boolean}
+   */
+  get waitingForInput() {
+    return this.#idleCauses - (this.#isStopped ? 1 : 0) > 0;
+  }
+
+  /**
    * Milliseconds the process has been stopped so far.
    *
    * @param {number} [at]

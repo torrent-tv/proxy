@@ -217,3 +217,21 @@ test("the share is unknown, not whole, when either reading is missing", () => {
   assert.equal(freeShareDuring(reading, { ...reading, takenAt: 1000, processCpuSeconds: null }, 4), null);
   assert.equal(freeShareDuring(reading, { ...reading, takenAt: 1000, system: null }, 4), null);
 });
+
+test("a run that ends while its processor is being read does not throw the reading away", async t => {
+  // r64 (torrent-tv/meta#178): the run's process was read after the await,
+  // and a run that had ended meanwhile threw `reading 'pid'` of null.
+  let now = 0;
+  t.mock.method(Date, "now", () => now);
+  const run = { process: { pid: 4242 }, startedAt: 0 };
+  const load = new HostLoad({
+    outputs: new Map([["s", { id: "s" }]]), runStateOf: () => "PRODUCING", liveRunsOf: () => run.process ? [run] : [],
+    readProxyCpuSeconds: () => 0, readSystemCpu: async () => null,
+    readProcessCpuSeconds: async () => { run.process = null; return 1; },
+    readMachineState: async () => ({ megahertz: null, celsius: null }),
+    shareOfMachine: (before, after) => shareOfMachine(before, after, 4),
+    getTorrentTotals: async () => ({ downloaded: 0, threadCpuSeconds: 0 })
+  });
+  t.mock.method(os, "cpus", () => new Array(4).fill({}));
+  await load.reportHostLoad();
+});

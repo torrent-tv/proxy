@@ -654,11 +654,17 @@ export class HostLoad {
     // alone would print something like `ffmpeg=-598%`. Only pids present in
     // BOTH readings are counted, so a process that came or went contributes
     // nothing rather than a lie.
-    const runs = encoding.flatMap((session) => this.#host.liveRunsOf(session)).filter((run) => Number.isInteger(run.process?.pid));
+    // Each run's pid and start are read BEFORE the readings are awaited: a run
+    // that ends meanwhile drops its process, and read after the await it threw
+    // `Cannot read properties of null (reading 'pid')`, seven times in one
+    // field session, each losing that reading (r64, torrent-tv/meta#178).
+    const runs = encoding.flatMap((session) => this.#host.liveRunsOf(session))
+      .filter((run) => Number.isInteger(run.process?.pid))
+      .map((run) => ({ pid: run.process.pid, startedAt: run.startedAt }));
     const [system, endedChildren, ...cpuReadings] = await Promise.all([
       this.#host.readSystemCpu(),
       this.#host.readEndedChildrenCpuSeconds?.() ?? null,
-      ...runs.map((run) => this.#host.readProcessCpuSeconds(run.process.pid))
+      ...runs.map((run) => this.#host.readProcessCpuSeconds(run.pid))
     ]);
     /** @type {Map<number, number>} */
     const byPid = new Map();
@@ -667,8 +673,8 @@ export class HostLoad {
     runs.forEach((run, index) => {
       const seconds = cpuReadings[index];
       if (seconds !== null) {
-        byPid.set(run.process.pid, seconds);
-        startedAt.set(run.process.pid, run.startedAt);
+        byPid.set(run.pid, seconds);
+        startedAt.set(run.pid, run.startedAt);
       }
     });
     const sample = {

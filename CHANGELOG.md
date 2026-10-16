@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **Fix**: The per-run processor line (`processor: run cost`) gives, beside each run's CPU seconds per second of film (`k`), the cost the budget uses for its output today (`c`, seconds of the whole machine per second of film, or `unpriced`) and `k` over the cores this process may use (`k/U`), on the same reading. Readings only: the budget still prices runs by `c`; whether it should use `k` is to be judged from these lines (#ttv-180).
 - **Fix**: An encoder started, or left running, beside a leading encoder whose readings exist is judged at once by the condition that let it start (the processor left free against what it draws, or the leader's speed to spare), instead of being paused by the urgency rule and let go on the next reading. On Home Assistant (r80, 2.101.4) every short soundtrack run went through both: 81 pauses of 0.3 s (median, 36 s in all) where r78 on 2.101.2 paused 30 times in all (#ttv-180).
 
 ## 2.101.5

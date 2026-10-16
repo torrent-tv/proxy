@@ -239,7 +239,8 @@ test("a run that ends while its processor is being read does not throw the readi
 
 test("each run's CPU per second of film over an interval is said with the runs beside it, and used by nothing", async t => {
   // torrent-tv/meta#180, phase 1: `k` in CPU seconds per second of film,
-  // beside the processor's bound and measured free amount on the machine line.
+  // beside the processor's bound and measured free amount on the machine line;
+  // plan 2.3: today's cost `c` and `k` over the bound beside it.
   let now = 0;
   t.mock.method(Date, "now", () => now);
   const lines = [];
@@ -264,7 +265,9 @@ test("each run's CPU per second of film over an interval is said with the runs b
     sampleProcessor: () => ({ takenAt: now, bound: { cores: 4, parallelism: 4, quotaCores: null, source: "cores" }, cgroup: null, idleSeconds: null }),
     processorBetween: (before, after, measured) => ({ bound: after.bound, freeCores: (1 - measured.systemShare) * measured.hostCores,
       freeSource: "/proc/stat", cgroupUsedCores: null, throttledPeriods: null, throttledSeconds: null }),
-    describeProcessor: (reading) => ` free-cores=${reading.freeCores.toFixed(2)}`
+    describeProcessor: (reading) => ` free-cores=${reading.freeCores.toFixed(2)}`,
+    // The picture priced, the soundtrack not yet.
+    costSecOf: (session) => (session.id === "v" ? 0.3 : null)
   });
   t.mock.method(os, "cpus", () => new Array(4).fill({}));
   await load.reportHostLoad();
@@ -275,8 +278,10 @@ test("each run's CPU per second of film over an interval is said with the runs b
   await load.reportHostLoad();
   const runCosts = lines.find((line) => line.startsWith("processor: run cost"));
   assert.equal(runCosts,
-    "processor: run cost over 5.0s: v #3..#9 decode k=1.480 CPU-s per film-s (7.40 CPU-s, 5.00 film-s, speed 1.00x, 1.48 cores), beside 1 [audio]; " +
-    "a #1..#1 audio k=0.025 CPU-s per film-s (0.10 CPU-s, 4.00 film-s, speed 0.80x, 0.02 cores), beside 1 [decode]");
+    "processor: run cost over 5.0s: v #3..#9 decode k=1.480 CPU-s per film-s (7.40 CPU-s, 5.00 film-s, speed 1.00x, 1.48 cores), " +
+    "c=0.300 k/U=0.370 (U=4.00 cores), beside 1 [audio]; " +
+    "a #1..#1 audio k=0.025 CPU-s per film-s (0.10 CPU-s, 4.00 film-s, speed 0.80x, 0.02 cores), " +
+    "c=unpriced k/U=0.006 (U=4.00 cores), beside 1 [decode]");
   const machine = lines.find((line) => line.startsWith("host-load:"));
   // 10 of 20 core-seconds busy: two cores idle.
   assert.match(machine, / free-cores=2\.00/);

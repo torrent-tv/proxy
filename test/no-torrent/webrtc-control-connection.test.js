@@ -39,7 +39,7 @@ test("media and control use independent peers and tagged signalling", t => {
   manager.handleSignal("session", { type: "offer", sdp: "media" });
   manager.handleSignal("session", { type: "offer", sdp: "control", connectionId: "control-1" });
   assert.equal(peers.length, 2);
-  assert.equal(signals[0].separateControl, true);
+  assert.equal(signals[0].separateControl, 2);
   assert.equal(signals[1].connectionId, "control-1");
   manager.handleSignal("session", { type: "candidate", candidate: "media-candidate", mid: "0" });
   manager.handleSignal("session", { type: "candidate", candidate: "control-candidate", mid: "0", connectionId: "control-1" });
@@ -68,14 +68,14 @@ test("replacing control closes only its old generation and ignores late candidat
   assert.deepEqual(peers.map(peer => peer.closed), [1, 1, 1]);
 });
 
-test("a control peer cannot carry a media channel or exist without its media session", t => {
+test("control signalling can use its own session, but its peer cannot carry a media channel", t => {
   const { manager, peers } = setup();
   t.after(() => manager.dispose());
   manager.handleSignal("session", { type: "offer", sdp: "control", connectionId: "orphan" });
-  assert.equal(peers.length, 0);
+  assert.equal(peers.length, 1);
   manager.handleSignal("session", { type: "offer", sdp: "media" });
   manager.handleSignal("session", { type: "offer", sdp: "control", connectionId: "control" });
   let closed = false;
-  peers[1].channel({ getLabel: () => "proxy", close: () => { closed = true; } });
+  peers[2].channel({ getLabel: () => "proxy", close: () => { closed = true; } });
   assert.equal(closed, true);
 });

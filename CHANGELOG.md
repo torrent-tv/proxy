@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Let the control connection acquire its own signalling session, so it can reconnect after a server release closes the earlier signalling socket while media keeps playing. Advertise capability version 2 for this contract.
+
 ## 2.100.12
 
 - **Fix**: Support a separate WebRTC control connection, so large media transfers do not share its SCTP send buffer or congestion window. Keep legacy pages compatible and isolate control reconnection from media delivery.

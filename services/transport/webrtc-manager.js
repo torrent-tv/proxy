@@ -316,7 +316,7 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
     // Forward our SDP answer to the browser through the tunnel.
     pc.onLocalDescription((sdp, type) => {
       log(`[webrtc] Session ${sessionId.slice(0, 8)}: sending ${type}`);
-      signalBrowser({ type, sdp, ...(connectionId === null ? { separateControl: true } : {}) });
+      signalBrowser({ type, sdp, ...(connectionId === null ? { separateControl: 2 } : {}) });
     });
 
     pc.onStateChange((state) => {
@@ -382,8 +382,6 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
     }
     const connectionId = signal.connectionId ?? null;
     if (connectionId !== null && (typeof connectionId !== "string" || !/^[a-zA-Z0-9-]{1,64}$/.test(connectionId))) return;
-    // A second association is subordinate to an existing media connection.
-    if (connectionId !== null && !peers.has(sessionId)) return;
     const peerId = connectionId === null ? sessionId : `${sessionId}/${connectionId}`;
 
     if (signal.type === "offer") {

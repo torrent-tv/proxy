@@ -207,11 +207,13 @@ test("a soundtrack walked from bytes the picture's input copied reads nothing of
   let reads = 0;
   const { container, sound } = await over({ held: () => { reads++; return true; } });
   const copy = (start, end) => data.file.subarray(start, end + 1);
-  assert.equal(await container.learnPackets(soundOf(3), copy), true);
+  assert.equal(await container.learnPackets(soundOf(3), copy), "walked");
   reads = 0;
-  const index = await container.readPacketIndex(soundOf(3));
+  const account = { lockMs: 0, reads: 0, bytes: 0 };
+  const index = await container.readPacketIndex(soundOf(3), { account });
   assert.equal(inputOf(index, sound, 3).kind, "result");
   assert.equal(reads, 0, "the file is not read again for what the copy answered");
+  assert.equal(account.reads, 0, "and the walk's own account says so");
   const counted = tables();
   assert.equal(counted.picture, 0);
   assert.equal(counted.unique, counted.stored);
@@ -224,7 +226,7 @@ test("what the copy does not hold is walked later from the file, from where the 
   const { container, sound } = await over();
   const middle = data.clusterAt[9];
   const copy = (start, end) => end < middle || start >= data.clusterAt[10] ? data.file.subarray(start, end + 1) : null;
-  assert.equal(await container.learnPackets(soundOf(4), copy), false);
+  assert.equal(await container.learnPackets(soundOf(4), copy), "missing");
   const answer = inputOf(await container.readPacketIndex(soundOf(4)), sound, 4);
   assert.deepEqual(answer.ranges, expected.ranges);
   const counted = tables();

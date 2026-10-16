@@ -1,4 +1,4 @@
-## Unreleased
+## 2.99.20
 
 - **Fix**: Memory for media metadata keeps room for a packet table's next growth while any table is held. A table grows a block at a time, each twice the last; allowed exactly what it held, each growth was refused first and its whole read tried again, and after a seek to 1000 s a soundtrack piece was refused three times and ready after 53.7 s (r58, #ttv-178).
 

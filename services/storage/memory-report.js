@@ -438,6 +438,12 @@ export function unaccountedBufferBytes(arrayBuffers, stores = []) {
  * @param {number} [options.snapshotFloorBytes]
  * @param {number} [options.snapshotGrowthBytes]
  * @param {number} [options.keepSnapshots] - Newest to keep; zero keeps all.
+ * @param {boolean} [options.heapSnapshots] - Whether a high-water earns a heap
+ *   snapshot at all. Off unless the operator asks: a snapshot stops the thread
+ *   for as long as it is written, and in a healthy session on Home Assistant
+ *   the torrent thread's array buffers reach the floor below — one snapshot
+ *   of 524 MB stopped that thread 4.4 s, 20 s after a seek the viewer was
+ *   waiting on (r61, torrent-tv/meta#178).
  * @param {number} [options.bufferSnapshotFloorBytes] - Array buffers above what
  *   the stores hold that earn a snapshot of their own; zero never takes one.
  * @param {number} [options.bufferSnapshotGrowthBytes]
@@ -460,6 +466,7 @@ export function startMemoryReport({
   snapshotFloorBytes = 500 * 1024 * 1024,
   snapshotGrowthBytes = 100 * 1024 * 1024,
   keepSnapshots = 0,
+  heapSnapshots = false,
   bufferSnapshotFloorBytes = 0,
   bufferSnapshotGrowthBytes = 500 * 1024 * 1024
 }) {
@@ -601,7 +608,7 @@ export function startMemoryReport({
       // and when V8 did kill the process at 1.99 GB of old space, no snapshot
       // had ever been taken of the growth that did it.
       const heapWatched = processMemory.heapTotal;
-      if (heapWatched > highWater + snapshotGrowthBytes && heapWatched > snapshotFloorBytes) {
+      if (heapSnapshots && heapWatched > highWater + snapshotGrowthBytes && heapWatched > snapshotFloorBytes) {
         highWater = heapWatched;
         await takeSnapshot(heapWatched, "a new high-water of the heap");
       }
@@ -609,6 +616,7 @@ export function startMemoryReport({
       // the heap: each one is in it with its size and its holder.
       const unaccounted = unaccountedBufferBytes(processMemory.arrayBuffers, stores);
       if (
+        heapSnapshots &&
         bufferSnapshotFloorBytes > 0 &&
         unaccounted > bufferSnapshotFloorBytes &&
         unaccounted > bufferHighWater + bufferSnapshotGrowthBytes

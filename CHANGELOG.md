@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.1
 
 - **Fix**: Report the processor's upper bound (the CPUs this process may use and any cgroup CPU quota on its path, fractional quotas included), the measured free processor in cores (unknown where no idle reading exists or our own use is unread under a limit), the cgroup's own use and throttling, each run's CPU seconds per second of film over every machine reading with the runs beside it, and each run's per-second processor and speed with their scatter once a minute. Readings only: no admission, pause, start or quality decision changes (#ttv-180).
 

@@ -84,7 +84,8 @@
  * @typedef {{ type: "start", from: number, to: number, because: string }
  *   | { type: "move", run: object, from: number, to: number, because: string }
  *   | { type: "stop", run: object, because: string }
- *   | { type: "keep", run: object, from: number, to: number }} PlanAction
+ *   | { type: "keep", run: object, from: number, to: number }
+ *   | { type: "hold", from: number, to: number, because: string }} PlanAction
  */
 
 /**
@@ -116,6 +117,11 @@
  *   encoder per piece: at exactly realtime each next piece is marginally late
  *   however many are running, so another one always seemed to help a little.
  *   Unmeasured is 1, and then the budget is the only thing bounding the count.
+ * @param {(from: number) => string | null} [params.holdStart] - Why a start at
+ *   `from` would be paused the moment it exists (`PauseRule`), or null. Such a
+ *   start comes back as `hold` with that reason: the encoder would hold a
+ *   process and its input for nothing, and one place decides a start
+ *   (torrent-tv/meta#180).
  * @returns {PlanAction[]} Stops first, then moves, then starts, so that a plan
  *   carried out in order never holds two encoders where it means to hold one.
  */
@@ -130,7 +136,8 @@ export function planEncoders({
   now = Date.now(),
   refetchSecPerFilmSecond = 0,
   contentionPenaltyFor = () => 1,
-  speedX = 0
+  speedX = 0,
+  holdStart = () => null
 }) {
   /** @type {PlanAction[]} */
   const stops = [];
@@ -686,7 +693,11 @@ export function planEncoders({
     });
   }
 
-  return [...stops, ...moves, ...starts, ...keeps];
+  const startsOrHeld = starts.map((start) => {
+    const because = holdStart(start.from);
+    return because ? { type: "hold", from: start.from, to: start.to, because } : start;
+  });
+  return [...stops, ...moves, ...startsOrHeld, ...keeps];
 }
 
 
@@ -1010,7 +1021,7 @@ function lastOf(windows) {
   return Math.max(...windows.map((span) => span.to));
 }
 
-function deadlineReaderFor(windows, segmentSeconds) {
+export function deadlineReaderFor(windows, segmentSeconds) {
   const perSegment = segmentSeconds > 0 ? segmentSeconds : 0;
   // A TABLE BY SEGMENT, filled once per plan. Read for every segment of every
   // arrangement the plan weighs, a search of every window for each index was

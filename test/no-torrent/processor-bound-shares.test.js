@@ -115,4 +115,7 @@ test("the machine's availability is of the bound the processor reading carries",
   // The host leaves 2 cores, the quota 1.2: 0.8 of 1.5. Of the host it was 0.25.
   close(load.hostAvailability.forEncoders, 0.8);
   close(load.hostAvailability.share, 1);
+  // Other work's cores, for the pause rule; the free cores are not read here.
+  close(load.hostAvailability.otherCores, 5.7);
+  assert.equal(load.hostAvailability.freeCores, null);
 });

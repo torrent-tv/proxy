@@ -685,13 +685,25 @@ export class HostLoad {
       : null;
     // Of the cores this process may use where that is fewer than the host's
     // (torrent-tv/meta#180, phase 3).
-    this.hostAvailability = availableShareFrom({
+    const availability = availableShareFrom({
       systemBusy: share.systemShare,
       encoderShare: share.processShare,
       proxyShare,
       hostCores: cores,
       boundCores: sample.processor?.bound?.cores ?? null
     });
+    // The processor left free and what other work takes, in cores, for the
+    // pause rule (torrent-tv/meta#180, phase 4). Unknown stays null.
+    const ourShare = Number.isFinite(proxyShare) && Number.isFinite(share.processShare) ? proxyShare + share.processShare : null;
+    const reading = typeof this.#host.processorBetween === "function"
+      ? this.#host.processorBetween(previous.processor ?? null, sample.processor ?? null,
+        { systemShare: share.systemShare, ourShare, hostCores: cores })
+      : null;
+    this.hostAvailability = {
+      ...availability,
+      freeCores: Number.isFinite(reading?.freeCores) ? reading.freeCores : null,
+      otherCores: availability.known ? availability.unattributed * cores : null
+    };
     return proxyShare;
   }
 

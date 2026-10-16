@@ -454,6 +454,11 @@ export class EncodeRun {
     this.clock.inputWaitEnds();
   }
 
+  /** @returns {boolean} Whether an input read of this run is waiting for bytes now. */
+  get isWaitingForInput() {
+    return this.clock.waitingForInput;
+  }
+
   /** @returns {boolean} Whether it is stopped where it stands, producing nothing. */
   get isSuspended() {
     return this.#state === ENCODE_RUN_STATE.SUSPENDED;

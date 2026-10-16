@@ -36,7 +36,15 @@ export class Renditions {
   #host;
 
   /**
-   * @param {object} host - `viewerSecondsOn`, `audioStartSecondsFor`, `activeOutputFor`, `viewersOf`, `audioRenditionName`, `logger`, `placeViewer`, `viewerLeaves`, `createOrGetSession`, `planEncodersSoon`, `disposeSession`, `viewerPositionOf`, `encodeRuns`, `fileStartTimeReads`, `getCachedAudioTracks`, `getCachedMediaInfo`, `getContainerMediaInfo`, `localBaseUrl`, `outputTimes`, `outputs`, `quality`, `qualityOffer`, `segmentDurationSec`, `sourceFiles`, `viewers`, `generationOfRequest`, `givenOutputOf`, `noteGivenOutput`, `chosenOutputOf`, `chooseOutput`, `storedPieceReady`, `headersCompatible`, `audioChoiceOf`, `linkMbpsOf`, `qualityModeOf`, `noteServingVerdict`, `limitsFor`, `heightsChosenAs`, `highestGivenSegmentOf`, `sameHeightSwitchOf`, `noteSameHeightSwitch`, `switchingOnto`, `segmentClosed`, `bufferedSecondsOf`, `minimumBufferSecondsFor`
+   * The segment each viewer's move was last said to wait for on the output
+   * they are leaving, so that a wait is said once per segment.
+   *
+   * @type {Map<string, number>}
+   */
+  #moveWaitsSaid = new Map();
+
+  /**
+   * @param {object} host - `viewerSecondsOn`, `audioStartSecondsFor`, `activeOutputFor`, `viewersOf`, `audioRenditionName`, `logger`, `placeViewer`, `viewerLeaves`, `createOrGetSession`, `planEncodersSoon`, `disposeSession`, `viewerPositionOf`, `encodeRuns`, `fileStartTimeReads`, `getCachedAudioTracks`, `getCachedMediaInfo`, `getContainerMediaInfo`, `localBaseUrl`, `outputTimes`, `outputs`, `quality`, `qualityOffer`, `segmentDurationSec`, `sourceFiles`, `viewers`, `generationOfRequest`, `givenOutputOf`, `noteGivenOutput`, `chosenOutputOf`, `chooseOutput`, `storedPieceReady`, `headersCompatible`, `audioChoiceOf`, `linkMbpsOf`, `qualityModeOf`, `noteServingVerdict`, `limitsFor`, `heightsChosenAs`, `highestGivenSegmentOf`, `sameHeightSwitchOf`, `noteSameHeightSwitch`, `switchingOnto`, `switchingFrom`, `segmentClosed`, `bufferedSecondsOf`, `minimumBufferSecondsFor`
    */
   constructor(host) {
     this.#host = host;
@@ -836,6 +844,14 @@ export class Renditions {
       for (const consumerId of this.#host.switchingOnto(output)) {
         this.#reconsiderSameHeightSwitch(base, consumerId, index);
       }
+      // A segment closed on the output a viewer is LEAVING may be the one their
+      // move waits for (`#givenAndOpenOn`). It is behind the segment the move
+      // begins at by construction, so it is asked about with no index.
+      for (const consumerId of this.#host.switchingFrom?.(output) ?? []) {
+        if (this.#host.activeOutputFor({ base, consumerId, outputs: this.#host.outputs }) === output) {
+          this.#reconsiderSameHeightSwitch(base, consumerId, null);
+        }
+      }
     }
   }
 
@@ -892,6 +908,28 @@ export class Renditions {
     for (const consumerId of this.#host.switchingOnto(output)) {
       this.#reconsiderSameHeightSwitch(base, consumerId, null);
     }
+  }
+
+  /**
+   * The segment just before the one a move would begin at, when it was given
+   * to this viewer from the output on their screen and is not closed there:
+   * the segment their held request waits for. Null otherwise.
+   *
+   * @param {HlsSession | null} current - The output on their screen.
+   * @param {string} consumerId
+   * @param {number[]} askedHeights
+   * @param {number} next - The segment the move would begin at.
+   * @returns {number | null}
+   */
+  #givenAndOpenOn(current, consumerId, askedHeights, next) {
+    const segment = next - 1;
+    if (!current?.outputKey || segment < 0) {
+      return null;
+    }
+    const generation = this.#host.generationOfRequest(consumerId, Number.NaN);
+    const given = askedHeights.some((height) =>
+      this.#host.givenOutputOf(consumerId, generation, height, segment) === current.outputKey);
+    return given && !this.#host.segmentClosed(current.outputKey, segment) ? segment : null;
   }
 
   /**
@@ -967,6 +1005,24 @@ export class Renditions {
     if (!this.#host.segmentClosed(prepared.outputKey ?? "", next)) {
       return;
     }
+    // THE SEGMENT ALREADY GIVEN FROM THE OUTPUT ON SCREEN. A request is held by
+    // the output it was given from, and leaving that output stops its encoder:
+    // a segment given and not yet closed there would then be made by nobody.
+    // On Home Assistant a viewer waiting for #2176 was moved from #2177 and
+    // the picture stood for good (r71, torrent-tv/meta#178). The move waits for
+    // that segment to be closed; an output whose encoding has failed for good
+    // closes nothing, and its held request is the serving path's to answer.
+    const open = this.#givenAndOpenOn(current, consumerId, move.askedHeights, next);
+    if (open !== null && !this.#host.encodeRuns.hasFailed(current)) {
+      if (this.#moveWaitsSaid.get(consumerId) !== open) {
+        this.#moveWaitsSaid.set(consumerId, open);
+        this.#host.logger.info(
+          `transcode ${base.id} ${consumerId}'s move to ${move.outputKey} waits for #${open} on ` +
+          `${current.outputKey}, given and not yet closed there`
+        );
+      }
+      return;
+    }
     // THE CUSHION, for a move that is not urgent (roadmap item 98): a move up
     // is made once the viewer holds the cushion this file needs, and their
     // next report asks again until they do. A move DOWN is made at once — it
@@ -1026,6 +1082,7 @@ export class Renditions {
    * @returns {void}
    */
   #completeSameHeightSwitch(base, consumerId, move, prepared, current, next) {
+    this.#moveWaitsSaid.delete(consumerId);
     for (const height of move.askedHeights) {
       this.#choose(consumerId, height, prepared, base);
     }
@@ -1063,6 +1120,7 @@ export class Renditions {
    * @returns {void}
    */
   #cancelSameHeightSwitch(base, consumerId, reason) {
+    this.#moveWaitsSaid.delete(consumerId);
     const move = this.#host.sameHeightSwitchOf(consumerId);
     if (!move) {
       return;

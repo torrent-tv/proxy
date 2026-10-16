@@ -566,6 +566,25 @@ export function switchingOnto(viewers, output) {
 }
 
 /**
+ * The present viewers on this output for whom a move onto ANOTHER output is
+ * being prepared: the ones a segment closed here may let go.
+ *
+ * @param {object} viewers
+ * @param {object} output
+ * @returns {string[]}
+ */
+export function switchingFrom(viewers, output) {
+  const found = [];
+  for (const [consumerId, viewer] of viewers.forOutput(output)) {
+    const move = viewer.sameHeightSwitch;
+    if (viewer.isPresent() && move && move.outputKey !== output.outputKey) {
+      found.push(consumerId);
+    }
+  }
+  return found;
+}
+
+/**
  * Every output a present viewer is being prepared onto, as ids.
  *
  * @param {object} viewers

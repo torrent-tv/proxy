@@ -60,6 +60,7 @@ import {
   stepBeingWarmedOf,
   stepBeingWarmedSinceOf,
   stepOnScreenOf,
+  switchingFrom,
   switchingOnto,
   watches
 } from "../viewer/choices.js";
@@ -450,6 +451,7 @@ export function wireOutputs({
     sameHeightSwitchOf: (consumerId) => sameHeightSwitchOf(parts.viewers, consumerId),
     noteSameHeightSwitch: (consumerId, value) => noteSameHeightSwitch(parts.viewers, consumerId, value),
     switchingOnto: (output) => switchingOnto(parts.viewers, output),
+    switchingFrom: (output) => switchingFrom(parts.viewers, output),
     // What a viewer holds, and the cushion this file needs before a move that
     // is not urgent is made (roadmap item 98).
     bufferedSecondsOf: (consumerId) => bufferedSecondsOf(parts.viewers, consumerId),

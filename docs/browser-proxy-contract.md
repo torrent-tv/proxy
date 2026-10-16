@@ -109,8 +109,10 @@ control, `<sessionId>/<connectionId>`. Only one control generation per signallin
 session is retained. A replacement closes its predecessor; late candidates and
 close events from that predecessor cannot affect the replacement or media peer.
 
-Media paths (`/transcode/`, `/stream`) and chunked large request bodies use the
-media association. Small API requests and their complete responses use control.
+Media paths (`/transcode/`, `/stream`, `/media`), speed samples (`/api/link-probe`,
+`/api/delivery-sink`), complete subtitle files (`GET /api/subtitles`), embedded
+covers and chunked large request bodies use the media association. Small API
+requests, including subtitle selection, and their complete responses use control.
 The page identifies the same viewer on both associations, using the existing
 many-connections-to-one-viewer presence relation. Closing either association alone
 does not release a viewer still present on the other. Probes, counters and silence

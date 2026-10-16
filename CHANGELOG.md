@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **Perf**: The start forecast places in exact time only the pieces within the proxy's look-ahead of the viewer, where planned arrivals exist and continuity is decided; the rest of the film is scheduled by the same rules in seconds, its missing bytes counted against what is held, planned and already brought. On a two-track 1340-piece film on the development machine a poll took 10-15 ms (median) and now 4.5-5 ms; the first call 61-74 ms and now 15-19 ms (#ttv-185).
 - **Fix**: The start forecast chooses a source's download rate by the rate it then reads from it, bytes over the span measured, instead of by the last reading. A last reading of 10.7 MB/s over a span of 0 B/s won over the 3.4-16.7 MB/s the torrent carried, and a viewer returning to media the page already held waited 10.7 s with no delay stated. The forecast's log line now gives both rate summaries (#ttv-185).
 
 ## 2.101.1

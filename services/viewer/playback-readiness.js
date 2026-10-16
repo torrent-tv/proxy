@@ -143,8 +143,20 @@ export function predictPlaybackReadiness(input = {}) {
   // Kept are the pieces still to play, the first piece (where the track
   // starts), the read piece nearest before them (what an unread piece is placed
   // by) and read pieces inside what the page reports holding (their frames).
+  //
+  // THE NEAR WINDOW AND THE TAIL (torrent-tv/meta#185). Pieces starting within
+  // the proxy's look-ahead of the viewer are placed in exact time, where whether
+  // the media is continuous is decided, and their bytes are those the torrent
+  // thread plans arrivals for. The pieces after it are scheduled by the same
+  // rules in seconds, by {@link scheduleTail}: no exact time and no planned
+  // arrival exists for them. Placing every remaining piece of a two-hour film
+  // in exact time on every poll cost 70-1128 ms a call on Home Assistant (r73,
+  // r74).
+  const lookahead = finiteNonNegative(input.lookaheadSeconds);
+  const horizonEnd = lookahead > 0 ? finiteNonNegative(input.positionSeconds) + lookahead : Number.POSITIVE_INFINITY;
   const tracks = (Array.isArray(input.tracks) ? input.tracks : []).map((track) =>
-    Array.isArray(track.segments) ? { ...track, segments: piecesThatMatter(track, finiteNonNegative(input.positionSeconds)) } : track);
+    Array.isArray(track.segments) ? { ...track,
+      segments: piecesThatMatter(track, finiteNonNegative(input.positionSeconds), horizonEnd) } : track);
   const duration = finiteNonNegative(input.durationSeconds);
   // Each track's served ticks are placed on the clock the page reports by the
   // offset its player applied (`timestampOffset`).
@@ -212,11 +224,20 @@ export function predictPlaybackReadiness(input = {}) {
     bitsPerMediaSecond: averageBitsPerMediaSecond(track, track.segments,
       new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : [])),
     segments: segmentsOf[trackIndex]
-      .filter((segment) => Number.isInteger(segment?.index) &&
-        Number.isFinite(segment?.startSeconds) && Number.isFinite(segment?.endSeconds) &&
-        segment.endSeconds > segment.startSeconds && segment.endSeconds > position)
-      .sort((left, right) => left.startSeconds - right.startSeconds || left.index - right.index)
+      .filter((segment) => isPiece(segment) && segment.endSeconds > position && segment.startSeconds < horizonEnd)
+      .sort((left, right) => left.startSeconds - right.startSeconds || left.index - right.index),
+    // The pieces after the near window, as the playlist cuts them, and the
+    // offset the page's player placed them by.
+    tail: horizonEnd === Number.POSITIVE_INFINITY ? [] :
+      (Array.isArray(input.tracks[trackIndex].segments) ? input.tracks[trackIndex].segments : [])
+        .filter((segment) => isPiece(segment) && segment.startSeconds >= horizonEnd && segment.endSeconds > position)
+        .sort((left, right) => left.startSeconds - right.startSeconds || left.index - right.index),
+    clockSeconds: Number.isFinite(track.clockOffsetSeconds) ? track.clockOffsetSeconds : 0
   }));
+  for (const state of trackState) {
+    state.tailEndSeconds = state.tail.length > 0
+      ? Math.min(duration, state.tail.at(-1).endSeconds + state.clockSeconds) : null;
+  }
   if (trackState.some(({ segments }) => segments.length === 0)) {
     return result(false, null, buffered, reserve, null, "timeline-unavailable", 0);
   }
@@ -241,8 +262,9 @@ export function predictPlaybackReadiness(input = {}) {
     return result(false, null, buffered, reserve, null, "link-rate-unavailable", 0);
   }
 
-  const preparedSegments = trackState.reduce((sum, { ready, segments }) =>
-    sum + segments.filter((segment) => ready.has(segment.index)).length, 0);
+  const preparedSegments = trackState.reduce((sum, { ready, segments, tail }) =>
+    sum + segments.filter((segment) => ready.has(segment.index)).length +
+    tail.filter((segment) => ready.has(segment.index)).length, 0);
   const jobs = [];
 
   for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
@@ -497,10 +519,20 @@ export function predictPlaybackReadiness(input = {}) {
       for (const range of production.segment.ranges) addMediaRange(prepared, range);
       // Supply interruption coverage is stock held by the proxy as well as
       // the browser. It is not a browser buffer-size admission rule.
-      const ahead = Math.max(0, secondsAhead(before, at) -
-        Math.min(reserve, secondsAhead(trackEnd, before)) * Number(production.requiresSource));
+      // The reserve is bounded by what is left of the track, not of the window.
+      const left = state.tailEndSeconds === null ? secondsAhead(trackEnd, before)
+        : Math.max(0, state.tailEndSeconds - toSeconds(before));
+      const ahead = Math.max(0, secondsAhead(before, at) - Math.min(reserve, left) * Number(production.requiresSource));
       constrain(production.at - ahead, "production", trackIndex, production.segment.index, production.at, ahead,
         production.requiresSource);
+    }
+  }
+  if (trackState.some(({ tail }) => tail.length > 0)) {
+    const stop = scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArrivals, runStarts, trackFinish,
+      link, position, reserve, transferFinish, constrain });
+    if (stop) {
+      return { ...result(false, null, buffered, reserve, null, stop.reason, preparedSegments),
+        ...(stop.unavailableSource ? { unavailableSource: stop.unavailableSource } : {}) };
     }
   }
   const delay = Math.max(0, ...constraints);
@@ -525,6 +557,183 @@ export function predictPlaybackReadiness(input = {}) {
       return toSeconds(contiguousEnd(ranges, at));
     })) };
 
+}
+
+/** A playlist piece with an index and a positive span in seconds. */
+function isPiece(segment) {
+  return Number.isInteger(segment?.index) && Number.isFinite(segment?.startSeconds) &&
+    Number.isFinite(segment?.endSeconds) && segment.endSeconds > segment.startSeconds;
+}
+
+/**
+ * The pieces after the near window, scheduled by the near window's rules in
+ * seconds and constrained as they are scheduled: their source bytes arrive in
+ * byte order at the source's measured service after the near window's bytes,
+ * a piece whose bytes come after its output's last run was admitted starts a
+ * run and pays the output's open, it is encoded at the output's measured rate
+ * and delivered over the one link in media order.
+ *
+ * Where a byte stands in that order is the bytes still missing before it,
+ * read off what is held, planned and brought by the near window
+ * ({@link missingBefore}); a piece is placed by the last range of it that
+ * misses bytes, so a range it reads that is already held — an AVI's index at
+ * the end of the file — does not place it at the end of the file. Planned and
+ * brought bytes come when they were to come. No exact time, list of arrivals
+ * or per-piece object is built: this runs over the rest of the film on every
+ * poll (torrent-tv/meta#185).
+ *
+ * @returns {{ reason: string, unavailableSource?: object } | null} Why there is no answer, or null.
+ */
+function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArrivals, runStarts, trackFinish, link,
+  position, reserve, transferFinish, constrain }) {
+  // Per source: what is missing before a byte, and how far the tail has asked.
+  const supply = new Map();
+  const supplyOf = (sourceId) => {
+    let state = supply.get(sourceId);
+    if (!state) {
+      const coverage = sourceByteCoverage.get(sourceId) ?? [];
+      const heldBefore = [0];
+      for (const range of coverage) heldBefore.push(heldBefore.at(-1) + range.end - range.start);
+      state = { coverage, heldBefore, asked: null, orders: [], finishes: [] };
+      supply.set(sourceId, state);
+    }
+    return state;
+  };
+  const next = trackState.map(() => 0);
+  let delivered = transferFinish;
+  for (;;) {
+    // The next piece in media order across the tracks, as the near window orders them.
+    let trackIndex = -1;
+    for (let index = 0; index < trackState.length; index += 1) {
+      const candidate = trackState[index].tail[next[index]];
+      if (!candidate) continue;
+      const best = trackIndex < 0 ? null : trackState[trackIndex].tail[next[trackIndex]];
+      if (!best || candidate.startSeconds < best.startSeconds ||
+        (candidate.startSeconds === best.startSeconds && candidate.endSeconds < best.endSeconds)) trackIndex = index;
+    }
+    if (trackIndex < 0) return null;
+    const state = trackState[trackIndex];
+    const { track } = state;
+    const segment = state.tail[next[trackIndex]++];
+    const startsAt = segment.startSeconds + state.clockSeconds;
+    const endsAt = segment.endSeconds + state.clockSeconds;
+    // Media the page already holds is not transferred again.
+    if (Array.isArray(track.clientRanges) && track.clientRanges.some((range) =>
+      range?.start <= Math.max(startsAt, position) && range?.end >= endsAt)) continue;
+    const exactBytes = sizeOf(track.segmentSizesBytes, segment.index);
+    const sizeBits = exactBytes > 0 ? exactBytes * 8 : state.bitsPerMediaSecond * (segment.endSeconds - segment.startSeconds);
+    if (!(sizeBits > 0)) return { reason: "segment-size-unavailable" };
+    const produced = state.ready.has(segment.index);
+    let work = 0;
+    if (!produced) {
+      work = segment.endSeconds - segment.startSeconds;
+      for (const range of Array.isArray(track.processingRanges) ? track.processingRanges : []) {
+        if (Number.isFinite(range?.start) && Number.isFinite(range?.end)) {
+          work -= Math.max(0, Math.min(range.end, segment.endSeconds) - Math.max(range.start, segment.startSeconds));
+        }
+      }
+      work = Math.max(0, work);
+    }
+    let sourceArrivalAt = 0;
+    if (work > 0) {
+      if (!state.curve) return { reason: "encode-rate-unavailable" };
+      const trackSources = Array.isArray(track.sourceIds) ? track.sourceIds : [];
+      const exactInputs = Array.isArray(segment.sourceInputs) ? segment.sourceInputs : null;
+      const count = trackSources.length + (exactInputs?.length ?? 0);
+      for (let place = 0; place < count; place += 1) {
+        const sourceId = place < trackSources.length ? trackSources[place]
+          : exactInputs[place - trackSources.length]?.sourceId;
+        if (namedBefore(sourceId, place, trackSources, exactInputs)) continue;
+        const source = sourceState.get(sourceId);
+        if (!source) return { reason: "source-measurement-unavailable" };
+        if (source.source.complete === true) continue;
+        const ranges = exactInputs ? inputRangesOf(exactInputs, sourceId) : null;
+        if (ranges === null) return { reason: "source-input-ranges-unavailable" };
+        const bytes = supplyOf(sourceId);
+        let order = 0;
+        for (const range of ranges) {
+          // Bytes the torrent thread planned, or the near window brought, come when they were to come.
+          sourceArrivalAt = Math.max(sourceArrivalAt, latestArrival(range, sourceArrivals.get(sourceId)));
+          const after = missingBefore(bytes, range.end);
+          if (after > missingBefore(bytes, range.start)) order = Math.max(order, after);
+        }
+        if (order === 0) continue;
+        const { service } = source;
+        if (!service.rate || !(service.rate.rateAt(0) > 0)) {
+          return { reason: service.rate ? "service-not-advancing" : "download-rate-unavailable",
+            unavailableSource: { sourceId, segmentIndex: segment.index, missingBytes: order - (bytes.asked ?? 0) } };
+        }
+        // The tail's first asked byte is where this source's tail begins:
+        // bytes missing before it are not this film's to wait for.
+        bytes.asked ??= Math.max(0, order - missingWithin(bytes, ranges));
+        let arrival;
+        if (order > bytes.asked) {
+          service.finish = service.rate.finish(order - bytes.asked, service.finish);
+          bytes.asked = order;
+          bytes.orders.push(order);
+          bytes.finishes.push(service.finish);
+          arrival = service.finish;
+        } else {
+          // Brought by an earlier piece's ask: when that ask reached it.
+          let low = 0, high = bytes.orders.length - 1;
+          while (low < high) {
+            const middle = (low + high) >>> 1;
+            if (bytes.orders[middle] < order) low = middle + 1;
+            else high = middle;
+          }
+          arrival = bytes.finishes[low] ?? service.finish;
+        }
+        sourceArrivalAt = Math.max(sourceArrivalAt, arrival);
+      }
+    }
+    let admittedAt = Math.max(trackFinish[trackIndex], sourceArrivalAt);
+    if (work > 0) {
+      const run = runStarts[trackIndex];
+      const live = run.spans.some(span => segment.startSeconds >= span.start && segment.startSeconds < span.end);
+      if (!live && (run.admittedAt === null || sourceArrivalAt > run.admittedAt)) {
+        run.admittedAt = admittedAt;
+        admittedAt += run.openSeconds;
+      }
+    }
+    const producedAt = work > 0 ? state.curve.finish(work, admittedAt) : 0;
+    trackFinish[trackIndex] = Math.max(trackFinish[trackIndex], producedAt);
+    delivered = link.finish(sizeBits, Math.max(delivered, producedAt));
+    const completedAt = delivered + finiteNonNegative(track.appendSeconds);
+    // The media before a piece is what the playlist puts before it: whether a
+    // hole stops the media is decided in the near window, in exact time.
+    const ahead = Math.max(0, startsAt - position);
+    const requiresSource = sourceArrivalAt > 0;
+    constrain(completedAt - ahead, "delivery", trackIndex, segment.index, completedAt, ahead, false);
+    const covered = Math.max(0, ahead - Math.min(reserve, Math.max(0, state.tailEndSeconds - startsAt)) *
+      Number(requiresSource));
+    constrain(producedAt - covered, "production", trackIndex, segment.index, producedAt, covered, requiresSource);
+  }
+}
+
+/**
+ * The bytes not held, and not brought by the near window, before `byte` of a
+ * source: `byte` less what the sorted coverage holds below it.
+ *
+ * @param {{ coverage: Array<{ start: number, end: number }>, heldBefore: number[] }} bytes
+ * @param {number} byte
+ */
+function missingBefore(bytes, byte) {
+  const { coverage, heldBefore } = bytes;
+  let low = 0, high = coverage.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (coverage[middle].end <= byte) low = middle + 1;
+    else high = middle;
+  }
+  const inside = low < coverage.length && coverage[low].start < byte ? byte - coverage[low].start : 0;
+  return byte - heldBefore[low] - inside;
+}
+
+/** The missing bytes of a piece's ranges of one source. */
+function missingWithin(bytes, ranges) {
+  let missing = 0;
+  for (const range of ranges) missing += missingBefore(bytes, range.end) - missingBefore(bytes, range.start);
+  return missing;
 }
 
 /**
@@ -628,21 +837,24 @@ function heldRanges(ranges, segments, unit, position) {
 }
 
 /**
- * The pieces of a track this forecast reads: those still to play (ending after
- * `position`), the first piece, every piece that has been read and every piece
- * that is made. A piece that is none of these changes no answer: it is not
- * scheduled, it is not where the track starts, no unread piece is placed by it
- * (only read pieces are), it lends no frame to what the page holds, and it has
- * no size to measure the output's rate by.
+ * The pieces of a track this forecast places in exact time: those still to
+ * play (ending after `position`) that start before `horizonEnd`, the first
+ * piece, every piece that has been read and every piece that is made. A piece
+ * that is none of these changes no exact answer: after the near window it is
+ * scheduled in seconds, it is not where the track starts, no unread piece is
+ * placed by it (only read pieces are), it lends no frame to what the page
+ * holds, and it has no size to measure the output's rate by.
  *
  * @param {{ segments: object[], readySegmentIndices?: number[] }} track
  * @param {number} position - Seconds.
+ * @param {number} [horizonEnd] - Seconds: where the near window ends.
  * @returns {object[]}
  */
-function piecesThatMatter(track, position) {
+function piecesThatMatter(track, position, horizonEnd = Number.POSITIVE_INFINITY) {
   const made = new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : []);
   const kept = track.segments.filter((segment) => segment?.index === 0 || segment?.mediaRanges !== undefined ||
-    made.has(segment?.index) || !(Number.isFinite(segment?.endSeconds) && segment.endSeconds <= position));
+    made.has(segment?.index) || (!(Number.isFinite(segment?.endSeconds) && segment.endSeconds <= position) &&
+      !(Number.isFinite(segment?.startSeconds) && segment.startSeconds >= horizonEnd)));
   return kept.length === track.segments.length ? track.segments : kept;
 }
 

@@ -658,6 +658,7 @@ export class ViewerRequests {
           fileLength: stats?.fileLength,
           pieceLength: stats?.pieceLength,
           downloadRateReadings: this.#sourceRateReadings(measurement, output.file.sourceKey, stats, now),
+          downloadRateSummaries: this.#sourceRateSummaries(measurement, output.file.sourceKey),
           downloadForecast,
         });
       }
@@ -774,11 +775,14 @@ export class ViewerRequests {
         bufferLimitSeconds: input.bufferLimitSeconds,
         lookaheadSeconds: input.lookaheadSeconds,
         link: input.linkReadings,
-        sources: input.sources.map(({ id, complete, residence, downloadForecast, downloadRateReadings }) => ({
+        sources: input.sources.map(({ id, complete, residence, downloadForecast, downloadRateReadings,
+          downloadRateSummaries }) => ({
           id, complete, residenceRanges: residence?.length ?? 0,
           forecastAt: downloadForecast?.measuredAt ?? null, plannedPieces: downloadForecast?.ranges.length ?? 0,
           unknownPieces: downloadForecast?.ranges.filter(range => range.availableAt === null).length ?? 0,
-          downloadRateBytesPerSecond: downloadRateReadings?.lastValue ?? null
+          // The rate the forecast reads, and both summaries it was chosen from.
+          downloadRateBytesPerSecond: this.#host.playbackReadiness.forecastRate(downloadRateReadings, now, 0, "time"),
+          downloadRateSummaries
         })),
         tracks: tracks.map(({ id, processedSeconds, readings, segments, readySegmentIndices }) => ({
           id, processedSeconds, readings, segments: segments.length, prepared: readySegmentIndices.length
@@ -818,7 +822,7 @@ export class ViewerRequests {
     const rates = (forecast.operations ?? []).map(operation =>
       `${operation.track} ${operation.operation} ${Number.isFinite(operation.speed) ? operation.speed.toFixed(2) : "?"}x`);
     const downloads = (input.sources ?? []).map(source => {
-      const rate = source.downloadRateReadings?.lastValue;
+      const rate = this.#host.playbackReadiness.forecastRate(source.downloadRateReadings, now, 0, "time");
       return `${Number.isFinite(rate) ? (rate / 1_048_576).toFixed(2) : "?"} MB/s`;
     });
     logger.info(`playback held ${session.id} consumer=${consumerId}: delay ${seconds(delay)}s by ` +
@@ -949,7 +953,14 @@ export class ViewerRequests {
     }
     // Totals that went back belong to a torrent added again: read on from them.
     if (limit) source.limit = limit;
-    return sourceService(source.free.snapshot(), source.delivered.snapshot());
+    return sourceService(source.free.snapshot(), source.delivered.snapshot(),
+      (summary) => this.#host.playbackReadiness.forecastRate(summary, now, 0, "time"));
+  }
+
+  /** Both summaries a source's service was chosen from, for the forecast's log line. */
+  #sourceRateSummaries(state, id) {
+    const source = state.sources.get(id);
+    return source ? { free: source.free.snapshot(), delivered: source.delivered.snapshot() } : null;
   }
 }
 
@@ -962,12 +973,19 @@ export class ViewerRequests {
  * downloaded 5-18 MB/s, answered "service not advancing", and held the viewer
  * (r54, torrent-tv/meta#178). What the swarm did carry, it can carry.
  *
+ * The two are compared by the rate the forecast reads from them, bytes over
+ * the span measured. Compared by their last readings, a summary whose last
+ * reading was 10.7 MB/s and whose span read 0 B/s won over 3.4-16.7 MB/s
+ * carried, and the forecast held the viewer with no delay to state (r74,
+ * torrent-tv/meta#185).
+ *
  * @param {object | null} free - A rate summary (`RateTrend.snapshot`).
  * @param {object | null} delivered
+ * @param {(summary: object) => number | null} rateOf - The rate the forecast reads from a summary.
  * @returns {object | null}
  */
-export function sourceService(free, delivered) {
+export function sourceService(free, delivered, rateOf) {
   if (!free) return delivered;
   if (!delivered) return free;
-  return delivered.lastValue > free.lastValue ? delivered : free;
+  return (rateOf(delivered) ?? 0) > (rateOf(free) ?? 0) ? delivered : free;
 }

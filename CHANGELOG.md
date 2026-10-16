@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The start forecast chooses a source's download rate by the rate it then reads from it, bytes over the span measured, instead of by the last reading. A last reading of 10.7 MB/s over a span of 0 B/s won over the 3.4-16.7 MB/s the torrent carried, and a viewer returning to media the page already held waited 10.7 s with no delay stated. The forecast's log line now gives both rate summaries (#ttv-185).
+
 ## 2.101.1
 
 - **Fix**: Report the processor's upper bound (the CPUs this process may use and any cgroup CPU quota on its path, fractional quotas included), the measured free processor in cores (unknown where no idle reading exists or our own use is unread under a limit), the cgroup's own use and throttling, each run's CPU seconds per second of film over every machine reading with the runs beside it, and each run's per-second processor and speed with their scatter once a minute. Readings only: no admission, pause, start or quality decision changes (#ttv-180).

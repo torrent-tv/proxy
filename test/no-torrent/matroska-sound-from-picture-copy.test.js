@@ -60,5 +60,6 @@ test("each piece's soundtrack is walked from the picture's copy of that piece, a
     const account = { lockMs: 0, reads: 0, bytes: 0 };
     assert.ok(await sound.readPacketIndex({ ...interval, trackIds: [2] }, { account }));
     assert.equal(account.reads, 0, `piece ${piece} reads nothing of the file`);
+    assert.equal(reads, 0, "and the file was asked for nothing");
   }
 });

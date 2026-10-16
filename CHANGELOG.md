@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.5
 
 - **Fix**: The torrent thread's arrival forecast gives only what the peers' queues say: a piece whose every missing block is asked for comes when its queues bring it, and every other missing piece is left to the start forecast, which brings it at the source's measured download rate. Its own estimate for those, the holders' speeds shared out over the map's bands, came back on the polls where the start forecast answered 21 846 s and 160 774 s while the torrent carried 3.5-5.5 MB/s (r78, r79). A held start's log line now says when its input's last bytes come, and whether by the torrent's queues or by the measured rate (#ttv-185).
 

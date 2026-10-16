@@ -1,4 +1,4 @@
-## Unreleased
+## 2.100.4
 
 - **Fix**: The host-load reading no longer fails when an encoder ends while its processor time is being read. It read the run's process after that wait, threw `Cannot read properties of null (reading 'pid')` seven times in one session on Home Assistant, and each time lost the reading the quality offer is computed from (r64, #ttv-178).
 

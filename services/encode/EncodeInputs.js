@@ -55,9 +55,17 @@ export class EncodeInputs {
   #rankAt;
   #log;
   #now;
+  /**
+   * Told when an original input's stretch is copied whole, while its bytes are
+   * held, so what else they answer can be read from them (`learnPackets`).
+   *
+   * @type {(output: object, from: number, to: number, input: object) => void}
+   */
+  #stretchCopied;
 
   constructor({ resolve, readRanges, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
-    rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now }) {
+    rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now, stretchCopied = () => {} }) {
+    this.#stretchCopied = stretchCopied;
     this.#openOf = openOf;
     this.#resolve = resolve;
     this.#read = readRanges;
@@ -583,6 +591,10 @@ export class EncodeInputs {
       const copied = result.whole ?? Promise.resolve(true);
       void copied.then(whole => {
         if (whole && result.copyMs > 0) keep(this.#copyRates, result.bytes / result.copyMs);
+        if (whole) {
+          try { this.#stretchCopied(output, from, end, result); }
+          catch (error) { this.#log(`encode input #${from}..#${end} of ${addressOf(output)}: what was told of its copy failed: ${error?.message ?? error}`); }
+        }
         this.#log(`encode input #${from}..#${end} of ${addressOf(output)}: ` + (whole
           ? `stretch copied, ${result.bytes} bytes in ${result.copyMs}ms of copying since it was admitted`
           : result.copyFailed?.() ? "the stretch could not be copied: a piece it needs is no longer held"

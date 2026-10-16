@@ -945,6 +945,39 @@ export async function startProxyServer({
       }
       return { kind: "result", sources };
     },
+    // THE SOUND'S PACKETS FROM THE PICTURE'S COPY. A Matroska soundtrack is
+    // fed to its encoder packet by packet, and finding its packets walks the
+    // clusters the Cues name for the piece — picture and sound together,
+    // about 20 MB for 0.3 MB of sound on the field's 1080p film. The picture's
+    // input copies those same clusters through the torrent thread first, and
+    // walked a second time there each soundtrack piece took 6-11 s, slower
+    // than the film plays (r61, torrent-tv/meta#178). Walked from the copy
+    // while it is held, the sound reads only its own packets later.
+    stretchCopied: (output, from, to, input) => {
+      for (const source of input.sources ?? []) {
+        const container = containerOrchestrator.known(source.sourceKey, source.fileIndex);
+        const tracks = containerOrchestrator.tracks.get(`${source.sourceKey}:${source.fileIndex}`);
+        if (typeof container?.learnPackets !== "function" || !Array.isArray(tracks)) continue;
+        const carried = new Set((source.input.selections ?? []).map(selection => selection.track?.trackNumber));
+        const sounds = new Set();
+        for (const other of outputParts.outputs.values()) {
+          const sound = other.spec?.audio;
+          if (other.spec?.video || !sound || other.file?.sourceKey !== source.sourceKey || sound.fileIndex !== source.fileIndex) continue;
+          const track = tracks.filter(candidate => candidate.type === "audio")[sound.trackIndex];
+          if (track && !carried.has(track.trackNumber)) sounds.add(track.trackNumber);
+        }
+        if (!sounds.size || !Number.isFinite(source.input.from) || !(source.input.to > source.input.from)) continue;
+        const read = (start, end) => {
+          const answer = input.read(source.fileIndex, start, end);
+          return answer && typeof answer.then !== "function" && answer.end === end ? answer.bytes : null;
+        };
+        const startedAt = Date.now();
+        void container.learnPackets({ from: source.input.from, to: source.input.to, trackIds: [...sounds] }, read).then(learned =>
+          logger.info(`encode input #${from}..#${to} of ${output.outputKey}: soundtrack packets of track(s) ${[...sounds].join(",")} ` +
+            `over ${source.input.from.toFixed(3)}-${source.input.to.toFixed(3)}s ${learned ? "walked" : "not all walked"} from its copy in ${Date.now() - startedAt}ms`),
+        error => logger.warn(`encode input #${from}..#${to} of ${output.outputKey}: walking the soundtrack from its copy failed: ${error?.message ?? error}`));
+      }
+    },
     readEncodeRanges: async (source, ranges, maxBytes) => {
       const torrent = torrentPool.knownTorrent(source.sourceKey);
       return torrent ? torrentPool.readHeldRangesOf(torrent, source.fileIndex, ranges, maxBytes) : null;

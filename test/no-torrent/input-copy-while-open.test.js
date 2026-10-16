@@ -158,3 +158,39 @@ test("an input whose stretch is not all downloaded waits for the bytes instead o
   assert.equal(ready?.kind, "result", "once they are here it is answered");
   ready.release();
 });
+
+test("a stretch copied whole is told about while its bytes are held, so a soundtrack can be walked from it", async () => {
+  // r61 (torrent-tv/meta#178): the soundtrack walked the clusters the
+  // picture's input had already copied, a second time through the torrent thread.
+  const told = [];
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources }),
+    readRanges: async (_source, list) => list.map(([start, end]) => FILE.subarray(start, end + 1)),
+    reviseBudget: async () => inputs.allow(1000), changed: () => {}, failed: error => { throw error; },
+    stretchCopied: (copiedFor, from, to, input) => told.push({ copiedFor, from, to, bytes: [...input.read(0, 200, 203).bytes] }) });
+  inputs.take(output, 3, 3);
+  for (let turn = 0; turn < 8; turn++) await setImmediate();
+  const ready = inputs.take(output, 3, 3);
+  assert.equal(ready?.kind, "result");
+  assert.deepEqual(told, [{ copiedFor: output, from: 3, to: 3, bytes: [...FILE.subarray(200, 204)] }],
+    "told once, with the stretch readable");
+  ready.release();
+});
+
+test("a stretch released before it is copied is not told about", async () => {
+  const told = [];
+  let settle = null;
+  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources }),
+    readRanges: async (_source, list) => list.length === 1 && list[0][0] === 100
+      ? new Promise(resolve => { settle = () => resolve(list.map(([start, end]) => FILE.subarray(start, end + 1))); })
+      : list.map(([start, end]) => FILE.subarray(start, end + 1)),
+    reviseBudget: async () => inputs.allow(1000), changed: () => {}, failed: error => { throw error; },
+    stretchCopied: () => told.push(true) });
+  inputs.take(output, 3, 3);
+  for (let turn = 0; turn < 8; turn++) await setImmediate();
+  const ready = inputs.take(output, 3, 3);
+  assert.equal(ready?.kind, "result");
+  ready.release();
+  settle();
+  for (let turn = 0; turn < 4; turn++) await setImmediate();
+  assert.deepEqual(told, []);
+});

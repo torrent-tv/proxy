@@ -226,6 +226,7 @@ export function wireOutputs({
     readMetadataActivity = null,
     sourceInputsFor = null,
     readEncodeRanges = null,
+    stretchCopied = () => {},
     readEncodeHeldRanges = null,
     encodeInputs = null,
     indexMemory = null,
@@ -1069,6 +1070,7 @@ export function wireOutputs({
     resolve: resolveEncodeInput,
     readRanges: readEncodeRanges,
     heldRanges: readEncodeHeldRanges,
+    stretchCopied,
     reviseBudget: () => parts.machineBudget.revise("memory", "admitted encode inputs"),
     capacity: () => parts.machineBudget.capacityOf("memory"),
     // How long this output's input takes to open, from the one owner of start

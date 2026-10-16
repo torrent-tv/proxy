@@ -745,6 +745,17 @@ export class TorrentWorkerClient {
   }
 
   /**
+   * A processor profile of the torrent thread over `seconds`, as JSON text.
+   *
+   * @param {number} seconds
+   * @returns {Promise<string | null>}
+   */
+  async cpuProfile(seconds) {
+    const text = await this.#caller.call(Command.CPU_PROFILE, { seconds });
+    return typeof text === "string" ? text : null;
+  }
+
+  /**
    * Say how much disk the spilled pieces on this thread may take between them.
    *
    * Best effort and never awaited by anything that matters: a share that does

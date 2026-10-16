@@ -278,6 +278,11 @@ export class WorkerTorrentPool {
    *
    * @returns {Promise<{ infoHash: string, progress: number, bytes: number }[]>}
    */
+  /** A processor profile of the torrent thread, as JSON text (`TorrentWorkerClient.cpuProfile`). */
+  async cpuProfile(seconds) {
+    return this.#client.cpuProfile(seconds);
+  }
+
   async heldTorrents() {
     const answer = await this.#client.heldTorrents();
     return Array.isArray(answer?.held) ? answer.held : [];

@@ -39,6 +39,7 @@ import { wholeFileStats } from "./whole-file-stats.js";
 import { describeHeldObjects, readUtpOpenCount } from "./held-objects.js";
 import { destroyedTorrents } from "../destroyed-torrents.js";
 import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../../storage/memory-report.js";
+import { profileThisThread } from "../../storage/cpu-profile.js";
 import { forwardLogsTo, logger } from "../../../utils/logger.js";
 
 /**
@@ -601,6 +602,12 @@ async function runCommand(command, params, id) {
       const after = await completedFiles.allow(Number(params.bytes));
       if (after.removed > 0) holdingsChanged();
       return after.bytes;
+    }
+
+    case Command.CPU_PROFILE: {
+      // The operator's profile of this thread, written by the main thread under
+      // the storage budget there (`storage/cpu-profile.js`).
+      return JSON.stringify(await profileThisThread(Number(params.seconds)));
     }
 
     case Command.DESTROY_ALL: {

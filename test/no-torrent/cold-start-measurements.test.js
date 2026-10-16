@@ -182,17 +182,25 @@ test("the cold-start profile is taken once, from the first source, and only when
     const off = startupCpuProfile({ seconds: 0, dir, log: (line) => lines.push(line) });
     off.begin();
     assert.equal(off.active(), false);
-    const profile = startupCpuProfile({ seconds: 0.2, dir, log: (line) => lines.push(line) });
+    // The torrent thread's profile arrives as text over the same seconds and is
+    // written beside the main thread's (r60, torrent-tv/meta#178).
+    const asked = [];
+    const profile = startupCpuProfile({ seconds: 0.2, dir, log: (line) => lines.push(line),
+      torrentThread: async (seconds) => { asked.push(seconds); return JSON.stringify({ nodes: [{ id: 1 }] }); } });
     profile.begin();
     profile.begin();
     const written = await new Promise((resolve) => {
-      const wait = () => (lines.some((line) => line.includes("written to")) ? resolve(true) : setTimeout(wait, 20));
+      const wait = () => (lines.filter((line) => line.includes("written to")).length === 2 ? resolve(true) : setTimeout(wait, 20));
       wait();
     });
     assert.equal(written, true);
-    const files = await readdir(dir);
-    assert.equal(files.length, 1);
+    assert.deepEqual(asked, [0.2]);
+    const files = (await readdir(dir)).sort();
+    assert.equal(files.length, 2);
+    assert.match(files[0], /^cpu-start-/);
+    assert.match(files[1], /^cpu-torrent-/);
     assert.ok(JSON.parse(await readFile(path.join(dir, files[0]), "utf8")).nodes.length > 0);
+    assert.equal(profile.active(), false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -107,6 +107,8 @@ export const Command = {
   SPILL_ALLOWANCE: "spill-allowance",
   WHOLE_FILES_ALLOWANCE: "whole-files-allowance",
   MEMORY_ALLOWANCE: "memory-allowance",
+  /** Profile this thread's processor for some seconds and answer with the profile as JSON text (opt-in, torrent-tv/meta#178). */
+  CPU_PROFILE: "cpu-profile",
   DESTROY_ALL: "destroy-all"
 };
 

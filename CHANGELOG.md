@@ -1,4 +1,4 @@
-## Unreleased
+## 2.100.1
 
 - **Fix**: A piece is written to disk in one write instead of 512 KiB at a time. Each part waited for a turn of the torrent thread's loop, which ran about a second late while downloading, so pieces arriving at 20 MB/s waited for their writes: 1.1 GB of them in that thread's memory at once on Home Assistant (r61, #ttv-178).
 

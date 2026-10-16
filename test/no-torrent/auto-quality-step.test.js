@@ -175,6 +175,21 @@ function fillingReports(viewer, linkMbps) {
   }
 }
 
+/**
+ * This viewer's page reports that it is held before its picture moves, with a
+ * buffer that grows, on the link named.
+ *
+ * @param {object} viewer
+ * @param {number} linkMbps
+ * @returns {void}
+ */
+function heldReports(viewer, linkMbps) {
+  const now = Date.now();
+  for (const [ago, held] of [[8_000, 0], [4_000, 4], [0, 8]]) {
+    viewer.report({ linkMbps, bufferedAheadSec: held, positionSeconds: 0, playing: false, waiting: true }, now - ago);
+  }
+}
+
 async function produceSegments(session, bytesEach) {
   // Where the run in force writes.
   const runDir = session.dirPath;
@@ -788,6 +803,45 @@ test("a machine-bound viewer is moved to a faster setting of the same size befor
   await manager.quality.noteViewerReported(session.id, "viewer");
   assert.deepEqual(asked, ["viewer:down"]);
   assert.equal(manager.viewers.get("viewer").qualityAsk ?? null, null, "no smaller picture is asked for while a faster setting is prepared");
+});
+
+// r70, torrent-tv/meta#178: a viewer held before the picture moves has a
+// buffer that grows, and was moved only after the start.
+test("a viewer held before the picture moves is moved to a faster setting when the machine is below realtime", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const asked = [];
+  manager.renditions.preparePresetSwitch = async (_output, consumerId, direction) => {
+    asked.push(`${consumerId}:${direction}`);
+    return { started: true, reason: "" };
+  };
+  measureSpeed([...session.runs][0], 0.92);
+  heldReports(manager.viewers.get("viewer"), 80);
+  await manager.quality.noteViewerReported(session.id, "viewer");
+  assert.deepEqual(asked, ["viewer:down"]);
+});
+
+test("a viewer held before the picture moves is left alone while the machine keeps up", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  const asked = [];
+  manager.renditions.preparePresetSwitch = async (_output, consumerId, direction) => {
+    asked.push(`${consumerId}:${direction}`);
+    return { started: true, reason: "" };
+  };
+  measureSpeed([...session.runs][0], 1.4);
+  heldReports(manager.viewers.get("viewer"), 80);
+  await manager.quality.noteViewerReported(session.id, "viewer");
+  assert.deepEqual(asked, []);
+  assert.ok(!(manager.viewers.get("viewer").qualityAsk?.height < 720), "no smaller picture is asked for");
 });
 
 test("on the way back up a better setting of the size on screen comes before a taller picture", async (t) => {

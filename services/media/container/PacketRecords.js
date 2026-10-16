@@ -9,6 +9,8 @@ const BLOCK_BYTES = 65536;
 // Matroska soundtrack read in stretches: 144 tables of one 25-minute film held
 // 18.9 MB for 3.7 MB of records (r47 reproduced, torrent-tv/meta#178).
 const FIRST_BLOCK_BYTES = 4096;
+/** The most one record can make a table take at once: a block of records and one of addresses. */
+export const LARGEST_GROWTH_BYTES = 2 * BLOCK_BYTES;
 const ADDRESS_BYTES = 8;
 const HEADER_BYTES = 56;
 

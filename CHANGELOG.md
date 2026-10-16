@@ -1,4 +1,4 @@
-## Unreleased
+## 2.100.8
 
 - **Perf**: The segment store answers where a piece is from its own record for an output whose pieces it publishes itself, instead of looking at the disk for every piece not made. Every served piece of such an output arrives through the store's publication; only an output whose muxer renames its own pieces still has the disk looked at. Asked about each piece of the film on every poll, the look cost the main thread 12.6 s of 300 s at a cold start (r61, #ttv-178).
 

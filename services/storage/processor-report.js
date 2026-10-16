@@ -14,6 +14,12 @@
  * threads only says where that time went. Each ffmpeg is its own process and
  * is added beside it. Linux only for the split and for ffmpeg; elsewhere the
  * process figure alone is said.
+ *
+ * Each run is also said on its own once a minute: the middle of its seconds'
+ * processor and speed, and how far those seconds sit from it
+ * (torrent-tv/meta#180, phase 1). That scatter is what a slowdown of the most
+ * urgent run would have to exceed before it could be put down to another run
+ * beside it; nothing decides on it yet.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
@@ -213,34 +219,107 @@ export function describeShares(seconds) {
 }
 
 /**
+ * One second of each run read at both ends of it: the cores its ffmpeg used
+ * and the film it made per second of wall clock. A run whose film is not
+ * known at either end says its processor alone.
+ *
+ * @param {{ at: number, ffmpeg: Map<number, number>, runs: Map<number, { label: string, film: number | null }> }} before
+ * @param {{ at: number, ffmpeg: Map<number, number>, runs: Map<number, { label: string, film: number | null }> }} after
+ * @returns {Map<number, { label: string, cores: number, speed: number | null }>}
+ */
+export function runSecondsBetween(before, after) {
+  /** @type {Map<number, { label: string, cores: number, speed: number | null }>} */
+  const seconds = new Map();
+  const elapsed = (after.at - before.at) / 1000;
+  if (!(elapsed > 0)) return seconds;
+  for (const [pid, run] of after.runs) {
+    const from = before.ffmpeg.get(pid);
+    const to = after.ffmpeg.get(pid);
+    const earlier = before.runs.get(pid);
+    if (!earlier || !Number.isFinite(from) || !Number.isFinite(to) || to < from) continue;
+    const made = Number.isFinite(run.film) && Number.isFinite(earlier.film) && run.film >= earlier.film ? run.film - earlier.film : null;
+    seconds.set(pid, { label: run.label, cores: (to - from) / elapsed, speed: made === null ? null : made / elapsed });
+  }
+  return seconds;
+}
+
+/**
+ * Per run, over the interval: the median of its seconds and the median of
+ * their distances to it, for its processor and its speed.
+ *
+ * @param {Map<number, { label: string, cores: number[], speed: number[] }>} runs
+ * @returns {string} Empty when no run was read for two seconds.
+ */
+export function describeRuns(runs) {
+  const said = [];
+  for (const run of runs.values()) {
+    if (run.cores.length < 2) continue;
+    const cores = middleAndScatter(run.cores);
+    const speed = middleAndScatter(run.speed);
+    said.push(`${run.label} cores ${cores.middle.toFixed(2)} (scatter ${cores.scatter.toFixed(2)})` +
+      (speed === null ? ", speed n/a" : `, speed ${speed.middle.toFixed(2)}x (scatter ${speed.scatter.toFixed(2)})`) +
+      ` over ${run.cores.length}s`);
+  }
+  return said.join("; ");
+}
+
+/**
+ * @param {number[]} values
+ * @returns {{ middle: number, scatter: number } | null}
+ */
+function middleAndScatter(values) {
+  if (values.length === 0) return null;
+  const median = (list) => {
+    const sorted = [...list].sort((a, b) => a - b);
+    const half = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[half - 1] + sorted[half]) / 2 : sorted[half];
+  };
+  const middle = median(values);
+  return { middle, scatter: median(values.map((value) => Math.abs(value - middle))) };
+}
+
+/**
  * Read every second, say once a minute, and every second while `detailed()`
  * is true.
  *
  * @param {object} params
  * @param {(line: string) => void} params.log
- * @param {() => number[]} params.ffmpegPids - The encoders running now.
+ * @param {() => Array<{ pid: number, label: string, film: number | null }>} params.ffmpegRuns - The encoders running now, with the film each has made.
  * @param {() => boolean} [params.detailed]
  * @param {number} [params.everyMs]
  * @param {number} [params.sayEveryMs]
  * @returns {{ stop: () => void }}
  */
-export function startProcessorReport({ log, ffmpegPids, detailed = () => false, everyMs = 1000, sayEveryMs = 60_000 }) {
+export function startProcessorReport({ log, ffmpegRuns, detailed = () => false, everyMs = 1000, sayEveryMs = 60_000 }) {
   let previous = null;
   let series = [];
+  /** @type {Map<number, { label: string, cores: number[], speed: number[] }>} */
+  let runSeries = new Map();
   let since = Date.now();
   const threads = threadReader();
   const tick = () => {
     const at = Date.now();
     const usage = process.cpuUsage();
-    const now = { at, process: (usage.user + usage.system) / 1e6, threads: threads.read(), ffmpeg: readProcessesSeconds(ffmpegPids()) };
+    const runs = new Map(ffmpegRuns().map((run) => [run.pid, { label: run.label, film: run.film }]));
+    const now = { at, process: (usage.user + usage.system) / 1e6, threads: threads.read(), ffmpeg: readProcessesSeconds([...runs.keys()]), runs };
     const shares = previous ? sharesBetween(previous, now) : null;
+    const perRun = previous ? runSecondsBetween(previous, now) : new Map();
     previous = now;
     if (!shares) return;
     series.push(shares);
+    for (const [pid, second] of perRun) {
+      const kept = runSeries.get(pid) ?? { label: second.label, cores: [], speed: [] };
+      kept.cores.push(second.cores);
+      if (second.speed !== null) kept.speed.push(second.speed);
+      runSeries.set(pid, kept);
+    }
     if (detailed()) log(`processor: ${describeShares([shares])}`);
     if (now.at - since >= sayEveryMs) {
       log(`processor: ${describeShares(series)}`);
+      const perRunLine = describeRuns(runSeries);
+      if (perRunLine) log(`processor: per run, by second: ${perRunLine}`);
       series = [];
+      runSeries = new Map();
       since = now.at;
       // A torrent thread made again since is counted as the rest until then.
       threads.rediscover();

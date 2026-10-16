@@ -101,6 +101,7 @@ import { contentOf, LocalObservations, PROXY_ROOT } from "../encode/LocalObserva
 import { configurationKeyOf } from "../encode/fingerprint.js";
 import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
 import { downloadShare } from "../storage/processor-share.js";
+import { describeProcessor, processorBetween, sampleProcessor } from "../storage/machine-processor.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode/encode-run-state.js";
 import { secondsUntilClosed } from "../encode/piece-close-time.js";
 
@@ -303,6 +304,11 @@ export function wireOutputs({
     readProxyCpuSeconds,
     readSystemCpu,
     shareOfMachine,
+    // The processor's upper bound and measured free amount, said beside the
+    // machine's line and used by no decision yet (torrent-tv/meta#180).
+    sampleProcessor: () => sampleProcessor(),
+    processorBetween,
+    describeProcessor,
     liveRunsOf: (...args) => parts.encodeRuns.liveRunsOf(...args),
     runStateOf: (...args) => parts.encodeRuns.runStateOf(...args),
     get getSourceStats() { return parts.getSourceStats; },

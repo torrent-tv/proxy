@@ -1151,10 +1151,13 @@ export async function startProxyServer({
   });
   startProcessorReport({
     log: (line) => logger.info(line),
-    ffmpegPids: () => [...outputParts.outputs.values()]
-      .flatMap((output) => outputParts.encodeRuns.liveRunsOf(output))
-      .map((run) => run.process?.pid)
-      .filter((pid) => Number.isInteger(pid)),
+    ffmpegRuns: () => [...outputParts.outputs.values()]
+      .flatMap((output) => outputParts.encodeRuns.liveRunsOf(output).map((run) => ({
+        pid: run.process?.pid,
+        label: `${output.outputKey} #${run.from}..#${run.to}`,
+        film: Number(run.progress?.processedSeconds) - Number(run.progress?.startPositionSeconds ?? 0)
+      })))
+      .filter((run) => Number.isInteger(run.pid)),
     detailed: () => startupProfile.active()
   });
   // What the last life of this process left on the disk. The kernel kills this

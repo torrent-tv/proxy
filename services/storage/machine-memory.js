@@ -163,7 +163,7 @@ function hostAvailable(readFile) {
 function containerRoom(readFile, hostTotal) {
   let membership;
   try {
-    membership = ownCgroup(readFile("/proc/self/cgroup"));
+    membership = cgroupOf(readFile("/proc/self/cgroup"), "memory");
   } catch {
     return null; // silent-ok: not Linux, or /proc is not readable.
   }
@@ -187,18 +187,19 @@ function containerRoom(readFile, hostTotal) {
 }
 
 /**
- * Which cgroup this process is in, for the memory controller.
+ * Which cgroup this process is in, for one controller (`memory`, `cpu`).
  *
- * A host in hybrid mode lists both versions; the memory controller is then on
- * version 1, named in the line that lists it.
+ * A host in hybrid mode lists both versions; a controller mounted on version 1
+ * is named in the line that lists it, and only then is version 2 the answer.
  *
  * @param {string} text - `/proc/self/cgroup`.
+ * @param {string} controller
  * @returns {{ version: 1 | 2, path: string } | null}
  */
-function ownCgroup(text) {
+export function cgroupOf(text, controller) {
   for (const line of text.split("\n")) {
     const match = /^\d+:([^:]*):(.*)$/.exec(line);
-    if (match && match[1].split(",").includes("memory")) {
+    if (match && match[1].split(",").includes(controller)) {
       return { version: 1, path: match[2] };
     }
   }
@@ -219,7 +220,7 @@ function ownCgroup(text) {
  * @param {string} path
  * @returns {string[]}
  */
-function levelsOf(mount, path) {
+export function levelsOf(mount, path) {
   const parts = path.split("/").filter(Boolean);
   if (parts.includes("..")) {
     return [];

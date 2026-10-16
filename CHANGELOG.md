@@ -1,5 +1,7 @@
 ## Unreleased
 
+- **Perf**: A Matroska soundtrack read packet by packet is walked from the clusters the picture's input has just copied, while that copy is held, instead of reading the same clusters through the torrent thread again. Walked there, each soundtrack piece took 6-11 s for 4-7 s of film, and after a seek the picture stopped dozens of times for 0.5-3 s (r61, #ttv-178).
+
 - **Fix**: A heap snapshot is written only with `--heap-snapshots`. Each one stops its thread while it is written, and in a healthy session on Home Assistant the torrent thread reached the floor: one snapshot of 1281 MB held that thread about 20 s and the picture stood 22.2 s (r61, #ttv-178).
 
 ## 2.100.0

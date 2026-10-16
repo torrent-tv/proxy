@@ -47,7 +47,8 @@ import { firstFrameOffset, readBlockHeader, walkHeldClusters } from "./matroska-
 import { buildMatroskaIndex, matroskaIntervalCovered, walkMatroskaPackets } from "./matroska-packets.js";
 import { PacketRecordsChain } from "./PacketRecordsChain.js";
 import { RetainedReads } from "./RetainedReads.js";
-import { isUnavailable } from "./unavailable.js";
+import { isUnavailable, strictReader } from "./unavailable.js";
+import { IndexMemoryUnavailable } from "./memory-unavailable.js";
 import {
   ID_ATTACHED_FILE, ID_ATTACHMENTS, ID_CHAPTERS, ID_FILE_DATA, ID_FILE_MEDIA_TYPE, ID_FILE_NAME, ID_INFO_TITLE, ID_TAGS,
   chapterTitlesOf, coverIndexOf, trackRatesFromTags, uidKeyOf, workFromTags
@@ -784,10 +785,12 @@ export class MatroskaContainer extends Container {
 
   /**
    * @param {object} [interval]
-   * @param {{ isCurrent?: () => boolean }} [options] - A walk whose request is
-   *   no longer current stops between clusters and answers null.
+   * @param {{ isCurrent?: () => boolean, readRange?: (start: number, end: number) => Promise<Buffer | null> | Buffer | null }} [options]
+   *   A walk whose request is no longer current stops between clusters and
+   *   answers null. `readRange`, when given, is where this one walk reads
+   *   instead of the file's own reader; what it does not hold is unavailable.
    */
-  async readPacketIndex(interval, { isCurrent } = {}) {
+  async readPacketIndex(interval, { isCurrent, readRange } = {}) {
     if (this.#packets) return this.#packets;
     const layout = await this.#segmentLayout();
     if (!layout) throw new Error("Matroska Segment is absent.");
@@ -806,7 +809,8 @@ export class MatroskaContainer extends Container {
     const complete = new Set();
     let whole = true;
     for (const track of requested) {
-      const chain = await this.#readTrackPackets(layout, tracks, track, start, interval, isCurrent);
+      const chain = await this.#readTrackPackets(layout, tracks, track, start, interval, isCurrent,
+        readRange ? strictReader(readRange, this.fileSize) : this.readRange);
       if (!chain) return null;
       streams.set(track.trackNumber, chain.records);
       if (chain.reachesEnd) complete.add(track.trackNumber);
@@ -816,6 +820,32 @@ export class MatroskaContainer extends Container {
       packetMemory: this.packetMemory });
     if (!interval && whole) this.#packets = index;
     return index;
+  }
+
+  /**
+   * Record these tracks' packets over `interval` from bytes another reader
+   * already holds, reading nothing of the file itself.
+   *
+   * A soundtrack's piece is walked over the clusters the Cues name for its
+   * interval, the picture's bytes with it: about 20 MB for 0.3 MB of sound on
+   * the field's 1080p film, read through the torrent thread a second time
+   * after the picture's input had copied the same clusters. Walked from that
+   * copy while it is held, the sound's input later reads only its own packets
+   * (r61, torrent-tv/meta#178).
+   *
+   * @param {{ from: number, to: number, trackIds: number[] }} interval
+   * @param {(start: number, end: number) => Buffer | null} readRange - Null where it does not hold the bytes.
+   * @returns {Promise<boolean>} Whether the interval's packets are recorded.
+   */
+  async learnPackets(interval, readRange) {
+    try {
+      return await this.readPacketIndex(interval, { readRange }) !== null;
+    } catch (error) {
+      // What the copy does not hold, or memory refused: the sound's own walk
+      // reads it later, from where this one stopped.
+      if (isUnavailable(error) || error instanceof IndexMemoryUnavailable) return false;
+      throw error;
+    }
   }
 
   /**
@@ -831,7 +861,7 @@ export class MatroskaContainer extends Container {
    *
    * @returns {Promise<{ records: PacketRecordsChain, startAt: number, reachesEnd: boolean }>}
    */
-  async #readTrackPackets(layout, tracks, track, start, interval, isCurrent) {
+  async #readTrackPackets(layout, tracks, track, start, interval, isCurrent, read) {
     const id = track.trackNumber;
     const previous = this.#packetWalks.get(id) ?? Promise.resolve();
     let finished;
@@ -886,7 +916,7 @@ export class MatroskaContainer extends Container {
         current = chainOf().at(-1);
         if (current.reachedEnd) break;
         const following = readings.find(reading => reading.startAt > current.startAt);
-        const outcome = await walkMatroskaPackets({ readRange: this.readRange, fileSize: this.fileSize,
+        const outcome = await walkMatroskaPackets({ readRange: read, fileSize: this.fileSize,
           portionBytes: this.portionBytes, layout, tracks, trackIds: [id], interval, packetMemory: this.packetMemory,
           state: current, until: following?.startAt ?? null, isCovered: covered, readsThrough, isCurrent });
         if (outcome === "obsolete") return null;

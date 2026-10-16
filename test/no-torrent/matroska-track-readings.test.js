@@ -199,3 +199,34 @@ test("a walk whose request is withdrawn stops between clusters and goes on later
   const counted = tables();
   assert.equal(counted.unique, counted.stored, "nothing is recorded twice for the stop");
 });
+
+test("a soundtrack walked from bytes the picture's input copied reads nothing of the file afterwards", async t => {
+  // r61 (torrent-tv/meta#178): each soundtrack piece walked the same clusters
+  // the picture's input had copied, through the torrent thread, in 6-11 s.
+  const tables = countTables(t);
+  let reads = 0;
+  const { container, sound } = await over({ held: () => { reads++; return true; } });
+  const copy = (start, end) => data.file.subarray(start, end + 1);
+  assert.equal(await container.learnPackets(soundOf(3), copy), true);
+  reads = 0;
+  const index = await container.readPacketIndex(soundOf(3));
+  assert.equal(inputOf(index, sound, 3).kind, "result");
+  assert.equal(reads, 0, "the file is not read again for what the copy answered");
+  const counted = tables();
+  assert.equal(counted.picture, 0);
+  assert.equal(counted.unique, counted.stored);
+});
+
+test("what the copy does not hold is walked later from the file, from where the copy stopped", async t => {
+  const { container: whole, sound: wholeSound } = await over();
+  const expected = inputOf(await whole.readPacketIndex(), wholeSound, 4);
+  const tables = countTables(t);
+  const { container, sound } = await over();
+  const middle = data.clusterAt[9];
+  const copy = (start, end) => end < middle || start >= data.clusterAt[10] ? data.file.subarray(start, end + 1) : null;
+  assert.equal(await container.learnPackets(soundOf(4), copy), false);
+  const answer = inputOf(await container.readPacketIndex(soundOf(4)), sound, 4);
+  assert.deepEqual(answer.ranges, expected.ranges);
+  const counted = tables();
+  assert.equal(counted.unique, counted.stored, "nothing recorded twice");
+});

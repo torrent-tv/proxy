@@ -7,6 +7,8 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import ffmpegBin from "ffmpeg-static";
 import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
+import { OriginalInputStore } from "../../services/encode/OriginalInputStore.js";
+import { openCompletedInputFile } from "../../services/torrent/worker/completed-input-file.js";
 import { buildOriginalCommand } from "../../services/encode/source-command.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
@@ -27,16 +29,22 @@ for (const [bFrames, startIndex, videoIndex = 0, sourceStart = 0, codec = "libx2
       "-output_ts_offset", String(sourceStart), file], { encoding: "utf8", windowsHide: true });
     assert.equal(generated.status, 0, generated.stderr);
     const bytes = await fs.readFile(file);
-    input = await admitOriginalInput({ sources: [{ sourceKey: "generated", fileIndex: 0, timeShiftSeconds: sourceStart,
+    const sources = [{ sourceKey: "generated", fileIndex: 0, timeShiftSeconds: sourceStart,
       input: { original: true, from: sourceStart + startIndex * cut, fileLength: bytes.length, ranges: [[0, bytes.length - 1]],
-        selections: [{ track: { type: audioOnly ? "audio" : "video", reorderDepth: bFrames }, index: videoIndex }] } }],
-      reserve: async () => () => {}, readRanges: async () => [bytes] });
+        commonRanges: [[0, Math.min(2047, bytes.length - 1)]],
+        selections: [{ track: { type: audioOnly ? "audio" : "video", reorderDepth: bFrames }, index: videoIndex }] } }];
+    const fromDisk = codec === "libx265" && final;
+    const store = new OriginalInputStore();
+    const storage = store.acquire(fromDisk ? [] : sources, bytes.length,
+      { readRanges: async (_source, ranges) => ranges.map(([start, end]) => Buffer.from(bytes.subarray(start, end + 1))) });
+    const files = fromDisk ? new Map([[0, await openCompletedInputFile({ path: file, length: bytes.length }, () => {})]]) : new Map();
+    input = await admitOriginalInput({ sources, storage, files });
     input.runTag = "zero";
     server = http.createServer((req, res) => {
       req.params = { token: "1", fileIndex: "0" }; req.raw = req;
       const reply = { raw: res, hijack() { return this; }, code(status) { res.statusCode = status; return this; },
         header(name, value) { res.setHeader(name, value); return this; },
-        send(body) { res.end(Buffer.isBuffer(body) ? body : body ? JSON.stringify(body) : undefined); return this; } };
+        send(body) { if (body?.pipe) body.pipe(res); else res.end(Buffer.isBuffer(body) ? body : body ? JSON.stringify(body) : undefined); return this; } };
       handleEncodeInputGet(req, reply, { inputOf: () => input });
     });
     await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -96,7 +104,7 @@ for (const [bFrames, startIndex, videoIndex = 0, sourceStart = 0, codec = "libx2
     }
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));
-    input?.release();
+    await input?.release();
     const absolute = path.resolve(directory), temporary = path.resolve(os.tmpdir());
     assert.ok(absolute.startsWith(`${temporary}${path.sep}`) && path.basename(absolute).startsWith("ttv95-original-input-"));
     await fs.rm(absolute, { recursive: true, force: true });

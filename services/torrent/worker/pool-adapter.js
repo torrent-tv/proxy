@@ -122,6 +122,10 @@ export class WorkerTorrentPool {
     return this.#client.wholeFiles;
   }
 
+  get wholeFileRequiredBytes() { return this.#client.wholeFileRequiredBytes ?? 0; }
+
+  acquireWholeFile(source) { return this.#client.acquireWholeFile(source); }
+
   allowWholeFileBytes(bytes) {
     return this.#client.allowWholeFileBytes(bytes);
   }

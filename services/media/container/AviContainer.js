@@ -275,9 +275,10 @@ export class AviContainer extends Container {
     // media time: every stream's packets in file order, from the first.
     const search = index.mediaRanges({ from: 0, to: FFMPEG_STREAM_SEARCH_SECONDS, picture: null,
       streams: requested.map(track => track.trackNumber) });
-    const ranges = [[0, movi.start + 3], ...index.indexRanges, ...index.firstPackets(), ...search,
-      ...index.mediaRanges({ from: interval.from, to: interval.to, picture: picture?.trackNumber ?? null,
-        streams: requested.map(track => track.trackNumber) })].map(padded);
+    const commonRanges = [[0, movi.start + 3], ...index.indexRanges, ...index.firstPackets(), ...search].map(padded);
+    const intervalRanges = index.mediaRanges({ from: interval.from, to: interval.to, picture: picture?.trackNumber ?? null,
+      streams: requested.map(track => track.trackNumber) }).map(padded);
+    const ranges = [...commonRanges, ...intervalRanges];
     ranges.sort((left, right) => left[0] - right[0]);
     const union = [];
     for (const range of ranges) {
@@ -285,7 +286,7 @@ export class AviContainer extends Container {
       if (previous && range[0] <= previous[1] + 1) previous[1] = Math.max(previous[1], range[1]);
       else union.push([...range]);
     }
-    return { kind: "result", from: interval.from, to: interval.to, ranges: union, fileLength: this.fileSize,
+    return { kind: "result", from: interval.from, to: interval.to, ranges: union, commonRanges, intervalRanges, fileLength: this.fileSize,
       streamSearchSeconds: FFMPEG_STREAM_SEARCH_SECONDS };
   }
 

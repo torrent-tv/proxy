@@ -46,6 +46,9 @@ test("Cues publish the whole needed cluster range before media bytes arrive", as
   assert.equal(await container.supportsOriginalSourceRanges(), true);
   assert.equal(input.kind, "result");
   assert.equal(input.fileLength, source.file.length);
+  const early = await container.readSourceRanges({ from: 0, to: 2, trackIds: [1] });
+  assert.deepEqual(early.commonRanges, input.commonRanges, "common parts remain explicit when media merges with the prefix");
+  assert.notDeepEqual(early.intervalRanges, input.intervalRanges);
   assert.ok(input.ranges.some(([start, end]) => start <= source.clusterAt[2] && end >= source.clusterAt[6] - 1));
   assert.ok(reads < 50, "mapping reads metadata rather than each media block");
 });

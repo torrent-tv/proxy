@@ -595,6 +595,22 @@ async function runCommand(command, params, id) {
       return memoryClaim();
     }
 
+    case Command.ACQUIRE_WHOLE_FILE: {
+      const hash = String(params.sourceKey).startsWith("torrent:") ? params.sourceKey.slice("torrent:".length).toLowerCase() : null;
+      const lease = hash === null ? null : completedFiles.acquire(hash, params.fileIndex);
+      if (!lease) return null;
+      wholeFileReaders.set(id, lease);
+      return { token: id, path: lease.path, length: lease.length, name: lease.name, heldBytes: completedFiles.bytes };
+    }
+
+    case Command.RELEASE_WHOLE_FILE: {
+      const lease = wholeFileReaders.get(params.token);
+      wholeFileReaders.delete(params.token);
+      const after = await lease?.release();
+      if (after?.removed) holdingsChanged();
+      return completedFiles.bytes;
+    }
+
     case Command.WHOLE_FILES_ALLOWANCE: {
       // Whole files are held on this thread and the disk has one owner, on the
       // other. What arrives is their share; what goes back is what they hold
@@ -980,6 +996,7 @@ function holdingsChanged() {
  * thread writes them, the main thread serves them without asking anybody.
  */
 const completedFiles = new CompletedFiles({ root: completedFilesRoot() });
+const wholeFileReaders = new Map();
 const wholeSources = createWholeSources({ find: (infoHash, fileIndex) => completedFiles.find(infoHash, fileIndex) });
 
 /** Adopted files and newly completed files state the same availability event. */

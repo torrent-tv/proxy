@@ -761,8 +761,8 @@ export class MatroskaContainer extends Container {
     // media time and stops on the first packet past it, which lies before the
     // first Cue later than that time; the padding holds its read-ahead.
     const searchEnd = points[firstAt(points[0].seconds + FFMPEG_STREAM_SEARCH_SECONDS, true)];
-    const ranges = [[0, paddedEnd((searchEnd ? searchEnd.at : layout.segmentEnd) - 1)],
-      [points[first].at, paddedEnd(mediaEnd)], [layout.cuesAt, paddedEnd(cuesEnd - 1)],
+    const commonRanges = [[0, paddedEnd((searchEnd ? searchEnd.at : layout.segmentEnd) - 1)],
+      [layout.cuesAt, paddedEnd(cuesEnd - 1)],
       [Math.max(0, this.fileSize - requestBytes), this.fileSize - 1]];
     // SeekHead may name top-level declarations after media clusters. Preserve
     // their original bytes instead of reconstructing declarations for FFmpeg.
@@ -770,8 +770,10 @@ export class MatroskaContainer extends Container {
       if (at === null || at < layout.firstClusterAt) continue;
       const end = await elementEnd(at);
       if (end === null) return { kind: "terminal", reason: "source-declarations-are-unbounded" };
-      ranges.push([at, paddedEnd(end - 1)]);
+      commonRanges.push([at, paddedEnd(end - 1)]);
     }
+    const intervalRanges = [[points[first].at, paddedEnd(mediaEnd)]];
+    const ranges = [...commonRanges, ...intervalRanges];
     ranges.sort((left, right) => left[0] - right[0]);
     const union = [];
     for (const range of ranges) {
@@ -779,7 +781,7 @@ export class MatroskaContainer extends Container {
       if (previous && range[0] <= previous[1] + 1) previous[1] = Math.max(previous[1], range[1]);
       else union.push([...range]);
     }
-    return { kind: "result", from: interval.from, to: interval.to, ranges: union, fileLength: this.fileSize,
+    return { kind: "result", from: interval.from, to: interval.to, ranges: union, commonRanges, intervalRanges, fileLength: this.fileSize,
       streamSearchSeconds: FFMPEG_STREAM_SEARCH_SECONDS };
   }
 

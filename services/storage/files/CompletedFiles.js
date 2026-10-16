@@ -54,6 +54,8 @@ export class CompletedFiles {
 
   /** Assemblies in flight, so two passes cannot write one file at once. @type {Set<string>} */
   #writing = new Set();
+  #readers = new Map();
+  #removeAfterRead = new Set();
 
   /**
    * What this store may hold, handed to it by the owner of the disk.
@@ -140,6 +142,7 @@ export class CompletedFiles {
    */
   find(infoHash, fileIndex) {
     const key = this.#keyOf(infoHash, fileIndex);
+    if (this.#removeAfterRead.has(key)) return null;
     const file = this.#held.get(key) ?? null;
     if (file) {
       // WHEN IT WAS LAST WANTED, which is the order it leaves in. A whole file
@@ -148,6 +151,26 @@ export class CompletedFiles {
       this.#lastRead.set(key, Date.now());
     }
     return file;
+  }
+
+  /** Pin a completed file against eviction until all its offset reads finish. */
+  acquire(infoHash, fileIndex) {
+    const key = this.#keyOf(infoHash, fileIndex);
+    const file = this.find(infoHash, fileIndex);
+    if (!file) return null;
+    this.#readers.set(key, (this.#readers.get(key) ?? 0) + 1);
+    let released = false;
+    return { ...file, release: async () => {
+      if (released) return { bytes: this.bytes, removed: 0 };
+      released = true;
+      const remaining = this.#readers.get(key) - 1;
+      if (remaining) this.#readers.set(key, remaining);
+      else {
+        this.#readers.delete(key);
+        if (this.#removeAfterRead.delete(key)) await this.#remove(key);
+      }
+      return this.allow(this.#allowanceBytes);
+    } };
   }
 
   /**
@@ -204,7 +227,7 @@ export class CompletedFiles {
     let oldest = null;
     let oldestAt = Number.POSITIVE_INFINITY;
     for (const key of this.#held.keys()) {
-      if (this.#writing.has(key)) {
+      if (this.#writing.has(key) || this.#readers.has(key)) {
         continue;
       }
       const at = this.#lastRead.get(key) ?? 0;
@@ -223,6 +246,7 @@ export class CompletedFiles {
    * @returns {Promise<void>}
    */
   async #remove(key) {
+    if (this.#readers.has(key)) { this.#removeAfterRead.add(key); return; }
     const file = this.#held.get(key);
     this.#held.delete(key);
     this.#lastRead.delete(key);
@@ -400,11 +424,11 @@ export class CompletedFiles {
   async forget(infoHash) {
     for (const key of [...this.#held.keys()]) {
       if (key.startsWith(`${infoHash}/`)) {
-        this.#held.delete(key);
+        await this.#remove(key);
       }
     }
-    await fs.rm(path.join(this.#root, String(infoHash)), { ...REMOVAL, recursive: true }).catch(
-      () => undefined
-    );
+    if (![...this.#held.keys()].some(key => key.startsWith(`${infoHash}/`))) {
+      await fs.rm(path.join(this.#root, String(infoHash)), { ...REMOVAL, recursive: true }).catch(() => undefined);
+    }
   }
 }

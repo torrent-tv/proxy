@@ -13,10 +13,10 @@ import { createHash } from "node:crypto";
  * (torrent-tv/meta#178). `whole` settles when everything is copied — true — or
  * when the copy failed or the input was released first — false.
  */
-export async function admitOriginalInput({ sources, reserve, readRanges, now = Date.now }) {
+export async function admitOriginalInput({ sources, reserve, readRanges, now = Date.now, storage = null, files = new Map() }) {
   const bytes = originalInputBytes(sources);
   if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new TypeError("Original input requires complete finite byte ranges.");
-  const releaseBudget = await reserve(bytes);
+  const releaseBudget = storage ? storage.release : await reserve(bytes);
   if (typeof releaseBudget !== "function") return releaseBudget?.kind === "terminal" ? releaseBudget : { kind: "needs-memory", bytes };
   const held = new Map();
   const hash = createHash("sha256");
@@ -24,10 +24,13 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
   // How long the copy itself took, apart from any wait for memory or bytes
   // before it: the figure a run's stretch is sized from, read where the copy is.
   let copyMs = 0;
+  let diskBytes = 0;
   // Per source, the range copied after the answer: its position in the
   // source's ranges, and the copy's promise once it has begun.
   const later = [];
   const read = async (source, ranges) => {
+    if (files.has(source.fileIndex)) return ranges.map(() => true);
+    if (storage) return await storage.copy(source, ranges) ? ranges.map(() => true) : null;
     const startedAt = now();
     const buffers = await readRanges(source, ranges, bytes);
     copyMs += Math.max(0, now() - startedAt);
@@ -43,7 +46,7 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
       const { ranges } = source.input;
       const largest = ranges.reduce((best, range, index) =>
         range[1] - range[0] > ranges[best][1] - ranges[best][0] ? index : best, 0);
-      const deferred = ranges.length > 1 ? largest : -1;
+      const deferred = !files.has(source.fileIndex) && ranges.length > 1 ? largest : -1;
       const first = ranges.filter((_, index) => index !== deferred);
       const buffers = await read(source, first);
       if (buffers === null) return { kind: "needs-bytes", sourceKey: source.sourceKey, fileIndex: source.fileIndex, ranges };
@@ -59,6 +62,8 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
       if (deferred >= 0) later.push({ entry, position: deferred });
     }
     let released = false;
+    let runReleased = false, owners = 1, finishClose;
+    const closed = new Promise(resolve => { finishClose = resolve; });
     let failed = false;
     retained = true;
     // ONE READ FOR THE STRETCH. Copied a torrent piece per read (2.97.12), a
@@ -102,19 +107,46 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
     // When FFmpeg's reads waited for a stretch still being copied.
     /** @type {{ from: number, to: number | null }[]} */
     const waits = [];
-    const answer = (entry, position, start, stop) => {
+    const answer = (entry, position, start, stop, answeringHttp = false) => {
       const now = Date.now();
       reads.count += 1;
       reads.bytes += stop - start + 1;
       reads.firstAt ||= now;
       reads.lastAt = now;
       const [from] = entry.source.input.ranges[position];
+      const file = files.get(entry.source.fileIndex);
+      if (file) {
+        // Packet learning reads only an already-owned memory copy; disk has no
+        // such copy. Its ordinary container reader already reads this file.
+        if (!answeringHttp) return null;
+        const stream = file.stream(start, stop, bytes => { diskBytes += bytes; });
+        return stream ? { length: file.length, end: stop, size: stop - start + 1, stream } : null;
+      }
+      if (storage) {
+        const held = storage.slices(entry.source, start, stop, answeringHttp);
+        if (!held) return null;
+        return { length: entry.source.input.fileLength, end: stop, size: stop - start + 1,
+          ...(answeringHttp && held.buffers.length > 1 ? { chunks: held.buffers }
+            : { bytes: held.buffers.length === 1 ? held.buffers[0] : Buffer.concat(held.buffers) }),
+          release: held.release };
+      }
       return { length: entry.source.input.fileLength, end: stop, bytes: entry.buffers[position].subarray(start - from, stop - from + 1) };
+    };
+    const drop = () => {
+      owners--;
+      if (owners || released) return;
+      released = true;
+      held.clear();
+      releaseBudget();
+      void Promise.all([whole, ...[...files.values()].map(file => file.release())]).then(finishClose);
     };
     return {
       kind: "result", original: true, sources, bytes, fingerprint: hash.digest("hex"),
       // What the copy took so far; final once `whole` has settled.
-      get copyMs() { return copyMs; },
+      get copyMs() { return storage ? storage.stats.copyMs : copyMs; },
+      get copiedBytes() { return storage ? storage.stats.copiedBytes : bytes; },
+      get sharedBytes() { return storage ? storage.stats.sharedBytes : 0; },
+      get diskBytes() { return diskBytes; },
       whole,
       // Bytes of the stretches still to be copied when the answer was given.
       deferredBytes: later.reduce((sum, job) => {
@@ -126,6 +158,13 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
       // not where each track stops. The final piece is judged by the input
       // reaching the end of the file instead (`piece-completeness.js`).
       tracks: sources.flatMap(source => (source.input.selections ?? []).map(selection => ({ track: selection.track }))),
+      heldUntil(fileIndex, start) {
+        if (released) return null;
+        const entry = held.get(fileIndex);
+        if (!entry || files.has(fileIndex)) return null;
+        const range = entry.source.input.ranges.find(([first, last]) => first <= start && last >= start);
+        return range ? Math.min(range[1] + 1, storage?.endOf(entry.source, start) ?? range[1] + 1) : null;
+      },
       /**
        * The answer to a read from `start`, or null when it lies outside what
        * the run holds. Inside a stretch still being copied the answer is a
@@ -141,12 +180,12 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
         const position = ranges.findIndex(([from, to]) => from <= start && (partial ? start : stop) <= to);
         if (position < 0) return null;
         stop = Math.min(stop, ranges[position][1]);
-        if (entry.buffers[position] !== null) return answer(entry, position, start, stop);
+        if (entry.buffers[position] !== null) return answer(entry, position, start, stop, partial);
         const wait = { from: Date.now(), to: null };
         waits.push(wait);
         return copied(entry, position).then(ok => {
           wait.to = Date.now();
-          return ok && !released ? answer(entry, position, start, stop) : null;
+          return ok && !released ? answer(entry, position, start, stop, partial) : null;
         });
       },
       /**
@@ -163,11 +202,16 @@ export async function admitOriginalInput({ sources, reserve, readRanges, now = D
       noteAnswer(answer) {
         if (!released) answers.push({ ...answer, at: Date.now() });
       },
+      /** Packet learning can finish after the FFmpeg run that supplied it. */
+      retain() {
+        if (released || runReleased) return null;
+        owners++;
+        let dropped = false;
+        return () => { if (!dropped) { dropped = true; drop(); } };
+      },
       release() {
-        if (released) return;
-        released = true;
-        held.clear();
-        releaseBudget();
+        if (!runReleased) { runReleased = true; drop(); }
+        return closed;
       }
     };
   } finally {

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A viewer whose picture has not moved yet, at the start or after a seek, is moved to a faster speed setting of the same size when this machine makes the picture slower than realtime, as a viewer whose buffer is draining already was. Waiting, the buffer grows and moved nothing: on Home Assistant an AVI re-encoded at 0.92-0.96x held its start 30 s and was moved to the faster setting 11 s after it had started (r70, #ttv-178).
+
 ## 2.100.8
 
 - **Perf**: The segment store answers where a piece is from its own record for an output whose pieces it publishes itself, instead of looking at the disk for every piece not made. Every served piece of such an output arrives through the store's publication; only an output whose muxer renames its own pieces still has the disk looked at. Asked about each piece of the film on every poll, the look cost the main thread 12.6 s of 300 s at a cold start (r61, #ttv-178).

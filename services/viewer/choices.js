@@ -327,7 +327,7 @@ export function visiblePictureOf(viewers, output, consumerId) {
  * @param {object} output
  * @param {string} consumerId
  * @param {number} spanSec - The segment duration of the output they watch.
- * @returns {{ bufferedSec: number, slope: number | null, reportGapSec: number } | null}
+ * @returns {{ bufferedSec: number, slope: number | null, reportGapSec: number, positionSec: number | null, waiting: boolean } | null}
  *   Null for nobody of that name; `slope` null while their reports do not yet
  *   span one segment.
  */
@@ -339,7 +339,9 @@ export function bufferOf(viewers, output, consumerId, spanSec) {
   const trend = viewer.bufferTrend(spanSec);
   const held = Number.isFinite(viewer.bufferedSeconds) ? Math.max(0, viewer.bufferedSeconds) : 0;
   return { bufferedSec: held, slope: trend?.slope ?? null, reportGapSec: trend?.reportGapSec ?? 0,
-    positionSec: viewer.positionSeconds() ?? null };
+    positionSec: viewer.positionSeconds() ?? null,
+    // Blocked on material owed to them, with their picture not moving.
+    waiting: viewer.waiting === true && viewer.playing !== true };
 }
 
 /**

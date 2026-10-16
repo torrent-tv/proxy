@@ -283,7 +283,23 @@ export class PieceDiskStore {
     await this.#removing.get(index);
     await this.#ensureDirectory();
     await this.#makeRoomFor(bytes.length, index);
-    await fs.writeFile(this.#pathOf(index), bytes);
+    // ONE WRITE FOR THE PIECE, not `fs.writeFile`: that writes 512 KiB at a
+    // time, sixteen requests for an 8 MiB piece, and each waits for a turn of
+    // this thread's loop. On Home Assistant the torrent thread's loop ran about
+    // a second late while downloading, a piece took that many seconds to reach
+    // the disk, and pieces arriving at 20 MB/s waited for their writes: 1.1 GB
+    // of them in that thread's memory at once (r61, torrent-tv/meta#178).
+    const handle = await fs.open(this.#pathOf(index), "w");
+    try {
+      let written = 0;
+      while (written < bytes.length) {
+        const { bytesWritten } = await handle.write(bytes, written, bytes.length - written, written);
+        if (!(bytesWritten > 0)) throw new Error(`Piece ${index} could not be written: the disk took nothing.`);
+        written += bytesWritten;
+      }
+    } finally {
+      await handle.close();
+    }
     if (!this.#stored.has(index)) {
       this.#bytes += bytes.length;
     } else {

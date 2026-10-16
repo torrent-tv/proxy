@@ -88,6 +88,7 @@ import { takeTurns } from "./utils/take-turns.js";
 import { completedFilesRoot } from "./services/storage/files/CompletedFiles.js";
 import { startupCpuProfile } from "./services/storage/cpu-profile.js";
 import { startProcessorReport } from "./services/storage/processor-report.js";
+import { processorBound } from "./services/storage/machine-processor.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("./package.json");
@@ -231,6 +232,10 @@ export async function startProxyServer({
   let videoEncoder = transcodeAudio
     ? await detectVideoEncoder({ ffmpegBin, logger })
     : null;
+  // The cores this process may use (a container's quota or CPU set): the
+  // readings below divide out a share of those, the unit every later share of
+  // the machine is in (torrent-tv/meta#180, phase 3).
+  const processorCores = processorBound().cores;
   // WHAT THIS HOST DOES, measured before any viewer exists. Every one of these
   // was gated on the chosen encoder being SOFTWARE, and two of the three are
   // not about the encoder at all: a host with a GPU decodes in software just
@@ -243,7 +248,7 @@ export async function startProxyServer({
   // (the rungs are timed on raw frames), but the order keeps the two figures
   // side by side in the log.
   const decodeCostModel = transcodeAudio
-    ? await benchmarkDecodeCost({ ffmpegBin, logger })
+    ? await benchmarkDecodeCost({ ffmpegBin, logger, processorCores })
     : null;
   // What a second job costs on this host. Measured because the budget adds
   // independent prices and this host says two jobs that each fit alone do not
@@ -264,16 +269,16 @@ export async function startProxyServer({
   // the processor and the threads, the device and its driver — which is what
   // decides whether anything kept from an earlier run still applies.
   const fingerprint = videoEncoder
-    ? await readHostFingerprint({ ffmpegBin, encoder: videoEncoder })
+    ? await readHostFingerprint({ ffmpegBin, encoder: videoEncoder, processorCores })
     : null;
   /** @type {Record<string, object[]>} */
   const calibratedModes = {};
   if (videoEncoder) {
     calibratedModes[videoEncoder.kind] =
-      (await calibrateEncoder({ ffmpegBin, encoder: videoEncoder, logger })).modes;
+      (await calibrateEncoder({ ffmpegBin, encoder: videoEncoder, logger, processorCores })).modes;
     if (videoEncoder.kind !== "software") {
       calibratedModes.software =
-        (await calibrateEncoder({ ffmpegBin, encoder: softwareDescriptor(), logger })).modes;
+        (await calibrateEncoder({ ffmpegBin, encoder: softwareDescriptor(), logger, processorCores })).modes;
       // A device that passed detection's own test and then none of whose modes
       // passed the product's is not used: detection encodes a synthetic pattern
       // with arguments of its own, and it is the product's arguments a viewer

@@ -96,3 +96,18 @@ test("a caller leaving during a completed file read releases that file", async (
   assert.equal(released, 1);
   assert.equal(serving.waiting, 0);
 });
+
+// torrent-tv/meta#178: a segment held on one output can be given to another
+// while it waits; the request then stops waiting here and resolves again.
+test("a held segment given to another output ends its wait as reassigned", async () => {
+  const serving = servingState();
+  let given = true;
+  const pending = waitForSessionFile(serving, "output", "segment-00010.ts", { stillGiven: () => given });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(serving.reads, 1);
+  given = false;
+  serving.change();
+  assert.equal((await pending).kind, "reassigned");
+  assert.equal(serving.reads, 1, "not read again from the output it left");
+  assert.equal(serving.waiting, 0);
+});

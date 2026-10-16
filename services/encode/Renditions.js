@@ -39,12 +39,12 @@ export class Renditions {
    * The segment each viewer's move was last said to wait for on the output
    * they are leaving, so that a wait is said once per segment.
    *
-   * @type {Map<string, number>}
+   * @type {Map<string, string>}
    */
   #moveWaitsSaid = new Map();
 
   /**
-   * @param {object} host - `viewerSecondsOn`, `audioStartSecondsFor`, `activeOutputFor`, `viewersOf`, `audioRenditionName`, `logger`, `placeViewer`, `viewerLeaves`, `createOrGetSession`, `planEncodersSoon`, `disposeSession`, `viewerPositionOf`, `encodeRuns`, `fileStartTimeReads`, `getCachedAudioTracks`, `getCachedMediaInfo`, `getContainerMediaInfo`, `localBaseUrl`, `outputTimes`, `outputs`, `quality`, `qualityOffer`, `segmentDurationSec`, `sourceFiles`, `viewers`, `generationOfRequest`, `givenOutputOf`, `noteGivenOutput`, `chosenOutputOf`, `chooseOutput`, `storedPieceReady`, `headersCompatible`, `audioChoiceOf`, `linkMbpsOf`, `qualityModeOf`, `noteServingVerdict`, `limitsFor`, `heightsChosenAs`, `highestGivenSegmentOf`, `sameHeightSwitchOf`, `noteSameHeightSwitch`, `switchingOnto`, `switchingFrom`, `segmentClosed`, `bufferedSecondsOf`, `minimumBufferSecondsFor`
+   * @param {object} host - `viewerSecondsOn`, `audioStartSecondsFor`, `activeOutputFor`, `viewersOf`, `audioRenditionName`, `logger`, `placeViewer`, `viewerLeaves`, `createOrGetSession`, `planEncodersSoon`, `disposeSession`, `viewerPositionOf`, `encodeRuns`, `fileStartTimeReads`, `getCachedAudioTracks`, `getCachedMediaInfo`, `getContainerMediaInfo`, `localBaseUrl`, `outputTimes`, `outputs`, `quality`, `qualityOffer`, `segmentDurationSec`, `sourceFiles`, `viewers`, `generationOfRequest`, `givenOutputOf`, `noteGivenOutput`, `chosenOutputOf`, `chooseOutput`, `storedPieceReady`, `headersCompatible`, `audioChoiceOf`, `linkMbpsOf`, `qualityModeOf`, `noteServingVerdict`, `limitsFor`, `heightsChosenAs`, `highestGivenSegmentOf`, `sameHeightSwitchOf`, `noteSameHeightSwitch`, `switchingOnto`, `switchingFrom`, `segmentClosed`, `secondsUntilClosed`, `invalidateWaits`, `bufferedSecondsOf`, `minimumBufferSecondsFor`
    */
   constructor(host) {
     this.#host = host;
@@ -997,31 +997,31 @@ export class Renditions {
       this.#cancelSameHeightSwitch(base, consumerId, "there is nothing left of the film to give from it");
       return;
     }
-    // A segment closed BEHIND the one they will ask for says nothing about it:
-    // the move would hand them an output that does not yet have what they need.
-    if (publishedIndex !== null && publishedIndex < next) {
-      return;
-    }
-    if (!this.#host.segmentClosed(prepared.outputKey ?? "", next)) {
-      return;
-    }
     // THE SEGMENT ALREADY GIVEN FROM THE OUTPUT ON SCREEN. A request is held by
     // the output it was given from, and leaving that output stops its encoder:
     // a segment given and not yet closed there would then be made by nobody.
     // On Home Assistant a viewer waiting for #2176 was moved from #2177 and
-    // the picture stood for good (r71, torrent-tv/meta#178). The move waits for
-    // that segment to be closed; an output whose encoding has failed for good
-    // closes nothing, and its held request is the serving path's to answer.
+    // the picture stood for good (r71, torrent-tv/meta#178). Nothing of it has
+    // been sent — only closed pieces are — so it is given by whichever output
+    // closes it sooner: the move then begins at it, or waits for it here. An
+    // output whose encoding has failed for good closes nothing, and its held
+    // request is the serving path's to answer.
     const open = this.#givenAndOpenOn(current, consumerId, move.askedHeights, next);
+    let from = next;
     if (open !== null && !this.#host.encodeRuns.hasFailed(current)) {
-      if (this.#moveWaitsSaid.get(consumerId) !== open) {
-        this.#moveWaitsSaid.set(consumerId, open);
-        this.#host.logger.info(
-          `transcode ${base.id} ${consumerId}'s move to ${move.outputKey} waits for #${open} on ` +
-          `${current.outputKey}, given and not yet closed there`
-        );
+      if (!this.#preparedClosesSooner(base, consumerId, move, current, prepared, open)) {
+        return;
       }
-      return;
+      from = open;
+    } else {
+      // A segment closed BEHIND the one they will ask for says nothing about it:
+      // the move would hand them an output that does not yet have what they need.
+      if (publishedIndex !== null && publishedIndex < next) {
+        return;
+      }
+      if (!this.#host.segmentClosed(prepared.outputKey ?? "", next)) {
+        return;
+      }
     }
     // THE CUSHION, for a move that is not urgent (roadmap item 98): a move up
     // is made once the viewer holds the cushion this file needs, and their
@@ -1053,7 +1053,58 @@ export class Renditions {
         return;
       }
     }
-    this.#completeSameHeightSwitch(base, consumerId, move, prepared, current, next);
+    if (from !== next) {
+      // The held request follows the address: it is woken, finds the segment
+      // given to the prepared output, and is answered from there.
+      const generation = this.#host.generationOfRequest(consumerId, Number.NaN);
+      for (const height of move.askedHeights) {
+        if (this.#host.givenOutputOf(consumerId, generation, height, from) === current.outputKey) {
+          this.#host.noteGivenOutput(consumerId, generation, height, from, prepared.outputKey ?? "");
+        }
+      }
+    }
+    this.#completeSameHeightSwitch(base, consumerId, move, prepared, current, from);
+    if (from !== next) {
+      this.#host.invalidateWaits?.(current);
+    }
+  }
+
+  /**
+   * Whether the output being prepared closes the segment held on the output on
+   * screen sooner than that output does, so that it is given from there.
+   *
+   * Both times are this machine's readings (`secondsUntilClosed`); either one
+   * unknown, or a header of the prepared output not proven to decode where the
+   * player's does, keeps the segment where it was given. Said once per segment
+   * and answer.
+   *
+   * @param {HlsSession} base
+   * @param {string} consumerId
+   * @param {object} move
+   * @param {HlsSession} current
+   * @param {HlsSession} prepared
+   * @param {number} index - The segment held on `current`.
+   * @returns {boolean}
+   */
+  #preparedClosesSooner(base, consumerId, move, current, prepared, index) {
+    const now = Date.now();
+    const onCurrent = this.#host.secondsUntilClosed?.(current, index, now) ?? null;
+    const onPrepared = this.#host.secondsUntilClosed?.(prepared, index, now) ?? null;
+    const withInit = current.segmentFormat?.initFileName !== null && prepared.segmentFormat?.initFileName !== null;
+    const compatible = !withInit || this.#host.headersCompatible(current.outputKey, prepared.outputKey)?.compatible === true;
+    const sooner = compatible && onCurrent !== null && onPrepared !== null && onPrepared < onCurrent;
+    const said = `${index}:${sooner}`;
+    if (this.#moveWaitsSaid.get(consumerId) !== said) {
+      this.#moveWaitsSaid.set(consumerId, said);
+      const time = (seconds) => (seconds === null ? "unknown" : `${seconds.toFixed(1)}s`);
+      this.#host.logger.info(
+        `transcode ${base.id} ${consumerId}'s move to ${move.outputKey}: #${index}, given from ${current.outputKey} ` +
+        `and not closed there, closes there in ${time(onCurrent)} and on the prepared output in ${time(onPrepared)}` +
+        (compatible ? "" : " (its header is not proven to decode where the player's does)") +
+        ` — ${sooner ? "given from the prepared output, the move begins at it" : "the move waits for it there"}`
+      );
+    }
+    return sooner;
   }
 
   /**
@@ -1358,6 +1409,32 @@ export class Renditions {
    * @returns {Promise<{ sessionId: string | null, error?: string }>} The session
    *   to serve the file from; a null id means there is no such variant.
    */
+  /**
+   * Whether this address is still given to the output a held request for it
+   * waits on. A move may give a segment that is not closed yet to the output
+   * the viewer is moved to (`#preparedClosesSooner`); the held request then
+   * asks again and is answered from there.
+   *
+   * @param {string} baseSessionId
+   * @param {number} height
+   * @param {string} fileName
+   * @param {string} consumerId
+   * @param {number} statedGeneration
+   * @param {string} sessionId - The output the request waits on.
+   * @returns {boolean}
+   */
+  stillGivenTo(baseSessionId, height, fileName, consumerId, statedGeneration, sessionId) {
+    const base = isOutputName(baseSessionId) ? this.#host.outputs.get(baseSessionId) : null;
+    const waitedOn = this.#host.outputs.get(sessionId);
+    const index = base?.segmentFormat?.segmentIndexFromName?.(fileName);
+    if (!base || !waitedOn || !consumerId || !Number.isInteger(index) || index < 0) {
+      return true;
+    }
+    const generation = this.#host.generationOfRequest(consumerId, statedGeneration);
+    const key = this.#host.givenOutputOf(consumerId, generation, height, index);
+    return !key || key === waitedOn.outputKey;
+  }
+
   async resolveVariantFile(baseSessionId, height, fileName, consumerId = "", statedGeneration = Number.NaN) {
     if (!isOutputName(baseSessionId)) {
       return { sessionId: null };

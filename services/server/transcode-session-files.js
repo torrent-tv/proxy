@@ -71,10 +71,13 @@ export function refusedAsStale(req, reply, viewerRequests, fileName) {
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ serving: object, viewerRequests: object, sessionId: string, fileName: string }} params
- * @returns {Promise<void>}
+ * @param {{ serving: object, viewerRequests: object, sessionId: string, fileName: string, stillGiven?: () => boolean }} params
+ *   `stillGiven`: whether the address is still given to this session; when it
+ *   stops being, nothing is answered and "reassigned" is returned for the
+ *   caller to resolve the address again.
+ * @returns {Promise<void | "reassigned">}
  */
-export async function serveSessionFile(req, reply, { serving, viewerRequests, sessionId, fileName }) {
+export async function serveSessionFile(req, reply, { serving, viewerRequests, sessionId, fileName, stillGiven = null }) {
   // Which viewer is asking. One session serves everyone watching a copied
   // picture, so without it their positions collapse into one and a seek by the
   // viewer in front releases the requests held for the viewer behind. Absent on
@@ -100,13 +103,18 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
   try {
     result = await waitForSessionFile(serving, sessionId, fileName, {
       until: clientGone,
-      consumerId
+      consumerId,
+      stillGiven
     });
   } finally {
     req.raw.off("aborted", onClientAbort);
     reply.raw?.off("close", onResponseClose);
   }
   const heldMs = Date.now() - holdStartedAt;
+  if (!clientAborted && result.kind === "reassigned") {
+    logger.info(`[hold] ${fileName} given to another output after ${heldMs}ms; asked again there`);
+    return "reassigned";
+  }
   if (clientAborted || result.kind === "cancelled") {
     logger.info(`[hold] request=${req.id ?? "unknown"} ${fileName} cancelled after ${heldMs}ms`);
     result.stream?.destroy?.();
@@ -234,7 +242,7 @@ export async function waitForRequestedFile(req, reply, serving, sessionId, fileN
   }
 }
 
-export async function waitForSessionFile(serving, sessionId, fileName, { until = null, consumerId = "" } = {}) {
+export async function waitForSessionFile(serving, sessionId, fileName, { until = null, consumerId = "", stillGiven = null } = {}) {
   let gone = false;
   const requesterGone = until ? until.then(() => { gone = true; }) : new Promise(() => {});
   // The viewer's position when this request was made. A seek makes every held
@@ -249,6 +257,9 @@ export async function waitForSessionFile(serving, sessionId, fileName, { until =
   while (!gone) {
     const change = serving.subscribeFileChange(sessionId);
     try {
+    if (stillGiven && !stillGiven()) {
+      return { kind: "reassigned" };
+    }
     const result = await serving.getFileStream(sessionId, fileName, { consumerId });
     if (gone) {
       result.stream?.destroy?.();

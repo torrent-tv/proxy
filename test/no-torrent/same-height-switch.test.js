@@ -134,6 +134,7 @@ function pictureAtNominal(how = {}) {
   const closed = new Set();
   const disposed = [];
   const opened = [];
+  const invalidated = [];
   // Outputs whose encoding has failed for good, as `EncodeRuns.hasFailed` says.
   const failed = new Set();
   let made = 0;
@@ -236,7 +237,9 @@ function pictureAtNominal(how = {}) {
     disposeSession: async (id) => { disposed.push(id); outputs.delete(id); },
     planEncodersSoon: () => {},
     viewerLeaves: (output, consumerId) => viewers.leaves(output, consumerId),
-    invalidateWaits: () => {},
+    invalidateWaits: (output) => { invalidated.push(output.id); },
+    // When a piece closes on an output, as the check states it; unknown unless named.
+    secondsUntilClosed: (output, index) => how.closeIn?.(output, index) ?? null,
     logger: { info: () => {}, warn: () => {}, error: () => {} }
   });
   for (const consumerId of how.viewers ?? ["viewer-a"]) {
@@ -295,7 +298,7 @@ function pictureAtNominal(how = {}) {
     failed.add(output.id);
     renditions.noteProductionFailed(output);
   };
-  return { renditions, outputs, viewers, base, file, closed, close, given, linkNow, report, fail, failed, disposed, opened };
+  return { renditions, outputs, viewers, base, file, closed, close, given, linkNow, report, fail, failed, disposed, opened, invalidated };
 }
 
 test("a thin link moves only its own viewer to a lower limit of the same height", async () => {
@@ -732,6 +735,58 @@ test("a move to a faster setting waits for the segment given from the output on 
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), base.outputKey);
   close(base, 10);
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey);
+});
+
+test("a held segment the prepared output closes sooner is given from it, and the move begins at it", async () => {
+  const fixture = pictureAtNominal({
+    closeIn: (output) => (output.id === BASE_ID ? 6 : 2)
+  });
+  const { renditions, viewers, base, given, linkNow, outputs, invalidated } = fixture;
+  given("viewer-a", 10, base, { openLast: true });
+  linkNow("viewer-a", LIMITS[1]);
+  const move = await renditions.prepareSameHeightSwitch(base, "viewer-a", "down", "thin");
+  assert.equal(move.started, true, move.reason);
+  // Nothing to wait for: the move is made as it is prepared.
+  const prepared = [...outputs.values()].find((output) => output.outputKey === chosenOutputOf(viewers, "viewer-a", HEIGHT));
+  assert.notEqual(prepared, base);
+  const generation = viewers.get("viewer-a").assignments.generation;
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "moved without #11 closed there");
+  assert.equal(givenOutputOf(viewers, "viewer-a", generation, HEIGHT, 10), prepared.outputKey, "#10 is given from the prepared output");
+  assert.ok(invalidated.includes(BASE_ID), "the request held on the output left is woken");
+  assert.equal(renditions.stillGivenTo(BASE_ID, HEIGHT, "segment-00010.mp4", "viewer-a", Number.NaN, BASE_ID), false);
+  assert.equal(renditions.stillGivenTo(BASE_ID, HEIGHT, "segment-00010.mp4", "viewer-a", Number.NaN, prepared.id), true);
+});
+
+test("a held segment the output on screen closes sooner stays given from it", async () => {
+  const { renditions, viewers, base, close, given, linkNow, outputs, report } = pictureAtNominal({
+    closeIn: (output) => (output.id === BASE_ID ? 1 : 5)
+  });
+  given("viewer-a", 10, base, { openLast: true });
+  linkNow("viewer-a", LIMITS[1]);
+  await renditions.prepareSameHeightSwitch(base, "viewer-a", "down", "thin");
+  const prepared = outputs.get(sameHeightSwitchOf(viewers, "viewer-a").outputId);
+  report("viewer-a", linkJustFor(LIMITS[1]));
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), base.outputKey);
+  const generation = viewers.get("viewer-a").assignments.generation;
+  assert.equal(givenOutputOf(viewers, "viewer-a", generation, HEIGHT, 10), base.outputKey);
+  close(prepared, 11);
+  close(base, 10);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "moved from #11 once #10 closed there");
+});
+
+test("a header not proven to decode where the player's does keeps the held segment where it was given", async () => {
+  const { renditions, viewers, base, given, linkNow, report } = pictureAtNominal({
+    closeIn: (output) => (output.id === BASE_ID ? 6 : 2),
+    headerVerdict: { compatible: false, differences: ["avcC differs"] }
+  });
+  given("viewer-a", 10, base, { openLast: true });
+  linkNow("viewer-a", LIMITS[1]);
+  await renditions.prepareSameHeightSwitch(base, "viewer-a", "down", "thin");
+  assert.ok(sameHeightSwitchOf(viewers, "viewer-a"), "the move is prepared");
+  report("viewer-a", linkJustFor(LIMITS[1]));
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), base.outputKey);
+  const generation = viewers.get("viewer-a").assignments.generation;
+  assert.equal(givenOutputOf(viewers, "viewer-a", generation, HEIGHT, 10), base.outputKey);
 });
 
 test("an output on screen whose encoding failed for good is not waited for", async () => {

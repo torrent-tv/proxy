@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Report original-input selection targets, boundary probes and reservation-time memory so short encoder runs can be attributed to the limits actually observed, without extra source reads or changes to admission (#ttv-181).
+
 ## 2.100.14
 
 - **Fix**: A segment a viewer is waiting for when they are moved to another output of the size on screen is given by whichever of the two outputs closes it sooner, by this machine's readings of their runs, instead of always by the one they are leaving. Nothing of it has been sent yet, so the prepared output can answer it: the move then begins at it, and the held request is answered from there. With either time unknown, or a header not proven to decode where the player's does, it is waited for where it was given, as in 2.100.11 (#ttv-178).

@@ -337,9 +337,15 @@ export class EncodeInputs {
    * @returns {{ bytes: number, openMeasured: boolean } | null}
    */
   stretchFor(output) {
+    const sizing = this.#sizingFor(output);
+    return sizing ? { bytes: sizing.bytes, openMeasured: sizing.openMeasured } : null;
+  }
+
+  #sizingFor(output) {
     const rate = middleOf(this.#copyRates);
     const open = this.#openOf(output);
-    return rate === null || !open ? null : { bytes: Math.floor(rate * open.seconds * 1000), openMeasured: open.measured };
+    return rate === null || !open ? null : { bytes: Math.floor(rate * open.seconds * 1000),
+      openMeasured: open.measured, openSeconds: open.seconds, copyBytesPerMs: rate };
   }
 
   /**
@@ -493,6 +499,9 @@ export class EncodeInputs {
    */
   async #admitStretch(request, firstSources) {
     const { output, from } = request;
+    // Record existing decisions only: diagnostics must not resolve another
+    // interval or ask storage for an additional availability reading.
+    const probes = [], reservations = [];
     let minimum = originalInputBytes(firstSources);
     const stretches = new Map([[from, { sources: firstSources, bytes: minimum }]]);
     const held = new Map();
@@ -508,7 +517,11 @@ export class EncodeInputs {
     };
     const fits = async (end, maxBytes) => {
       const stretch = await at(end);
-      return Boolean(stretch) && stretch.bytes <= maxBytes && await this.#present(stretch.sources, held, request.timing);
+      const withinLimit = Boolean(stretch) && stretch.bytes <= maxBytes;
+      const result = !stretch ? "unresolved" : !withinLimit ? "size"
+        : await this.#present(stretch.sources, held, request.timing) ? "fits" : "missing-bytes";
+      probes.push({ end, limitBytes: maxBytes, bytes: stretch?.bytes ?? null, result });
+      return result === "fits";
     };
     // Grows by doubling and then halves back: a handful of resolutions find
     // the end whether it is a piece away or the rest of the film.
@@ -535,10 +548,11 @@ export class EncodeInputs {
       }
       return good;
     };
-    const sizing = this.stretchFor(output);
+    const sizing = this.#sizingFor(output);
     const target = sizing?.bytes ?? null;
     if (sizing && !sizing.openMeasured) request.timing.openApproximate = true;
     let end = target === null || this.#heldRanges === null ? floor : await longest(target);
+    const targetEnd = end;
     if (this.#requests.get(request.key) !== request) return undefined;
     this.#wanted.set(request.key, { wanted: stretches.get(end).bytes, required: minimum });
     await this.#spent(request.timing, "budgetMs", () => this.#revise());
@@ -576,7 +590,13 @@ export class EncodeInputs {
       if (this.#requests.get(request.key) !== request) return undefined;
       this.#wanted.set(request.key, { wanted: chosen.bytes, required: chosen.bytes });
       result = await admitOriginalInput({ sources: chosen.sources, readRanges: this.#read, now: this.#now,
-        reserve: async bytes => this.#hold(request, bytes) });
+        reserve: async bytes => {
+          const reservation = { bytes, allowed: this.#allowed, held: this.#held, capacity,
+            room: roomNow(), end };
+          const release = this.#hold(request, bytes);
+          reservations.push({ ...reservation, admitted: typeof release === "function" });
+          return release;
+        } });
       // Another output's copy can take the room this one was sized for while
       // it was being chosen. A shorter stretch is tried at once rather than
       // waiting for a memory change that may never come.
@@ -585,6 +605,12 @@ export class EncodeInputs {
     }
     if (result.kind === "needs-memory") this.#wanted.set(request.key, { wanted: minimum, required: minimum });
     if (result.kind === "result") {
+      this.#log(`encode input selection of ${addressOf(output)}: ${JSON.stringify({
+        from, requestedTo: request.to, serves, floor, targetEnd, chosenEnd: end,
+        targetBytes: target, minimumBytes: minimum, inputBytes: result.bytes,
+        copyBytesPerMs: sizing?.copyBytesPerMs ?? null, openSeconds: sizing?.openSeconds ?? null,
+        openMeasured: sizing?.openMeasured ?? null, reservations, probes
+      })}`);
       Object.assign(result, { from, to: end });
       // The stretch is copied after the answer, while the run opens; the rate
       // is the whole copy's, learned once it is done.

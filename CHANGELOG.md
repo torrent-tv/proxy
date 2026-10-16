@@ -1,5 +1,7 @@
 ## Unreleased
 
+- **Fix**: A piece is written to disk in one write instead of 512 KiB at a time. Each part waited for a turn of the torrent thread's loop, which ran about a second late while downloading, so pieces arriving at 20 MB/s waited for their writes: 1.1 GB of them in that thread's memory at once on Home Assistant (r61, #ttv-178).
+
 - **Perf**: A Matroska soundtrack read packet by packet is walked from the clusters the picture's input has just copied, while that copy is held, instead of reading the same clusters through the torrent thread again. Walked there, each soundtrack piece took 6-11 s for 4-7 s of film, and after a seek the picture stopped dozens of times for 0.5-3 s (r61, #ttv-178).
 
 - **Fix**: A heap snapshot is written only with `--heap-snapshots`. Each one stops its thread while it is written, and in a healthy session on Home Assistant the torrent thread reached the floor: one snapshot of 1281 MB held that thread about 20 s and the picture stood 22.2 s (r61, #ttv-178).

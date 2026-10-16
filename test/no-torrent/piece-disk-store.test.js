@@ -425,3 +425,29 @@ test("a store takes up the pieces a previous life left in its directory", async 
     await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
+
+test("a piece reaches the disk in one write, not one per 512 KiB", async () => {
+  // r61 (torrent-tv/meta#178): `fs.writeFile` wrote an 8 MiB piece as sixteen
+  // requests, each waiting for a turn of a loop running a second late, and
+  // 1.1 GB of arriving pieces waited for their writes in the torrent thread.
+  const { createHook } = await import("node:async_hooks");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "piece-write-"));
+  const store = new PieceDiskStore({ directory, name: "pieces" });
+  const piece = Buffer.alloc(8 * 1024 * 1024, 5);
+  let requests = 0;
+  const hook = createHook({ init(_id, type) { if (type === "FSREQPROMISE") requests++; } });
+  try {
+    await store.write(0, Buffer.alloc(PIECE, 1));
+    hook.enable();
+    await store.write(1, piece);
+    hook.disable();
+    assert.ok(requests <= 3, `${requests} requests to the file system for one piece`);
+    const back = Buffer.alloc(piece.length);
+    assert.equal(await store.read(1, back), piece.length);
+    assert.ok(back.equals(piece), "and every byte is there");
+  } finally {
+    hook.disable();
+    await store.destroy?.();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});

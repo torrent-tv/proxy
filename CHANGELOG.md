@@ -1,4 +1,4 @@
-## Unreleased
+## 2.100.12
 
 - **Fix**: Support a separate WebRTC control connection, so large media transfers do not share its SCTP send buffer or congestion window. Keep legacy pages compatible and isolate control reconnection from media delivery.
 

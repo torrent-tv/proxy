@@ -1,15 +1,14 @@
 /**
  * @file WebRTC connection manager for the proxy (Node.js side).
  *
- * Maintains one `PeerConnection` per browser session, keyed by `sessionId`.
+ * Maintains a media connection and an optional independent control connection
+ * per browser session. Control signals carry a generation's `connectionId`.
  * Receives SDP offers and ICE candidates through the signalling tunnel
  * and responds with SDP answers and its own candidates through the same channel.
  *
  * Data channels for actual streaming are handed off to `transport/data-channel-handler.js`
  * via the `onDataChannel` callback — this module only owns the signalling phase.
  */
-
-import nodeDataChannel from "node-datachannel";
 
 /** @import { WebRtcSignal } from './tunnel-client.js' */
 
@@ -148,6 +147,8 @@ function candidateAddrKind(candidate) {
  * Configuration for the WebRTC manager.
  *
  * @typedef {Object} WebRtcManagerOptions
+ * @property {typeof import("node-datachannel").default} rtc
+ *   The peer connection implementation, supplied by the composition root.
  * @property {(sessionId: string, signal: WebRtcSignal) => void} sendSignal
  *   Send a WebRTC signal (answer or ICE candidate) back to the browser via
  *   the tunnel.  Typically wired to `tunnelClient.sendSignal`.
@@ -196,9 +197,10 @@ function candidateAddrKind(candidate) {
  * @param {WebRtcManagerOptions} options
  * @returns {WebRtcManager}
  */
-export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort, getNatInfo }) {
+export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort, getNatInfo, rtc }) {
   /** @type {Map<string, import("node-datachannel").PeerConnection>} */
   const peers = new Map();
+  const controlPeers = new Map();
 
   /**
    * @param {string} message
@@ -222,7 +224,7 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
   let udpMuxListener = null;
   if (Number.isInteger(udpPort) && udpPort > 0 && udpPort <= 65535) {
     try {
-      udpMuxListener = new nodeDataChannel.IceUdpMuxListener(udpPort);
+      udpMuxListener = new rtc.IceUdpMuxListener(udpPort);
       // STUN that doesn't match an existing session (our PeerConnections are
       // created from the SDP offer before the browser's STUN arrives, so normal
       // traffic is "handled"). Stray/unhandled requests are simply dropped.
@@ -249,13 +251,23 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
    * @param {string} sessionId
    * @returns {import("node-datachannel").PeerConnection}
    */
-  function getOrCreatePeer(sessionId) {
-    const existing = peers.get(sessionId);
+  function getOrCreatePeer(sessionId, connectionId = null) {
+    const peerId = connectionId === null ? sessionId : `${sessionId}/${connectionId}`;
+    const existing = peers.get(peerId);
     if (existing) {
       return existing;
     }
 
-    const pc = new nodeDataChannel.PeerConnection(`proxy-${sessionId.slice(0, 8)}`, pcConfig);
+    if (connectionId !== null) {
+      const previous = controlPeers.get(sessionId);
+      if (previous) closePeer(previous);
+    }
+    const pc = new rtc.PeerConnection(`proxy-${peerId}`, pcConfig);
+    if (connectionId !== null) controlPeers.set(sessionId, peerId);
+    const signalBrowser = (signal) => sendSignal(sessionId, {
+      ...signal,
+      ...(connectionId === null ? {} : { connectionId })
+    });
 
     // Forward all ICE candidates to the browser through the tunnel.
     //
@@ -272,7 +284,7 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
       log(
         `[webrtc] Session ${sessionId.slice(0, 8)}: sending ${kind} candidate: ${candidate.replace(/^a=/, "")}`
       );
-      sendSignal(sessionId, { type: "candidate", candidate, mid });
+      signalBrowser({ type: "candidate", candidate, mid });
 
       // Symmetric-NAT port prediction: offer extra srflx candidates at the
       // predicted external ports so the browser probes them too. No-op unless
@@ -287,7 +299,7 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
               `[webrtc] Session ${sessionId.slice(0, 8)}: symmetric NAT (delta=${nat.portDelta}) — injecting ${predicted.length} predicted srflx candidates: ${predicted.map((p) => p.port).join(",")}`
             );
             for (const p of predicted) {
-              sendSignal(sessionId, { type: "candidate", candidate: p.candidate, mid });
+              signalBrowser({ type: "candidate", candidate: p.candidate, mid });
             }
           }
         }
@@ -304,7 +316,7 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
     // Forward our SDP answer to the browser through the tunnel.
     pc.onLocalDescription((sdp, type) => {
       log(`[webrtc] Session ${sessionId.slice(0, 8)}: sending ${type}`);
-      sendSignal(sessionId, { type, sdp });
+      signalBrowser({ type, sdp, ...(connectionId === null ? { separateControl: true } : {}) });
     });
 
     pc.onStateChange((state) => {
@@ -328,7 +340,7 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
       // "disconnected" is a transient state — ICE may recover on its own.
       // Only tear down on terminal states: "failed" and "closed".
       if (state === "failed" || state === "closed") {
-        closeSession(sessionId);
+        if (peers.get(peerId) === pc) closePeer(peerId);
       }
     });
 
@@ -340,11 +352,15 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
 
     // Browser creates the data channel — we receive it here.
     pc.onDataChannel((channel) => {
-      log(`[webrtc] Session ${sessionId.slice(0, 8)}: data channel "${channel.getLabel()}" opened`);
-      onDataChannel(sessionId, channel);
+      if (peers.get(peerId) !== pc || (connectionId !== null && channel.getLabel() !== "proxy-control")) {
+        channel.close();
+        return;
+      }
+      log(`[webrtc] Session ${sessionId.slice(0, 8)}: ${connectionId === null ? "media" : `control ${connectionId}`} channel "${channel.getLabel()}" opened`);
+      onDataChannel(peerId, channel);
     });
 
-    peers.set(sessionId, pc);
+    peers.set(peerId, pc);
     return pc;
   }
 
@@ -364,6 +380,11 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
     if (!signal || typeof signal.type !== "string") {
       return;
     }
+    const connectionId = signal.connectionId ?? null;
+    if (connectionId !== null && (typeof connectionId !== "string" || !/^[a-zA-Z0-9-]{1,64}$/.test(connectionId))) return;
+    // A second association is subordinate to an existing media connection.
+    if (connectionId !== null && !peers.has(sessionId)) return;
+    const peerId = connectionId === null ? sessionId : `${sessionId}/${connectionId}`;
 
     if (signal.type === "offer") {
       if (typeof signal.sdp !== "string") {
@@ -375,19 +396,19 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
       // single bad session must never crash the whole proxy — that would drop
       // every other viewer and the tunnel. Contain it: fail this session only.
       try {
-        const pc = getOrCreatePeer(sessionId);
+        const pc = getOrCreatePeer(sessionId, connectionId);
         pc.setRemoteDescription(signal.sdp, "offer");
         // `onLocalDescription` fires automatically with the SDP answer.
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         log(`[webrtc] Session ${sessionId.slice(0, 8)}: failed to handle offer: ${message}`);
-        closeSession(sessionId);
+        closePeer(peerId);
       }
       return;
     }
 
     if (signal.type === "candidate") {
-      const pc = peers.get(sessionId);
+      const pc = peers.get(peerId);
       if (!pc) {
         return;
       }
@@ -409,13 +430,21 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
    * @param {string} sessionId
    * @returns {void}
    */
-  function closeSession(sessionId) {
-    const pc = peers.get(sessionId);
+  function closePeer(peerId) {
+    const pc = peers.get(peerId);
     if (pc) {
+      peers.delete(peerId);
+      const sessionId = peerId.split("/")[0];
+      if (controlPeers.get(sessionId) === peerId) controlPeers.delete(sessionId);
       try { pc.close(); } catch { /* ignore */ }
-      peers.delete(sessionId);
-      log(`[webrtc] Session ${sessionId.slice(0, 8)}: closed`);
+      log(`[webrtc] Session ${sessionId.slice(0, 8)}: peer ${peerId} closed`);
     }
+  }
+
+  function closeSession(sessionId) {
+    const control = controlPeers.get(sessionId);
+    if (control) closePeer(control);
+    closePeer(sessionId);
   }
 
   /**
@@ -425,7 +454,7 @@ export function createWebRtcManager({ sendSignal, onDataChannel, onLog, udpPort,
    */
   function dispose() {
     for (const sessionId of [...peers.keys()]) {
-      closeSession(sessionId);
+      closePeer(sessionId);
     }
     if (udpMuxListener) {
       try { udpMuxListener.stop(); } catch { /* ignore */ }

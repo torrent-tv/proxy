@@ -18,6 +18,7 @@ import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import ffmpegStatic from "ffmpeg-static";
+import nodeDataChannel from "node-datachannel";
 import { startProxyServer } from "../server.js";
 import { registerClient } from "../services/transport/registry-api.js";
 import { createTunnelClient } from "../services/transport/tunnel-client.js";
@@ -689,6 +690,7 @@ try {
   });
 
   webRtcManager = createWebRtcManager({
+    rtc: nodeDataChannel,
     // Single UDP port (UPnP-mapped above) shared by all sessions via a
     // persistent ICE UDP mux listener, so the WebRTC path is reachable from the
     // internet on one fixed port.

@@ -195,6 +195,9 @@ export function wireOutputs({
     // A software preset every picture is encoded at, for runs compared at one
     // quality (`--pin-preset`); null leaves the choice to the machine.
     pinnedPreset = null,
+    // A size every original-input stretch is given in place of copy rate
+    // times open (`--input-stretch-bytes`); null keeps the rule.
+    inputStretchBytes = null,
     // What every encoder this host may use was qualified and measured to do at
     // startup, by kind (`encode/calibration.js`). Takes the place of the one
     // array above, which a test may still hand in on its own.
@@ -1097,6 +1100,7 @@ export function wireOutputs({
     readRanges: readEncodeRanges,
     heldRanges: readEncodeHeldRanges,
     stretchCopied,
+    stretchBytes: inputStretchBytes,
     reviseBudget: () => parts.machineBudget.revise("memory", "admitted encode inputs"),
     capacity: () => parts.machineBudget.capacityOf("memory"),
     // How long this output's input takes to open, from the one owner of start
@@ -1120,6 +1124,9 @@ export function wireOutputs({
       parts.serving.invalidateWaits(output);
     }
   }) : null);
+  if (parts.encodeInputs && inputStretchBytes) {
+    logger.info(`encode input: every original-input stretch sized to ${inputStretchBytes} bytes (--input-stretch-bytes)`);
+  }
   // One owner of the disk, and the list of what takes it lives with the owner.
   parts.machineBudget = wireMachineBudget({
     segmentStore: parts.segmentStore,

@@ -89,6 +89,7 @@ program
   .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
   .option("--delivery-sink", "Serve /api/delivery-sink, a torrent-free byte stream for delivery testing")
   .option("--pin-preset <name>", "Encode every software picture at this libx264 preset only, for runs that must be compared at one quality (off by default)")
+  .option("--heap-snapshots", "Write a heap snapshot of a thread whose memory reaches a new high-water; each one stops that thread while it is written (off by default)")
   .option("--profile-start <seconds>", "Profile the CPU of the main thread and the torrent thread for this many seconds from the first source opened, written beside the state (off by default)")
   .option(
     "--send-chunk-bytes <bytes>",
@@ -395,6 +396,7 @@ try {
     logFile: options.logFile ?? "",
     deliverySink: options.deliverySink === true,
     profileStartSeconds: Number(options.profileStart) || 0,
+    heapSnapshots: options.heapSnapshots === true,
     pinnedPreset: typeof options.pinPreset === "string" && options.pinPreset.trim() ? options.pinPreset.trim() : null,
     // Late-bound the same way `webRtcManager` is below: the torrent pool is
     // built inside `startProxyServer`, before `dataChannelHandler` — the
@@ -524,6 +526,7 @@ try {
     // 2026-09-07 and every one was gone by the time the process that wrote them
     // died of a heap it had never been possible to look at.
     snapshotDir: options.stateDir || undefined,
+    heapSnapshots: options.heapSnapshots === true,
     snapshotFloorBytes: 400 * 1024 * 1024,
     snapshotGrowthBytes: 400 * 1024 * 1024,
     keepSnapshots: 3

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A heap snapshot is written only with `--heap-snapshots`. Each one stops its thread while it is written, and in a healthy session on Home Assistant the torrent thread reached the floor: one snapshot of 1281 MB held that thread about 20 s and the picture stood 22.2 s (r61, #ttv-178).
+
 ## 2.100.0
 
 - **New**: `--profile-start` profiles the torrent thread beside the main thread, over the same seconds, written as `cpu-torrent-<time>.cpuprofile` under the same storage budget. After a seek to 1400 s on Home Assistant a soundtrack input waited 23.3 s while every read of held bytes took 1.5-6 s in that thread and its loop ran up to 2.7 s late; no log says what it spent three quarters of a core on (r60, #ttv-178).

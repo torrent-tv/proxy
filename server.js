@@ -127,6 +127,8 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
 export async function startProxyServer({
   host, port, transcodeAudio, ffmpegBin, memoryBytes, segmentFormat, stateDir, onSubtitleCues, diagnostics, budgetPolicy,
   deliverySink = false,
+  // Whether a memory high-water earns a heap snapshot (`--heap-snapshots`).
+  heapSnapshots = false,
   // Seconds of main-thread CPU profile from the first source opened; 0 is off.
   profileStartSeconds = 0,
   // The one software preset every picture is encoded at, for runs compared at
@@ -178,6 +180,7 @@ export async function startProxyServer({
   const torrentPool = new WorkerTorrentPool({
     memoryBytes,
     stateDir,
+    heapSnapshots,
     onHoldingsChanged: () => onStateChanged(),
     onSourceForgotten: ({ sourceKey }) => {
       sourcePreparation?.forget(sourceKey);

@@ -692,6 +692,7 @@ startMemoryReport({
   quietMs: 60_000,
   changeBytes: 25 * 1024 * 1024,
   snapshotDir: workerData?.stateDir || undefined,
+  heapSnapshots: workerData?.heapSnapshots === true,
   snapshotFloorBytes: 400 * 1024 * 1024,
   snapshotGrowthBytes: 400 * 1024 * 1024,
   // CHOSEN, not derived: no healthy session has recorded this figure yet, so

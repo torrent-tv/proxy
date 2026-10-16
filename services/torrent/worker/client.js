@@ -117,13 +117,13 @@ export class TorrentWorkerClient {
   /**
    * @param {{ memoryBytes?: number, stateDir?: string, onPiecesArrived?: (event: object) => void }} [options]
    */
-  constructor({ memoryBytes, stateDir, onPiecesArrived, onSourceForgotten, onHoldingsChanged } = {}) {
+  constructor({ memoryBytes, stateDir, heapSnapshots = false, onPiecesArrived, onSourceForgotten, onHoldingsChanged } = {}) {
     this.#worker = new Worker(fileURLToPath(WORKER_URL), {
       // `stateDir` travels because the worker writes heap snapshots of its own
       // isolate there. It cannot choose a directory any other way: a worker may
       // not change the process's working directory, and the isolate that has
       // died three times is the one no snapshot has ever been taken of.
-      workerData: { memoryBytes, stateDir }
+      workerData: { memoryBytes, stateDir, heapSnapshots }
     });
     this.#caller = createCaller(this.#worker);
     this.#onPiecesArrived = onPiecesArrived ?? (() => undefined);

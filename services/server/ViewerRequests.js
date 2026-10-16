@@ -855,7 +855,12 @@ export class ViewerRequests {
     const segments = [];
     for (let index = 0; index < count; index++) {
       const endSeconds = timeline.publishedStartOf(index + 1);
-      const ranges = this.#host.encodeRuns.finishedMediaRangesOf(output, index);
+      // Only a made piece has media intervals to read. Asked of every piece,
+      // each one not made cost a `stat` of its file in the store's safety net
+      // for a missed directory event: 1327 per poll per output, 12.6 s of 300 s
+      // of the main thread at a cold start on Home Assistant (r61,
+      // torrent-tv/meta#178), while requests waited behind it.
+      const ranges = inventory.has(index) ? this.#host.encodeRuns.finishedMediaRangesOf(output, index) : undefined;
       const mediaRanges = ranges && output.segmentFormat?.servedMediaRanges ?
         output.segmentFormat.servedMediaRanges(ranges, { initBytes: sessionInit }) : undefined;
       if (index !== 0 && mediaRanges === undefined && !inventory.has(index) &&

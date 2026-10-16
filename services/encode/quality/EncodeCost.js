@@ -129,6 +129,33 @@ export class EncodeCost {
   }
 
   /**
+   * The speed a move onto another setting of this output's encoder was decided
+   * at (`presetSpeedOf`, its processing): what this output stands on until a
+   * piece of it is measured, instead of the figure taken when it was opened.
+   * That figure counts the output the move replaces as running beside it.
+   * Field r82 (torrent-tv/meta#185): an output at `faster` opened during a cold
+   * start was predicted 0.22x, its move was priced 1.81x, it measured
+   * 1.46-1.65x, and the start forecast on 0.22x stated 30 596 s where the
+   * picture came in 10.5 s. The price assumes the output on screen stops; where
+   * another viewer keeps it running, the figure is high until a piece is
+   * measured. A move is not an offer, so no cheapest-mode figure stands beside
+   * it.
+   *
+   * @param {object} session - The output the move is prepared onto.
+   * @param {number} speed - Seconds of film per second.
+   * @returns {void}
+   */
+  notePriceFor(session, speed) {
+    const preset = session?.spec?.video?.encode?.preset ?? null;
+    if (!session?.spec?.transcodesVideo || !preset || !Number.isFinite(speed) || speed <= 0) return;
+    const state = qualityStateOf(session);
+    state.predictedSpeedWhenOffered = speed;
+    state.predictedMode = preset;
+    state.offeredSpeedAtCheapestMode = null;
+    state.lastPredictionRatio = null;
+  }
+
+  /**
    * What this output's picture would do at another speed setting of its
    * encoder, at the same size, on this machine as it is: the startup
    * measurement of THAT mode at this frame, this file's decoding as measured

@@ -456,6 +456,14 @@ export function wireOutputs({
     presetLadder: () => (parts.encoders.current?.kind === "software" && Array.isArray(parts.softwarePresetBenchmark)
       ? parts.softwarePresetBenchmark.map((entry) => entry.preset) : []),
     presetSpeedOf: (output, preset) => parts.encodeCost.presetSpeedOf(output, preset, { segmentSeconds: parts.segmentDurationSec }),
+    // The price a move was decided at, given to an output with no measured
+    // piece: one already measured stands on its readings, and an output that
+    // runs was priced with its own cost counted beside the one on screen.
+    notePredictedSpeed: (output, speed) => {
+      if (parts.encodeRuns.speedReadingsOf(output).length === 0 && parts.encodeRuns.liveRunsOf(output).length === 0) {
+        parts.encodeCost.notePriceFor(output, speed);
+      }
+    },
     requiredSpeedOf: (output) => parts.hostLoad.requiredSpeedFor(output.file.sourceKey, output.file.fileIndex) ?? 1,
     heightsChosenAs: (consumerId, outputKey) => heightsChosenAs(parts.viewers, consumerId, outputKey),
     highestGivenSegmentOf: (consumerId, askedHeight) => highestGivenSegmentOf(parts.viewers, consumerId, askedHeight),

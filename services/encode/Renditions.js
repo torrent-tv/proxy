@@ -633,8 +633,10 @@ export class Renditions {
     }
     const bar = this.#host.requiredSpeedOf?.(base) ?? 1;
     const priced = [];
+    const speeds = new Map();
     const holds = (preset) => {
       const speed = this.#host.presetSpeedOf?.(current, preset) ?? null;
+      speeds.set(preset, speed);
       priced.push(`${preset}=${speed ? `${speed.effective.toFixed(2)}x` : "unpriced"}`);
       return speed !== null && speed.effective >= bar;
     };
@@ -654,6 +656,7 @@ export class Renditions {
     return this.#beginMove({
       base, current, consumerId, askedHeights, direction, changes: "preset",
       reasonText: `${reasonText}; priced ${priced.join(", ")} against ${bar.toFixed(2)}x`,
+      speed: speeds.get(target)?.processing ?? null,
       opening: this.#stepOpening(base, {
         height: encode.height,
         startSeconds: this.#host.viewerPositionOf(base.id, consumerId),
@@ -679,7 +682,8 @@ export class Renditions {
    * @param {object} move
    * @returns {Promise<{ started: boolean, reason: string, noPlace?: boolean }>}
    */
-  async #beginMove({ base, current, consumerId, askedHeights, direction, changes, reasonText, opening, what, matches, described }) {
+  async #beginMove({ base, current, consumerId, askedHeights, direction, changes, reasonText, opening, what, matches, described,
+    speed = null }) {
     const refuse = (reason) => ({ started: false, reason });
     let prepared;
     try {
@@ -727,6 +731,11 @@ export class Renditions {
     if (prepared !== base) {
       prepared.variantHeight ??= current.spec.video.encode.height;
       this.#host.outputs.markStep(prepared);
+    }
+    // The speed this move was decided at is what the start forecast reads for
+    // the output until a piece of it is measured (torrent-tv/meta#185).
+    if (Number.isFinite(speed) && speed > 0) {
+      this.#host.notePredictedSpeed?.(prepared, speed);
     }
     this.#host.noteSameHeightSwitch(consumerId, {
       askedHeights,

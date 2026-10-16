@@ -92,10 +92,10 @@ export class EncodeInputs {
   }
 
   /** The container's statement of an interval, its time added to the request's account. */
-  async #resolveTimed(timing, output, from, to) {
+  async #resolveTimed(timing, output, from, to, isCurrent = null) {
     const startedAt = this.#now();
     try {
-      return await this.#resolve(output, from, to, timing);
+      return await this.#resolve(output, from, to, timing, isCurrent);
     } finally {
       timing.resolutions += 1;
       timing.resolveMs += this.#now() - startedAt;
@@ -384,7 +384,11 @@ export class EncodeInputs {
       reads: 0, queuedMs: 0, readMs: 0, heldMs: 0, budgetMs: 0 };
     request.timing.attempts += 1;
     request.promise = (async () => {
-      const resolved = await this.#resolveTimed(request.timing, request.output, request.from, request.from);
+      // A request the plan withdraws stops its reads: a soundtrack piece's
+      // packet walk, left to run, held the file's reads and the piece the
+      // viewer had seeked to waited 16.9 s behind it (r59, torrent-tv/meta#178).
+      const resolved = await this.#resolveTimed(request.timing, request.output, request.from, request.from,
+        () => this.#requests.get(request.key) === request);
       if (resolved.kind === "result") this.#original.set(request.output, resolved.sources?.every(source => source.input.original === true) === true);
       if (this.#requests.get(request.key) !== request) return;
       let result;

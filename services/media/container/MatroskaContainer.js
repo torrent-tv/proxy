@@ -782,7 +782,12 @@ export class MatroskaContainer extends Container {
       streamSearchSeconds: FFMPEG_STREAM_SEARCH_SECONDS };
   }
 
-  async readPacketIndex(interval) {
+  /**
+   * @param {object} [interval]
+   * @param {{ isCurrent?: () => boolean }} [options] - A walk whose request is
+   *   no longer current stops between clusters and answers null.
+   */
+  async readPacketIndex(interval, { isCurrent } = {}) {
     if (this.#packets) return this.#packets;
     const layout = await this.#segmentLayout();
     if (!layout) throw new Error("Matroska Segment is absent.");
@@ -801,7 +806,8 @@ export class MatroskaContainer extends Container {
     const complete = new Set();
     let whole = true;
     for (const track of requested) {
-      const chain = await this.#readTrackPackets(layout, tracks, track, start, interval);
+      const chain = await this.#readTrackPackets(layout, tracks, track, start, interval, isCurrent);
+      if (!chain) return null;
       streams.set(track.trackNumber, chain.records);
       if (chain.reachesEnd) complete.add(track.trackNumber);
       if (!chain.reachesEnd || chain.startAt !== layout.firstClusterAt) whole = false;
@@ -825,7 +831,7 @@ export class MatroskaContainer extends Container {
    *
    * @returns {Promise<{ records: PacketRecordsChain, startAt: number, reachesEnd: boolean }>}
    */
-  async #readTrackPackets(layout, tracks, track, start, interval) {
+  async #readTrackPackets(layout, tracks, track, start, interval, isCurrent) {
     const id = track.trackNumber;
     const previous = this.#packetWalks.get(id) ?? Promise.resolve();
     let finished;
@@ -882,7 +888,8 @@ export class MatroskaContainer extends Container {
         const following = readings.find(reading => reading.startAt > current.startAt);
         const outcome = await walkMatroskaPackets({ readRange: this.readRange, fileSize: this.fileSize,
           portionBytes: this.portionBytes, layout, tracks, trackIds: [id], interval, packetMemory: this.packetMemory,
-          state: current, until: following?.startAt ?? null, isCovered: covered, readsThrough });
+          state: current, until: following?.startAt ?? null, isCovered: covered, readsThrough, isCurrent });
+        if (outcome === "obsolete") return null;
         if (outcome !== "until") break;
         current.next = following;
       }

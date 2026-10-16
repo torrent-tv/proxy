@@ -160,9 +160,16 @@ export class PauseRule {
     const since = this.#triedAt.get(run) ?? Number.NEGATIVE_INFINITY;
     const beside = lead.filter((second) => second.running.has(run) && second.at > since);
     if (beside.length < LEAST_SECONDS) {
-      // Let go by this rule and not measured yet: it runs until it is.
-      // Running since before anything could be compared: the urgency rule.
-      return this.#triedAt.has(run) ? { runs: true, because: `being measured beside the leader (${beside.length}s so far)` } : null;
+      if (this.#triedAt.has(run)) {
+        // Let go by this rule and not measured yet: it runs until it is.
+        return { runs: true, because: `being measured beside the leader (${beside.length}s so far)` };
+      }
+      // Running and not measured yet without having been let go by this rule
+      // (a start the plan made, or a run that led before): judged as a try,
+      // the condition `wouldStart` let it start under. Paused at once and
+      // tried a tick later instead, short runs on Home Assistant (r80) went
+      // through both: 81 pauses of 0.3 s (median), one per run.
+      return this.#whetherToTry({ leader, band, run, need, lead, without, draw, free, others, otherRunning, now });
     }
     const besideSpeed = middleAndScatter(beside.map((second) => second.speed));
     if (Number.isFinite(need)) {

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: An encoder started, or left running, beside a leading encoder whose readings exist is judged at once by the condition that let it start (the processor left free against what it draws, or the leader's speed to spare), instead of being paused by the urgency rule and let go on the next reading. On Home Assistant (r80, 2.101.4) every short soundtrack run went through both: 81 pauses of 0.3 s (median, 36 s in all) where r78 on 2.101.2 paused 30 times in all (#ttv-180).
+
 ## 2.101.5
 
 - **Fix**: The torrent thread's arrival forecast gives only what the peers' queues say: a piece whose every missing block is asked for comes when its queues bring it, and every other missing piece is left to the start forecast, which brings it at the source's measured download rate. Its own estimate for those, the holders' speeds shared out over the map's bands, came back on the polls where the start forecast answered 21 846 s and 160 774 s while the torrent carried 3.5-5.5 MB/s (r78, r79). A held start's log line now says when its input's last bytes come, and whether by the torrent's queues or by the measured rate (#ttv-185).

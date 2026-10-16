@@ -140,3 +140,41 @@ test("supply slower than the film over the rest of it holds the start once by th
   assert.equal(answer.reason, "minimum-safe-delay");
   assert.ok(Math.abs(answer.delaySeconds - expected) < 1, `${answer.delaySeconds} against ${expected}`);
 });
+
+// r78, r79 (torrent-tv/meta#185): holds of 21 846 s and 160 774 s named only
+// the piece; the answer now says when its input's last bytes come, and
+// whether the torrent's queues say so or the measured rate.
+test("a hold names when its input's bytes come and whether the torrent's queues say so", () => {
+  const now = 1_000_000;
+  const piece = 6, count = 100, duration = piece * count;
+  const bytesPerSecond = 1_000_000;
+  const byteAt = (seconds) => Math.round(seconds * bytesPerSecond);
+  const input = (ranges, rate) => ({
+    now, positionSeconds: 0, durationSeconds: duration, bufferedAheadSeconds: 0, reserveSeconds: 0,
+    lookaheadSeconds: 120,
+    sources: [{ id: "source", complete: false, fileOffset: 0, fileLength: byteAt(duration), pieceLength: PIECE_BYTES,
+      residence: [], downloadForecast: { ranges }, downloadRateReadings: summaryOf(rate, now) }],
+    tracks: [{
+      id: "video", sourceIds: ["source"], processedSeconds: 0, startupRemainingSeconds: 0, openSeconds: 0,
+      bitsPerMediaSecond: 8_000_000, readings: summaryOf(50, now),
+      segments: Array.from({ length: count }, (_, place) => ({
+        index: place, startSeconds: place * piece, endSeconds: (place + 1) * piece,
+        sourceInputs: [{ sourceId: "source", ranges: [{ start: byteAt(place * piece), end: byteAt((place + 1) * piece) }] }]
+      })),
+      readySegmentIndices: [], segmentSizesBytes: new Map()
+    }],
+    linkReadings: summaryOf(1_000_000_000, now)
+  });
+  // The piece at 300 s, after the look-ahead, queued to come in 5000 s.
+  const queued = predictPlaybackReadiness(input([{ start: byteAt(300), end: byteAt(306), availableAt: now + 5_000_000 }],
+    bytesPerSecond * 4));
+  assert.equal(queued.holdingBy.segment, 50);
+  assert.equal(queued.holdingBy.sourcePlanned, true);
+  assert.equal(queued.holdingBy.sourceArrivalSeconds, 5000);
+  // Supply at half of real time: the last piece's bytes, at the measured rate.
+  const measured = predictPlaybackReadiness(input([], bytesPerSecond / 2));
+  assert.equal(measured.holdingBy.segment, count - 1);
+  assert.equal(measured.holdingBy.sourcePlanned, false);
+  assert.ok(Math.abs(measured.holdingBy.sourceArrivalSeconds - duration * 2) < 1,
+    `${measured.holdingBy.sourceArrivalSeconds} against ${duration * 2}`);
+});

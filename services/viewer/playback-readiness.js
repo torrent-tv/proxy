@@ -380,7 +380,7 @@ export function predictPlaybackReadiness(input = {}) {
         const arrival = (range.availableAt - now) / 1000;
         // The entire protocol piece becomes readable after verification;
         // bytes inside it never arrive proportionally to their file address.
-        sourceByteService.get(id).push({ start: range.start, end: range.end, begin: arrival, finish: arrival });
+        sourceByteService.get(id).push({ start: range.start, end: range.end, begin: arrival, finish: arrival, planned: true });
       }
     }
   }
@@ -409,6 +409,7 @@ export function predictPlaybackReadiness(input = {}) {
   for (const job of jobs) {
     const { track, trackIndex, segment, sizeBits, encodeWork, sourceByteIntervals } = job;
     let sourceArrivalAt = 0;
+    const plan = { finish: 0 };
     for (const [sourceId, ranges] of sourceByteIntervals) {
       const source = sourceState.get(sourceId);
       if (!source) {
@@ -417,7 +418,7 @@ export function predictPlaybackReadiness(input = {}) {
       for (const interval of ranges) {
         const missing = uncoveredIntervals(interval, sourceByteCoverage.get(sourceId) ?? []);
         if (missing.length === 0) {
-          sourceArrivalAt = Math.max(sourceArrivalAt, latestArrival(interval, sourceArrivals.get(sourceId)));
+          sourceArrivalAt = Math.max(sourceArrivalAt, latestArrival(interval, sourceArrivals.get(sourceId), plan));
           continue;
         }
 
@@ -468,10 +469,13 @@ export function predictPlaybackReadiness(input = {}) {
     }
     const producedAt = job.produced || encodeWork === 0 ? 0 : processing.finish(encodeWork, admittedAt);
     trackFinish[trackIndex] = Math.max(trackFinish[trackIndex], producedAt);
-    productions.push({ at: producedAt, trackIndex, segment, requiresSource: sourceArrivalAt > 0 });
+    const sourcePlanned = sourceArrivalAt > 0 && plan.finish >= sourceArrivalAt;
+    productions.push({ at: producedAt, trackIndex, segment, requiresSource: sourceArrivalAt > 0, sourceArrivalAt,
+      sourcePlanned });
     const deliveryAt = link.finish(sizeBits, Math.max(transferFinish, producedAt));
     transferFinish = deliveryAt;
-    completions.push({ at: deliveryAt + finiteNonNegative(track.appendSeconds), trackIndex, segment });
+    completions.push({ at: deliveryAt + finiteNonNegative(track.appendSeconds), trackIndex, segment, sourceArrivalAt,
+      sourcePlanned });
   }
 
   const constraints = [];
@@ -479,10 +483,12 @@ export function predictPlaybackReadiness(input = {}) {
   // largest of thousands, and the log could only say that some term was
   // positive while the picture stood for 17 s (torrent-tv/meta#178).
   let holding = null;
-  const constrain = (value, kind, trackIndex, segment, atSeconds, aheadSeconds, requiresSource) => {
+  const constrain = (value, kind, trackIndex, segment, atSeconds, aheadSeconds, requiresSource,
+    sourceArrivalAt = 0, sourcePlanned = false) => {
     constraints.push(value);
     if (value > 0 && (holding === null || value > holding.value)) {
-      holding = { value, kind, trackIndex, segment, atSeconds, aheadSeconds, requiresSource };
+      holding = { value, kind, trackIndex, segment, atSeconds, aheadSeconds, requiresSource, sourceArrivalAt,
+        sourcePlanned };
     }
   };
   const end = rescale(fromSeconds(duration), unit);
@@ -501,7 +507,8 @@ export function predictPlaybackReadiness(input = {}) {
       for (const range of completion.segment.ranges) addMediaRange(delivered, range);
       after = contiguousEnd(delivered, at);
       const ahead = secondsAhead(earliest(before, trackEnd), at);
-      constrain(completion.at - ahead, "delivery", trackIndex, completion.segment.index, completion.at, ahead, false);
+      constrain(completion.at - ahead, "delivery", trackIndex, completion.segment.index, completion.at, ahead, false,
+        completion.sourceArrivalAt, completion.sourcePlanned);
       if (compare(after, before) <= 0 && completion.segment.ranges.some(({ start }) => compare(start, before) > 0)) {
         // A timestamp hole cannot be repaired by waiting longer. Keep it
         // distinct from an unavailable rate or a slow but finite service.
@@ -524,7 +531,7 @@ export function predictPlaybackReadiness(input = {}) {
         : Math.max(0, state.tailEndSeconds - toSeconds(before));
       const ahead = Math.max(0, secondsAhead(before, at) - Math.min(reserve, left) * Number(production.requiresSource));
       constrain(production.at - ahead, "production", trackIndex, production.segment.index, production.at, ahead,
-        production.requiresSource);
+        production.requiresSource, production.sourceArrivalAt, production.sourcePlanned);
     }
   }
   if (trackState.some(({ tail }) => tail.length > 0)) {
@@ -548,7 +555,11 @@ export function predictPlaybackReadiness(input = {}) {
     holdingBy: ready ? null : holding === null ? (originReady ? null : { kind: "position-not-held" })
       : { kind: holding.kind, track: tracks[holding.trackIndex]?.id ?? holding.trackIndex,
         segment: holding.segment, atSeconds: holding.atSeconds, aheadSeconds: holding.aheadSeconds,
-        requiresSource: holding.requiresSource },
+        requiresSource: holding.requiresSource,
+        // When its input's last bytes come, and whether the torrent thread's
+        // queues say so rather than the source's measured service.
+        ...(holding.sourceArrivalAt > 0 ? { sourceArrivalSeconds: holding.sourceArrivalAt,
+          sourcePlanned: holding.sourcePlanned } : {}) },
     preparedUntilSeconds: Math.min(duration, ...trackState.map((state, index) => {
       const ranges = state.clientRanges.map((range) => ({ ...range }));
       for (const item of productions.filter((item) => item.trackIndex === index && item.at <= delay)) {
@@ -600,6 +611,7 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArriv
     return state;
   };
   const next = trackState.map(() => 0);
+  const plan = { finish: 0 };
   let delivered = transferFinish;
   for (;;) {
     // The next piece in media order across the tracks, as the near window orders them.
@@ -635,6 +647,7 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArriv
       work = Math.max(0, work);
     }
     let sourceArrivalAt = 0;
+    plan.finish = 0;
     if (work > 0) {
       if (!state.curve) return { reason: "encode-rate-unavailable" };
       const trackSources = Array.isArray(track.sourceIds) ? track.sourceIds : [];
@@ -653,7 +666,7 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArriv
         let order = 0;
         for (const range of ranges) {
           // Bytes the torrent thread planned, or the near window brought, come when they were to come.
-          sourceArrivalAt = Math.max(sourceArrivalAt, latestArrival(range, sourceArrivals.get(sourceId)));
+          sourceArrivalAt = Math.max(sourceArrivalAt, latestArrival(range, sourceArrivals.get(sourceId), plan));
           const after = missingBefore(bytes, range.end);
           if (after > missingBefore(bytes, range.start)) order = Math.max(order, after);
         }
@@ -703,10 +716,13 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArriv
     // hole stops the media is decided in the near window, in exact time.
     const ahead = Math.max(0, startsAt - position);
     const requiresSource = sourceArrivalAt > 0;
-    constrain(completedAt - ahead, "delivery", trackIndex, segment.index, completedAt, ahead, false);
+    const sourcePlanned = requiresSource && plan.finish >= sourceArrivalAt;
+    constrain(completedAt - ahead, "delivery", trackIndex, segment.index, completedAt, ahead, false, sourceArrivalAt,
+      sourcePlanned);
     const covered = Math.max(0, ahead - Math.min(reserve, Math.max(0, state.tailEndSeconds - startsAt)) *
       Number(requiresSource));
-    constrain(producedAt - covered, "production", trackIndex, segment.index, producedAt, covered, requiresSource);
+    constrain(producedAt - covered, "production", trackIndex, segment.index, producedAt, covered, requiresSource,
+      sourceArrivalAt, sourcePlanned);
   }
 }
 
@@ -1023,7 +1039,16 @@ function indexedArrivals(ranges) {
     .map(range => ({ ...range, maximumEnd: maximumEnd = Math.max(maximumEnd, range.end) }));
 }
 
-function latestArrival(interval, ranges = []) {
+/**
+ * When the last of an interval's bytes arrives, by the arrivals indexed; with
+ * `plan`, the latest of those the torrent thread's queues gave is kept in it.
+ *
+ * @param {{ start: number, end: number }} interval
+ * @param {Array<{ start: number, end: number, finish: number, maximumEnd: number, planned?: boolean }>} [ranges]
+ * @param {{ finish: number } | null} [plan]
+ * @returns {number}
+ */
+function latestArrival(interval, ranges = [], plan = null) {
   let low = 0, high = ranges.length;
   while (low < high) {
     const middle = (low + high) >>> 1;
@@ -1032,7 +1057,10 @@ function latestArrival(interval, ranges = []) {
   }
   let finish = 0;
   for (let index = low; index < ranges.length && ranges[index].start < interval.end; index++) {
-    if (ranges[index].end > interval.start) finish = Math.max(finish, ranges[index].finish);
+    if (ranges[index].end > interval.start) {
+      finish = Math.max(finish, ranges[index].finish);
+      if (plan && ranges[index].planned) plan.finish = Math.max(plan.finish, ranges[index].finish);
+    }
   }
   return finish;
 }

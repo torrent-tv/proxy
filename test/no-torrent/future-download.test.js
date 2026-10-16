@@ -74,81 +74,24 @@ test("a changed map invalidates a forecast without modifying protocol state", as
   assert.equal(entry.wire.requests.length, 0);
 });
 
-test("unrequested pieces of one band arrive in the order the sequential picker takes them", async () => {
-  // A band now spans a stretch of many segments (`coalescedZones`); charged its
-  // end, its nearest piece would be priced at its farthest (torrent-tv/meta#178).
-  const entry = state();
-  entry.wire.peerPieces = { get: () => true };
-  const result = await forecast(entry);
-  assert.deepEqual([...result.arrivals.values()], [2500, 4500, 6500]);
-  assert.deepEqual(entry.wire.requests, []);
-});
-
-test("global bands do not spend the same measured supply concurrently", async () => {
-  const first = state();
-  const second = state();
-  for (const entry of [first, second]) entry.wire.peerPieces = { get: () => true };
-  second.register.state({ claimant: "viewer", fileIndex: 0, byteStart: 0,
-    byteEnd: 6 * BLOCK - 1, priority: 10, urgency: 0 });
-  const result = await futureDownload([second, first], { now: 500, findStore: () => null });
-  assert.deepEqual([...result.get(first.torrent).arrivals.values()], [2500, 4500, 6500]);
-  // The second torrent's own peer is free from the start, but the supply both
-  // peers measure, two blocks a second, carries the first band's six blocks
-  // before this band's: its first piece cannot come before 4 s.
-  assert.deepEqual([...result.get(second.torrent).arrivals.values()], [4500, 6500, 8500]);
-});
-
-test("pieces held by different peers come together, not one after another", async () => {
-  // A two-hour film's far pieces, each with a few unchoked holders, summed one
-  // after another: 127 838 s at 2.33 MB/s, and a seek held 39 s (r49,
-  // torrent-tv/meta#178).
-  const entry = state();
-  entry.torrent.wires = [0, 1, 2].map(held => ({ requests: [], downloadSpeed: () => BLOCK,
-    peerPieces: { get: index => index === held } }));
-  assert.deepEqual([...(await forecast(entry)).arrivals.values()], [2500, 2500, 2500]);
-});
-
-test("an unadvertised piece prevents a band estimate while observed queues remain usable", async () => {
+test("an observed queue gives its piece's arrival beside pieces left unknown", async () => {
   const entry = state();
   entry.wire.peerPieces = { get: index => index !== 0 };
   entry.wire.requests.push({ piece: 1, offset: 0, length: 2 * BLOCK });
   assert.deepEqual([...((await forecast(entry)).arrivals.values())], [null, 2500, null]);
 });
 
-test("equal priorities preserve required times instead of pricing the whole film as one band", async () => {
-  const entry = state();
-  entry.wire.peerPieces = { get: () => true };
-  entry.register.clear();
-  for (let piece = 0; piece < 3; piece++) entry.register.state({ claimant: `part:${piece}`,
-    fileIndex: 0, byteStart: piece * 2 * BLOCK, byteEnd: (piece + 1) * 2 * BLOCK - 1,
-    urgency: 0, priority: 100, deadlineAt: 1000 + piece * 10000 });
-  assert.deepEqual([...((await forecast(entry)).arrivals.values())], [2500, 4500, 6500]);
-});
-
-test("the nearest piece queued on a slow wire keeps its queue's time while a fast peer brings the next", async () => {
+test("a piece queued on a slow wire keeps its queue's time; one nobody was asked for is the start forecast's", async () => {
   // Its blocks are reserved to the slow wire: the fast one cannot bring them
-  // sooner (torrent-tv/meta#178 review).
+  // sooner (torrent-tv/meta#178 review). A piece not asked for is brought by
+  // the start forecast at the source's measured service. A second estimate
+  // here, shared out by the holders' own speeds, came back on the polls where
+  // the forecast answered 21 846 s and 160 774 s while the torrent carried
+  // 3.5-5.5 MB/s (r78, r79, torrent-tv/meta#185).
   const entry = state();
   entry.wire.downloadSpeed = () => BLOCK / 2;
   entry.wire.peerPieces = { get: index => index === 0 };
   entry.wire.requests.push({ piece: 0, offset: 0, length: 2 * BLOCK });
   entry.torrent.wires.push({ requests: [], downloadSpeed: () => 10 * BLOCK, peerPieces: { get: () => true } });
-  const arrivals = (await forecast(entry)).arrivals;
-  assert.equal(arrivals.get(0), 4500);
-  assert.equal(arrivals.get(1), 700);
-  assert.equal(arrivals.get(2), 900);
-});
-
-test("a peer choking us brings nothing but the pieces it allows, whatever it carried before", async () => {
-  const entry = state();
-  entry.wire.downloadSpeed = () => 10 * BLOCK;
-  entry.wire.peerPieces = { get: () => true };
-  entry.wire.peerChoking = true;
-  assert.deepEqual([...(await forecast(entry)).arrivals.values()], [null, null, null]);
-  entry.wire.hasFast = true;
-  entry.wire.peerAllowedFastSet = [0];
-  const arrivals = (await forecast(entry)).arrivals;
-  assert.equal(arrivals.get(0), 700);
-  // The rest waits behind a piece nobody can be asked for.
-  assert.equal(arrivals.get(1), null);
+  assert.deepEqual([...(await forecast(entry)).arrivals], [[0, 4500], [1, null], [2, null]]);
 });

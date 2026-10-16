@@ -828,7 +828,9 @@ export class ViewerRequests {
     logger.info(`playback held ${session.id} consumer=${consumerId}: delay ${seconds(delay)}s by ` +
       (holding.kind === "position-not-held" ? "the position, which nothing buffered covers" :
         `the ${holding.kind} of ${holding.track} #${holding.segment} in ${seconds(holding.atSeconds)}s against ` +
-        `${seconds(holding.aheadSeconds)}s of media before it${holding.requiresSource ? ", its input still downloading" : ""}`) +
+        `${seconds(holding.aheadSeconds)}s of media before it${holding.requiresSource ? ", its input still downloading" : ""}` +
+        (Number.isFinite(holding.sourceArrivalSeconds) ? ` until ${seconds(holding.sourceArrivalSeconds)}s by ` +
+          (holding.sourcePlanned ? "the torrent's queues" : "the measured download rate") : "")) +
       `; buffered ${seconds(forecast.bufferedSeconds)}s; rates ${rates.join(", ") || "none"}; download ${downloads.join(", ") || "none"}`);
   }
 

@@ -55,19 +55,17 @@ The proxy does not replace its methods. Withdrawn selections cancel obsolete
 requests; selections shared by remaining demand keep their requests. `critical`
 marks missing blocked-read ranges through the public API.
 
-FutureDownload observes outstanding peer queues, advertised pieces and measured
-peer rates. Complete queues provide a piece's arrival. For unrequested blocks,
-the public map establishes the order between bands, including required times
-when priorities tie, and a band's pieces come in index order, as the native
-`sequential` picker takes them. A piece is brought by the peers that hold it and
-may be asked for it, together, each from when it has brought what came before
-it; and no sooner than the measured supply of every such peer, across torrents,
-carries all the bytes ahead of it. Pieces with one holder are therefore
-summed one after another, and pieces with different holders come in parallel.
-A piece without a measured supplier leaves it and every later piece unknown;
-observed complete queues remain usable. The estimate
-is conditional on continued supply and successful verification. It never issues
-requests or replaces WebTorrent's picker.
+FutureDownload observes outstanding peer queues and measured peer rates. A
+piece whose every missing block is asked for arrives when its queues say: a
+block is reserved to the wire it was asked of. Every other missing piece is
+left unknown, and the start forecast brings it at the source's measured service
+in its own media order (`viewer/playback-readiness.js`). Until 2.101.4 this
+module also shared the holders' own speeds out over the bands of the map; that
+second model of the same supply came back on the polls where the forecast
+answered 21 846 s and 160 774 s while the torrent carried 3.5-5.5 MB/s (r78,
+r79, torrent-tv/meta#185), and it is gone. The estimate is conditional on
+continued supply and successful verification. It never issues requests or
+replaces WebTorrent's picker.
 Source reports never wait for a forecast. They are answered with the last
 finished one only for a torrent whose map and withdrawals are the ones it was
 worked out on; a newer one is worked out beside them, one at a time, once the

@@ -6,13 +6,14 @@
 #   docker build -t torrent-tv-proxy .
 #   docker run --network host -v ttv-proxy:/data torrent-tv-proxy --server-url https://webauth.courses
 
-# Alpine comes from Amazon's copy of Docker's official images (the same
-# digest), not from Docker Hub: Docker Hub refuses anonymous pulls past a
-# per-address limit, the CI runners share their addresses, and on
-# 2026-10-09 the release stopped twice on `429 Too Many Requests`.
+# Alpine comes from Google's mirror of Docker's official images (the same
+# digest, sha256:294b683c…). Docker Hub and Amazon's copy both refuse
+# anonymous pulls past a per-address limit, and the CI runners share their
+# addresses: Docker Hub stopped the release twice on 2026-10-09, Amazon's
+# copy four times running on 2026-10-16 ("toomanyrequests: Data limit exceeded").
 # Every stage takes node from Alpine's own package, as the add-on does, so the
 # native modules are compiled for the node that runs them.
-FROM public.ecr.aws/docker/library/alpine:3 AS dependencies
+FROM mirror.gcr.io/library/alpine:3 AS dependencies
 # utp-native ships no musl prebuild, so it is compiled here.
 RUN apk add --no-cache nodejs npm python3 make g++
 WORKDIR /app
@@ -40,7 +41,7 @@ RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
  && rm -rf node_modules/utp-native/build/Release/obj.target \
       node_modules/utp-native/build/Release/.deps
 
-FROM public.ecr.aws/docker/library/alpine:3 AS package
+FROM mirror.gcr.io/library/alpine:3 AS package
 RUN apk add --no-cache nodejs npm
 WORKDIR /src
 COPY . .
@@ -49,7 +50,7 @@ RUN npm pack --ignore-scripts --pack-destination /tmp \
  && tar -xzf /tmp/torrent-tv-proxy-*.tgz -C /app --strip-components=1
 
 # The runtime has node and ffmpeg; npm stays in the stages that install.
-FROM public.ecr.aws/docker/library/alpine:3
+FROM mirror.gcr.io/library/alpine:3
 RUN apk add --no-cache nodejs ffmpeg \
  && addgroup -S app && adduser -S -G app app \
  && mkdir /data && chown app:app /data

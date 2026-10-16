@@ -289,3 +289,16 @@ test("a segment name that is not one is refused", async () => {
     assert.equal(answer.kind, "not-found", `${name} must not be servable`);
   }
 });
+
+test("the progress report reads the media intervals of made pieces only", async () => {
+  // r61 (torrent-tv/meta#178): asked of every piece, each one not made cost a
+  // `stat` in the store, 1327 per poll per output on the main thread.
+  const manager = bareManager();
+  manager.outputs.set(SESSION_ID, fakeSession());
+  manager.segmentStore.sizesOf = () => new Map([[2, 1000]]);
+  const asked = [];
+  manager.encodeRuns.finishedMediaRangesOf = (_output, index) => { asked.push(index); return undefined; };
+  await manager.viewerRequests.getSessionProgress(SESSION_ID, "viewer-one");
+  assert.ok(asked.length > 0, "the forecast was built");
+  assert.deepEqual([...new Set(asked)], [2]);
+});

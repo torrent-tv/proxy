@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Perf**: The playback forecast reads the media intervals of made pieces only. Asked of every piece of the film on each progress poll, each piece not made cost a `stat` of its file: 1327 per poll per output, 12.6 s of 300 s of the main thread at a cold start on Home Assistant, while the page's requests waited behind it (r61, #ttv-178).
+
 ## 2.100.6
 
 - **Perf**: A file's fingerprint names both missing edges at once, so a cold start asks the swarm for the file's last piece with its first. Asked only after the first had arrived, the last piece — which also holds a Matroska film's Cues — came 2.4 s later, and the start waited for it (r66, #ttv-178).

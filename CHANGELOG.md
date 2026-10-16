@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The host-load reading no longer fails when an encoder ends while its processor time is being read. It read the run's process after that wait, threw `Cannot read properties of null (reading 'pid')` seven times in one session on Home Assistant, and each time lost the reading the quality offer is computed from (r64, #ttv-178).
+
 ## 2.100.3
 
 - **Fix**: A soundtrack walked from the picture's copy reads up to the copy's end what it needs instead of asking for a portion past it. The copy ends 1 MB into the next cluster, 38 of 167 such walks stopped there, and each of those soundtrack pieces read 4-8 MB more through the torrent thread, 0.5-5 s (r63, #ttv-178).

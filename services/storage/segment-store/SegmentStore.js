@@ -104,6 +104,17 @@ export class SegmentStore {
 
   /** Output key → how to read its file names. @type {Map<string, object>} */
   #formats = new Map();
+  /**
+   * The outputs whose served pieces this store names itself, in `publish`.
+   * Their record is complete by construction: a piece arrives through
+   * `publish` and leaves through this store's removals. Only an output whose
+   * muxer renames its own pieces into place (the `hls` branch, taken where
+   * there is no grid of cuts) can hold a piece the record has not been told
+   * of yet, and only there does `pathOf` look at the disk.
+   *
+   * @type {Set<string>}
+   */
+  #publishing = new Set();
   #reads = new Map();
 
   /** Hold physical material while a read is prepared or its stream is open. */
@@ -668,6 +679,7 @@ export class SegmentStore {
     }
     // Publication registers the material even after the previous directory was dropped.
     this.useFormat(key, format);
+    this.#publishing.add(key);
     // What the directory holds has changed by this one piece.
     if (index >= 0) this.#heldArrived(key, index);
     else this.#held.delete(key);
@@ -1135,10 +1147,15 @@ export class SegmentStore {
     this.#touched.set(key, this.#now());
     const contents = this.refresh(key);
     const found = contents.byNumber.get(index);
-    if (found || !contents.followed) return found ?? null;
+    // An output this store publishes answers from its record alone. Looking
+    // at the disk for every piece not made, as it did for every output, cost
+    // the main thread 12.6 s of 300 s at a cold start on Home Assistant, the
+    // forecast asking about each piece of the film on every poll (r61,
+    // torrent-tv/meta#178).
+    if (found || !contents.followed || this.#publishing.has(key)) return found ?? null;
     // A reading kept up piece by piece answers from what it was told, and a
-    // change the watch failed to deliver would leave a closed piece absent for
-    // good. The one file asked about is looked at — a `stat`, not a listing.
+    // piece a muxer renamed into place may not have been told of yet. The one
+    // file asked about is looked at — a `stat`, not a listing.
     this.#heldArrived(key, index);
     return contents.byNumber.get(index) ?? null;
   }
@@ -1178,6 +1195,7 @@ export class SegmentStore {
     }
     this.#held.delete(key);
     this.#formats.delete(key);
+    this.#publishing.delete(key);
     this.#mediaRanges.delete(key);
     this.#touched.delete(key);
     this.#inits.delete(key);

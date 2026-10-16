@@ -102,6 +102,7 @@ import { configurationKeyOf } from "../encode/fingerprint.js";
 import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
 import { downloadShare } from "../storage/processor-share.js";
 import { describeProcessor, processorBetween, sampleProcessor } from "../storage/machine-processor.js";
+import { ProcessorBudget } from "../encode/ProcessorBudget.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode/encode-run-state.js";
 import { secondsUntilClosed } from "../encode/piece-close-time.js";
 
@@ -350,7 +351,7 @@ export function wireOutputs({
     producedNumbers: (...args) => parts.serving.producedNumbers(...args),
     servesAudioSeparately: (...args) => parts.renditions.servesAudioSeparately(...args),
     disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
-    get contentionPenalties() { return parts.contentionPenalties; },
+    get contentionPenalties() { return parts.processor?.penalties ?? null; },
     get encodeCost() { return parts.encodeCost; },
     get encodeOrchestrator() { return parts.encodeOrchestrator; },
     get ffmpegBin() { return parts.ffmpegBin; },
@@ -736,7 +737,7 @@ export function wireOutputs({
       files.set(key, file);
     }
     const watched = [...files.values()].filter((file) => Number.isFinite(file.bytesPerFilmSecond) && file.bytesPerFilmSecond > 0);
-    const share = downloadShare({ availableShare: parts.hostLoad.hostAvailability?.share ?? 1,
+    const share = downloadShare({ availableShare: parts.processor?.availability()?.share ?? 1,
       baseDraw: parts.hostLoad.baseDraw, costPerMegabyte: parts.hostLoad.observedTorrentCostPerMegabyte, files: watched });
     // Kept beside the readings it is judged against: what the torrents moved
     // over each interval is said next to the limit in force (meta#178).
@@ -744,7 +745,17 @@ export function wireOutputs({
     void Promise.resolve(parts.setDownloadRate(share.bytesPerSecond, `film speed ${share.filmSpeed.toFixed(2)}x ` +
       `over ${watched.length} file(s), ${Math.round(share.capacity * 100)}% of the machine for the proxy`)).catch(() => {});
   };
-  parts.contentionPenalties = contentionPenalties instanceof Map ? contentionPenalties : null;
+  // The one owner of what the processor gives the encoders: the share of the
+  // machine other work leaves and the measured contention penalties, read by
+  // every place that decides on the processor (torrent-tv/meta#180).
+  parts.processor = new ProcessorBudget({ reading: () => parts.hostLoad.hostAvailability, penalties: contentionPenalties });
+  // Kept as the name the penalties were always set and read by, now the budget's.
+  Object.defineProperty(parts, "contentionPenalties", {
+    get: () => parts.processor.penalties,
+    set: (penalties) => { parts.processor.penalties = penalties; },
+    enumerable: true,
+    configurable: true
+  });
   // Seconds of film per second when the picture is COPIED, measured at
   // startup. Nothing else prices that branch: the other benchmarks measure
   // encoding and decoding, and a copy does neither.
@@ -913,11 +924,11 @@ export function wireOutputs({
     host: () => ({
       benchmark: parts.softwarePresetBenchmark,
       decodeModel: parts.decodeCostModel,
-      contentionPenalties: parts.contentionPenalties,
+      contentionPenalties: parts.processor.penalties,
       copySpeedX: parts.copySpeedX,
       audioCalibration,
       audioDescriptionOf,
-      availability: parts.hostLoad.hostAvailability,
+      availability: parts.processor.availability() ?? undefined,
       // WHICH encoder this host settled on. Only the software ladder is
       // benchmarked, so a reading taken off a hardware encoder cannot be
       // split into its decode and encode halves and is not filed as one.
@@ -957,7 +968,7 @@ export function wireOutputs({
     encodeCost: parts.encodeCost,
     occupiedCostSec: (fileKey) => parts.admission?.occupiedCost({ exceptFileKey: fileKey }).costSec ?? 0,
     occupancyKnownFor: (fileKey) => (parts.admission?.occupiedCost({ exceptFileKey: fileKey }).unpriced ?? 0) === 0,
-    availability: () => parts.hostLoad.hostAvailability ?? null,
+    availability: () => parts.processor.availability(),
     outputs: parts.outputs,
     stateFor: (session) => parts.encodeRuns.runStateOf(session),
     // WHICH HEIGHTS A LIVE VIEWER HAS ON SCREEN, as numbers. Who is watching
@@ -1051,7 +1062,7 @@ export function wireOutputs({
     finished: (address) => parts.outputs.outputsOn(address).some((session) => finishedOutput(session)),
     loadOf: (address) => parts.encodeCost.loadOfOutput(address),
     loadForCandidate: (spec, file) => parts.encodeCost.loadForCandidate(spec, file),
-    availability: () => parts.hostLoad.hostAvailability ?? null
+    availability: () => parts.processor.availability()
   });
   parts.encodeOrchestrator = new EncodeOrchestrator({
     inputDemandChanged: (address, windows) => {
@@ -1067,7 +1078,7 @@ export function wireOutputs({
     maxRunsFor: (address) => parts.encodeRuns.maxRunsForOutput(address),
     makeRun: ({ address, from, to, because }) => parts.encodeRuns.makeRunAt(address, from, to, because),
     segmentSeconds: parts.segmentDurationSec,
-    contentionPenalties: parts.contentionPenalties,
+    contentionPenalties: parts.processor.penalties,
     startingSpeedFor: (address) => parts.encodeCost.speedForOutput(address),
     segmentCoverage,
     // HOW IT ASKS TO DECIDE AGAIN. A plan that refuses to place anything

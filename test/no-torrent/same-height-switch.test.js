@@ -56,6 +56,7 @@ import {
   sameHeightSwitchOf,
   stepBeingWarmedOf,
   stepOnScreenOf,
+  switchingFrom,
   switchingOnto,
   watches
 } from "../../services/viewer/choices.js";
@@ -198,6 +199,7 @@ function pictureAtNominal(how = {}) {
     sameHeightSwitchOf: (consumerId) => sameHeightSwitchOf(viewers, consumerId),
     noteSameHeightSwitch: (consumerId, value) => noteSameHeightSwitch(viewers, consumerId, value),
     switchingOnto: (output) => switchingOnto(viewers, output),
+    switchingFrom: (output) => switchingFrom(viewers, output),
     segmentClosed: (key, index) => closed.has(`${key}#${index}`),
     // What a viewer holds, as their page said, and the cushion a move that is
     // not urgent waits for — none unless a check names one.
@@ -250,16 +252,22 @@ function pictureAtNominal(how = {}) {
     viewer.report({ linkMbps: linkJustFor(NOMINAL) * 2, bufferedAheadSec: 20, positionSeconds: 40, playing: true });
   }
   /**
-   * The segments this viewer has been given in the viewing they are in.
+   * The segments this viewer has been given in the viewing they are in, each
+   * closed on the output it was given from — what an answered request is —
+   * unless `openLast` says the last one is still being waited for there.
    *
    * @param {string} consumerId
    * @param {number} upTo
    * @param {object} [output]
+   * @param {{ openLast?: boolean }} [how]
    */
-  const given = (consumerId, upTo, output = base) => {
+  const given = (consumerId, upTo, output = base, { openLast = false } = {}) => {
     const generation = viewers.get(consumerId).assignments.generation;
     for (let index = 0; index <= upTo; index += 1) {
       noteGivenOutput(viewers, consumerId, generation, HEIGHT, index, output.outputKey);
+      if (!(openLast && index === upTo)) {
+        closed.add(`${output.outputKey}#${index}`);
+      }
     }
   };
   /** @param {string} consumerId @param {number} limit */
@@ -692,6 +700,49 @@ test("a machine-bound viewer is moved to the best faster setting this machine ho
   assert.equal(opened.at(-1).capKbps, NOMINAL);
   close(prepared, 11);
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "moved once the next segment is closed there");
+});
+
+// r71 (torrent-tv/meta#178): a viewer waiting for #2176 was moved from #2177,
+// the output they left stopped making #2176, and the picture stood for good.
+test("a move waits for the segment given from the output on screen and not closed there", async () => {
+  const { renditions, viewers, base, close, given, linkNow, outputs } = pictureAtNominal();
+  given("viewer-a", 10, base, { openLast: true });
+  linkNow("viewer-a", LIMITS[1]);
+  const move = await renditions.prepareSameHeightSwitch(base, "viewer-a", "down", "thin");
+  assert.equal(move.started, true, move.reason);
+  const prepared = outputs.get(sameHeightSwitchOf(viewers, "viewer-a").outputId);
+  close(prepared, 11);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), base.outputKey, "#10 is still awaited on the output on screen");
+  assert.equal(viewers.forOutput(base).has("viewer-a"), true, "they stay on it, so its encoder makes #10");
+  close(base, 10);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "moved on #10 closing there, with no report");
+  const generation = viewers.get("viewer-a").assignments.generation;
+  assert.equal(givenOutputOf(viewers, "viewer-a", generation, HEIGHT, 10), base.outputKey, "the held request stays with the output it was given from");
+});
+
+test("a move to a faster setting waits for the segment given from the output on screen too", async () => {
+  const { renditions, viewers, base, close, given, outputs } = pictureAtNominal({
+    format: mpegtsFormat, preset: "faster", ladder: LADDER, presetSpeeds: { superfast: 1.3, ultrafast: 2.4 }
+  });
+  given("viewer-a", 10, base, { openLast: true });
+  const move = await renditions.preparePresetSwitch(base, "viewer-a", "down", "slow");
+  assert.equal(move.started, true, move.reason);
+  const prepared = outputs.get(sameHeightSwitchOf(viewers, "viewer-a").outputId);
+  close(prepared, 11);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), base.outputKey);
+  close(base, 10);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey);
+});
+
+test("an output on screen whose encoding failed for good is not waited for", async () => {
+  const { renditions, viewers, base, close, given, linkNow, outputs, failed } = pictureAtNominal();
+  given("viewer-a", 10, base, { openLast: true });
+  linkNow("viewer-a", LIMITS[1]);
+  await renditions.prepareSameHeightSwitch(base, "viewer-a", "down", "thin");
+  const prepared = outputs.get(sameHeightSwitchOf(viewers, "viewer-a").outputId);
+  failed.add(base.id);
+  close(prepared, 11);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey);
 });
 
 test("no faster setting that holds realtime moves nothing, and says what each was priced at", async () => {

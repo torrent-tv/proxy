@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A move to another output of the size on screen (another limit or speed setting) waits until the segment a viewer was last given from the output they are on is closed there. Their request for it is held by that output, and leaving it stopped its encoder: on Home Assistant a viewer waiting for #2176 was moved from #2177, nobody made #2176, and the picture stood for good. The segment closing there now makes the move at once (r71, #ttv-178).
+
 ## 2.100.10
 
 - **Fix**: A viewer held before their picture moves is no longer moved to a faster speed setting; only a viewer whose buffer is draining is, as before 2.100.9. Held after a seek on Home Assistant, a viewer was moved from a piece past the one they were waiting for, the output they left stopped making that piece, and the picture stood for good; at the cold start the move was refused anyway, since a second encoder beside the first would have slowed every output to 0.53x (r71, #ttv-178).

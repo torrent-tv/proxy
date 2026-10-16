@@ -1,4 +1,4 @@
-## Unreleased
+## 2.100.15
 
 - **Fix**: Report original-input selection targets, boundary probes and reservation-time memory so short encoder runs can be attributed to the limits actually observed, without extra source reads or changes to admission (#ttv-181).
 

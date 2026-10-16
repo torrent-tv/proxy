@@ -309,6 +309,8 @@ export function wireOutputs({
     describeProcessor,
     liveRunsOf: (...args) => parts.encodeRuns.liveRunsOf(...args),
     runStateOf: (...args) => parts.encodeRuns.runStateOf(...args),
+    // Today's cost `c` beside each run's measured `k` (torrent-tv/meta#180, plan 2.3).
+    costSecOf: (session) => parts.encodeCost?.loadOfOutput(session.outputKey)?.costSec ?? null,
     get getSourceStats() { return parts.getSourceStats; },
     get getTorrentTotals() { return parts.getTorrentTotals; },
     get outputs() { return parts.outputs; },

@@ -157,7 +157,7 @@ export class HostLoad {
   #supplyByKey = new Map();
 
   /**
-   * @param {object} host - `liveRunsOf`, `runStateOf`, the readings of `encode/host-load.js` (`readMachineState`, `readProcessCpuSeconds`, `readProxyCpuSeconds`, `readSystemCpu`, `shareOfMachine`), `getSourceStats`, `getTorrentTotals`, `outputs`
+   * @param {object} host - `liveRunsOf`, `runStateOf`, the readings of `encode/host-load.js` (`readMachineState`, `readProcessCpuSeconds`, `readProxyCpuSeconds`, `readSystemCpu`, `shareOfMachine`), `getSourceStats`, `getTorrentTotals`, `outputs`, and optionally `costSecOf(session)`, `EncodeCost`'s cost of an output, said beside each run's `k`
    */
   /** The share of the machine this process draws doing nothing priced; zero until measured. */
   get baseDraw() {
@@ -634,6 +634,13 @@ export class HostLoad {
    * Only runs read at both ends that made film in between are said. For the
    * log only.
    *
+   * Beside each `k`, `EncodeCost`'s cost of the run's output (`c`) and `k`
+   * converted to that unit over the cores this process may use (`k/U`), on the
+   * same reading: where a run uses less than it is given the two differ, and
+   * whether the processor claim moves from `c` to `k` is judged from these
+   * lines (plan 2.3, torrent-tv/meta#180). `c` is filed as if the run were
+   * alone on a quiet machine; a `k` read beside other runs is not.
+   *
    * @param {{ takenAt: number, byPid: Map<number, number>, runs?: Map<number, { film: number | null, label: string, kind: string }> }} previous
    * @param {{ takenAt: number, byPid: Map<number, number>, runs?: Map<number, { film: number | null, label: string, kind: string }> }} sample
    */
@@ -642,6 +649,8 @@ export class HostLoad {
     const elapsedSec = (sample.takenAt - previous.takenAt) / 1000;
     if (!(elapsedSec > 0)) return;
     const alive = new Map([...previous.runs, ...sample.runs]);
+    const boundCores = Number(sample.processor?.bound?.cores);
+    const cores = Number.isFinite(boundCores) && boundCores > 0 ? boundCores : Math.max(1, os.cpus().length);
     const said = [];
     for (const [pid, run] of sample.runs) {
       const before = previous.runs.get(pid);
@@ -653,12 +662,31 @@ export class HostLoad {
       if (!(film > 0)) continue;
       const cpu = cpuNow - cpuBefore;
       const beside = [...alive].filter(([other]) => other !== pid).map(([, other]) => other.kind);
-      said.push(`${run.label} ${run.kind} k=${(cpu / film).toFixed(3)} CPU-s per film-s ` +
+      const k = cpu / film;
+      said.push(`${run.label} ${run.kind} k=${k.toFixed(3)} CPU-s per film-s ` +
         `(${cpu.toFixed(2)} CPU-s, ${film.toFixed(2)} film-s, speed ${(film / elapsedSec).toFixed(2)}x, ` +
-        `${(cpu / elapsedSec).toFixed(2)} cores), beside ${beside.length}` + (beside.length > 0 ? ` [${beside.join(", ")}]` : ""));
+        `${(cpu / elapsedSec).toFixed(2)} cores), ` +
+        `c=${Number.isFinite(run.costSec) && run.costSec > 0 ? run.costSec.toFixed(3) : "unpriced"} k/U=${(k / cores).toFixed(3)} ` +
+        `(U=${cores.toFixed(2)} cores), beside ${beside.length}` + (beside.length > 0 ? ` [${beside.join(", ")}]` : ""));
     }
     if (said.length > 0) {
       logger.info(`processor: run cost over ${elapsedSec.toFixed(1)}s: ${said.join("; ")}`);
+    }
+  }
+
+  /**
+   * `EncodeCost`'s cost of an output, for the log; null where it is unpriced
+   * or cannot be read.
+   *
+   * @param {object} session
+   * @returns {number | null}
+   */
+  #costSecOf(session) {
+    try {
+      const cost = Number(this.#host.costSecOf?.(session));
+      return Number.isFinite(cost) && cost > 0 ? cost : null;
+    } catch {
+      return null;
     }
   }
 
@@ -750,7 +778,8 @@ export class HostLoad {
         startedAt: run.startedAt,
         film: filmMadeBy(run),
         label: `${session.outputKey ?? session.id} #${run.from}..#${run.to}`,
-        kind: costKindForSession(session)
+        kind: costKindForSession(session),
+        costSec: this.#costSecOf(session)
       })));
     const [system, endedChildren, ...cpuReadings] = await Promise.all([
       this.#host.readSystemCpu(),
@@ -761,7 +790,7 @@ export class HostLoad {
     const byPid = new Map();
     /** @type {Map<number, number>} */
     const startedAt = new Map();
-    /** @type {Map<number, { film: number | null, label: string, kind: string }>} */
+    /** @type {Map<number, { film: number | null, label: string, kind: string, costSec: number | null }>} */
     const runsByPid = new Map();
     runs.forEach((run, index) => {
       const seconds = cpuReadings[index];
@@ -769,7 +798,7 @@ export class HostLoad {
         byPid.set(run.pid, seconds);
         startedAt.set(run.pid, run.startedAt);
       }
-      runsByPid.set(run.pid, { film: run.film, label: run.label, kind: run.kind });
+      runsByPid.set(run.pid, { film: run.film, label: run.label, kind: run.kind, costSec: run.costSec });
     });
     const sample = {
       takenAt: Date.now(),

@@ -4,9 +4,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { EventEmitter } from "node:events";
 import { CompletedFiles } from "../../services/storage/files/CompletedFiles.js";
 import { openCompletedInputFile } from "../../services/torrent/worker/completed-input-file.js";
 import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
+import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
 
 const hash = "0123456789abcdef0123456789abcdef01234567";
 
@@ -63,6 +65,22 @@ test("a response destroyed before reading returns its pin, including an explicit
   const closed = input.release();
   stream.destroy();
   await closed;
+  assert.equal(files.bytes, 0);
+}));
+
+test("closing an HTTP response destroys its unread disk stream and returns the file lease", async () => withFile(async (files, content) => {
+  const file = await openInput(files);
+  const raw = new EventEmitter();
+  const reply = { raw, code() { return this; }, header() { return this; }, send(body) { this.body = body; return this; } };
+  const input = { lengthOf: () => content.length,
+    read: () => ({ end: content.length - 1, size: content.length, stream: file.stream(0, content.length - 1, () => {}) }) };
+  await handleEncodeInputGet({ raw: { socket: { remoteAddress: "127.0.0.1" } }, method: "GET",
+    params: { token: "1", fileIndex: "0" }, headers: { range: "bytes=0-" } }, reply, { inputOf: () => input });
+  const closed = file.release();
+  await files.allow(0);
+  raw.emit("close");
+  await closed;
+  assert.equal(reply.body.destroyed, true);
   assert.equal(files.bytes, 0);
 }));
 

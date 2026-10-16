@@ -1,4 +1,4 @@
-## Unreleased
+## 2.100.11
 
 - **Fix**: A move to another output of the size on screen (another limit or speed setting) waits until the segment a viewer was last given from the output they are on is closed there. Their request for it is held by that output, and leaving it stopped its encoder: on Home Assistant a viewer waiting for #2176 was moved from #2177, nobody made #2176, and the picture stood for good. The segment closing there now makes the move at once (r71, #ttv-178).
 

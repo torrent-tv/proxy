@@ -41,6 +41,22 @@ export async function handleTranscodeVariantFileGet(req, reply, { renditions, se
   if (refusedAsStale(req, reply, viewerRequests, fileName)) {
     return reply;
   }
+  // A held segment can be given to another output while it waits (a move
+  // between two outputs of this height); the request then resolves again.
+  for (;;) {
+    const answered = await serveResolved(req, reply, { renditions, serving, viewerRequests, baseSessionId, height, fileName, consumerId });
+    if (answered !== "reassigned") {
+      return answered;
+    }
+  }
+}
+
+/**
+ * Resolve the address once and answer it from what it resolves to.
+ *
+ * @returns {Promise<unknown>} "reassigned" when the held segment was given to another output meanwhile.
+ */
+async function serveResolved(req, reply, { renditions, serving, viewerRequests, baseSessionId, height, fileName, consumerId }) {
   const resolved = await renditions.resolveVariantFile(
     baseSessionId,
     height,
@@ -90,6 +106,7 @@ export async function handleTranscodeVariantFileGet(req, reply, { renditions, se
     serving,
     viewerRequests,
     sessionId: resolved.sessionId,
-    fileName
+    fileName,
+    stillGiven: () => renditions.stillGivenTo(baseSessionId, height, fileName, consumerId, statedGenerationOf(req), resolved.sessionId)
   });
 }

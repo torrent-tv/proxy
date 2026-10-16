@@ -102,6 +102,7 @@ import { configurationKeyOf } from "../encode/fingerprint.js";
 import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
 import { downloadShare } from "../storage/processor-share.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode/encode-run-state.js";
+import { secondsUntilClosed } from "../encode/piece-close-time.js";
 
 // Where a variant and an audio rendition live under a session — `v/<height>/…`
 // and `a/<track>/…` — is stated in `encode/output/playlists.js`, beside the lines that
@@ -460,6 +461,29 @@ export function wireOutputs({
     // asked before a preparation is recorded.
     admitsPreparation: (output) => parts.admission.admitsPreparation(output?.outputKey ?? ""),
     segmentClosed: (key, index) => parts.segmentStore.isClosed(key, index),
+    // How long until a piece is closed on an output, from that output's runs and
+    // the rate the start forecast reads for it (`encode/piece-close-time.js`).
+    secondsUntilClosed: (output, index, now) => {
+      const readings = parts.encodeRuns.speedReadingsOf(output).filter((reading) => reading.at <= now);
+      const summary = readings.length > 0 ? rateSummaryOf(readings) : null;
+      const speed = summary ? forecastRate(summary, now, 0, "piece") : parts.encodeCost.projectedSpeedOf(output);
+      return secondsUntilClosed({
+        closed: parts.segmentStore.isClosed(output.outputKey ?? "", index),
+        index,
+        pieceStart: output.timeline?.publishedStartOf?.(index),
+        pieceEnd: output.timeline?.publishedStartOf?.(index + 1),
+        runs: parts.encodeRuns.liveRunsOf(output).map((run) => ({
+          from: run.from,
+          to: Number.isInteger(run.to) ? run.to : -1,
+          startedAt: run.startedAt,
+          startSeconds: run.progress.startPositionSeconds,
+          reachedSeconds: run.progress.processedSeconds
+        })),
+        speed: Number.isFinite(speed) ? speed : null,
+        openSeconds: runStartSecondsOf(output),
+        now
+      });
+    },
     // What a gone output left in the store, and whether another output's header
     // may stand in for its own.
     storedPieceReady: (key, fileName) => parts.serving.hasStoredPiece(key, fileName),

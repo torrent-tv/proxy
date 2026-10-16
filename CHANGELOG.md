@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A segment a viewer is waiting for when they are moved to another output of the size on screen is given by whichever of the two outputs closes it sooner, by this machine's readings of their runs, instead of always by the one they are leaving. Nothing of it has been sent yet, so the prepared output can answer it: the move then begins at it, and the held request is answered from there. With either time unknown, or a header not proven to decode where the player's does, it is waited for where it was given, as in 2.100.11 (#ttv-178).
+
 ## 2.100.13
 
 - **Fix**: Let the control connection acquire its own signalling session, so it can reconnect after a server release closes the earlier signalling socket while media keeps playing. Advertise capability version 2 for this contract.

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.100.7
 
 - **Perf**: The playback forecast reads the media intervals of made pieces only. Asked of every piece of the film on each progress poll, each piece not made cost a `stat` of its file: 1327 per poll per output, 12.6 s of 300 s of the main thread at a cold start on Home Assistant, while the page's requests waited behind it (r61, #ttv-178).
 

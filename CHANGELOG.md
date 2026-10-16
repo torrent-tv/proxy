@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: An encoder input the plan withdraws stops its reads: one not yet begun is skipped in the file's queue, and a Matroska packet walk under way stops at the next cluster, to go on from there when asked again. Left to run, the walks for a soundtrack piece behind the viewer and one far ahead held the file's reads after a seek to 1400 s, and the piece the viewer had seeked to waited 16.9 s behind them; the picture first moved after 64.6 s (r59, #ttv-178).
+
 ## 2.99.20
 
 - **Fix**: Memory for media metadata keeps room for a packet table's next growth while any table is held. A table grows a block at a time, each twice the last; allowed exactly what it held, each growth was refused first and its whole read tried again, and after a seek to 1000 s a soundtrack piece was refused three times and ready after 53.7 s (r58, #ttv-178).

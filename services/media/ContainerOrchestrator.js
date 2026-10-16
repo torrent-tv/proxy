@@ -215,7 +215,8 @@ export class ContainerOrchestrator {
         value = await container.readSourceRanges(params.packetInterval);
         if (value.kind !== "result") return { ...value, requestId };
       } else if (statement === "packets") {
-        value = await container.readPacketIndex(params.packetInterval);
+        value = await container.readPacketIndex(params.packetInterval, { isCurrent: params.isCurrent });
+        if (value === null) return { kind: "terminal", reason: "request-obsolete", requestId };
         await value?.prepareAudioDependencies?.(params.packetInterval, container.readRange);
       } else {
         throw new TypeError(`Unknown media statement: ${statement}`);

@@ -44,9 +44,12 @@ function recordedTracks(tracks, trackIds) {
  * `start` on, where the caller knows it: those are read a portion at a time
  * across clusters too.
  *
- * @returns {Promise<"covered" | "until" | "end">}
+ * A walk whose `isCurrent` turns false stops at the next cluster, where its
+ * state is whole, and answers "obsolete".
+ *
+ * @returns {Promise<"covered" | "until" | "end" | "obsolete">}
  */
-export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, trackIds, interval, packetMemory, state, until = null, isCovered = null, readsThrough = null }) {
+export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, trackIds, interval, packetMemory, state, until = null, isCovered = null, readsThrough = null, isCurrent = null }) {
   // INSIDE A CLUSTER EVERY BLOCK HEADER IS READ, so its bytes are read a
   // portion at a time up to the cluster's end, and never past it. Read a
   // header at a time, each a read of a few bytes from the torrent thread, the
@@ -71,6 +74,7 @@ export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, l
   if (covered()) return "covered";
   let at = state.at;
   while (at < limit) {
+    if (!state.cluster && isCurrent?.() === false) return "obsolete";
     const element = state.cluster?.element ?? await validHeader(reader, at, layout.segmentEnd);
     if (element.id !== CLUSTER) {
       if (element.end === null) throw new Error("An unknown-sized Matroska element is not a Cluster.");

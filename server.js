@@ -868,7 +868,7 @@ export async function startProxyServer({
     },
     // `timing`, when given, is told how long each read of a file waited behind
     // the reads asked before it and how long it took (torrent-tv/meta#166).
-    resolveEncodeInput: async (output, fromIndex, toIndex, timing = null) => {
+    resolveEncodeInput: async (output, fromIndex, toIndex, timing = null, isCurrent = null) => {
       const grid = output.timeline?.published ?? output.timeline?.boundaries;
       const from = grid?.[fromIndex], to = grid?.[toIndex + 1];
       if (!Number.isFinite(from) || !(to > from)) return { kind: "terminal", reason: "output-interval-not-declared" };
@@ -914,6 +914,7 @@ export async function startProxyServer({
         if (media.kind !== "result") return media;
         const timeShiftSeconds = Number(media.value?.startTimeSeconds) || 0;
         const sourceInterval = output.timeline.sourceInterval(fromIndex, toIndex, timeShiftSeconds);
+        if (isCurrent) params.isCurrent = isCurrent;
         params.packetInterval = { ...sourceInterval,
           trackIds: wanted.map(track => track.trackNumber),
           modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };

@@ -184,3 +184,18 @@ test("a downloaded cluster is walked in portions, not a read per block header", 
   // reads of its own.
   assert.ok(reads <= 25, `${reads} reads`);
 });
+
+test("a walk whose request is withdrawn stops between clusters and goes on later from there", async t => {
+  // r59 (torrent-tv/meta#178): a withdrawn piece's walk held the file's reads
+  // and the piece the viewer had seeked to waited 16.9 s behind it.
+  const tables = countTables(t);
+  const { container, sound } = await over();
+  let current = true, clusters = 0;
+  const isCurrent = () => { clusters += 1; return current && clusters < 3; };
+  assert.equal(await container.readPacketIndex(soundOf(6), { isCurrent }), null);
+  current = true; clusters = -1000;
+  const index = await container.readPacketIndex(soundOf(6), { isCurrent });
+  assert.equal(inputOf(index, sound, 6).kind, "result");
+  const counted = tables();
+  assert.equal(counted.unique, counted.stored, "nothing is recorded twice for the stop");
+});

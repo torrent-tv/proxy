@@ -973,9 +973,15 @@ export class MatroskaContainer extends Container {
       Math.max(track.seekPrerollSeconds ?? 0, track.defaultDurationSeconds ?? 0)));
     let preceding = -1;
     for (let index = 0; index < points.length && points[index].seconds <= interval.from - preroll; index++) preceding = index;
-    // The preceding cue's Cluster also retains audio that overlaps this cut
-    // and decoder dependencies before the first presented packet.
-    return preceding < 0 ? first : points[Math.max(0, preceding - 1)].at;
+    // A picture's leading frames may depend on the Cluster before its cue, so
+    // a picture begins one cue earlier. Sound and subtitles do not: the
+    // preroll above already reaches the cue whose Cluster holds a frame that
+    // overlaps the cut and the frames a decoder needs before it. Begun a cue
+    // earlier as well, a soundtrack's walk started a Cluster before the bytes
+    // the picture's input had copied for the same piece and could not be
+    // walked from them (r65, torrent-tv/meta#178).
+    const back = requested.some(track => track.type === "video") ? 1 : 0;
+    return preceding < 0 ? first : points[Math.max(0, preceding - back)].at;
   }
 
   /**

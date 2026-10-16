@@ -41,6 +41,19 @@
  * `share`, what other processes leave, stays for the download's share of the
  * proxy's processor (`processor-share.js`), which divides the proxy's room
  * between its own download and its encoders and must not lose that room twice.
+ *
+ * THE WHOLE MACHINE IS WHAT THIS PROCESS MAY USE (torrent-tv/meta#180, phase
+ * 3). `/proc/stat` and `os.cpus()` describe the host; a container's CPU quota
+ * (`cpu.max`, Docker `--cpus`) or a CPU set (`--cpuset-cpus`) gives the proxy
+ * fewer cores than that. Where such a bound is smaller than the host, both
+ * shares are fractions of the bound instead: the encoders get what the host's
+ * other work leaves, but never more than the bound less the proxy's own draw.
+ * Measured as fractions of the host, a 1.5-core quota on an 8-core host read
+ * a busy neighbour as lost room the quota never had, and the proxy's own draw
+ * as an eighth of what it takes from the quota. The startup measurements are
+ * divided by the same fraction (`host-load.js` `freeShareDuring`), so a cost
+ * filed from either stays in one unit. Without a bound smaller than the host,
+ * nothing changes.
  */
 
 /**
@@ -52,10 +65,17 @@
  * @param {number | null} reading.encoderShare - Our own ffmpeg processes.
  * @param {number | null} reading.proxyShare - The proxy process itself, every
  *   thread of it.
- * @returns {{ share: number, forEncoders: number, unattributed: number, known: boolean }}
+ * @param {number | null} [reading.hostCores] - The cores the three shares
+ *   above are fractions of.
+ * @param {number | null} [reading.boundCores] - The cores this process may use
+ *   (`storage/machine-processor.js` `processorBound`); counts only when
+ *   smaller than `hostCores`.
+ * @returns {{ share: number, forEncoders: number, unattributed: number, known: boolean, boundCores?: number }}
  *   `share` is what other processes leave; `forEncoders` what they and the
- *   proxy leave. `known` is false when the host does not report its own load —
- *   then both are 1 and the caller must say it is uncorrected rather than pretend.
+ *   proxy leave; both of `boundCores` where it is given, else of the whole
+ *   host. `unattributed` stays a fraction of the host. `known` is false when
+ *   the host does not report its own load — then both are 1 and the caller
+ *   must say it is uncorrected rather than pretend.
  */
 export function availableShareFrom(reading = {}) {
   const systemBusy = finite(reading.systemBusy);
@@ -65,11 +85,26 @@ export function availableShareFrom(reading = {}) {
     return { share: 1, forEncoders: 1, unattributed: 0, known: false };
   }
   const encoders = finite(reading.encoderShare) ?? 0;
-  const ours = encoders + (finite(reading.proxyShare) ?? 0);
+  const proxy = finite(reading.proxyShare) ?? 0;
+  const ours = encoders + proxy;
   // Rounding, and the two readings being taken microseconds apart, can put our
   // own share fractionally above the system total. Below zero is not a
   // measurement of anything.
   const unattributed = clamp(systemBusy - ours, 0, 1);
+  const hostCores = finite(reading.hostCores);
+  const boundCores = finite(reading.boundCores);
+  if (hostCores !== null && boundCores !== null && boundCores > 0 && boundCores < hostCores) {
+    // In cores: the host's other work takes from the host, the proxy's own
+    // draw from the bound as well.
+    const leftOnHost = hostCores - clamp(systemBusy - encoders, 0, 1) * hostCores;
+    return {
+      share: clamp(Math.min(boundCores, hostCores - unattributed * hostCores) / boundCores, 0, 1),
+      forEncoders: clamp(Math.min(boundCores - proxy * hostCores, leftOnHost) / boundCores, 0, 1),
+      unattributed,
+      known: true,
+      boundCores
+    };
+  }
   return { share: clamp(1 - unattributed, 0, 1), forEncoders: clamp(1 - (systemBusy - encoders), 0, 1),
     unattributed, known: true };
 }

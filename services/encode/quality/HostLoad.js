@@ -593,6 +593,7 @@ export class HostLoad {
       // What the offer will multiply a prediction by, in the same line as the
       // readings it comes from.
       ` available=${asPercent(this.hostAvailability.share)} for-encoders=${asPercent(this.hostAvailability.forEncoders)}` +
+      (Number.isFinite(this.hostAvailability.boundCores) ? ` of ${this.hostAvailability.boundCores.toFixed(2)} cores` : "") +
       ` free=${asPercent(free)}` + processor + late
     );
   }
@@ -664,7 +665,7 @@ export class HostLoad {
   /**
    * @param {{ elapsedSec: number, processShare: number | null, systemShare: number | null, rejected?: string[] } | null} share
    * @param {{ proxyCpuSeconds: number | null }} previous
-   * @param {{ proxyCpuSeconds: number | null }} sample
+   * @param {{ proxyCpuSeconds: number | null, processor?: { bound?: { cores: number } | null } | null }} sample
    * @returns {number | null} The proxy's own share of the machine, for the log.
    */
   #setAvailability(share, previous, sample) {
@@ -682,10 +683,14 @@ export class HostLoad {
     const proxyShare = Number.isFinite(previous.proxyCpuSeconds)
       ? (sample.proxyCpuSeconds - previous.proxyCpuSeconds) / (share.elapsedSec * cores)
       : null;
+    // Of the cores this process may use where that is fewer than the host's
+    // (torrent-tv/meta#180, phase 3).
     this.hostAvailability = availableShareFrom({
       systemBusy: share.systemShare,
       encoderShare: share.processShare,
-      proxyShare
+      proxyShare,
+      hostCores: cores,
+      boundCores: sample.processor?.bound?.cores ?? null
     });
     return proxyShare;
   }

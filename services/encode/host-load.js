@@ -189,14 +189,14 @@ export function shareOfMachine(before, after, cores = os.cpus().length) {
  * One reading of everything above, to be compared against the next.
  *
  * @param {number | null} pid - The encoder's process, when one is running.
- * @returns {Promise<{ takenAt: number, processCpuSeconds: number | null, system: CpuTotals | null }>}
+ * @returns {Promise<{ takenAt: number, processCpuSeconds: number | null, system: CpuTotals | null, proxyCpuSeconds: number }>}
  */
 export async function sampleHost(pid) {
   const [processCpuSeconds, system] = await Promise.all([
     pid === null ? Promise.resolve(null) : readProcessCpuSeconds(pid),
     readSystemCpu()
   ]);
-  return { takenAt: Date.now(), processCpuSeconds, system };
+  return { takenAt: Date.now(), processCpuSeconds, system, proxyCpuSeconds: readProxyCpuSeconds() };
 }
 
 /**
@@ -215,12 +215,22 @@ export async function sampleHost(pid) {
  * Null when the host does not report its load (no `/proc`), or a reading was
  * refused; the measurement is then used as it was read, and says so.
  *
- * @param {{ takenAt: number, processCpuSeconds: number | null, system: object | null } | null} before
- * @param {{ takenAt: number, processCpuSeconds: number | null, system: object | null } | null} after
+ * Where this process may use fewer cores than the host has (a container's CPU
+ * quota or CPU set, `boundCores`), the share is of those cores, as the share a
+ * running encoder is filed with (`available-share.js`): what the host's other
+ * work leaves, but never more than the bound less this process's own draw.
+ * Otherwise the measurement, which ran inside the bound, was divided by a
+ * share of the whole host, and a busy neighbour made it read faster than the
+ * bound allows (torrent-tv/meta#180, phase 3).
+ *
+ * @param {{ takenAt: number, processCpuSeconds: number | null, system: object | null, proxyCpuSeconds?: number | null } | null} before
+ * @param {{ takenAt: number, processCpuSeconds: number | null, system: object | null, proxyCpuSeconds?: number | null } | null} after
  * @param {number} [cores]
+ * @param {number | null} [boundCores] - The cores this process may use; counts
+ *   only when fewer than `cores`.
  * @returns {number | null} Between 0 and 1.
  */
-export function freeShareDuring(before, after, cores = os.cpus().length) {
+export function freeShareDuring(before, after, cores = os.cpus().length, boundCores = null) {
   if (!before || !after) {
     return null;
   }
@@ -229,8 +239,26 @@ export function freeShareDuring(before, after, cores = os.cpus().length) {
     return null;
   }
   const others = Math.min(1, Math.max(0, shares.systemShare - shares.processShare));
-  const free = 1 - others;
+  const free = Number.isFinite(boundCores) && boundCores > 0 && boundCores < cores
+    ? Math.min(1, (cores - others * cores) / boundCores, (boundCores - proxyCoresBetween(before, after)) / boundCores)
+    : 1 - others;
   return free > 0 ? free : null;
+}
+
+/**
+ * The cores this process drew between two readings; 0 where either has no
+ * reading of it.
+ *
+ * @param {{ takenAt: number, proxyCpuSeconds?: number | null }} before
+ * @param {{ takenAt: number, proxyCpuSeconds?: number | null }} after
+ * @returns {number}
+ */
+function proxyCoresBetween(before, after) {
+  const elapsedSec = (after.takenAt - before.takenAt) / 1000;
+  if (!(elapsedSec > 0) || !Number.isFinite(before.proxyCpuSeconds) || !Number.isFinite(after.proxyCpuSeconds)) {
+    return 0;
+  }
+  return Math.max(0, (after.proxyCpuSeconds - before.proxyCpuSeconds) / elapsedSec);
 }
 
 /**

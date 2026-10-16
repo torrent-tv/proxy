@@ -22,7 +22,10 @@
  * 2. the libx264 build — the version string x264 writes into every stream it
  *    produces (`x264 - core N rNNNN hash`), read from one encoded frame;
  * 3. the processor model and the thread count the encoder is given
- *    (`CPU_THREADS`, which is the core count);
+ *    (`CPU_THREADS`, which is the core count), and the cores this process may
+ *    use where a container's CPU quota or CPU set makes them fewer: a speed
+ *    filed as a share of those cores (`available-share.js`) does not hold
+ *    under another quota (torrent-tv/meta#180);
  * 4. for a device-backed encoder, the device model and its driver: NVIDIA's
  *    own tool where it exists, and otherwise what the kernel publishes under
  *    `/sys` for the render node or the video device.
@@ -116,7 +119,9 @@ export function configurationKeyOf(fingerprint, encoder) {
       ...common,
       `x264=${fingerprint?.x264 ?? UNKNOWN}`,
       `cpu=${fingerprint?.cpu ?? UNKNOWN}`,
-      `threads=${fingerprint?.threads ?? UNKNOWN}`
+      `threads=${fingerprint?.threads ?? UNKNOWN}`,
+      // Only where it binds, so a host without a quota keeps its key.
+      ...(Number.isFinite(fingerprint?.boundCores) ? [`bound=${fingerprint.boundCores}`] : [])
     ].join(";");
   }
   const device = fingerprint?.devices?.[encoder?.kind] ?? null;
@@ -137,6 +142,8 @@ export function configurationKeyOf(fingerprint, encoder) {
  * @property {string} x264
  * @property {string} cpu
  * @property {number} threads
+ * @property {number | null} [boundCores] - The cores this process may use,
+ *   where fewer than the host's; absent or null otherwise.
  * @property {Record<string, DeviceFingerprint>} devices - By encoder kind.
  */
 
@@ -288,10 +295,10 @@ async function nvidiaDevice() {
  * Read this host's fingerprint. Always resolves: an unreadable part is
  * `unknown`, never a refusal to start.
  *
- * @param {{ ffmpegBin: string, encoder?: { kind: string, device: string | null } | null }} params
+ * @param {{ ffmpegBin: string, encoder?: { kind: string, device: string | null } | null, processorCores?: number | null }} params
  * @returns {Promise<HostFingerprint>}
  */
-export async function readHostFingerprint({ ffmpegBin, encoder = null }) {
+export async function readHostFingerprint({ ffmpegBin, encoder = null, processorCores = null }) {
   const versionText = await capture(ffmpegBin, ["-hide_banner", "-version"], 5000);
   // `-hide_banner` does not hide the version line itself: it is the answer.
   const ffmpeg = parseFfmpegVersion(versionText ? versionText.toString("utf8") : "");
@@ -317,6 +324,7 @@ export async function readHostFingerprint({ ffmpegBin, encoder = null }) {
     x264,
     cpu: os.cpus()[0]?.model?.trim() || UNKNOWN,
     threads: CPU_THREADS,
+    boundCores: Number.isFinite(processorCores) && processorCores < os.cpus().length ? processorCores : null,
     devices
   };
 }

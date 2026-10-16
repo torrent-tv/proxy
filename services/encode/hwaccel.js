@@ -679,13 +679,13 @@ export async function benchmarkContention({ ffmpegBin, logger, clipsDir = CALIBR
   return penalties;
 }
 
-export async function benchmarkDecodeCost({ ffmpegBin, logger, clipsDir = CALIBRATION_DIR }) {
+export async function benchmarkDecodeCost({ ffmpegBin, logger, clipsDir = CALIBRATION_DIR, processorCores = null }) {
   const log = logger ?? { info: () => {}, warn: () => {} };
   const startedAllAt = Date.now();
   /** @type {Record<string, { pixelTerm: number, bitrateTerm: number, constantTerm: number }>} */
   const families = {};
   for (const [family, clips] of Object.entries(CALIBRATION_SETS)) {
-    const fitted = await fitOneFamily({ ffmpegBin, log, clipsDir, family, clips });
+    const fitted = await fitOneFamily({ ffmpegBin, log, clipsDir, family, clips, processorCores });
     if (fitted) {
       families[family] = fitted;
     }
@@ -721,10 +721,10 @@ export async function benchmarkDecodeCost({ ffmpegBin, logger, clipsDir = CALIBR
 /**
  * Fit one codec family's decode cost from its own clips.
  *
- * @param {{ ffmpegBin: string, log: { info: Function, warn: Function }, clipsDir: string, family: string, clips: string[] }} params
+ * @param {{ ffmpegBin: string, log: { info: Function, warn: Function }, clipsDir: string, family: string, clips: string[], processorCores?: number | null }} params
  * @returns {Promise<{ pixelTerm: number, bitrateTerm: number, constantTerm: number } | null>}
  */
-async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips }) {
+async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips, processorCores = null }) {
   const startedAllAt = Date.now();
   /** @type {Array<{ megapixelsPerSecond: number, megabitsPerSecond: number, costSecondsPerSecond: number }>} */
   const samples = [];
@@ -745,7 +745,7 @@ async function fitOneFamily({ ffmpegBin, log, clipsDir, family, clips }) {
   }
   for (const [index, clip] of clips.entries()) {
     const stream = streams[index];
-    const measured = stream ? await decodePipedStream(ffmpegBin, stream, log) : null;
+    const measured = stream ? await decodePipedStream(ffmpegBin, stream, log, processorCores) : null;
     if (!measured?.speed) {
       log.warn(
         `hwaccel: decode benchmark "${clip}" said nothing; ${family} not measured` +
@@ -998,9 +998,11 @@ function runCapturingStderr(ffmpegBin, args, timeoutMs) {
  *
  * @param {string} ffmpegBin
  * @param {{ bytes: Buffer, demuxer: string, megapixelsPerSecond: number, megabitsPerSecond: number, fps: number }} stream
+ * @param {{ info: Function, warn: Function }} [log]
+ * @param {number | null} [processorCores] - The cores this process may use, for `freeShareDuring`.
  * @returns {Promise<{ speed: number, windowSec: number, megapixelsPerSecond: number, megabitsPerSecond: number } | null>}
  */
-function decodePipedStream(ffmpegBin, stream, log = { info: () => {}, warn: () => {} }) {
+function decodePipedStream(ffmpegBin, stream, log = { info: () => {}, warn: () => {} }, processorCores = null) {
   return new Promise((resolve) => {
     const args = [
       "-hide_banner", "-loglevel", "error", "-nostats",
@@ -1047,7 +1049,7 @@ function decodePipedStream(ffmpegBin, stream, log = { info: () => {}, warn: () =
       const hostAfter = hostBefore !== null && child?.pid && child.exitCode === null
         ? await sampleHost(child.pid).catch(() => null)
         : null;
-      const freeShare = freeShareDuring(hostBefore === null ? null : await hostBefore, hostAfter);
+      const freeShare = freeShareDuring(hostBefore === null ? null : await hostBefore, hostAfter, undefined, processorCores);
       try {
         child?.stdin?.destroy();
       } catch {
@@ -1418,9 +1420,13 @@ export function slopeOf(samples, minimumWindowSec = ENCODE_BENCHMARK_WINDOW_SEC)
  * A hardware encoder is limited by its device and not by the cores, so its
  * reading is kept as read.
  *
+ * `processorCores` is the cores this process may use (a container's quota or
+ * CPU set); the share divided out is of those where they are fewer than the
+ * host's (`freeShareDuring`, torrent-tv/meta#180).
+ *
  * @returns {Promise<{ speed: number, measuredSpeed: number, freeShare: number | null } | null>}
  */
-export function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath, frame = { width: BENCHMARK_REF_W, height: BENCHMARK_REF_H }) {
+export function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath, frame = { width: BENCHMARK_REF_W, height: BENCHMARK_REF_H }, processorCores = null) {
   const cpuBound = encoder?.kind === "software";
   return new Promise((resolve) => {
     const args = [
@@ -1470,7 +1476,7 @@ export function measureEncodeSlope(ffmpegBin, encoder, rung, rawFramesPath, fram
           resolve(null);
           return;
         }
-        const freeShare = freeShareDuring(before, after);
+        const freeShare = freeShareDuring(before, after, undefined, processorCores);
         resolve({ speed: freeShare === null ? value : value / freeShare, measuredSpeed: value, freeShare });
       });
     };

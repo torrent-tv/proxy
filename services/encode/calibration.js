@@ -185,6 +185,8 @@ async function checkModeProducesCorrectSegments({ ffmpegBin, encoder, rung, segm
  * @param {{ info: (m: string) => void, warn: (m: string) => void }} [params.logger]
  * @param {number} [params.segmentDurationSec]
  * @param {Array<{ width: number, height: number }>} [params.frames]
+ * @param {number | null} [params.processorCores] - The cores this process may
+ *   use, which the readings' share of the machine is of (`measureEncodeSlope`).
  * @param {object} [params.measure] - Replaces the three readings, for a check
  *   that must not run ffmpeg: `check`, `rawFrames`, `speed`. `speed` answers a
  *   number, or `{ speed, freeShare }` as `measureEncodeSlope` does.
@@ -196,12 +198,13 @@ export async function calibrateEncoder({
   logger,
   segmentDurationSec = 4,
   frames = CALIBRATION_FRAMES,
+  processorCores = null,
   measure = null
 }) {
   const log = logger ?? { info: () => {}, warn: () => {} };
   const check = measure?.check ?? checkModeProducesCorrectSegments;
   const rawFrames = measure?.rawFrames ?? ((frame) => decodeToRawFrames(ffmpegBin, log, frame));
-  const speed = measure?.speed ?? ((rung, rawPath, frame) => measureEncodeSlope(ffmpegBin, encoder, rung, rawPath, frame));
+  const speed = measure?.speed ?? ((rung, rawPath, frame) => measureEncodeSlope(ffmpegBin, encoder, rung, rawPath, frame, processorCores));
   const release = measure?.release ?? ((rawPath) => {
     try {
       rmSync(path.dirname(rawPath), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

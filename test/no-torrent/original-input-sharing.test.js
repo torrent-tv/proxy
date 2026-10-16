@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
+import { EventEmitter } from "node:events";
 import { OriginalInputStore } from "../../services/encode/OriginalInputStore.js";
 import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
 import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
+import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
 
 const source = (ranges, commonRanges = [[0, 9]], sourceKey = "generated") => ({ sourceKey, fileIndex: 0,
   input: { original: true, fileLength: 2000, ranges, commonRanges, selections: [] } });
@@ -123,6 +125,27 @@ test("an unfinished HTTP answer retains all its parts after both runs release", 
   assert.equal(store.bytes, 150);
   answer.release();
   answer.release();
+  assert.equal(store.bytes, 0);
+});
+
+test("a response closed during its deferred copy releases the subsequently acquired HTTP reference", async () => {
+  const store = new OriginalInputStore();
+  let finish;
+  const input = await admit(store, source([[0, 9], [100, 199]], []), async (s, ranges) => {
+    if (ranges.some(([start]) => start === 100)) await new Promise(resolve => { finish = resolve; });
+    return reader(s, ranges);
+  });
+  const raw = new EventEmitter();
+  raw.destroyed = false;
+  const reply = { raw, code() { return this; }, header() { return this; }, send() { throw new Error("Closed response must not be sent."); } };
+  const pending = handleEncodeInputGet({ raw: { socket: { remoteAddress: "127.0.0.1" } }, method: "GET",
+    params: { token: "1", fileIndex: "0" }, headers: { range: "bytes=100-" } }, reply, { inputOf: () => input });
+  await setImmediate();
+  raw.destroyed = true;
+  raw.emit("close");
+  finish();
+  assert.equal(await pending, reply);
+  await input.release();
   assert.equal(store.bytes, 0);
 });
 

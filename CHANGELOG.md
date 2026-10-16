@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Release an encoder input answer when its HTTP connection closed while its deferred copy was pending; explicitly destroy offset-read streams on response close so cancelled reads cannot retain a completed file (#ttv-181).
+
 ## 2.101.7
 
 - **Fix**: Encoder runs of one file share copied source ranges and pending reads, including overlaps and the stream-search prefix. Common container ranges survive seeks while an output exists and remain reclaimable by the memory budget. Runs, packet learning and unfinished HTTP responses retain the bytes they use. Files downloaded whole are read at the requested offsets without a complete input copy and remain protected against disk eviction through the last response. Full FFmpeg input/cache size, additional memory and actual copy/read counts are accounted separately (#ttv-181).

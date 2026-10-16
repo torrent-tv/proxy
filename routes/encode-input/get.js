@@ -45,6 +45,14 @@ export async function handleEncodeInputGet(req, reply, { inputOf, refused = () =
     refused({ token, fileIndex, start: range.start, runTag: input.runTag ?? null });
     return reply.code(503).send({ error: "Original input bytes are outside the admitted ranges." });
   }
+  // A deferred read may finish after FFmpeg closed the connection. No close
+  // event remains to release an answer acquired after that event.
+  if (reply.raw?.destroyed || req.raw?.aborted) {
+    held.stream?.destroy();
+    held.release?.();
+    return reply;
+  }
+  const body = held.stream ?? (held.chunks ? Readable.from(held.chunks, { objectMode: false }) : held.bytes);
   // What was handed to the system for this answer before its connection
   // closed, and whether all of it was: an answer runs to the end of its
   // admitted range and FFmpeg closes the connection once it has what it wants,
@@ -54,12 +62,18 @@ export async function handleEncodeInputGet(req, reply, { inputOf, refused = () =
   const socket = req.raw?.socket;
   const writtenBefore = socket?.bytesWritten ?? 0;
   reply.raw?.once?.("close", () => {
+    body?.destroy?.();
     held.release?.();
     input.noteAnswer?.({ fileIndex, start: range.start, end: held.end,
       written: Math.max(0, (socket?.bytesWritten ?? writtenBefore) - writtenBefore),
       handedOver: reply.raw?.writableFinished === true });
   });
-  return reply.code(206).header("Content-Length", String(held.size ?? held.bytes.length))
-    .header("Content-Range", `bytes ${range.start}-${held.end}/${length}`)
-    .send(held.stream ?? (held.chunks ? Readable.from(held.chunks, { objectMode: false }) : held.bytes));
+  try {
+    return reply.code(206).header("Content-Length", String(held.size ?? held.bytes.length))
+      .header("Content-Range", `bytes ${range.start}-${held.end}/${length}`).send(body);
+  } catch (error) {
+    body?.destroy?.();
+    held.release?.();
+    throw error;
+  }
 }

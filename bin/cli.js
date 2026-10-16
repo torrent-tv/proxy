@@ -89,7 +89,7 @@ program
   .option("--no-port-mapping", "Disable automatic UPnP/NAT-PMP port mapping")
   .option("--delivery-sink", "Serve /api/delivery-sink, a torrent-free byte stream for delivery testing")
   .option("--pin-preset <name>", "Encode every software picture at this libx264 preset only, for runs that must be compared at one quality (off by default)")
-  .option("--profile-start <seconds>", "Profile the main thread's CPU for this many seconds from the first source opened, written beside the state (off by default)")
+  .option("--profile-start <seconds>", "Profile the CPU of the main thread and the torrent thread for this many seconds from the first source opened, written beside the state (off by default)")
   .option(
     "--send-chunk-bytes <bytes>",
     "Size of one data-channel message when sending a response body (0 = whatever the body read hands over, ~64KB). For measuring whether the delivery wedge depends on that size."

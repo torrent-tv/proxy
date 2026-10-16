@@ -1,3 +1,7 @@
+## Unreleased
+
+- **New**: `--profile-start` profiles the torrent thread beside the main thread, over the same seconds, written as `cpu-torrent-<time>.cpuprofile` under the same storage budget. After a seek to 1400 s on Home Assistant a soundtrack input waited 23.3 s while every read of held bytes took 1.5-6 s in that thread and its loop ran up to 2.7 s late; no log says what it spent three quarters of a core on (r60, #ttv-178).
+
 ## 2.99.21
 
 - **Fix**: An encoder input the plan withdraws stops its reads: one not yet begun is skipped in the file's queue, and a Matroska packet walk under way stops at the next cluster, to go on from there when asked again. Left to run, the walks for a soundtrack piece behind the viewer and one far ahead held the file's reads after a seek to 1400 s, and the piece the viewer had seeked to waited 16.9 s behind them; the picture first moved after 64.6 s (r59, #ttv-178).

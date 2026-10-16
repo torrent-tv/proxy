@@ -1099,7 +1099,8 @@ export async function startProxyServer({
     seconds: profileStartSeconds,
     dir: stateDir || "",
     log: (line) => logger.info(line),
-    mayKeep: (bytes) => diagnostics?.mayKeep?.({ what: "a CPU profile", bytes }) ?? true
+    mayKeep: (bytes) => diagnostics?.mayKeep?.({ what: "a CPU profile", bytes }) ?? true,
+    torrentThread: (seconds) => torrentPool.cpuProfile?.(seconds) ?? Promise.resolve(null)
   });
   startProcessorReport({
     log: (line) => logger.info(line),

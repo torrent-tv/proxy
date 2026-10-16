@@ -32,18 +32,28 @@ import { logger } from "../../utils/logger.js";
 export const CONTAINER_HEAD_BYTES = 256 * 1024;
 
 /**
- * The size of the file and its OpenSubtitles hash, from the two edges. A read
- * that has not arrived throws `BytesUnavailable`, so nothing partial is kept.
+ * The size of the file and its OpenSubtitles hash, from the two edges. Nothing
+ * partial is kept: an edge that has not arrived is named instead.
+ *
+ * Both edges are read at once and both missing ones named in one answer. Read
+ * one after the other, a cold start asked the swarm for the file's last piece
+ * only once its first had arrived: on Home Assistant the last piece, which
+ * also holds a Matroska file's Cues, came 2.4 s after the first and the start
+ * waited for it (r66, torrent-tv/meta#178).
  *
  * @param {{ readRange: (start: number, end: number) => Promise<Buffer | null>, fileSize: number }} params
- * @returns {Promise<{ hash: string, size: number } | null>} `null` for a file too short to have one.
+ * @returns {Promise<{ hash: string, size: number } | { missing: Array<[number, number]> } | null>}
+ *   `null` for a file too short to have one.
  */
 async function readFingerprint({ readRange, fileSize }) {
   if (!hasOshash(fileSize)) return null;
   const read = strictReader(readRange, fileSize);
-  const head = await read(0, OSHASH_EDGE_BYTES - 1);
-  const tail = await read(fileSize - OSHASH_EDGE_BYTES, fileSize - 1);
-  return { hash: oshash(fileSize, head, tail), size: fileSize };
+  const reads = await Promise.allSettled([read(0, OSHASH_EDGE_BYTES - 1), read(fileSize - OSHASH_EDGE_BYTES, fileSize - 1)]);
+  const failed = reads.find(reading => reading.status === "rejected" && !isUnavailable(reading.reason));
+  if (failed) throw failed.reason;
+  const missing = reads.filter(reading => reading.status === "rejected").map(reading => [reading.reason.start, reading.reason.end]);
+  if (missing.length) return { missing };
+  return { hash: oshash(fileSize, reads[0].value, reads[1].value), size: fileSize };
 }
 
 /**
@@ -181,6 +191,10 @@ export class ContainerOrchestrator {
       if (statement === "fingerprint") {
         // A fact about the bytes at the two ends of the file, whatever the format.
         const value = await readFingerprint(params);
+        if (value?.missing) {
+          logger.info(`media request=${requestId} needs bytes=${value.missing.map(([start, end]) => `${start}-${end}`).join(",")}`);
+          return { kind: "needs-ranges", ranges: value.missing, requestId };
+        }
         return value ? { kind: "result", value, requestId } : { kind: "terminal", reason: "file-too-short", requestId };
       }
       const container = await this.containerFor(params);

@@ -41,6 +41,11 @@ function holding(size, held) {
 test("the fingerprint statement answers from the two edges and asks for the missing one", async () => {
   const size = 5 * EDGE;
   const orchestrator = new ContainerOrchestrator();
+  // Both edges missing are both named in one answer, so a cold start asks the
+  // swarm for the last piece with the first (r66, torrent-tv/meta#178).
+  const neither = await orchestrator.inspect(holding(size, []), "fingerprint");
+  assert.equal(neither.kind, "needs-ranges");
+  assert.deepEqual(neither.ranges, [[0, EDGE - 1], [size - EDGE, size - 1]]);
   const missing = await orchestrator.inspect(holding(size, [[0, EDGE - 1]]), "fingerprint");
   assert.equal(missing.kind, "needs-ranges");
   assert.deepEqual(missing.ranges, [[size - EDGE, size - 1]]);

@@ -7,18 +7,35 @@ export class IndexMemory {
   #revise;
   #changed;
   #revisionQueued = false;
+  #growthBytes;
 
-  constructor({ reviseBudget, changed }) {
+  /**
+   * @param {object} params
+   * @param {() => void} params.reviseBudget
+   * @param {() => void} params.changed
+   * @param {number} [params.growthBytes] - What one growth of a table can
+   *   take at most, kept free beyond what is held while anything is held. A
+   *   table grows a block at a time, each twice the last; allowed exactly what
+   *   it held, each growth was refused first and its whole read tried again:
+   *   a soundtrack piece after a seek was refused three times and ready after
+   *   53.7 s (r58, torrent-tv/meta#178).
+   */
+  constructor({ reviseBudget, changed, growthBytes = 0 }) {
     this.#revise = reviseBudget;
     this.#changed = changed;
+    this.#growthBytes = growthBytes;
   }
 
   held() { return this.#held; }
   packetBytes() { return this.#packetBytes; }
   wanted() {
+    const short = [...this.#files.values()].reduce((sum, file) => sum + Math.max(0, file.needed - file.held), 0);
+    return this.#held + Math.max(short, this.#held > 0 ? this.#growthBytes : 0);
+  }
+  /** What is held and asked for, without the margin kept for growth. */
+  required() {
     return this.#held + [...this.#files.values()].reduce((sum, file) => sum + Math.max(0, file.needed - file.held), 0);
   }
-  required() { return this.wanted(); }
 
   allow(bytes) {
     const allowed = Math.max(0, bytes);

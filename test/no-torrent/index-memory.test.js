@@ -145,3 +145,19 @@ test("an indivisible index allocation cannot be starved by a large piece-cache r
   assert.deepEqual(divideAllowance([100, 100], 100, [100, 100]), [50, 50]);
   assert.deepEqual(divideAllowance([100, 100], 300, [100, 0]), [100, 100]);
 });
+
+test("a held table is allowed its next growth before it asks for it", async () => {
+  // r58 (torrent-tv/meta#178): allowed exactly what it held, each doubling of
+  // a table's blocks was refused first, and its read tried again.
+  const memory = new IndexMemory({ reviseBudget() {}, changed() {}, growthBytes: 131072 });
+  assert.equal(memory.wanted(), 0, "nothing held, nothing kept free");
+  memory.allow(8192);
+  const records = new PacketRecords(memory.forFile("source", 0));
+  records.push({ pts: 0, duration: 1, ranges: [[0, 0]] });
+  assert.equal(memory.wanted(), 8192 + 131072);
+  memory.allow(memory.wanted());
+  for (let index = 1; index < 600; index++) records.push({ pts: index, duration: 1, ranges: [[0, 0]] });
+  assert.ok(records.length === 600, "growth within the free margin is not refused");
+  records.dispose();
+  memory.forget("source");
+});

@@ -15,6 +15,7 @@ import { handleHealthGet } from "./routes/health/get.js";
 import { handleMediaGet } from "./routes/media/get.js";
 import { ProbeRequests } from "./services/media/ProbeRequests.js";
 import { IndexMemory } from "./services/storage/IndexMemory.js";
+import { LARGEST_GROWTH_BYTES } from "./services/media/container/PacketRecords.js";
 import { probePackets } from "./services/media/probe-packets.js";
 import { trackChoicesOf } from "./services/viewer/segment-demands.js";
 import { PlaybackProjection } from "./services/torrent/PlaybackProjection.js";
@@ -770,6 +771,7 @@ export async function startProxyServer({
     failed: (request, error) => logger.warn(`media request=${request.key} probe failed: ${error?.message ?? error}`)
   });
   const indexMemory = new IndexMemory({
+    growthBytes: LARGEST_GROWTH_BYTES,
     reviseBudget: () => { void outputParts.machineBudget.revise("memory", "media metadata").catch(error => logger.warn(`packet index budget: ${error.message}`)); },
     changed: () => { mediaReads.memoryChanged(); probeReads.memoryChanged(); outputParts.encodeInputs?.memoryChanged(); }
   });

@@ -62,20 +62,10 @@ export class EncodeInputs {
    * @type {(output: object, from: number, to: number, input: object) => void}
    */
   #stretchCopied;
-  /**
-   * A stretch size the operator named for comparison runs
-   * (`--input-stretch-bytes`), in place of copy rate times open; null keeps
-   * the measured rule. Only the target changes: memory, downloaded bytes and
-   * the plan's bound still end a stretch (torrent-tv/meta#182).
-   *
-   * @type {number | null}
-   */
-  #fixedStretchBytes;
 
   constructor({ resolve, readRanges, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
-    rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now, stretchCopied = () => {}, stretchBytes = null }) {
+    rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now, stretchCopied = () => {} }) {
     this.#stretchCopied = stretchCopied;
-    this.#fixedStretchBytes = Number.isSafeInteger(stretchBytes) && stretchBytes > 0 ? stretchBytes : null;
     this.#openOf = openOf;
     this.#resolve = resolve;
     this.#read = readRanges;
@@ -354,10 +344,6 @@ export class EncodeInputs {
   #sizingFor(output) {
     const rate = middleOf(this.#copyRates);
     const open = this.#openOf(output);
-    if (this.#fixedStretchBytes !== null) {
-      return { bytes: this.#fixedStretchBytes, openMeasured: true, openSeconds: open?.seconds ?? null,
-        copyBytesPerMs: rate, fixed: true };
-    }
     return rate === null || !open ? null : { bytes: Math.floor(rate * open.seconds * 1000),
       openMeasured: open.measured, openSeconds: open.seconds, copyBytesPerMs: rate };
   }
@@ -621,7 +607,7 @@ export class EncodeInputs {
     if (result.kind === "result") {
       this.#log(`encode input selection of ${addressOf(output)}: ${JSON.stringify({
         from, requestedTo: request.to, serves, floor, targetEnd, chosenEnd: end,
-        targetBytes: target, targetFixed: sizing?.fixed === true, minimumBytes: minimum, inputBytes: result.bytes,
+        targetBytes: target, minimumBytes: minimum, inputBytes: result.bytes,
         copyBytesPerMs: sizing?.copyBytesPerMs ?? null, openSeconds: sizing?.openSeconds ?? null,
         openMeasured: sizing?.openMeasured ?? null, reservations, probes
       })}`);

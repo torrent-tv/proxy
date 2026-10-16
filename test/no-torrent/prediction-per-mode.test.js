@@ -95,6 +95,24 @@ test("new software mode choice reflects the measured free share of the machine",
   assert.equal(choice.preset, "ultrafast");
 });
 
+// r82 (torrent-tv/meta#185): opened during a cold start beside the output it
+// was to replace, an output at `faster` was predicted 0.22x; its move was
+// priced 1.81x and it measured 1.46-1.65x.
+test("the speed a move was decided at replaces the figure taken when the output was opened", () => {
+  const cost = costWith();
+  const session = outputAt("fast");
+  cost.notePredictionFor(session);
+  const state = qualityStateOf(session);
+  state.lastPredictionRatio = 3;
+  cost.notePriceFor(session, 1.81);
+  assert.equal(state.predictedSpeedWhenOffered, 1.81);
+  assert.equal(state.predictedMode, "fast");
+  assert.equal(state.offeredSpeedAtCheapestMode, null, "a move is not an offer");
+  assert.equal(state.lastPredictionRatio, null, "the first ratio against the new figure is said");
+  cost.notePriceFor(session, Number.NaN);
+  assert.equal(state.predictedSpeedWhenOffered, 1.81, "no price, no change");
+});
+
 test("a mode that was not measured has no prediction rather than another mode's", () => {
   const cost = costWith();
   const session = outputAt("veryslow");

@@ -135,6 +135,8 @@ function pictureAtNominal(how = {}) {
   const disposed = [];
   const opened = [];
   const invalidated = [];
+  // The speeds a move was decided at, given to the output it prepares.
+  const predicted = [];
   // Outputs whose encoding has failed for good, as `EncodeRuns.hasFailed` says.
   const failed = new Set();
   let made = 0;
@@ -194,6 +196,7 @@ function pictureAtNominal(how = {}) {
     presetLadder: () => how.ladder ?? [],
     presetSpeedOf: (_output, preset) => (how.presetSpeeds?.[preset] === undefined
       ? null : { processing: how.presetSpeeds[preset], effective: how.presetSpeeds[preset] }),
+    notePredictedSpeed: (output, speed) => { predicted.push({ outputKey: output.outputKey, speed }); },
     requiredSpeedOf: () => 1,
     heightsChosenAs: (consumerId, key) => heightsChosenAs(viewers, consumerId, key),
     highestGivenSegmentOf: (consumerId, height) => highestGivenSegmentOf(viewers, consumerId, height),
@@ -298,7 +301,7 @@ function pictureAtNominal(how = {}) {
     failed.add(output.id);
     renditions.noteProductionFailed(output);
   };
-  return { renditions, outputs, viewers, base, file, closed, close, given, linkNow, report, fail, failed, disposed, opened, invalidated };
+  return { renditions, outputs, viewers, base, file, closed, close, given, linkNow, report, fail, failed, disposed, opened, invalidated, predicted };
 }
 
 test("a thin link moves only its own viewer to a lower limit of the same height", async () => {
@@ -703,6 +706,27 @@ test("a machine-bound viewer is moved to the best faster setting this machine ho
   assert.equal(opened.at(-1).capKbps, NOMINAL);
   close(prepared, 11);
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "moved once the next segment is closed there");
+});
+
+// r82 (torrent-tv/meta#185): an output opened for a move to `faster` was
+// predicted 0.22x when it was opened, the move was priced 1.81x, it measured
+// 1.46-1.65x, and the start forecast on 0.22x stated 30 596 s.
+test("the speed a move to another setting was decided at is given to the output it prepares; a move between limits gives none", async () => {
+  const presetMove = pictureAtNominal({
+    format: mpegtsFormat, preset: "faster", ladder: LADDER, presetSpeeds: { fast: 0.7, faster: 0.9, veryfast: 0.95, superfast: 1.3, ultrafast: 2.4 }
+  });
+  presetMove.given("viewer-a", 10);
+  const move = await presetMove.renditions.preparePresetSwitch(presetMove.base, "viewer-a", "down", "slow");
+  assert.equal(move.started, true, move.reason);
+  const prepared = presetMove.outputs.get(sameHeightSwitchOf(presetMove.viewers, "viewer-a").outputId);
+  assert.deepEqual(presetMove.predicted, [{ outputKey: prepared.outputKey, speed: 1.3 }], "the chosen setting's processing speed");
+
+  const limitMove = pictureAtNominal();
+  limitMove.given("viewer-a", 10);
+  limitMove.linkNow("viewer-a", LIMITS[1]);
+  const thin = await limitMove.renditions.prepareSameHeightSwitch(limitMove.base, "viewer-a", "down", "thin");
+  assert.equal(thin.started, true, thin.reason);
+  assert.deepEqual(limitMove.predicted, []);
 });
 
 // r71 (torrent-tv/meta#178): a viewer waiting for #2176 was moved from #2177,

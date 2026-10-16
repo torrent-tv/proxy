@@ -972,8 +972,12 @@ export async function startProxyServer({
           const answer = input.read(source.fileIndex, start, end);
           return answer && typeof answer.then !== "function" && answer.end === end ? answer.bytes : null;
         };
+        const holdsUntil = start => {
+          const range = source.input.ranges.find(([first, last]) => first <= start && start <= last);
+          return range ? range[1] + 1 : null;
+        };
         const startedAt = Date.now();
-        void container.learnPackets({ from: source.input.from, to: source.input.to, trackIds: [...sounds] }, read).then(learned =>
+        void container.learnPackets({ from: source.input.from, to: source.input.to, trackIds: [...sounds] }, read, holdsUntil).then(learned =>
           logger.info(`encode input #${from}..#${to} of ${output.outputKey}: soundtrack packets of track(s) ${[...sounds].join(",")} ` +
             `over ${source.input.from.toFixed(3)}-${source.input.to.toFixed(3)}s ` +
             (learned === "walked" ? "walked" : `not all walked (${learned === "memory" ? "memory refused" : "the copy does not hold the rest"})`) +

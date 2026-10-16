@@ -49,7 +49,7 @@ function recordedTracks(tracks, trackIds) {
  *
  * @returns {Promise<"covered" | "until" | "end" | "obsolete">}
  */
-export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, trackIds, interval, packetMemory, state, until = null, isCovered = null, readsThrough = null, isCurrent = null }) {
+export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, layout, tracks, trackIds, interval, packetMemory, state, until = null, isCovered = null, readsThrough = null, isCurrent = null, holdsUntil = null }) {
   // INSIDE A CLUSTER EVERY BLOCK HEADER IS READ, so its bytes are read a
   // portion at a time up to the cluster's end, and never past it. Read a
   // header at a time, each a read of a few bytes from the torrent thread, the
@@ -61,8 +61,14 @@ export async function walkMatroskaPackets({ readRange, fileSize, portionBytes, l
   // (r54). The headers lie throughout the portion, so it is all needed.
   // Between clusters only their headers are read.
   let readableUntil = null;
+  // `holdsUntil` bounds a portion by what the reader holds, so a walk over a
+  // copy reads up to its end what it needs, not a portion past it (r63).
   const reader = new ElementReader({ read: readRange, fileSize, portionBytes, prefetch: true,
-    readableUntil: start => Math.max(readableUntil ?? start, readsThrough?.(start) ?? start) });
+    readableUntil: start => {
+      const reach = Math.max(readableUntil ?? start, readsThrough?.(start) ?? start);
+      const held = holdsUntil?.(start);
+      return Number.isFinite(held) ? Math.min(reach, held) : reach;
+    } });
   const declared = recordedTracks(tracks, trackIds);
   if (!state.packets) {
     state.packets = new Map([...declared.keys()].map(id => [id, new PacketRecords(packetMemory)]));

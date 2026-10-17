@@ -194,6 +194,7 @@ test("a seek before an output exists withdraws old input and prepares the new po
 
 test("all candidate declarations precede visible-file indexes in reading order", async () => {
   const viewers = new Viewers();
+  viewers.selectsSource("person", "source");
   viewers.visibleFiles("person", "source", [2]);
   const reads = [];
   const preparation = new SourcePreparation({ viewers, candidatesFor: async () => [8, 2],
@@ -207,6 +208,7 @@ test("all candidate declarations precede visible-file indexes in reading order",
 
 test("selection withdraws other files and reprices existing declarations before indexed preparation", async () => {
   const viewers = new Viewers();
+  viewers.selectsSource("person", "source");
   viewers.visibleFiles("person", "source", [1, 2]);
   const reads = [], withdrawn = [], repriced = [];
   const preparation = new SourcePreparation({ viewers, candidatesFor: async () => [1, 2],

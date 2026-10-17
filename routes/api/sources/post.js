@@ -31,8 +31,9 @@ export async function handleApiSourcesPost(req, reply, { sourceRegistry, viewers
     return reply.code(400).send({ error: "sourceType and source are required." });
   }
 
-  const sourceKey = await sourceRegistry.upsert(sourceType, source);
   const consumerId = typeof payload.consumerId === "string" ? payload.consumerId.trim() : "";
-  if (consumerId) viewers?.selectsSource(consumerId, sourceKey);
+  const viewer = consumerId ? viewers?.present(consumerId) : null;
+  const sourceKey = await sourceRegistry.upsert(sourceType, source);
+  if (viewer && viewers.get(consumerId) === viewer) viewers.selectsSource(consumerId, sourceKey);
   return reply.send({ sourceKey, playbackMapVersion: 1 });
 }

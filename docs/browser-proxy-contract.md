@@ -121,7 +121,7 @@ decisions are separate for each association.
 Once the last connection carrying a viewer closes, their presence ends before
 output disposal waits for child processes. Late reports, seeks, media requests
 and completed preparations cannot register that viewer again. Reports and seeks
-for an absent viewer return `404`; arrival or an explicit output opening can
+for an absent viewer return `404`; arrival or an explicit source/output opening can
 establish a new viewing. An opening already in progress cannot attach to a
 different viewing created by a reconnect under the same viewer identifier.
 

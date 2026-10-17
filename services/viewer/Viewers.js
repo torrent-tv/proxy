@@ -97,7 +97,9 @@ export class Viewers {
     if (!Array.isArray(indices) || indices.some(index => !Number.isSafeInteger(index) || index < 0)) {
       throw new TypeError("Visible files need source indices.");
     }
-    const viewer = this.selectsSource(consumerId, sourceKey, now);
+    const viewer = this.get(consumerId);
+    if (!viewer?.isPresent() || viewer.source?.sourceKey !== sourceKey) return null;
+    viewer.seen(now);
     const visible = [...new Set(indices)];
     if (JSON.stringify(viewer.source.visibleFileIndices) !== JSON.stringify(visible)) {
       viewer.source.visibleFileIndices = visible;

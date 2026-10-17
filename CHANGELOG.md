@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.13
 
 - **Fix**: Prevent late reports, media requests and completed source, audio or quality preparations from restoring a viewer after their connection closes, so unwatched files stop downloading and encoding.
 

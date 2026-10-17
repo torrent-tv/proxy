@@ -15,6 +15,11 @@ import os from "node:os";
 import path from "node:path";
 import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
+import { SourceFile } from "../../services/media/SourceFile.js";
+import { Timeline } from "../../services/encode/output/Timeline.js";
+import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { Output } from "../../services/encode/output/Output.js";
+import { outputSpec } from "./helpers/output-spec.js";
 
 function wired(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), "speculative-hold-"));
@@ -73,4 +78,61 @@ test("an unmeasured swarm or film holds nothing back", (t) => {
   parts.outputs.outputsOn = () => [];
   parts.applySpeculativeHold();
   assert.equal(told.length, 0);
+});
+
+test("the start forecast's wait is said in why the download was held", (t) => {
+  const { parts, told } = wired(t);
+  parts.encodeOrchestrator.processorShortfall = () => ({ ...SHORT, need: Number.POSITIVE_INFINITY, waitedFor: 1501 });
+  parts.hostLoad.swarmRate = () => 10e6;
+  parts.applySpeculativeHold();
+  assert.equal(told.at(-1).held, true);
+  assert.match(told.at(-1).because, /over 5s with a viewer waiting for its #1501 by the start forecast; the swarm gives/);
+});
+
+test("a viewer the start forecast holds for an encoder's piece is told to whoever shares the processor", async (t) => {
+  const { parts } = wired(t);
+  const OUTPUT = "surface:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
+  const session = {
+    id: "aaaaaaaabbbbcccc",
+    spec: outputSpec({ cutGrid: "keyframe", audioSeparate: false }),
+    outputKey: OUTPUT,
+    dirPath: path.join(os.tmpdir(), "speculative-hold-does-not-exist"),
+    file: new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv" })
+      .learn({ width: 1920, height: 1080, durationSeconds: 40 }),
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
+    timeline: new Timeline({ boundaries: Array.from({ length: 11 }, (_, index) => index * 4), cutGrid: "keyframe" }),
+    segmentFormat: fmp4Format,
+    output: new Output({ encodeWidth: 0, encodeHeight: 0, outputFps: 24, softwarePreset: null, applyTonemap: false }),
+    transcodeVideo: false,
+    transcodeAudio: true,
+    audioTrackIndex: 0,
+    audioSourceTrackIndex: 0,
+    useSyntheticPlaylist: true,
+    playlistText: "#EXTM3U\n",
+    segmentCount: 10,
+    progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
+  };
+  parts.outputs.set(session.id, session);
+  // A viewer at the start over a fast link; nothing is made; the encoder is
+  // predicted at 0.5x and each piece reads its own 10 MB of a file still
+  // downloading at 50 MB/s.
+  parts.viewers.get = () => ({ linkReading: () => ({ linkSampleMbps: 100, linkSampleMeasuredAt: Date.now(),
+    positionSeconds: 0, bufferedAheadSec: 0 }) });
+  parts.encodeCost.projectedSpeedOf = () => 0.5;
+  parts.sourceInputsFor = (_output, index) => [{ sourceId: "torrent:abc:0", ranges: [{ start: index * 1e7, end: (index + 1) * 1e7 }] }];
+  let complete = false;
+  parts.getSourceStats = async () => ({ fileAvailable: complete, downloadSpeed: 50e6, fileOffset: 0, fileLength: 1e8,
+    pieceLength: 1 << 20 });
+  const waits = [];
+  parts.encodeOrchestrator.noteViewerWaiting = (viewer, wait) => { waits.push({ viewer, wait }); };
+  const held = (await parts.viewerRequests.getSessionProgress(session.id, "viewer-one")).playbackReadiness.holdingBy;
+  assert.equal(held.kind, "production");
+  assert.deepEqual(waits.at(-1), { viewer: "viewer-one", wait: { address: OUTPUT, index: held.segment } });
+  // The whole file is here: the forecast waits for no encoder's input, and
+  // what holds the viewer, if anything, is no production.
+  complete = true;
+  const after = (await parts.viewerRequests.getSessionProgress(session.id, "viewer-one")).playbackReadiness.holdingBy;
+  assert.notEqual(after?.kind, "production");
+  assert.deepEqual(waits.at(-1), { viewer: "viewer-one", wait: null });
 });

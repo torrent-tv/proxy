@@ -156,9 +156,18 @@ export class EncodeOrchestrator {
    * Whether the run a viewer needs first is short of the processor, from the
    * last time who has the processor was decided (`processorShortfall`).
    *
-   * @type {{ address: string, speed: { middle: number, scatter: number }, need: number, seconds: number } | null}
+   * @type {{ address: string, speed: { middle: number, scatter: number }, need: number, seconds: number,
+   *   waitedFor?: number } | null}
    */
   #shortfall = null;
+
+  /**
+   * The piece each waiting viewer's start is held by the production of, as
+   * the start forecast last said it (`noteViewerWaiting`), by viewer.
+   *
+   * @type {Map<string, { address: string, index: number }>}
+   */
+  #viewersWaiting = new Map();
 
   /**
    * What starting and stopping an encoder was measured to cost on this host,
@@ -455,6 +464,7 @@ export class EncodeOrchestrator {
     this.#lastError.delete(address);
     this.#lastProgress.delete(address);
     this.#failedStarts.delete(address);
+    this.#forgetWaitsOn(address);
   }
 
   /** @param {string} address @returns {{ at: number, count: number, blocked: boolean, limit: number }} */
@@ -610,6 +620,37 @@ export class EncodeOrchestrator {
     // right whatever the last one met.
     if (!Array.isArray(zones) || zones.length === 0) {
       this.#forgetInputState(address);
+      this.#forgetWaitsOn(address);
+    }
+  }
+
+  /**
+   * What a viewer's start waits for, as the start forecast says each time it
+   * is asked: the production of piece `index` of `address`, or nothing an
+   * encoder makes (null). The map's deadlines can be met while the forecast
+   * still holds the viewer for the stock it wants after the piece they stand
+   * in: on Home Assistant (r87, torrent-tv/meta#180) the download was let go
+   * 5.3 s before a seek's viewer started, while the forecast held them for
+   * the production of the next piece. Who has the processor is decided again
+   * when it changes.
+   *
+   * @param {string} viewer
+   * @param {{ address: string, index: number } | null} wait
+   */
+  noteViewerWaiting(viewer, wait) {
+    const said = this.#viewersWaiting.get(viewer) ?? null;
+    const next = typeof wait?.address === "string" && Number.isInteger(wait.index)
+      ? { address: wait.address, index: wait.index } : null;
+    if (said?.address === next?.address && said?.index === next?.index) return;
+    if (next) this.#viewersWaiting.set(viewer, next);
+    else this.#viewersWaiting.delete(viewer);
+    this.shareTheMachine();
+  }
+
+  /** @param {string} address */
+  #forgetWaitsOn(address) {
+    for (const [viewer, wait] of this.#viewersWaiting) {
+      if (wait.address === address) this.#viewersWaiting.delete(viewer);
     }
   }
 
@@ -739,9 +780,14 @@ export class EncodeOrchestrator {
     const now = this.now();
     const running = this.#runningNow();
     const need = this.#needOf(leading);
-    // Only a run in a band a viewer is in can be short for a viewer.
-    const short = leading.urgent === true ? this.#pauseRule.shortfall({ leader: leading.run, need }) : null;
-    this.#noteShortfall(short ? { address: leading.address, ...short } : null);
+    // Only a run in a band a viewer is in can be short for a viewer, and a run
+    // making a piece the start forecast holds a viewer for needs all it can
+    // make, whatever the map's deadlines say.
+    const waited = this.#runAViewerWaitsFor();
+    const judged = waited ?? (leading.urgent === true ? leading : null);
+    const short = judged
+      ? this.#pauseRule.shortfall({ leader: judged.run, need: waited ? Number.POSITIVE_INFINITY : need }) : null;
+    this.#noteShortfall(short ? { address: judged.address, ...short, ...(waited ? { waitedFor: waited.index } : {}) } : null);
     const free = this.#processorReading("freeCores");
     const others = this.#processorReading("otherCores");
     for (const [address, runs] of this.#runs) {
@@ -769,19 +815,40 @@ export class EncodeOrchestrator {
   }
 
   /**
+   * The live run making a piece the start forecast holds a viewer for, the
+   * most urgent if there are several; null where none is.
+   *
+   * @returns {{ address: string, index: number, run: object, band: { urgent: boolean, priority: number } } | null}
+   */
+  #runAViewerWaitsFor() {
+    let found = null;
+    for (const { address, index } of this.#viewersWaiting.values()) {
+      for (const run of this.#runs.get(address) ?? []) {
+        if (!run.isAlive || run.isStopping || run.isSuspended === true || index < run.head || index > run.to) continue;
+        const band = this.#bandAt(address, run.head);
+        if (!found || compareUrgency(band, found.band) < 0) found = { address, index, run, band };
+      }
+    }
+    return found;
+  }
+
+  /**
    * Whether the run a viewer needs first is short of the processor, and by
    * what: its output, the speed it made over its seconds kept (median and
    * scatter) and the speed its deadlines need, infinite where a viewer waits
-   * for it (`PauseRule.shortfall`, torrent-tv/meta#180). Null where it is not
-   * short, or nothing measured it.
+   * for it (`PauseRule.shortfall`, torrent-tv/meta#180). The run the start
+   * forecast holds a viewer for is judged before the map's leader, and names
+   * the piece it is waited for by (`waitedFor`). Null where it is not short,
+   * or nothing measured it.
    *
-   * @returns {{ address: string, speed: { middle: number, scatter: number }, need: number, seconds: number } | null}
+   * @returns {{ address: string, speed: { middle: number, scatter: number }, need: number, seconds: number,
+   *   waitedFor?: number } | null}
    */
   processorShortfall() {
     return this.#shortfall;
   }
 
-  /** @param {{ address: string, speed: { middle: number, scatter: number }, need: number, seconds: number } | null} short */
+  /** @param {{ address: string, speed: { middle: number, scatter: number }, need: number, seconds: number, waitedFor?: number } | null} short */
   #noteShortfall(short) {
     this.#shortfall = short;
     this.shortfallNoted();

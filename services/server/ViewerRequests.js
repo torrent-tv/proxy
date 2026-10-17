@@ -790,6 +790,11 @@ export class ViewerRequests {
       })}`);
     }
     this.#sayHolding(session, consumerId, measurement, forecast, input, now);
+    // The encoder this viewer waits for, told to whoever shares the processor
+    // (torrent-tv/meta#180): the forecast knows it before the map's deadlines do.
+    const holding = forecast.holdingBy;
+    this.#host.noteViewerWaiting?.(consumerId || session.id,
+      holding?.kind === "production" ? { address: holding.track, index: holding.segment } : null);
     return forecast;
   }
 

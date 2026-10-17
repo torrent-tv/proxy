@@ -294,3 +294,54 @@ test("the orchestrator says the leader is short only in a band a viewer is in, a
   }
   assert.equal(made.processorShortfall(), null);
 });
+
+test("the run a viewer's start waits for by the forecast is short, whatever the map's deadlines say", () => {
+  const PICTURE = "torrent:abc:fmt=mpegts:grid=even@0:video-only:v=0/enc/libx264/720x400@24/superfast";
+  let told = 0;
+  const made = new EncodeOrchestrator({
+    maxRunsFor: () => 1, segmentSeconds: 4, startingSpeedFor: () => 1, now: () => 1000,
+    logger: { info: () => {}, warn: () => {} }, makeRun: () => null,
+    processor: { freeCores: () => 0, otherCores: () => 0 }, shortfallNoted: () => { told += 1; }
+  });
+  const picture = { from: 1, to: 100, head: 1, speedX: 1, isAlive: true, isStopping: false, isSuspended: false,
+    process: { pid: 11 }, pause() { return true; }, resume() { return true; }, stop() {}, noteProduced() {} };
+  // Due in 8 s and in no band a viewer is in: the map calls nothing urgent.
+  made.notePriorityMap(PICTURE, [{ from: 0, to: 200, priority: 100, withinSeconds: 8, urgent: false }]);
+  made.adopt(PICTURE, picture);
+  for (let second = 1; second <= 3; second += 1) {
+    made.noteRunSeconds(new Map([[11, { cores: 3, speed: 2 }]]), second * 1000);
+  }
+  assert.equal(made.processorShortfall(), null);
+  // The forecast holds a viewer for the production of #2, which this run makes.
+  const before = told;
+  made.noteViewerWaiting("viewer", { address: PICTURE, index: 2 });
+  assert.equal(told, before + 1, "decided again when the wait changes");
+  const short = made.processorShortfall();
+  assert.equal(short.address, PICTURE);
+  assert.equal(short.need, Number.POSITIVE_INFINITY);
+  assert.equal(short.waitedFor, 2);
+  assert.equal(short.speed.middle, 2);
+  made.noteViewerWaiting("viewer", { address: PICTURE, index: 2 });
+  assert.equal(told, before + 1, "the same wait decides nothing again");
+  // The piece is made: the run is past it, and nothing waits for this run.
+  picture.head = 3;
+  made.shareTheMachine();
+  assert.equal(made.processorShortfall(), null);
+  picture.head = 2;
+  made.shareTheMachine();
+  assert.equal(made.processorShortfall()?.waitedFor, 2);
+  // A paused run is not short of the processor: it is not on it.
+  picture.isSuspended = true;
+  made.shareTheMachine();
+  assert.equal(made.processorShortfall(), null);
+  picture.isSuspended = false;
+  // The viewer starts: the forecast names nothing an encoder makes.
+  made.noteViewerWaiting("viewer", null);
+  assert.equal(made.processorShortfall(), null);
+  // Nobody is coming to the output: what was said about its viewers goes.
+  made.noteViewerWaiting("viewer", { address: PICTURE, index: 2 });
+  assert.equal(made.processorShortfall()?.waitedFor, 2);
+  made.notePriorityMap(PICTURE, []);
+  made.shareTheMachine();
+  assert.equal(made.processorShortfall(), null);
+});

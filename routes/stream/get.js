@@ -109,6 +109,65 @@ function wholeFileFor(torrentPool, sourceKey, fileIndex) {
 }
 
 /**
+ * Open the whole file a response under way can continue from, if there is one.
+ *
+ * Any failure to open it leaves the response on the torrent, which can still
+ * answer; a file the disk owner removed is also forgotten here, as the route
+ * does before headers.
+ *
+ * @param {{ wholeFiles?: Map<string, { path: string, length: number, name: string }> }} torrentPool
+ * @param {string} sourceKey
+ * @param {number} fileIndex
+ * @param {number} length - The length the response was promised for.
+ * @returns {Promise<import("node:fs/promises").FileHandle | null>}
+ */
+async function openWholeFileToContinue(torrentPool, sourceKey, fileIndex, length) {
+  const whole = wholeFileFor(torrentPool, sourceKey, fileIndex);
+  if (!whole || whole.length !== length) {
+    return null;
+  }
+  try {
+    return await open(whole.path, "r");
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      const key = `${sourceKey.slice("torrent:".length).toLowerCase()}/${fileIndex}`;
+      if (torrentPool.wholeFiles.get(key) === whole) torrentPool.wholeFiles.delete(key);
+    }
+    return null;
+  }
+}
+
+/**
+ * Write bytes `from`..`end` of an open file to a response, each write waited
+ * for, and close the file.
+ *
+ * @param {import("node:http").ServerResponse} raw
+ * @param {import("node:fs/promises").FileHandle} handle
+ * @param {number} from - Inclusive.
+ * @param {number} end - Inclusive.
+ * @param {(length: number) => void} onWritten
+ * @returns {Promise<number>} Bytes written.
+ */
+async function writeFromWholeFile(raw, handle, from, end, onWritten) {
+  let written = 0;
+  try {
+    for await (const chunk of handle.createReadStream({ start: from, end, autoClose: false })) {
+      if (raw.writableEnded || raw.destroyed) {
+        break;
+      }
+      await new Promise((resolve, reject) => {
+        raw.write(chunk, (error) => (error ? reject(error) : resolve()));
+      });
+      written += chunk.length;
+      onWritten(chunk.length);
+    }
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+  return written;
+}
+
+/**
  * Serve a whole file off the disk, with ranges.
  *
  * @param {import("fastify").FastifyRequest} req
@@ -264,34 +323,66 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
     reply.raw.once("close", () => fragments.cancel());
 
     let sent = 0;
+    // THE TORRENT STOPS ANSWERING FOR A FILE AS SOON AS IT IS A FILE, also for
+    // a response that began before (user, 2026-10-09, torrent-tv/meta#173). An
+    // encoder slower than the film is never suspended and reads one response
+    // to the end of the file; left on the piece store, that read keeps the
+    // torrent alive for as long as the viewer stays (torrent-tv/meta#105). So
+    // between fragments, and when the torrent's read fails, the rest of the
+    // range is taken from the file — the same bytes at the same offsets.
+    let continueFrom = null;
     try {
-      for await (const fragment of markWaits ? markingWaits(fragments, markWaits) : fragments) {
-        if (reply.raw.writableEnded || reply.raw.destroyed) {
-          fragment.release();
-          break;
+      try {
+        for await (const fragment of markWaits ? markingWaits(fragments, markWaits) : fragments) {
+          if (reply.raw.writableEnded || reply.raw.destroyed) {
+            fragment.release();
+            break;
+          }
+          continueFrom = await openWholeFileToContinue(torrentPool, sourceKey, fileIndex, file.length);
+          if (continueFrom) {
+            fragment.release();
+            break;
+          }
+          try {
+            await new Promise((resolve, reject) => {
+              reply.raw.write(fragment.bytes, (error) => (error ? reject(error) : resolve()));
+            });
+            sent += fragment.bytes.length;
+          // Say so, if this read belongs to a transcode session. It is the only
+          // proof that a session which has produced nothing yet is nevertheless
+          // being fed: the encoder's own progress cannot move until its first
+          // frame is decoded, and a viewer waiting for that first frame was being
+          // told the proxy had died while the swarm was delivering to it. Field
+          // 2026-09-03: 46.3 s on one piece, `processedSeconds` frozen at the
+          // start position throughout, and the browser gave up 0.4 s before the
+          // piece landed.
+          if (noteInputBytes) {
+            noteInputBytes(sessionId, fragment.bytes.length);
+          }
+          // Only now are these bytes gone: the piece can be unpinned, and the
+          // slot it occupies reused. Releasing before this point corrupts the
+          // response silently.
+          } finally {
+            fragment.release();
+          }
         }
-        try {
-          await new Promise((resolve, reject) => {
-            reply.raw.write(fragment.bytes, (error) => (error ? reject(error) : resolve()));
-          });
-          sent += fragment.bytes.length;
-        // Say so, if this read belongs to a transcode session. It is the only
-        // proof that a session which has produced nothing yet is nevertheless
-        // being fed: the encoder's own progress cannot move until its first
-        // frame is decoded, and a viewer waiting for that first frame was being
-        // told the proxy had died while the swarm was delivering to it. Field
-        // 2026-09-03: 46.3 s on one piece, `processedSeconds` frozen at the
-        // start position throughout, and the browser gave up 0.4 s before the
-        // piece landed.
-        if (noteInputBytes) {
-          noteInputBytes(sessionId, fragment.bytes.length);
-        }
-        // Only now are these bytes gone: the piece can be unpinned, and the
-        // slot it occupies reused. Releasing before this point corrupts the
-        // response silently.
-        } finally {
-          fragment.release();
-        }
+      } catch (error) {
+        if (sent >= contentLength || req.raw.aborted || reply.raw.destroyed) throw error;
+        continueFrom = await openWholeFileToContinue(torrentPool, sourceKey, fileIndex, file.length);
+        if (!continueFrom) throw error;
+      }
+      if (continueFrom) {
+        fragments.cancel();
+        const fromTorrent = sent;
+        sent += await writeFromWholeFile(reply.raw, continueFrom, start + sent, end, (length) => {
+          if (noteInputBytes) {
+            noteInputBytes(sessionId, length);
+          }
+        });
+        logger.info(
+          `stream: read of "${file.name}" bytes ${start}-${end} continued from the whole file: ` +
+          `${fromTorrent} byte(s) from the torrent, ${sent - fromTorrent} from the file`
+        );
       }
       // THE BODY MUST BE AS LONG AS THE HEADER PROMISED, and nothing checked.
       //

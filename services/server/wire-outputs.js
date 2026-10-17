@@ -631,6 +631,7 @@ export function wireOutputs({
     disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
     planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
     waitUntilReady: (...args) => parts.serving.waitUntilReady(...args),
+    noteViewerWaiting: (viewer, wait) => parts.encodeOrchestrator?.noteViewerWaiting(viewer, wait),
     get encodeRuns() { return parts.encodeRuns; },
     // When this viewer's playback can start and run to the end: the viewer
     // component's forecast, which models the viewer's browser.
@@ -781,7 +782,8 @@ export function wireOutputs({
       const swarm = parts.hostLoad.swarmRate();
       const made = `the encoder a viewer needs first made ${short.speed.middle.toFixed(2)}x ` +
         `(scatter ${short.speed.scatter.toFixed(2)}) over ${short.seconds}s` +
-        (Number.isFinite(short.need) ? `, needing ${short.need.toFixed(2)}x` : " with a viewer waiting");
+        (Number.isFinite(short.need) ? `, needing ${short.need.toFixed(2)}x` : " with a viewer waiting") +
+        (Number.isInteger(short.waitedFor) ? ` for its #${short.waitedFor} by the start forecast` : "");
       if (!Number.isFinite(needs) || needs <= 0) {
         because = `${made}; its film's bytes per second are unknown`;
       } else if (swarm === null) {

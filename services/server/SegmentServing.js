@@ -904,9 +904,8 @@ export class SegmentServing {
    * backwards several times a second — measured 2026-09-13, 77 encoder starts
    * and 141 stops in six minutes while both viewers sat frozen.
    *
-   * A viewer is forgotten once nothing has been heard from them for longer than
-   * any silence a watching viewer can produce. The figure is the proxy's own
-   * look-ahead, not a chosen interval.
+   * Presence is established by arrival or an explicit opening and ends with
+   * the connection. A queued request cannot restore a viewer who has left.
    *
    * @param {HlsSession} session
    * @param {string} consumerId
@@ -917,7 +916,7 @@ export class SegmentServing {
     if (!consumerId) {
       return;
     }
-    this.#host.viewers.of(session, consumerId).seen();
+    this.#host.viewers.join(session, consumerId)?.seen();
   }
 
   /**

@@ -178,6 +178,7 @@ test("a seek moves the seeking viewer's own head, and nobody else's", async () =
   };
 
   const jumpTo = 120;
+  manager.viewers.present("jumping");
   manager.viewerRequests.requestSeek(SESSION_ID, jumpTo, "jumping");
 
   assert.equal(

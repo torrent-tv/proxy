@@ -118,6 +118,13 @@ many-connections-to-one-viewer presence relation. Closing either association alo
 does not release a viewer still present on the other. Probes, counters and silence
 decisions are separate for each association.
 
+Once the last connection carrying a viewer closes, their presence ends before
+output disposal waits for child processes. Late reports, seeks, media requests
+and completed preparations cannot register that viewer again. Reports and seeks
+for an absent viewer return `404`; arrival or an explicit output opening can
+establish a new viewing. An opening already in progress cannot attach to a
+different viewing created by a reconnect under the same viewer identifier.
+
 Initial connection preparation waits for both required channels. Established
 control loss rejects only requests sent on that channel and starts independent
 control connection preparation. Sent actions are never replayed automatically.

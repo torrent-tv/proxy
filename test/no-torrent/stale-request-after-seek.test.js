@@ -100,6 +100,7 @@ test("a request behind where the viewer said they are does not move the encoder"
   });
 
   // The viewer stated their position: 2083.4 s, which is segment #520 here.
+  manager.viewers.present("viewer-1");
   manager.viewerRequests.requestSeek(SESSION_ID, 2083.4, "viewer-1");
 
   await manager.serving.getFileStream(
@@ -148,6 +149,7 @@ test("a request cannot move the viewer's position backwards", async (t) => {
     await tidy(manager, session, dirPath);
   });
 
+  manager.viewers.present("viewer-1");
   manager.viewerRequests.requestSeek(SESSION_ID, 2083.4, "viewer-1");
   await manager.serving.getFileStream(SESSION_ID, fmp4Format.segmentFileName(BEHIND_INDEX));
 

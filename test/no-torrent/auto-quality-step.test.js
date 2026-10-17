@@ -464,6 +464,7 @@ test("a reading stops counting when the person leaves, not when it gets old", as
   gone.qualityMode = "auto";
   gone.report({ linkMbps: 1.0, bufferedAheadSec: 1.5, positionSeconds: 40, playing: true }, Date.now() - 120_000);
   gone.gone = true;
+  manager.viewers.present("here");
   recordViewerReport({
     outputs: manager.outputs,
     viewers: manager.viewers,

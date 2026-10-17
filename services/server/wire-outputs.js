@@ -205,6 +205,7 @@ export function wireOutputs({
     getSourceStats = null,
     setPriorityMap = null,
     setDownloadRate = null,
+    setSpeculativeHold = null,
     // What a second job costs on this host, measured at startup. Null when it
     // could not be measured, and then nothing is corrected — the alternative
     // is inventing a penalty, which is the same fault as inventing a fill rate.
@@ -753,6 +754,48 @@ export function wireOutputs({
     void Promise.resolve(parts.setDownloadRate(share.bytesPerSecond, `film speed ${share.filmSpeed.toFixed(2)}x ` +
       `over ${watched.length} file(s), ${Math.round(share.capacity * 100)}% of the machine for the proxy`)).catch(() => {});
   };
+  parts.setSpeculativeHold = typeof setSpeculativeHold === "function" ? setSpeculativeHold : null;
+  // THE DOWNLOAD GIVES WAY TO THE ENCODER A VIEWER NEEDS FIRST
+  // (torrent-tv/meta#180, phase 5). While that encoder makes film on the
+  // processor and less than its deadlines need, what nobody needs yet — the
+  // film's tail, the gap behind a seek — is not downloaded, so the torrent
+  // thread's processor goes to it. Only where the swarm gives more than the
+  // film needs at the speed asked of it (its need, or with a viewer waiting
+  // what it makes up to its scatter): then every byte an encoder will reach
+  // still comes first and in time, and nothing is lost by not fetching ahead.
+  // Where the swarm is slower than that, the bytes fetched ahead are what the
+  // film will play from, and they are fetched. Decided each time who has the
+  // processor is decided and each time the machine is read.
+  parts.speculativeHeld = false;
+  parts.applySpeculativeHold = () => {
+    if (!parts.setSpeculativeHold || !parts.hostLoad || !parts.encodeOrchestrator) return;
+    const short = parts.encodeOrchestrator.processorShortfall();
+    let held = false;
+    let because = "the encoder a viewer needs first is not short of the processor";
+    if (short) {
+      const output = parts.outputs.outputsOn(short.address)[0] ?? null;
+      const length = Number(output?.file?.lengthBytes ?? parts.hostLoad.fileLengthByKey.get(output?.file?.key));
+      const bytesPerFilmSecond = length / Number(output?.file?.durationSeconds);
+      const asked = Number.isFinite(short.need) ? short.need : short.speed.middle + short.speed.scatter;
+      const needs = bytesPerFilmSecond * asked;
+      const swarm = parts.hostLoad.swarmRate();
+      const made = `the encoder a viewer needs first made ${short.speed.middle.toFixed(2)}x ` +
+        `(scatter ${short.speed.scatter.toFixed(2)}) over ${short.seconds}s` +
+        (Number.isFinite(short.need) ? `, needing ${short.need.toFixed(2)}x` : " with a viewer waiting");
+      if (!Number.isFinite(needs) || needs <= 0) {
+        because = `${made}; its film's bytes per second are unknown`;
+      } else if (swarm === null) {
+        because = `${made}; the swarm's rate is not measured yet`;
+      } else {
+        held = swarm > needs;
+        because = `${made}; the swarm gives ${(swarm / 1e6).toFixed(2)} MB/s, ` +
+          `${held ? "more than" : "not more than"} the ${(needs / 1e6).toFixed(2)} MB/s its film needs at ${asked.toFixed(2)}x`;
+      }
+    }
+    if (held === parts.speculativeHeld) return;
+    parts.speculativeHeld = held;
+    void Promise.resolve(parts.setSpeculativeHold(held, because)).catch(() => {});
+  };
   // The one owner of what the processor gives the encoders: the share of the
   // machine other work leaves and the measured contention penalties, read by
   // every place that decides on the processor (torrent-tv/meta#180).
@@ -1090,6 +1133,7 @@ export function wireOutputs({
     // The processor left free and what other work takes, for the pause rule
     // (torrent-tv/meta#180, phase 4).
     processor: parts.processor,
+    shortfallNoted: () => parts.applySpeculativeHold?.(),
     startingSpeedFor: (address) => parts.encodeCost.speedForOutput(address),
     segmentCoverage,
     // HOW IT ASKS TO DECIDE AGAIN. A plan that refuses to place anything
@@ -1257,7 +1301,11 @@ export function wireOutputs({
     liveConsumers: (...args) => parts.renditions.liveConsumers(...args),
     liveRunsOf: (...args) => parts.encodeRuns.liveRunsOf(...args),
     producedNumbers: (...args) => parts.serving.producedNumbers(...args),
-    reportHostLoad: async (...args) => { await parts.hostLoad.reportHostLoad(...args); parts.applyDownloadShare?.(); },
+    reportHostLoad: async (...args) => {
+      await parts.hostLoad.reportHostLoad(...args);
+      parts.applyDownloadShare?.();
+      parts.applySpeculativeHold?.();
+    },
     runStateOf: (...args) => parts.encodeRuns.runStateOf(...args),
     sampleDownloadRates: (...args) => parts.hostLoad.sampleDownloadRates(...args),
     get encodeCost() { return parts.encodeCost; },

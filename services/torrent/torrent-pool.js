@@ -18,7 +18,7 @@ import { logger } from "../../utils/logger.js";
 import { pieceStoreOf } from "./piece-store-of.js";
 import { demandProgress } from "./demand-progress.js";
 import { Urgency, urgencyName } from "./demand/index.js";
-import { demandFor, firstClassStatement, forgetTorrent, reconcileAll, hasUnmetDemand, selectionLimitOf } from "./download/registry.js";
+import { demandFor, firstClassStatement, forgetTorrent, holdSpeculative, reconcileAll, hasUnmetDemand, selectionLimitOf } from "./download/registry.js";
 import { applyDownloadRate } from "./download/throttle.js";
 import { withdrawClaim } from "./download/withdraw-claim.js";
 import { deadlineOfMapZone, levelOfMapZone, priorityOfMapZone } from "./map-zones.js";
@@ -1308,6 +1308,20 @@ export class TorrentPool {
 
   /** The power of two the last limit said was nearest, null for none. */
   #downloadLimitScale = null;
+
+  /**
+   * Hold back, or let go, what every torrent downloads speculatively: the
+   * film's tail and the gap behind a seek (`download/registry.js`
+   * `holdSpeculative`, torrent-tv/meta#180). Said when it changes.
+   *
+   * @param {boolean} held
+   * @param {string} [because]
+   */
+  setSpeculativeHold(held, because = "") {
+    if (!holdSpeculative(held)) return;
+    logger.info(`torrent-pool: speculative download ${held === true ? "held" : "let go"}${because ? ` (${because})` : ""}`);
+    reconcileAll();
+  }
 
   applyPriorityMap(torrent, fileIndex, zones, durationSeconds) {
     // A MAP WITH NOTHING IN IT IS A STATEMENT, and it is answered before

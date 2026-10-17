@@ -72,6 +72,12 @@ export const Command = {
    * (`storage/processor-share.js`, torrent-tv/meta#178).
    */
   DOWNLOAD_RATE: "download-rate",
+  /**
+   * Whether the speculative levels are held back for the processor the
+   * encoders need (`download/registry.js` `holdSpeculative`,
+   * torrent-tv/meta#180).
+   */
+  SPECULATIVE_HOLD: "speculative-hold",
   /** Read a byte range; the body arrives as CHUNK messages. */
   READ_RANGE: "read-range",
   /** Abandon an in-flight READ_RANGE (viewer gone, seek superseded). */

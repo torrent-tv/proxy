@@ -179,6 +179,17 @@ export class WorkerTorrentPool {
     return this.#client.setDownloadRate(bytesPerSecond, because);
   }
 
+  /**
+   * Whether the speculative levels are held back for the encoders.
+   *
+   * @param {boolean} held
+   * @param {string} [because]
+   * @returns {Promise<void>}
+   */
+  async setSpeculativeHold(held, because = "") {
+    return this.#client.setSpeculativeHold(held, because);
+  }
+
   async setPriorityMap({ sourceKey, fileIndex, durationSeconds, zones, postedAt }) {
     if (!sourceKey) {
       return;

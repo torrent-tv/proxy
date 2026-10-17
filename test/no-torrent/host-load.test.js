@@ -66,6 +66,36 @@ test("the torrent thread's price of a downloaded byte, its base draw off, is tak
   assert.ok(Math.abs(load.torrentThreadCostPerMegabyte - 0.01) < 1e-9, `${load.torrentThreadCostPerMegabyte}`);
 });
 
+test("the swarm's rate is what it gave while our selection held nothing back, and holding it back does not lower it", async t => {
+  let now = 0, downloaded = 0, threadCpu = 0;
+  const selection = { ms: 0, heldBackMs: 0, freeBytes: 0, freeMs: 0 };
+  t.mock.method(Date, "now", () => now);
+  const load = new HostLoad({
+    outputs: new Map([["s", { id: "s" }]]), runStateOf: () => "PRODUCING", liveRunsOf: () => [],
+    readProxyCpuSeconds: () => 0, readSystemCpu: async () => null, readProcessCpuSeconds: async () => null,
+    readMachineState: async () => ({ megahertz: null, celsius: null }),
+    shareOfMachine: (before, after) => shareOfMachine(before, after, 4),
+    getTorrentTotals: async () => ({ downloaded, threadCpuSeconds: threadCpu, selection: { ...selection } })
+  });
+  t.mock.method(os, "cpus", () => new Array(4).fill({}));
+  await load.reportHostLoad();
+  assert.equal(load.swarmRate(), null, "nothing read yet");
+  // Three seconds of 10 MB/s with nothing held back.
+  for (let second = 0; second < 3; second++) {
+    now += 1000; threadCpu += 0.1; downloaded += 10e6;
+    Object.assign(selection, { ms: selection.ms + 1000, freeMs: selection.freeMs + 1000, freeBytes: selection.freeBytes + 10e6 });
+    await load.reportHostLoad();
+  }
+  assert.equal(load.swarmRate(), 10e6);
+  // Five seconds held back the whole time, 0.5 MB/s carried: what was asked for.
+  for (let second = 0; second < 5; second++) {
+    now += 1000; threadCpu += 0.01; downloaded += 0.5e6;
+    Object.assign(selection, { ms: selection.ms + 1000, heldBackMs: selection.heldBackMs + 1000 });
+    await load.reportHostLoad();
+  }
+  assert.equal(load.swarmRate(), 10e6);
+});
+
 test("a process using one core of four for a second reports a quarter of the machine", () => {
   const before = { takenAt: 1_000, processCpuSeconds: 10, system: null };
   const after = { takenAt: 2_000, processCpuSeconds: 11, system: null };

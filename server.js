@@ -1068,6 +1068,7 @@ export async function startProxyServer({
     // seconds into bytes, what to ask the swarm for, what to keep in memory —
     // is its own business.
     setDownloadRate: (bytesPerSecond, because) => torrentPool.setDownloadRate?.(bytesPerSecond, because),
+    setSpeculativeHold: (held, because) => torrentPool.setSpeculativeHold?.(held, because),
     setPriorityMap: async ({ sourceKey, fileIndex, durationSeconds, zones }) => {
       void sourcePreparation?.refresh();
       const record = sourceRegistry.get(sourceKey);

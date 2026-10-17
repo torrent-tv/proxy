@@ -403,17 +403,12 @@ export class OutputLifecycle {
     if (typeof consumerId !== "string" || consumerId.length === 0) {
       return 0;
     }
-    const watched = this.#host.viewers.get(consumerId)?.outputs;
-    if (!watched || watched.size === 0) {
-      this.#host.viewers.hasGone(consumerId);
-      return 0;
-    }
-    // Copied before anything is released: releasing walks the same set.
-    const outputs = [...watched];
+    // Presence ends synchronously, before disposal waits for a child process.
+    // Late reports and preparations must not rejoin this viewer meanwhile.
+    const outputs = this.#host.viewers.hasGone(consumerId);
     for (const outputId of outputs) {
       await this.releaseSessionConsumer(outputId, consumerId, because);
     }
-    this.#host.viewers.hasGone(consumerId);
     return outputs.length;
   }
 

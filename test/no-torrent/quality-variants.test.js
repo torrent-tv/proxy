@@ -829,6 +829,32 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   );
 });
 
+for (const prepare of [false, true]) {
+  test(`an audio opening completing after departure does not restore demand (prepare=${prepare})`, async (t) => {
+    const { manager, base, dirPath } = await managerWithBase();
+    t.after(async () => {
+      await manager.lifecycle.disposeAll();
+      await rm(dirPath, { recursive: true, force: true });
+    });
+    base.spec = outputSpec({ transcodeVideo: true, audioSeparate: true, height: base.output.encodeHeight });
+    manager.viewers.of(base, VIEWER);
+    manager.getCachedAudioTracks = () => [{ index: 0, language: "eng", isDefault: true }];
+    let complete;
+    manager.viewerRequests.createOrGetSession = () => new Promise(resolve => { complete = resolve; });
+    const pending = prepare
+      ? manager.renditions.prepareAudioTrack(BASE_ID, 0, 100, VIEWER)
+      : manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00000.mp4", VIEWER);
+    // The base can outlive its viewer because an assignment retains it.
+    manager.viewers.hasGone(VIEWER);
+    const audio = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
+    manager.outputs.set(audio.id, audio);
+    complete(audio);
+    await pending;
+    assert.equal(manager.viewers.get(VIEWER), null);
+    assert.equal(manager.viewers.forOutput(audio).size, 0);
+  });
+}
+
 test("a separately published audio track starts where the picture is, from the reported buffer", async (t) => {
   const { manager, base, dirPath } = await managerWithBase();
   t.after(async () => {

@@ -179,6 +179,16 @@ export class Viewers {
     return this.#byId.get(consumerId) ?? null;
   }
 
+  /**
+   * Add an output to an existing viewing. A request or preparation completing
+   * after departure cannot establish presence again; only arrival or a new
+   * explicit opening may do that through `present` or `of`.
+   */
+  join(output, consumerId, now = Date.now()) {
+    const viewer = this.get(consumerId);
+    return viewer?.isPresent() ? this.of(output, consumerId, now) : null;
+  }
+
   sourceKeys() {
     return new Set([...this.#byId.values()].filter(viewer => viewer.isPresent() && viewer.source)
       .map(viewer => viewer.source.sourceKey));

@@ -121,7 +121,13 @@ export class ViewerRequests {
     // What this viewer's link last measured, where the request does not say:
     // a viewer who comes back to open another film has a link this proxy has
     // already measured, and the output they are given is judged by it.
-    const known = consumerId ? this.#host.viewers.get(consumerId) : null;
+    let known = consumerId ? this.#host.viewers.get(consumerId) : null;
+    const requireViewing = () => {
+      request.signal?.throwIfAborted();
+      if (known && this.#host.viewers.get(consumerId) !== known) {
+        throw new DOMException("The viewer left while the output was opening.", "AbortError");
+      }
+    };
     const viewerLinkMbps = request.viewerLinkMbps ?? known?.linkReading()?.linkMbps ?? null;
     const startPositionSeconds = request.startPositionSeconds ?? 0;
     // Whether they were already on the output this request lands on, read at
@@ -136,13 +142,14 @@ export class ViewerRequests {
     // state nothing has every encoder on it stopped.
     const claim = consumerId
       ? (candidate) => {
-          request.signal?.throwIfAborted();
+          requireViewing();
           alreadyOn = this.#host.viewers.forOutput(candidate).has(consumerId);
           const answer = alreadyOn
             ? { admitted: true, reason: "already watching it", speedX: null }
             : this.#host.admitsWatching(candidate);
           if (answer.admitted) {
-            this.placeViewer(candidate, this.#host.viewers.of(candidate, consumerId), startPositionSeconds);
+            known = this.#host.viewers.of(candidate, consumerId);
+            this.placeViewer(candidate, known, startPositionSeconds);
           }
           return answer;
         }
@@ -152,7 +159,7 @@ export class ViewerRequests {
       viewerLinkMbps,
       claim
     });
-    request.signal?.throwIfAborted();
+    requireViewing();
     if (consumerId) {
       const joined = existed && !alreadyOn;
       // What THIS viewer wants of the sound, which an output they are joining
@@ -257,7 +264,8 @@ export class ViewerRequests {
     if (!output || !consumerId) {
       return;
     }
-    this.placeViewer(output, this.#host.viewers.of(output, consumerId), positionSeconds);
+    const viewer = this.#host.viewers.join(output, consumerId);
+    if (viewer) this.placeViewer(output, viewer, positionSeconds);
   }
 
   placeViewer(session, viewer, positionSeconds) {
@@ -320,7 +328,8 @@ export class ViewerRequests {
     // from where the viewers are, and both orchestrators read the map.
     // A seek that names nobody moves nobody: the route refuses it before it
     // gets here.
-    const viewer = this.#host.viewers.of(named, consumerId);
+    const viewer = this.#host.viewers.join(named, consumerId);
+    if (!viewer) return false;
     viewer.moveTo(positionSeconds);
     // WHICH VIEWING THEIR REQUESTS NOW BELONG TO, as the page states it.
     //

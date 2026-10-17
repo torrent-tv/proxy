@@ -226,6 +226,7 @@ test("a session that is not there is answered, not invented", async () => {
 test("what a viewer states about themselves is kept and answered", () => {
   const manager = bareManager();
   manager.outputs.set(SESSION_ID, fakeSession());
+  manager.viewers.present("viewer-one");
 
   // Nine public members had no test of any kind before the dismantling began,
   // and six of them are the viewer's own facts — the ones that move into

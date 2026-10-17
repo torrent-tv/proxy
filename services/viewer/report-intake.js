@@ -23,13 +23,12 @@ import { activeOutputFor } from "./active-output.js";
  *
  * @param {object} params
  * @param {{ get: (id: string) => object | undefined }} params.outputs - Every live output, by id.
- * @param {{ of: (session: object, consumerId: string) => import("./Viewer.js").Viewer }} params.viewers
+ * @param {{ join: (session: object, consumerId: string) => import("./Viewer.js").Viewer | null }} params.viewers
  * @param {string} params.sessionId - The session the page addresses, which is
  *   always the picture's: the browser is not told which rung it is on.
  * @param {object} params.report - What they said about themselves.
  * @param {number} [params.now]
- * @returns {boolean} False when no such session is live, which is the page
- *   reporting into one that has been disposed.
+ * @returns {boolean} False when the session or its viewer has gone.
  */
 export function recordViewerReport({ outputs, viewers, sessionId, report, now = Date.now() }) {
   const named = outputs.get(sessionId);
@@ -41,6 +40,8 @@ export function recordViewerReport({ outputs, viewers, sessionId, report, now = 
   // The stream on screen is the reporter's own: with two viewers on two rungs,
   // one report says nothing about the other's encoder.
   const session = activeOutputFor({ base: named, consumerId, outputs, viewers });
-  viewers.of(session, consumerId).report(report, now);
+  const viewer = viewers.join(session, consumerId);
+  if (!viewer) return false;
+  viewer.report(report, now);
   return true;
 }

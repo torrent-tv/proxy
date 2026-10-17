@@ -107,6 +107,8 @@ test("a seek by one viewer does not release the request held for another", async
   // One is at segment #25, the other far ahead at #150 — inside the fixture's
   // own 200-segment timeline, since a position past the end of the grid is
   // clamped to it and would prove nothing about the width.
+  manager.viewers.present("behind");
+  manager.viewers.present("ahead");
   manager.viewerRequests.requestSeek(SESSION_ID, 100, "behind");
   manager.viewerRequests.requestSeek(SESSION_ID, 600, "ahead");
 

@@ -96,7 +96,8 @@ export function audioChoiceOf(viewers, output, consumerId) {
  * @returns {void}
  */
 export function chooseAudioTrack(viewers, output, consumerId, choice) {
-  viewers.of(output, consumerId).audio = { trackIndex: choice.trackIndex, transcode: choice.transcode === true };
+  const viewer = viewers.join(output, consumerId);
+  if (viewer) viewer.audio = { trackIndex: choice.trackIndex, transcode: choice.transcode === true };
 }
 
 /**
@@ -122,7 +123,8 @@ export function stepOnScreenOf(viewers, output, consumerId) {
  * @returns {void}
  */
 export function noteStepOnScreen(viewers, output, consumerId, stepId) {
-  viewers.of(output, consumerId).activeVariantId = stepId;
+  const viewer = viewers.join(output, consumerId);
+  if (viewer) viewer.activeVariantId = stepId;
 }
 
 /**
@@ -148,7 +150,7 @@ export function noteStepBeingWarmed(viewers, output, consumerId, stepId) {
   // Clearing does not make a watcher. Warming one FOR somebody is them
   // watching; saying nothing is being warmed for a person who watches nothing
   // would put them on this output for the sake of a null.
-  const viewer = stepId ? viewers.of(output, consumerId) : on(viewers, output, consumerId);
+  const viewer = stepId ? viewers.join(output, consumerId) : on(viewers, output, consumerId);
   if (viewer) {
     // When the warming of THIS step began: kept across a repeat of the same
     // step, started afresh for another one, gone with it.
@@ -192,16 +194,15 @@ export function audioBeingWarmedOf(viewers, output, consumerId) {
  * @returns {void}
  */
 export function noteAudioBeingWarmed(viewers, output, consumerId, renditionId) {
-  const viewer = renditionId ? viewers.of(output, consumerId) : on(viewers, output, consumerId);
+  const viewer = renditionId ? viewers.join(output, consumerId) : on(viewers, output, consumerId);
   if (viewer) {
     viewer.warmingAudioId = renditionId;
   }
 }
 
 /**
- * This viewer is watching this output. Asking for any of its files is watching
- * it: nothing is made for an output nobody is on, so the init a player needs
- * before it can ask for a segment would never be made.
+ * A present viewer is watching this output. Asking for its init or a segment
+ * adds the output to their viewing; a late request cannot establish presence.
  *
  * @param {object} viewers
  * @param {object} output
@@ -209,7 +210,7 @@ export function noteAudioBeingWarmed(viewers, output, consumerId, renditionId) {
  * @returns {void}
  */
 export function watches(viewers, output, consumerId) {
-  viewers.of(output, consumerId);
+  viewers.join(output, consumerId);
 }
 
 /**
@@ -222,7 +223,7 @@ export function watches(viewers, output, consumerId) {
  * @returns {void}
  */
 export function placeOn(viewers, output, consumerId, seconds) {
-  viewers.of(output, consumerId).moveTo(seconds);
+  viewers.join(output, consumerId)?.moveTo(seconds);
 }
 
 /**

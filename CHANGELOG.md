@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.10
 
 - **Fix**: While the encoder a viewer needs first makes film on the processor and less than its deadlines need (anything at all while a viewer waits for it), the download holds back what nobody needs yet, the film's tail and the gap behind a seek, so the torrent thread's processor goes to that encoder. It holds back only where the swarm gave more than the film needs at the speed asked of the encoder: the median of what it carried while our selection held no connection back, never less than the median of what it carried in all. Every urgent level is still asked for first. The torrent thread says `speculative download held` or `let go` with the readings behind it. On Home Assistant (r84, 2.101.8) the torrent thread drew 9-19 % of the machine while it downloaded 7-14 MB/s and handed readers about 0.5 MB/s in most intervals, with 0-6 % of the machine free (#ttv-180).
 

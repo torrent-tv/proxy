@@ -14,7 +14,12 @@ test("the first opening holds capacity before a concurrent opening is admitted",
     ["source-b:0", 0.6]
   ]);
   const viewers = {
-    get: () => null,
+    get(consumerId) {
+      for (const members of records.values()) {
+        if (members.has(consumerId)) return members.get(consumerId);
+      }
+      return null;
+    },
     forOutput(output) {
       return new Set(records.get(output.outputKey)?.keys() ?? []);
     },

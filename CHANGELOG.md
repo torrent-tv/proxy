@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.9
 
 - **Fix**: An output a viewer is moved onto at another speed setting of the encoder stands, until a piece of it is measured, on the speed the move was decided at, instead of the figure taken when the output was opened, which counted the output being replaced as running beside it. On Home Assistant (r82, 2.101.5) an output at `faster` opened during a cold start was predicted 0.22x, its move was priced 1.81x and it measured 1.46-1.65x; on 0.22x the start forecast stated 30 596 s and 1 037 s where the picture came in 10.5 s and 14.4 s. The `prediction` log line then compares the measurement with that price and gives no cheapest-mode figure. Moves between limits and height steps are unchanged (#ttv-185).
 

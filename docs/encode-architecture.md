@@ -305,6 +305,11 @@ a faster setting (`Renditions.preparePresetSwitch`); the move records that it
 changes the setting, so their link carrying the output on screen does not
 cancel it.
 
+A separate audio-only output may close a segment while this move is being
+prepared. Its publication is not a picture the viewer is leaving, so it does
+not reconsider the move. Publications from a picture output are checked using
+the picture that owns the prepared output and the picture currently on screen.
+
 1. **Which setting.** Down: the best setting faster than the one on screen that
    this machine holds; up: the next better one only, once the viewer has room
    to spare (`#roomToSpare`). Each candidate is priced by

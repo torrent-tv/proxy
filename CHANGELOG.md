@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Do not cancel a viewer's picture preset move when a separate soundtrack closes a segment; reconsider the move against its prepared picture and the picture the viewer is leaving (#ttv-195).
+
 ## 2.101.15
 
 - **Perf**: A downloaded file is written out whole while somebody watches it, instead of after its last viewer leaves, and a file nobody watches is not written. A response already being read from the torrent continues from that file at the next fragment, or when the torrent's read fails, with the same bytes; the proxy logs `continued from the whole file` with the bytes taken from each. A torrent whose every file is saved is removed while its viewers stay, once no read is left on its piece store, and not in the sweep that announced its last file. The `whole files: kept` line gives the time the write took. On Home Assistant (2026-10-09, proxy 2.95.41) a film re-encoded at 0.56x reached 100 % while it played and was written only a minute after the tab closed (#ttv-173).

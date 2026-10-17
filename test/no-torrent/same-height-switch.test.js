@@ -130,6 +130,28 @@ function pictureAtNominal(how = {}) {
   const base = outputAt({ id: BASE_ID, file, limit: NOMINAL, preset: how.preset ?? null, format: how.format });
   const outputs = new OutputCatalog();
   outputs.set(BASE_ID, base);
+  const audioOutput = how.separateAudio
+    ? (() => {
+        const spec = outputSpec({
+          sourceKey: file.sourceKey,
+          fileIndex: file.fileIndex,
+          audioOnly: true,
+          transcodeAudio: false,
+          segmentFormatId: how.format?.id ?? fmp4Format.id
+        });
+        const output = {
+          id: "aaaaaaaa33333333",
+          file,
+          spec,
+          outputKey: spec.toKey(),
+          timeline: { cutGrid: "uniform", segmentCount: SEGMENTS },
+          segmentFormat: how.format ?? fmp4Format,
+          output: { encodeHeight: 0 }
+        };
+        outputs.set(output.id, output);
+        return output;
+      })()
+    : null;
   const viewers = new Viewers();
   const closed = new Set();
   const disposed = [];
@@ -256,6 +278,9 @@ function pictureAtNominal(how = {}) {
     // picture answered it, by the rule.
     chooseOutput(viewers, consumerId, HEIGHT, base.outputKey);
     viewer.report({ linkMbps: linkJustFor(NOMINAL) * 2, bufferedAheadSec: 20, positionSeconds: 40, playing: true });
+    if (audioOutput) {
+      viewers.of(audioOutput, consumerId);
+    }
   }
   /**
    * The segments this viewer has been given in the viewing they are in, each
@@ -301,7 +326,7 @@ function pictureAtNominal(how = {}) {
     failed.add(output.id);
     renditions.noteProductionFailed(output);
   };
-  return { renditions, outputs, viewers, base, file, closed, close, given, linkNow, report, fail, failed, disposed, opened, invalidated, predicted };
+  return { renditions, outputs, viewers, base, file, audioOutput, closed, close, given, linkNow, report, fail, failed, disposed, opened, invalidated, predicted };
 }
 
 test("a thin link moves only its own viewer to a lower limit of the same height", async () => {
@@ -706,6 +731,34 @@ test("a machine-bound viewer is moved to the best faster setting this machine ho
   assert.equal(opened.at(-1).capKbps, NOMINAL);
   close(prepared, 11);
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "moved once the next segment is closed there");
+});
+
+test("a separate soundtrack publication does not cancel a prepared picture preset move", async () => {
+  const fixture = pictureAtNominal({
+    format: mpegtsFormat,
+    preset: "veryfast",
+    ladder: LADDER,
+    presetSpeeds: { faster: 1.81 },
+    separateAudio: true
+  });
+  const { renditions, viewers, base, outputs, audioOutput, close } = fixture;
+  const move = await renditions.preparePresetSwitch(base, "viewer-a", "up", "room");
+  assert.equal(move.started, true, move.reason);
+  const prepared = outputs.get(sameHeightSwitchOf(viewers, "viewer-a").outputId);
+  assert.equal(prepared.spec.video.encode.preset, "faster");
+
+  close(audioOutput, 1);
+  close(audioOutput, 2);
+  close(audioOutput, 3);
+  const pending = sameHeightSwitchOf(viewers, "viewer-a");
+  assert.ok(pending, "audio pieces leave the picture move pending");
+  assert.equal(pending.outputId, prepared.id);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), base.outputKey, "the viewer stays on the current picture until the target is ready");
+  assert.equal(viewers.forOutput(audioOutput).has("viewer-a"), true, "the viewer keeps the selected soundtrack");
+
+  close(prepared, 10);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "the target picture is selected once its next segment is closed");
+  assert.equal(viewers.forOutput(audioOutput).has("viewer-a"), true, "completing the picture move keeps the soundtrack");
 });
 
 // r82 (torrent-tv/meta#185): an output opened for a move to `faster` was

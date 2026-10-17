@@ -77,6 +77,14 @@ function wants(made, zones) {
   })));
 }
 
+test("forgetting a disposed output withdraws its last priority map", () => {
+  const made = new EncodeOrchestrator({});
+  made.notePriorityMap(PICTURE, [{ from: 0, to: 20, priority: 100, withinSeconds: 0 }]);
+  assert.ok(made.wantedSegmentsOn(PICTURE).length > 0);
+  made.forgetOutput(PICTURE);
+  assert.deepEqual(made.wantedSegmentsOn(PICTURE), []);
+});
+
 /**
  * How many encoders are working the stretch a given number falls in.
  *

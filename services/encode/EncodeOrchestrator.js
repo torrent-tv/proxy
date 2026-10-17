@@ -457,6 +457,9 @@ export class EncodeOrchestrator {
    * @param {string} address
    */
   forgetOutput(address) {
+    // The output no longer exists. Its last map must not remain an input to
+    // later plans while stopped child processes finish exiting.
+    this.notePriorityMap(address, []);
     if (this.runsOn(address).length > 0) {
       return;
     }

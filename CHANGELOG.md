@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Withdraw a disposed output's last encoding priority map, including while its stopped processes finish exiting, so later plans and state reports do not keep its old demand.
+
 ## 2.101.13
 
 - **Fix**: Prevent late reports, media requests and completed source, audio or quality preparations from restoring a viewer after their connection closes, so unwatched files stop downloading and encoding.

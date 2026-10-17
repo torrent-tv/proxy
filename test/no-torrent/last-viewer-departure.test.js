@@ -6,6 +6,7 @@ import { runsOf } from "../../services/viewer/PriorityMap.js";
 import { recordViewerReport } from "../../services/viewer/report-intake.js";
 import { ViewerRequests } from "../../services/server/ViewerRequests.js";
 import { OutputLifecycle } from "../../services/server/OutputLifecycle.js";
+import { handleApiSourcesPost } from "../../routes/api/sources/post.js";
 import { chooseAudioTrack, noteStepOnScreen, noteStepBeingWarmed, noteAudioBeingWarmed,
   watches, placeOn } from "../../services/viewer/choices.js";
 
@@ -34,6 +35,30 @@ test("a report arriving after departure cannot restore the file's map", () => {
   assert.equal(recorded, false);
   assert.equal(viewers.get("person"), null);
   assert.deepEqual(published.at(-1).zones, []);
+});
+
+test("metadata completing after departure or source replacement cannot restore source demand", () => {
+  const viewers = new Viewers();
+  viewers.selectsSource("person", "source");
+  viewers.hasGone("person");
+  assert.equal(viewers.visibleFiles("person", "source", [0]), null);
+  assert.equal(viewers.get("person"), null);
+  const returned = viewers.selectsSource("person", "new-source");
+  assert.equal(viewers.visibleFiles("person", "source", [0]), null);
+  assert.equal(returned.source.sourceKey, "new-source");
+});
+
+test("source registration completing after departure does not restore presence", async () => {
+  const viewers = new Viewers();
+  let complete;
+  const pending = handleApiSourcesPost({ body: { sourceType: "magnet", source: "source", consumerId: "person" } },
+    { send: value => value }, { viewers,
+      sourceRegistry: { upsert: () => new Promise(resolve => { complete = resolve; }) } });
+  assert.ok(viewers.get("person"));
+  viewers.hasGone("person");
+  complete("source");
+  await pending;
+  assert.equal(viewers.get("person"), null);
 });
 
 test("an audio opening completing after departure cannot register a new viewer", async () => {

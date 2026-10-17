@@ -153,6 +153,14 @@ export class EncodeOrchestrator {
   #pauseRule = new PauseRule();
 
   /**
+   * Whether the run a viewer needs first is short of the processor, from the
+   * last time who has the processor was decided (`processorShortfall`).
+   *
+   * @type {{ address: string, speed: { middle: number, scatter: number }, need: number, seconds: number } | null}
+   */
+  #shortfall = null;
+
+  /**
    * What starting and stopping an encoder was measured to cost on this host,
    * before any viewer existed. Told once; real runs replace it as they end.
    *
@@ -238,6 +246,8 @@ export class EncodeOrchestrator {
    * @param {{ freeCores: () => number | null, otherCores: () => number | null } | null} [params.processor] -
    *   The processor left free and the processor other work takes, in cores
    *   (`ProcessorBudget`); absent, both are unknown.
+   * @param {() => void} [params.shortfallNoted] - Told each time who has the
+   *   processor was decided, so the download can read `processorShortfall`.
    */
   constructor({
     maxRunsFor,
@@ -253,6 +263,7 @@ export class EncodeOrchestrator {
     describeWaits = null,
     admission = null,
     processor = null,
+    shortfallNoted = null,
     logger,
     now
   }) {
@@ -262,6 +273,7 @@ export class EncodeOrchestrator {
     // is about one output, and then only the per-output limit binds.
     this.admission = admission && typeof admission.placesFor === "function" ? admission : null;
     this.processor = processor && typeof processor.freeCores === "function" ? processor : null;
+    this.shortfallNoted = typeof shortfallNoted === "function" ? shortfallNoted : () => undefined;
     this.#describeWaits = typeof describeWaits === "function" ? describeWaits : () => "";
     // Only the segment facts and operations this planner needs cross the
     // storage boundary; the concrete storage remains in the server assembly.
@@ -720,12 +732,16 @@ export class EncodeOrchestrator {
     const leading = this.#leadingBand();
     this.#leading = leading;
     if (!leading) {
+      this.#noteShortfall(null);
       this.#placeHeldBack(null);
       return;
     }
     const now = this.now();
     const running = this.#runningNow();
     const need = this.#needOf(leading);
+    // Only a run in a band a viewer is in can be short for a viewer.
+    const short = leading.urgent === true ? this.#pauseRule.shortfall({ leader: leading.run, need }) : null;
+    this.#noteShortfall(short ? { address: leading.address, ...short } : null);
     const free = this.#processorReading("freeCores");
     const others = this.#processorReading("otherCores");
     for (const [address, runs] of this.#runs) {
@@ -750,6 +766,25 @@ export class EncodeOrchestrator {
       }
     }
     this.#placeHeldBack(leading);
+  }
+
+  /**
+   * Whether the run a viewer needs first is short of the processor, and by
+   * what: its output, the speed it made over its seconds kept (median and
+   * scatter) and the speed its deadlines need, infinite where a viewer waits
+   * for it (`PauseRule.shortfall`, torrent-tv/meta#180). Null where it is not
+   * short, or nothing measured it.
+   *
+   * @returns {{ address: string, speed: { middle: number, scatter: number }, need: number, seconds: number } | null}
+   */
+  processorShortfall() {
+    return this.#shortfall;
+  }
+
+  /** @param {{ address: string, speed: { middle: number, scatter: number }, need: number, seconds: number } | null} short */
+  #noteShortfall(short) {
+    this.#shortfall = short;
+    this.shortfallNoted();
   }
 
   /**

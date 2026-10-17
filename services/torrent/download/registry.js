@@ -30,6 +30,12 @@ let futurePending = null;
 let publishingSelections = false;
 /** What the last reconciliation told the swarm to fetch first, for the pool to say. */
 let firstClassStated = "none";
+/**
+ * Whether the speculative levels are held back for the processor: the encoder
+ * a viewer needs first is short of it, and the swarm gives more than its film
+ * needs (`holdSpeculative`, torrent-tv/meta#180).
+ */
+let speculativeHeld = false;
 
 /**
  * The last forecast that finished on the maps it was begun on: its result, the
@@ -223,6 +229,26 @@ export function firstClassStatement() {
 }
 
 /**
+ * Hold the speculative levels back, or let them go again, on every torrent.
+ *
+ * Downloading what nobody needs yet takes the torrent thread's processor
+ * (Home Assistant r84: 9-19 % of the machine while it downloaded 7-14 MB/s
+ * and handed readers about 0.5 MB/s in most intervals, with 0-6 % of the
+ * machine free). The side that measures the encoders decides when that processor is
+ * worth more to them (torrent-tv/meta#180, phase 5); the urgent levels are
+ * never held, so every byte an encoder will reach is still asked for first.
+ *
+ * @param {boolean} held
+ * @returns {boolean} Whether this changed anything.
+ */
+export function holdSpeculative(held) {
+  const next = held === true;
+  if (next === speculativeHeld) return false;
+  speculativeHeld = next;
+  return true;
+}
+
+/**
  * Bring every torrent's download set into line with what is stated.
  *
  * The cross-torrent rule lives here and not in a selection, because it is not a
@@ -235,7 +261,7 @@ export function firstClassStatement() {
 export function reconcileAll() {
   if (publishingSelections) return { torrents: live.size, speculativeAllowed: false, stated: 0, withdrawn: 0 };
   const entries = [...live];
-  const speculativeAllowed = !entries.some((entry) => entry.selection.hasUrgentMissing());
+  const speculativeAllowed = !speculativeHeld && !entries.some((entry) => entry.selection.hasUrgentMissing());
   // The first class across every torrent: the most urgent missing level and
   // its highest priority. Lower classes stay out of every torrent's selection.
   const bands = entries.map(entry => entry.selection.missingBand()).filter(Boolean);

@@ -244,3 +244,53 @@ test("the orchestrator lets a paused soundtrack run beside the picture once the 
   }
   assert.equal(sound.isSuspended, false);
 });
+
+test("the leader is short of the processor only while it makes film on it below its need", () => {
+  const rule = new PauseRule();
+  const leader = run("L");
+  assert.equal(rule.shortfall({ leader, need: 1.5 }), null, "nothing measured");
+  feed(rule, leader, 1, [1.1, 1.2].map((speed) => ({ cores: 2, speed, running: [leader] })));
+  assert.equal(rule.shortfall({ leader, need: 1.5 }), null, "fewer seconds than a median is taken from");
+  feed(rule, leader, 3, [{ cores: 2, speed: 1.3, running: [leader] }]);
+  const short = rule.shortfall({ leader, need: 1.5 });
+  assert.equal(short.speed.middle, 1.2);
+  assert.ok(Math.abs(short.speed.scatter - 0.1) < 1e-9);
+  assert.deepEqual([short.need, short.seconds], [1.5, 3]);
+  assert.equal(rule.shortfall({ leader, need: 1.1 }), null, "the need is met");
+  assert.equal(rule.shortfall({ leader, need: 0 }), null, "nothing is due");
+  assert.equal(rule.shortfall({ leader, need: Number.POSITIVE_INFINITY }).need, Number.POSITIVE_INFINITY,
+    "a viewer waits: any speed is short");
+  feed(rule, leader, 4, [{ cores: 0.3, speed: 0.2, running: [leader], waiting: true }]);
+  assert.equal(rule.shortfall({ leader, need: 1.5 }), null, "waiting for its input, the input is what it lacks");
+});
+
+test("the orchestrator says the leader is short only in a band a viewer is in, and each time it decides", () => {
+  const PICTURE = "torrent:abc:fmt=mpegts:grid=even@0:video-only:v=0/enc/libx264/720x400@24/superfast";
+  let told = 0;
+  const made = new EncodeOrchestrator({
+    maxRunsFor: () => 1, segmentSeconds: 4, startingSpeedFor: () => 1, now: () => 1000,
+    logger: { info: () => {}, warn: () => {} }, makeRun: () => null,
+    processor: { freeCores: () => 0, otherCores: () => 0 }, shortfallNoted: () => { told += 1; }
+  });
+  const picture = { from: 1, to: 100, head: 1, speedX: 1, isAlive: true, isStopping: false, isSuspended: false,
+    process: { pid: 11 }, pause() { return true; }, resume() { return true; }, stop() {}, noteProduced() {} };
+  // Due in 8 s for every piece from #1: a need of 0.5x at the head, above it further on.
+  made.notePriorityMap(PICTURE, [{ from: 0, to: 200, priority: 100, withinSeconds: 8, urgent: false }]);
+  made.adopt(PICTURE, picture);
+  for (let second = 1; second <= 3; second += 1) {
+    made.noteRunSeconds(new Map([[11, { cores: 3, speed: 0.4 }]]), second * 1000);
+  }
+  assert.ok(told >= 3);
+  assert.equal(made.processorShortfall(), null, "not in a band a viewer is in");
+  made.notePriorityMap(PICTURE, [{ from: 0, to: 200, priority: 100, withinSeconds: 0, urgent: true }]);
+  made.shareTheMachine();
+  const short = made.processorShortfall();
+  assert.equal(short.address, PICTURE);
+  assert.equal(short.need, 1, "due as it plays");
+  assert.equal(short.speed.middle, 0.4);
+  // Made faster than it is due: no longer short.
+  for (let second = 4; second <= 8; second += 1) {
+    made.noteRunSeconds(new Map([[11, { cores: 3, speed: 2 }]]), second * 1000);
+  }
+  assert.equal(made.processorShortfall(), null);
+});

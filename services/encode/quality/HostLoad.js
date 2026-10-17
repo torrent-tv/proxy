@@ -124,6 +124,15 @@ export class HostLoad {
   #torrentCostReadings = [];
 
   /**
+   * What every torrent carried per interval, in bytes per second: in all, and
+   * over the time our selection held no connection back (`SelectionLimit`).
+   * Kept as readings for `swarmRate`.
+   *
+   * @type {{ carried: number[], unheld: number[] }}
+   */
+  #swarmReadings = { carried: [], unheld: [] };
+
+  /**
    * The share of the machine this process draws with nothing encoding and the
    * torrents moving nothing — the spending that would have happened anyway.
    * The processor share takes it off what the proxy has.
@@ -264,6 +273,7 @@ export class HostLoad {
     // worker starts its clock again: such an interval says nothing.
     if (!(elapsedSec > 0) || megabytes < 0 || now.threadCpuSeconds < previous.threadCpuSeconds) return;
     const cpuSeconds = (now.threadCpuSeconds - previous.threadCpuSeconds) / Math.max(1, os.cpus().length);
+    this.#noteSwarm(now, previous, megabytes * 1e6 / elapsedSec);
     const limit = this.downloadLimit;
     // What else the thread moved over the same interval, across every torrent:
     // sent back to the swarm, and handed to readers (encoder inputs, container
@@ -309,6 +319,39 @@ export class HostLoad {
       `its base draw ${((this.#observedThreadBaseDraw ?? 0) * 100).toFixed(1)}% of the machine taken off; ` +
       `for the log only, not the download limit or the quality offer)`
     );
+  }
+
+  /**
+   * What the swarm can give every torrent, in bytes per second: the median of
+   * what it carried while our selection held no connection back, but never
+   * less than the median of what it carried in all — the same choice the
+   * start forecast makes for one source (`ViewerRequests` `sourceService`).
+   * Time our selection held a connection back measures our asking, not the
+   * swarm, so holding the speculative levels back does not lower it
+   * (torrent-tv/meta#180). Null before any interval was read.
+   *
+   * @returns {number | null}
+   */
+  swarmRate() {
+    const carried = medianOf(this.#swarmReadings.carried);
+    const unheld = medianOf(this.#swarmReadings.unheld);
+    if (carried === null && unheld === null) return null;
+    return Math.max(carried ?? 0, unheld ?? 0);
+  }
+
+  /**
+   * @param {{ selection: { freeBytes?: number, freeMs?: number } | null }} now
+   * @param {{ selection: { freeBytes?: number, freeMs?: number } | null }} previous
+   * @param {number} carried - Bytes per second over the interval, every torrent.
+   */
+  #noteSwarm(now, previous, carried) {
+    this.#swarmReadings.carried = [...this.#swarmReadings.carried, carried].slice(-READINGS_KEPT);
+    const freeMs = (now.selection?.freeMs ?? 0) - (previous.selection?.freeMs ?? 0);
+    const freeBytes = (now.selection?.freeBytes ?? 0) - (previous.selection?.freeBytes ?? 0);
+    // Totals that went back belong to a torrent that left: nothing to read.
+    if (freeMs > 0 && freeBytes >= 0) {
+      this.#swarmReadings.unheld = [...this.#swarmReadings.unheld, freeBytes * 1000 / freeMs].slice(-READINGS_KEPT);
+    }
   }
 
   /**

@@ -525,6 +525,11 @@ async function runCommand(command, params, id) {
       return true;
     }
 
+    case Command.SPECULATIVE_HOLD: {
+      pool.setSpeculativeHold(params.held === true, params.because);
+      return true;
+    }
+
     case Command.READ_RANGE: {
       // Streams its own reply; the caller's promise resolves once the body has
       // been fully sent, which is what lets the client await completion.

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { demandFor, reconcileAll, forgetTorrent, downloadForecastOf, forecastSettled, onForecastFailure } from "../../services/torrent/download/registry.js";
+import { demandFor, reconcileAll, forgetTorrent, downloadForecastOf, forecastSettled, onForecastFailure, holdSpeculative } from "../../services/torrent/download/registry.js";
 
 function source(t) {
   const torrent = new EventEmitter();
@@ -72,6 +72,27 @@ test("the first class spans torrents and withholds lower classes everywhere", t 
   second.held.add(1);
   first.torrent.emit("verified", 1);
   assert.deepEqual(third.torrent._selections._items, [{ from: 2, to: 2, priority: 1 }]);
+});
+
+test("held for the processor, the speculative levels are withdrawn and the urgent ones still asked for", t => {
+  t.after(() => holdSpeculative(false));
+  const entry = source(t);
+  state(entry.register, 2, 3);
+  reconcileAll();
+  assert.deepEqual(entry.torrent._selections._items, [{ from: 2, to: 2, priority: 0 }]);
+  assert.equal(holdSpeculative(true), true);
+  assert.equal(holdSpeculative(true), false, "the same hold again changes nothing");
+  reconcileAll();
+  assert.deepEqual(entry.torrent._selections._items, []);
+  state(entry.register, 1, 2, 40);
+  reconcileAll();
+  assert.deepEqual(entry.torrent._selections._items, [{ from: 1, to: 1, priority: 1 }]);
+  entry.held.add(1);
+  entry.torrent.emit("verified", 1);
+  assert.deepEqual(entry.torrent._selections._items, [], "the tail stays held once nothing urgent is missing");
+  assert.equal(holdSpeculative(false), true);
+  reconcileAll();
+  assert.deepEqual(entry.torrent._selections._items, [{ from: 2, to: 2, priority: 0 }]);
 });
 
 /** Ask for the forecast, then let the one worked out beside the answer finish. */

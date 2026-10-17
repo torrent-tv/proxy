@@ -511,6 +511,17 @@ export class TorrentWorkerClient {
     return this.#caller.call(Command.DOWNLOAD_RATE, { bytesPerSecond: Number.isFinite(bytesPerSecond) ? bytesPerSecond : null, because });
   }
 
+  /**
+   * Whether the speculative levels are held back (`Command.SPECULATIVE_HOLD`).
+   *
+   * @param {boolean} held
+   * @param {string} [because]
+   * @returns {Promise<void>}
+   */
+  async setSpeculativeHold(held, because = "") {
+    return this.#caller.call(Command.SPECULATIVE_HOLD, { held: held === true, because });
+  }
+
   async setPriorityMap({ sourceKey, fileIndex, zones, durationSeconds, postedAt }) {
     return this.#caller.call(Command.PRIORITY_MAP, {
       sourceKey,

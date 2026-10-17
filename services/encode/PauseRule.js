@@ -199,6 +199,29 @@ export class PauseRule {
   }
 
   /**
+   * Whether the leader is short of the processor: its last second made film
+   * without waiting for its input, and over the seconds kept it made less than
+   * its need — anything at all where a viewer waits for it. Null where it is
+   * not short, waits for its input, or has fewer seconds than a median is
+   * taken from (torrent-tv/meta#180, phase 5: what the download's speculative
+   * levels give way to).
+   *
+   * @param {object} params
+   * @param {object} params.leader
+   * @param {number} params.need - `s*`, as for `judge`.
+   * @returns {{ speed: { middle: number, scatter: number }, need: number, seconds: number } | null}
+   */
+  shortfall({ leader, need }) {
+    const kept = this.#seconds.get(leader) ?? [];
+    if (!(need > 0) || kept.length === 0 || kept.at(-1).waiting) return null;
+    const lead = kept.filter((second) => !second.waiting && second.speed !== null);
+    if (lead.length < LEAST_SECONDS) return null;
+    const speed = middleAndScatter(lead.map((second) => second.speed));
+    if (Number.isFinite(need) && speed.middle >= need) return null;
+    return { speed, need, seconds: lead.length };
+  }
+
+  /**
    * Whether a run not started yet, on `address` and less urgent than
    * `leader`, would be let go at once: a start the rule would pause is not
    * made (`EncodePlan` holds it). Without readings of the leader, it would.

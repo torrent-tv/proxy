@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.11
 
 - **Fix**: The download also holds back what nobody needs yet while the start forecast holds a viewer for a piece an encoder is making, even where the map's deadlines for that encoder are met. On Home Assistant (r87, 2.101.10) the download was let go at a seek 1 s after its first piece was made, and the viewer then waited 5.3 s more while the forecast held them for the production of the next piece. The same swarm condition applies, and the hold is let go once that piece is made, the forecast names something else, or nobody watches the output. The `speculative download held` line names the piece (`with a viewer waiting for its #N by the start forecast`) (#ttv-180).
 

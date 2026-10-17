@@ -255,3 +255,65 @@ test("a short source response fails the connection and an unsuccessful write rel
     assert.equal(sent.called, false);
   }
 });
+
+/**
+ * A response read from the torrent whose file is written out whole while it is
+ * under way, with a body that is collected byte by byte.
+ *
+ * @param {{ failAfterFirst?: boolean }} options
+ */
+async function continuedResponse({ failAfterFirst = false } = {}) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stream-continue-"));
+  const where = path.join(root, "0");
+  const bytes = Buffer.from("0123456789abcdefghij", "utf8");
+  await fs.writeFile(where, bytes);
+  const { req, reply, sent, deps } = harness({ method: "GET", range: "bytes=2-17" });
+  const body = [];
+  reply.raw.write = (chunk, done) => { body.push(Buffer.from(chunk)); done(); };
+  reply.raw.writableEnded = false;
+  reply.raw.destroyed = false;
+  const wholeFiles = new Map();
+  let cancelled = 0;
+  let released = 0;
+  deps.torrentPool.wholeFiles = wholeFiles;
+  deps.torrentPool.getTorrent = async () => ({ files: [{ name: "film.avi", length: bytes.length,
+    createFragmentReader: () => ({ cancel() { cancelled++; }, async *[Symbol.asyncIterator]() {
+      yield { bytes: bytes.subarray(2, 6), release: () => { released++; } };
+      // The file is written out and announced between two fragments.
+      wholeFiles.set("abc/0", { path: where, length: bytes.length, name: "film.avi" });
+      if (failAfterFirst) throw new Error("Piece store is closed.");
+      yield { bytes: bytes.subarray(6, 10), release: () => { released++; } };
+      throw new Error("the torrent was read after the file was there");
+    } }) }] });
+  deps.sourceRegistry = { get: () => ({ sourceType: "magnet", source: "magnet:?xt=urn:btih:abc" }) };
+  req.query = { sourceKey: "torrent:abc", fileIndex: "0" };
+  const noted = [];
+  deps.noteInputBytes = (_session, length) => noted.push(length);
+  try {
+    await handleStreamGet(req, reply, deps);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+  return { body: Buffer.concat(body), expected: bytes.subarray(2, 18), sent, reply, cancelled, released, noted };
+}
+
+test("a response under way continues from the file once the file is written whole", async () => {
+  // torrent-tv/meta#173: an encoder slower than the film reads one response
+  // to the end; left on the piece store, it would keep the torrent alive.
+  const { body, expected, sent, reply, cancelled, released, noted } = await continuedResponse();
+  assert.deepEqual(body, expected, "the body is the same bytes at the same offsets");
+  assert.equal(sent.headers["content-length"], String(expected.length));
+  assert.equal(sent.called, true, "the response was ended");
+  assert.notEqual(reply.raw.destroyed, true);
+  assert.ok(cancelled >= 1, "the torrent's read was cancelled");
+  assert.equal(released, 2, "every fragment taken from the torrent was released");
+  assert.equal(noted.reduce((total, length) => total + length, 0), expected.length,
+    "the bytes from the file are counted as the encoder's input too");
+});
+
+test("a torrent read that fails after the file is written whole is finished from the file", async () => {
+  const { body, expected, sent, reply } = await continuedResponse({ failAfterFirst: true });
+  assert.deepEqual(body, expected);
+  assert.equal(sent.called, true);
+  assert.notEqual(reply.raw.destroyed, true);
+});

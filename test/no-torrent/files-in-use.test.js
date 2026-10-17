@@ -4,7 +4,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { filesInUse, readWhileInUse } from "../../services/torrent/worker/files-in-use.js";
+import { filesInUse, filesToKeep, mayRemoveWholeTorrent, readWhileInUse } from "../../services/torrent/worker/files-in-use.js";
 
 test("range admission retains its file until asynchronous storage completes", async () => {
   const torrent = {};
@@ -60,4 +60,39 @@ test("stated needs count, and the fills that read nothing do not", () => {
     openReads: []
   });
   assert.deepEqual([...used], [2]);
+});
+
+test("a downloaded file is written out while somebody watches it, and only then", () => {
+  // torrent-tv/meta#173: written after its last viewer left, it serves nobody.
+  const files = [{ done: true }, { done: true }, { done: false }, { done: true }];
+  const kept = new Set([3]);
+  const toKeep = filesToKeep({ files, isKept: (index) => kept.has(index), inUse: new Set([0, 2, 3]) });
+  assert.deepEqual(toKeep, [0], "only the watched, downloaded file not yet kept is written");
+});
+
+test("a torrent saved whole is removed though a viewer still states a need for it", () => {
+  const torrent = { done: true, files: [{}, {}] };
+  assert.equal(mayRemoveWholeTorrent({ torrent, isKept: () => true, openReads: [], announcedNow: false }), true,
+    "a stated need is answered from the files and does not keep the torrent");
+});
+
+test("a read still on the piece store keeps the torrent", () => {
+  // torrent-tv/meta#105: removing the torrent closes the store under the read.
+  const torrent = { done: true, files: [{}] };
+  const openReads = new Map();
+  assert.equal(mayRemoveWholeTorrent({ torrent, isKept: () => true, openReads: openReads.values(), announcedNow: false }), true);
+  // A read that opened while a file was being written is seen, because the
+  // reads are taken at the moment of the decision.
+  openReads.set(1, { torrent, fileIndex: 0 });
+  assert.equal(mayRemoveWholeTorrent({ torrent, isKept: () => true, openReads: openReads.values(), announcedNow: false }), false);
+  assert.equal(mayRemoveWholeTorrent({ torrent, isKept: () => true, openReads: [{ torrent: {}, fileIndex: 0 }], announcedNow: false }), true,
+    "a read of another torrent does not keep this one");
+});
+
+test("a torrent is not removed in the sweep that announced its file, nor before it is whole", () => {
+  const torrent = { done: true, files: [{}, {}] };
+  assert.equal(mayRemoveWholeTorrent({ torrent, isKept: () => true, openReads: [], announcedNow: true }), false,
+    "the main thread has not yet learned that the file answers");
+  assert.equal(mayRemoveWholeTorrent({ torrent, isKept: (index) => index === 0, openReads: [], announcedNow: false }), false);
+  assert.equal(mayRemoveWholeTorrent({ torrent: { done: false, files: [{}] }, isKept: () => true, openReads: [], announcedNow: false }), false);
 });

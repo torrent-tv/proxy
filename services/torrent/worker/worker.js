@@ -33,7 +33,7 @@ import { heldRangesOf, ownsItsMemory, readHeldBytes, readHeldRanges } from "./he
 import { CompletedFiles, completedFilesRoot } from "../../storage/files/CompletedFiles.js";
 import { pieceFromWholeFiles, pieceIsInWholeFiles } from "../../storage/files/piece-from-whole-file.js";
 import { Command, Event } from "./protocol.js";
-import { filesInUse, readWhileInUse } from "./files-in-use.js";
+import { filesInUse, filesToKeep, mayRemoveWholeTorrent, readWhileInUse } from "./files-in-use.js";
 import { createWholeSources } from "./whole-sources.js";
 import { wholeFileStats } from "./whole-file-stats.js";
 import { describeHeldObjects, readUtpOpenCount } from "./held-objects.js";
@@ -1069,8 +1069,8 @@ const WHOLE_FILE_SWEEP_MS = 10_000;
 const beingKept = new Set();
 
 /**
- * Keep every file that is now whole, and let go of a torrent that has nothing
- * left to fetch.
+ * Keep every file that is now whole while it is watched, and let go of a
+ * torrent that has nothing left to fetch.
  *
  * The instruction this serves, 2026-09-11: as soon as a torrent is fully
  * downloaded, downloading stops, the torrent is deleted, and what was
@@ -1098,21 +1098,22 @@ async function keepWholeFiles() {
       windows: demandFor(torrent).register.windows(),
       openReads: openReads.values()
     });
-    for (const [fileIndex, file] of torrent.files.entries()) {
+    // WHILE SOMEBODY WATCHES IT, and only then: see `filesToKeep`. Its cost
+    // beside the viewer is the disk — the pieces are read with `store.get`,
+    // which takes no block of memory from anybody.
+    const toKeep = filesToKeep({
+      files: torrent.files,
+      isKept: (fileIndex) =>
+        completedFiles.find(infoHash, fileIndex) !== null || beingKept.has(`${infoHash}/${fileIndex}`),
+      inUse: wanted
+    });
+    let announcedNow = false;
+    for (const fileIndex of toKeep) {
+      const file = torrent.files[fileIndex];
       const key = `${infoHash}/${fileIndex}`;
-      if (file?.done !== true || completedFiles.find(infoHash, fileIndex) || beingKept.has(key)) {
-        continue;
-      }
-      // NOT WHILE ANYBODY WANTS IT. Writing a film out is a read of the whole
-      // of it and a write of the whole of it — a gigabyte and a half on the
-      // file this was measured against — and doing that beside a viewer takes
-      // the disk and the piece store from them for nothing they asked for. The
-      // file is complete; it will still be complete when they leave.
-      if (wanted.has(fileIndex)) {
-        continue;
-      }
       beingKept.add(key);
       try {
+        const startedAt = performance.now();
         const kept = await completedFiles.keep({
           infoHash,
           fileIndex,
@@ -1122,7 +1123,8 @@ async function keepWholeFiles() {
         });
         if (kept) {
           logger.info(
-            `whole files: kept "${file.name}" (${Math.round(kept.length / 1048576)}MB) — ` +
+            `whole files: kept "${file.name}" (${Math.round(kept.length / 1048576)}MB, ` +
+            `written in ${((performance.now() - startedAt) / 1000).toFixed(1)}s) — ` +
             "it is a file now, and reading it needs no torrent"
           );
           // The pieces it was built from are a second copy of the same bytes.
@@ -1145,6 +1147,7 @@ async function keepWholeFiles() {
             length: kept.length,
             name: kept.name
           });
+          announcedNow = true;
           holdingsChanged();
         }
       } catch (error) {
@@ -1159,12 +1162,18 @@ async function keepWholeFiles() {
     //
     // Safe to destroy only because a piece can now be read out of those files:
     // a path that asks for this source again adds the torrent back, and what it
-    // verifies it reads from the files rather than from the swarm. Not while
-    // anybody is reading it, for the same reason the writing above waits.
-    const isWhole =
-      torrent.done === true &&
-      torrent.files.every((unused, fileIndex) => completedFiles.find(infoHash, fileIndex) !== null);
-    if (isWhole && wanted.size === 0) {
+    // verifies it reads from the files rather than from the swarm. A viewer
+    // still watching does not keep it — the files answer them — but a read
+    // still running on its piece store does: see `mayRemoveWholeTorrent`. The
+    // reads are taken now, not from the start of this sweep, because a write
+    // above can take minutes and a read can open while it runs.
+    const isRemovable = mayRemoveWholeTorrent({
+      torrent,
+      isKept: (fileIndex) => completedFiles.find(infoHash, fileIndex) !== null,
+      openReads: openReads.values(),
+      announcedNow
+    });
+    if (isRemovable) {
       logger.info(
         `whole files: "${torrent.name}" is downloaded whole and saved — removing the torrent, keeping the files`
       );

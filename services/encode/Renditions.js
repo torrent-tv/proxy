@@ -855,10 +855,18 @@ export class Renditions {
       }
       // A segment closed on the output a viewer is LEAVING may be the one their
       // move waits for (`#givenAndOpenOn`). It is behind the segment the move
-      // begins at by construction, so it is asked about with no index.
+      // begins at by construction, so it is asked about with no index. A move
+      // is about its prepared picture: a separate soundtrack is not an output
+      // the viewer is leaving from for that move.
+      if (output.spec?.carries === "audio-only") {
+        continue;
+      }
       for (const consumerId of this.#host.switchingFrom?.(output) ?? []) {
-        if (this.#host.activeOutputFor({ base, consumerId, outputs: this.#host.outputs }) === output) {
-          this.#reconsiderSameHeightSwitch(base, consumerId, null);
+        const move = this.#host.sameHeightSwitchOf(consumerId);
+        const prepared = move ? this.#host.outputs.get(move.outputId) : null;
+        const moveBase = prepared ? this.#host.outputs.pictureOf(prepared) : base;
+        if (this.#host.activeOutputFor({ base: moveBase, consumerId, outputs: this.#host.outputs }) === output) {
+          this.#reconsiderSameHeightSwitch(moveBase, consumerId, null);
         }
       }
     }

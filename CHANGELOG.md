@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Evict eligible unused output segments when the measured disk allowance is zero, while preserving active reads and current viewer segments (#ttv-211).
+
 ## 2.101.22
 
 - **Fix**: Reserve completed-file storage before concurrent writes and evict eligible unused files before admitting a needed file (#ttv-210).

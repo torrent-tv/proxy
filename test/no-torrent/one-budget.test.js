@@ -115,6 +115,7 @@ test("what FFmpeg caches of a run's input is counted on its disk in full, before
   const wired = wireMachineBudget({ segmentStore: { root: os.tmpdir(), stats: () => ({ bytes: 0 }) },
     inputCaches: { held: () => caches, root: null }, readFree: async () => 100 * MEGABYTE,
     policy: { kind: "fixed", bytes: 100 * MEGABYTE }, logger: { info: () => {}, warn: () => {} } });
+  assert.equal(wired.segmentBytes(), null, "the share is unknown before the first measurement");
   await wired.revise();
   assert.equal(wired.segmentBytes(), 100 * MEGABYTE);
   caches = 30 * MEGABYTE;

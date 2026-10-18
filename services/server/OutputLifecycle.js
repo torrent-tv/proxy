@@ -219,7 +219,7 @@ export class OutputLifecycle {
     const maxBytes = this.#host.machineBudget.segmentBytes();
     const inventory = this.#host.segmentStore.inventory();
     let held = inventory.reduce((bytes, output) => bytes + output.bytes, 0);
-    if (!Number.isFinite(maxBytes) || maxBytes <= 0 || held <= maxBytes) return;
+    if (!Number.isFinite(maxBytes) || maxBytes < 0 || held <= maxBytes) return;
     const candidates = leastNeededSegments(inventory.map(output => ({
       ...output,
       positions: this.#host.viewerSegmentsOn(output.key),

@@ -56,9 +56,9 @@ import { availableMemoryBytes } from "./machine-memory.js";
  * @param {import("./MachineBudget.js").BudgetPolicy} [params.policy] - What the
  *   operator has said this proxy may take. Absent, the measured default.
  * @param {{ info: Function, warn?: Function }} [params.logger]
- * @returns {{ revise: () => Promise<unknown>, segmentBytes: () => number, diagnostics: object | null, describe: () => string }}
- *   What the segments may hold is asked for rather than pushed: zero until the
- *   first revision, and zero stops growth rather than licensing it.
+ * @returns {{ revise: () => Promise<unknown>, segmentBytes: () => number | null, diagnostics: object | null, describe: () => string }}
+ *   What the segments may hold is asked for rather than pushed: null until the
+ *   first revision, then the measured allowance, including a measured zero.
  */
 export function wireMachineBudget({
   segmentStore,
@@ -101,7 +101,7 @@ export function wireMachineBudget({
   const segmentsOn = deviceOf(segmentStore.root);
   defineDisk(segmentsOn, segmentStore.root);
 
-  let segmentBytes = 0;
+  let segmentBytes = null;
   budget.register({
     name: "segments",
     resource: segmentsOn,

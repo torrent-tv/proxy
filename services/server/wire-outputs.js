@@ -457,6 +457,7 @@ export function wireOutputs({
     presetLadder: () => (parts.encoders.current?.kind === "software" && Array.isArray(parts.softwarePresetBenchmark)
       ? parts.softwarePresetBenchmark.map((entry) => entry.preset) : []),
     presetSpeedOf: (output, preset) => parts.encodeCost.presetSpeedOf(output, preset, { segmentSeconds: parts.segmentDurationSec }),
+    processingSpeedOf: (output) => parts.encodeCost.latestSpeedReadingOf(output)?.speed ?? null,
     // The price a move was decided at, given to an output with no measured
     // piece: one already measured stands on its readings, and an output that
     // runs was priced with its own cost counted beside the one on screen.

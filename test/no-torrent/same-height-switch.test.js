@@ -218,6 +218,7 @@ function pictureAtNominal(how = {}) {
     presetLadder: () => how.ladder ?? [],
     presetSpeedOf: (_output, preset) => (how.presetSpeeds?.[preset] === undefined
       ? null : { processing: how.presetSpeeds[preset], effective: how.presetSpeeds[preset] }),
+    processingSpeedOf: (output) => typeof how.processingSpeedOf === "function" ? how.processingSpeedOf(output) : 1,
     notePredictedSpeed: (output, speed) => { predicted.push({ outputKey: output.outputKey, speed }); },
     requiredSpeedOf: () => 1,
     heightsChosenAs: (consumerId, key) => heightsChosenAs(viewers, consumerId, key),
@@ -759,6 +760,33 @@ test("a separate soundtrack publication does not cancel a prepared picture prese
   close(prepared, 10);
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "the target picture is selected once its next segment is closed");
   assert.equal(viewers.forOutput(audioOutput).has("viewer-a"), true, "completing the picture move keeps the soundtrack");
+});
+
+test("a preset step up waits for the candidate's measured speed to meet the source demand", async () => {
+  let measuredSpeed = null;
+  const { renditions, viewers, base, close, given, outputs } = pictureAtNominal({
+    format: mpegtsFormat,
+    preset: "veryfast",
+    ladder: LADDER,
+    presetSpeeds: { faster: 1.81 },
+    processingSpeedOf: () => measuredSpeed
+  });
+  given("viewer-a", 10);
+  const move = await renditions.preparePresetSwitch(base, "viewer-a", "up", "room");
+  assert.equal(move.started, true, move.reason);
+  const prepared = outputs.get(sameHeightSwitchOf(viewers, "viewer-a").outputId);
+
+  close(prepared, 11);
+  assert.equal(sameHeightSwitchOf(viewers, "viewer-a")?.outputId, prepared.id, "an unopened speed sample is not evidence");
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), base.outputKey, "the current output keeps serving the viewer");
+
+  measuredSpeed = 0.99;
+  close(prepared, 12);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), base.outputKey, "a measured shortfall does not replace it");
+
+  measuredSpeed = 1.01;
+  close(prepared, 13);
+  assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "the output moves after meeting the measured demand");
 });
 
 // r82 (torrent-tv/meta#185): an output opened for a move to `faster` was

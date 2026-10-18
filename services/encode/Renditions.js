@@ -43,8 +43,11 @@ export class Renditions {
    */
   #moveWaitsSaid = new Map();
 
+  /** Viewers waiting for a preset's measured speed before a quality step up. @type {Set<string>} */
+  #presetSpeedWaitSaid = new Set();
+
   /**
-   * @param {object} host - `viewerSecondsOn`, `audioStartSecondsFor`, `activeOutputFor`, `viewersOf`, `audioRenditionName`, `logger`, `placeViewer`, `viewerLeaves`, `createOrGetSession`, `planEncodersSoon`, `disposeSession`, `viewerPositionOf`, `encodeRuns`, `fileStartTimeReads`, `getCachedAudioTracks`, `getCachedMediaInfo`, `getContainerMediaInfo`, `localBaseUrl`, `outputTimes`, `outputs`, `quality`, `qualityOffer`, `segmentDurationSec`, `sourceFiles`, `viewers`, `generationOfRequest`, `givenOutputOf`, `noteGivenOutput`, `chosenOutputOf`, `chooseOutput`, `storedPieceReady`, `headersCompatible`, `audioChoiceOf`, `linkMbpsOf`, `qualityModeOf`, `noteServingVerdict`, `limitsFor`, `heightsChosenAs`, `highestGivenSegmentOf`, `sameHeightSwitchOf`, `noteSameHeightSwitch`, `switchingOnto`, `switchingFrom`, `segmentClosed`, `secondsUntilClosed`, `invalidateWaits`, `bufferedSecondsOf`, `minimumBufferSecondsFor`
+   * @param {object} host - `viewerSecondsOn`, `audioStartSecondsFor`, `activeOutputFor`, `viewersOf`, `audioRenditionName`, `logger`, `placeViewer`, `viewerLeaves`, `createOrGetSession`, `planEncodersSoon`, `disposeSession`, `viewerPositionOf`, `encodeRuns`, `fileStartTimeReads`, `getCachedAudioTracks`, `getCachedMediaInfo`, `getContainerMediaInfo`, `localBaseUrl`, `outputTimes`, `outputs`, `quality`, `qualityOffer`, `segmentDurationSec`, `sourceFiles`, `viewers`, `generationOfRequest`, `givenOutputOf`, `noteGivenOutput`, `chosenOutputOf`, `chooseOutput`, `storedPieceReady`, `headersCompatible`, `audioChoiceOf`, `linkMbpsOf`, `qualityModeOf`, `noteServingVerdict`, `limitsFor`, `heightsChosenAs`, `highestGivenSegmentOf`, `sameHeightSwitchOf`, `noteSameHeightSwitch`, `switchingOnto`, `switchingFrom`, `segmentClosed`, `secondsUntilClosed`, `invalidateWaits`, `bufferedSecondsOf`, `minimumBufferSecondsFor`, `processingSpeedOf`, `requiredSpeedOf`
    */
   constructor(host) {
     this.#host = host;
@@ -1052,6 +1055,25 @@ export class Renditions {
         return;
       }
     }
+    // A quality step up may choose a slower encoding preset. The benchmark is
+    // only a forecast; keep the current output until this candidate has closed
+    // pieces at the source's required speed. A step down is urgent and must
+    // not wait on a measurement from the output meant to rescue playback.
+    if (move.direction === "up" && move.changes === "preset" && prepared.spec?.transcodesVideo) {
+      const speed = this.#host.processingSpeedOf?.(prepared) ?? null;
+      const required = this.#host.requiredSpeedOf?.(prepared) ?? 1;
+      if (!Number.isFinite(speed) || speed < required) {
+        if (!this.#presetSpeedWaitSaid.has(consumerId)) {
+          this.#presetSpeedWaitSaid.add(consumerId);
+          this.#host.logger.info(
+            `transcode ${base.id} keeps ${consumerId} on ${current.outputKey} while ${prepared.outputKey} ` +
+            `proves its preset at ${Number.isFinite(speed) ? `${speed.toFixed(2)}x` : "an unmeasured speed"}; ` +
+            `requires ${required.toFixed(2)}x`
+          );
+        }
+        return;
+      }
+    }
     // The player fetches the fMP4 init once and decodes every later fragment
     // against it. Changing bitrate outputs is safe only when the prepared
     // output's init says the same thing to that decoder. The new segment is
@@ -1151,6 +1173,7 @@ export class Renditions {
    */
   #completeSameHeightSwitch(base, consumerId, move, prepared, current, next) {
     this.#moveWaitsSaid.delete(consumerId);
+    this.#presetSpeedWaitSaid.delete(consumerId);
     for (const height of move.askedHeights) {
       this.#choose(consumerId, height, prepared, base);
     }
@@ -1189,6 +1212,7 @@ export class Renditions {
    */
   #cancelSameHeightSwitch(base, consumerId, reason) {
     this.#moveWaitsSaid.delete(consumerId);
+    this.#presetSpeedWaitSaid.delete(consumerId);
     const move = this.#host.sameHeightSwitchOf(consumerId);
     if (!move) {
       return;

@@ -81,6 +81,8 @@ export class CompletedFiles {
 
   /** When each held file was last asked for. @type {Map<string, number>} */
   #lastRead = new Map();
+  /** Monotonic access order, so reads in the same clock tick remain ordered. */
+  #accessOrder = 0;
 
   /**
    * @param {object} params
@@ -153,9 +155,14 @@ export class CompletedFiles {
       // WHEN IT WAS LAST WANTED, which is the order it leaves in. A whole file
       // nobody has asked for in the longest is the one whose loss costs least:
       // it can be downloaded again, and a read of it falls back to the pieces.
-      this.#lastRead.set(key, Date.now());
+      this.#touch(key);
     }
     return file;
+  }
+
+  /** Mark a file as more recently wanted than every earlier access. */
+  #touch(key) {
+    this.#lastRead.set(key, ++this.#accessOrder);
   }
 
   /** Pin a completed file against eviction until all its offset reads finish. */
@@ -430,7 +437,7 @@ export class CompletedFiles {
       await this.#withAdmission(async () => {
         this.#reservations.delete(key);
         this.#held.set(key, file);
-        this.#lastRead.set(key, Date.now());
+        this.#touch(key);
         this.#writing.delete(key);
         await this.#trimToAllowance();
       });

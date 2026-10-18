@@ -44,7 +44,7 @@ async function filesInATempRoot() {
   return { files: new CompletedFiles({ root }), root };
 }
 
-test("a whole file is kept only while there is room for it", async () => {
+test("a whole file larger than its allowance is not kept", async () => {
   const { files, root } = await filesInATempRoot();
   try {
     files.allow(4 * KILOBYTE);
@@ -54,10 +54,10 @@ test("a whole file is kept only while there is room for it", async () => {
     assert.ok(kept, "it fits, so it is kept");
 
     const refused = await files.keep({
-      infoHash: "b".repeat(40), fileIndex: 0, length: 3 * KILOBYTE, name: "two.mkv", open: bytesOf(3 * KILOBYTE)
+      infoHash: "b".repeat(40), fileIndex: 0, length: 5 * KILOBYTE, name: "two.mkv", open: bytesOf(5 * KILOBYTE)
     });
-    assert.equal(refused, null, "it does not fit, so it is not assembled at all");
-    assert.equal(files.size, 1, "and nothing already held was taken to make room during a write");
+    assert.equal(refused, null, "a file larger than the full allowance was kept");
+    assert.equal(files.size, 1, "an oversized file displaced an existing whole file");
   } finally {
     await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }

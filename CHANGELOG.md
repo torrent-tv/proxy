@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Serve completed files through the storage owner's read lease so active HTTP responses prevent eviction until the response ends or is cancelled (#ttv-209).
+
 ## 2.101.20
 
 - **Fix**: Keep a viewer on the current picture preset until the proposed quality step proves it can encode at the source's required speed (#ttv-200).

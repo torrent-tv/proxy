@@ -13,8 +13,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { handleStreamGet } from "../../routes/stream/get.js";
+import { CompletedFiles } from "../../services/storage/files/CompletedFiles.js";
 import { WorkerTorrentPool } from "../../services/torrent/worker/pool-adapter.js";
+import { openCompletedInputFile } from "../../services/torrent/worker/completed-input-file.js";
 
 /**
  * Minimal stand-ins for the parts of Fastify and the pool this route touches.
@@ -150,18 +153,29 @@ test("a ranged GET does not change the download map", async () => {
 
 test("a file downloaded whole is served from disk without touching the torrent", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "stream-whole-"));
-  const where = path.join(root, "0");
   const bytes = Buffer.from("a film that is a file now", "utf8");
-  await fs.writeFile(where, bytes);
+  const files = new CompletedFiles({ root: path.join(root, "files") });
+  await files.allow(bytes.length);
+  const held = await files.keep({
+    infoHash: "abc",
+    fileIndex: 0,
+    length: bytes.length,
+    name: "film.mkv",
+    open: () => Readable.from([bytes])
+  });
   try {
     const { req, reply, sent, deps } = harness({ method: "GET", range: "bytes=2-6" });
     let asked = false;
-    const wholeFiles = new Map([
-      ["abc/0", { path: where, length: bytes.length, name: "film.mkv" }]
-    ]);
+    let read;
+    const wholeFiles = new Map([["abc/0", held]]);
     // Supply the worker boundary explicitly: no Worker or torrent is started.
     deps.torrentPool = new WorkerTorrentPool({}, {
       wholeFiles,
+      async acquireWholeFile() {
+        const pin = files.acquire("abc", 0);
+        read = pin && await openCompletedInputFile(pin, () => pin.release());
+        return read;
+      },
       async getTorrent() {
         asked = true;
         throw new Error("the worker must not be asked for completed bytes");
@@ -174,17 +188,107 @@ test("a file downloaded whole is served from disk without touching the torrent",
     req.query = { sourceKey: "torrent:abc", fileIndex: "0" };
 
     await handleStreamGet(req, reply, deps);
+    await files.allow(0);
 
     assert.equal(asked, false, "the torrent was asked for");
+    assert.equal(files.bytes, bytes.length, "an active response lost its file lease");
     assert.equal(sent.code, 206);
     assert.equal(sent.headers["content-range"], `bytes 2-6/${bytes.length}`);
     assert.equal(sent.headers["content-length"], "5");
     const chunks = [];
     for await (const chunk of sent.body) chunks.push(chunk);
     assert.deepEqual(Buffer.concat(chunks), bytes.subarray(2, 7));
+    await read.closed;
+    assert.equal(files.bytes, 0, "the file remained after its final read lease ended");
   } finally {
     await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
+});
+
+test("a disconnected whole-file response releases its lease", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stream-cancelled-whole-"));
+  const bytes = Buffer.alloc(256 * 1024, 7);
+  const files = new CompletedFiles({ root: path.join(root, "files") });
+  await files.allow(bytes.length);
+  const held = await files.keep({
+    infoHash: "abc",
+    fileIndex: 0,
+    length: bytes.length,
+    name: "film.mkv",
+    open: () => Readable.from([bytes])
+  });
+  let read;
+  try {
+    const { req, reply, sent, deps } = harness({ method: "GET" });
+    deps.torrentPool = new WorkerTorrentPool({}, {
+      wholeFiles: new Map([["abc/0", held]]),
+      async acquireWholeFile() {
+        const pin = files.acquire("abc", 0);
+        read = pin && await openCompletedInputFile(pin, () => pin.release());
+        return read;
+      }
+    });
+    deps.sourceRegistry = { get: () => ({ sourceType: "torrent", source: "magnet:?xt=urn:btih:abc" }) };
+    req.query = { sourceKey: "torrent:abc", fileIndex: "0" };
+
+    await handleStreamGet(req, reply, deps);
+    await files.allow(0);
+    assert.equal(files.bytes, bytes.length, "an active response lost its file lease");
+    sent.body.destroy();
+    await read.closed;
+    assert.equal(files.bytes, 0, "a cancelled response leaked its file lease");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
+});
+
+test("a response switches to the leased whole file after its first torrent fragment", async () => {
+  const bytes = Buffer.from("abcdef");
+  const chunks = [];
+  const { req, reply, sent, deps } = harness({ method: "GET", range: "bytes=0-5" });
+  const wholeFiles = new Map();
+  let acquisitions = 0;
+  let releases = 0;
+  const file = {
+    name: "film.mkv",
+    length: bytes.length,
+    createFragmentReader() {
+      return {
+        cancel() {},
+        async *[Symbol.asyncIterator]() {
+          yield { bytes: Buffer.from("ab"), release() {} };
+          yield { bytes: Buffer.from("cd"), release() {} };
+        }
+      };
+    }
+  };
+  deps.sourceRegistry = { get: () => ({ sourceType: "torrent", source: "magnet:?xt=urn:btih:abc" }) };
+  req.query = { sourceKey: "torrent:abc", fileIndex: "0" };
+  deps.torrentPool = {
+    wholeFiles,
+    async getTorrent() { return { files: [file] }; },
+    async acquireWholeFile() {
+      acquisitions++;
+      return {
+        length: bytes.length,
+        stream(start, end) { return Readable.from([bytes.subarray(start, end + 1)]); },
+        async release() { releases++; }
+      };
+    }
+  };
+  reply.raw.write = (chunk, done) => {
+    chunks.push(Buffer.from(chunk));
+    if (chunks.length === 1) wholeFiles.set("abc/0", { path: "unused", length: bytes.length, name: "film.mkv" });
+    done();
+  };
+  reply.raw.end = () => { sent.called = true; };
+
+  await handleStreamGet(req, reply, deps);
+
+  assert.equal(sent.hijacked, true, JSON.stringify(sent));
+  assert.deepEqual(Buffer.concat(chunks), bytes);
+  assert.equal(acquisitions, 1, "the source switch did not acquire the whole-file lease");
+  assert.equal(releases, 1, "the source switch did not release the whole-file lease");
 });
 
 test("an announced file removed before opening falls back to the torrent before headers", async () => {
@@ -194,6 +298,7 @@ test("an announced file removed before opening falls back to the torrent before 
     deps.torrentPool.wholeFiles = new Map([
       ["abc/0", { path: path.join(root, "missing"), length: 10, name: "gone.mkv" }]
     ]);
+    deps.torrentPool.acquireWholeFile = async () => null;
     deps.sourceRegistry = { get: () => ({ sourceType: "magnet", source: "magnet:?xt=urn:btih:abc" }) };
     req.query = { sourceKey: "torrent:abc", fileIndex: "0" };
     await handleStreamGet(req, reply, deps);
@@ -210,6 +315,32 @@ test("a file this proxy does not have whole still goes to the torrent", async ()
   deps.torrentPool.wholeFiles = new Map([["other/7", { path: "/nowhere", length: 1, name: "x" }]]);
   await handleStreamGet(req, reply, deps);
   assert.equal(state.prioritized.length, 0, "a read must not change download demand");
+});
+
+test("HEAD reads completed-file metadata without acquiring a body lease", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "stream-head-whole-"));
+  const where = path.join(root, "0");
+  const bytes = Buffer.from("a film on disk", "utf8");
+  await fs.writeFile(where, bytes);
+  let acquisitions = 0;
+  try {
+    const { req, reply, sent, deps } = harness({ method: "HEAD" });
+    deps.torrentPool = new WorkerTorrentPool({}, {
+      wholeFiles: new Map([["abc/0", { path: where, length: bytes.length, name: "film.mkv" }]]),
+      async acquireWholeFile() { acquisitions++; return null; }
+    });
+    deps.sourceRegistry = { get: () => ({ sourceType: "torrent", source: "magnet:?xt=urn:btih:abc" }) };
+    req.query = { sourceKey: "torrent:abc", fileIndex: "0" };
+
+    await handleStreamGet(req, reply, deps);
+
+    assert.equal(acquisitions, 0, "HEAD acquired a lease despite reading no body");
+    assert.equal(sent.headers["content-length"], String(bytes.length));
+    assert.equal(sent.headers["accept-ranges"], "bytes");
+    assert.equal(sent.called, true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
+  }
 });
 
 test("every wait of an encoder's input read is marked for the run its URL names", async () => {
@@ -276,6 +407,11 @@ async function continuedResponse({ failAfterFirst = false } = {}) {
   let cancelled = 0;
   let released = 0;
   deps.torrentPool.wholeFiles = wholeFiles;
+  deps.torrentPool.acquireWholeFile = async ({ sourceKey, fileIndex }) => {
+    const infoHash = sourceKey.slice("torrent:".length).toLowerCase();
+    const file = wholeFiles.get(`${infoHash}/${fileIndex}`);
+    return file ? openCompletedInputFile(file, async () => {}) : null;
+  };
   deps.torrentPool.getTorrent = async () => ({ files: [{ name: "film.avi", length: bytes.length,
     createFragmentReader: () => ({ cancel() { cancelled++; }, async *[Symbol.asyncIterator]() {
       yield { bytes: bytes.subarray(2, 6), release: () => { released++; } };

@@ -129,3 +129,102 @@ test("the files held whole are listed by torrent, and listing them is not a read
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("concurrent writes reserve the allowance before either file is assembled", async () => {
+  const root = await directory();
+  const files = new CompletedFiles({ root });
+  let startWrite;
+  let finishWrite;
+  const started = new Promise(resolve => { startWrite = resolve; });
+  const waitForFinish = new Promise(resolve => { finishWrite = resolve; });
+  const slow = () => Readable.from((async function* () {
+    startWrite();
+    await waitForFinish;
+    yield Buffer.alloc(700, 1);
+  })());
+  try {
+    await files.allow(1000);
+    const first = files.keep({ infoHash: INFO_HASH, fileIndex: 0, length: 700, name: "first", open: slow });
+    await started;
+    const second = await files.keep({ infoHash: INFO_HASH, fileIndex: 1, length: 700, name: "second", open: opens(Buffer.alloc(700, 2)) });
+    assert.equal(second, null, "a second write used bytes already reserved by the first");
+    finishWrite();
+    assert.ok(await first, "the admitted file was not kept");
+    assert.equal(files.bytes, 700);
+    assert.ok(files.bytes <= 1000);
+  } finally {
+    finishWrite();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("admission replaces the oldest unused whole file when the allowance is full", async () => {
+  const root = await directory();
+  const files = new CompletedFiles({ root });
+  try {
+    await files.allow(1000);
+    await files.keep({ infoHash: INFO_HASH, fileIndex: 0, length: 700, name: "old", open: opens(Buffer.alloc(700, 1)) });
+    const current = await files.keep({ infoHash: INFO_HASH, fileIndex: 1, length: 700, name: "current", open: opens(Buffer.alloc(700, 2)) });
+    assert.ok(current, "the current file was refused despite an eligible victim");
+    assert.equal(files.find(INFO_HASH, 0), null, "the eligible old file was retained");
+    assert.equal(files.bytes, 700);
+    assert.deepEqual(await fs.readFile(current.path), Buffer.alloc(700, 2));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("admission preserves a live reader and releases a failed write reservation", async () => {
+  const root = await directory();
+  const files = new CompletedFiles({ root });
+  try {
+    await files.allow(10);
+    await files.keep({ infoHash: INFO_HASH, fileIndex: 0, length: 7, name: "old", open: opens(Buffer.from("olddata")) });
+    const reader = files.acquire(INFO_HASH, 0);
+    assert.ok(reader);
+    assert.equal(await files.keep({ infoHash: INFO_HASH, fileIndex: 1, length: 7, name: "current", open: opens(Buffer.from("newdata")) }), null);
+    assert.ok(files.find(INFO_HASH, 0), "the live reader's file was evicted");
+    await reader.release();
+
+    const failed = await files.keep({
+      infoHash: INFO_HASH,
+      fileIndex: 2,
+      length: 7,
+      name: "failed",
+      open: () => Readable.from((async function* () { yield Buffer.from("bad"); throw new Error("read failed"); })())
+    });
+    assert.equal(failed, null);
+    const current = await files.keep({ infoHash: INFO_HASH, fileIndex: 1, length: 7, name: "current", open: opens(Buffer.from("newdata")) });
+    assert.ok(current, "failed write left a reservation behind");
+    assert.equal(files.bytes, 7);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a smaller allowance is enforced when an admitted write finishes", async () => {
+  const root = await directory();
+  const files = new CompletedFiles({ root });
+  let startWrite;
+  let finishWrite;
+  const started = new Promise(resolve => { startWrite = resolve; });
+  const waitForFinish = new Promise(resolve => { finishWrite = resolve; });
+  try {
+    await files.allow(10);
+    const pending = files.keep({
+      infoHash: INFO_HASH,
+      fileIndex: 0,
+      length: 8,
+      name: "pending",
+      open: () => Readable.from((async function* () { startWrite(); await waitForFinish; yield Buffer.alloc(8); })())
+    });
+    await started;
+    await files.allow(0);
+    finishWrite();
+    assert.equal(await pending, null, "the completed write remained over the revised allowance");
+    assert.equal(files.bytes, 0);
+  } finally {
+    finishWrite();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

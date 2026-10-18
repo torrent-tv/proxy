@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Reserve completed-file storage before concurrent writes and evict eligible unused files before admitting a needed file (#ttv-210).
+
 ## 2.101.21
 
 - **Fix**: Serve completed files through the storage owner's read lease so active HTTP responses prevent eviction until the response ends or is cancelled (#ttv-209).

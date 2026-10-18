@@ -54,8 +54,13 @@ export class CompletedFiles {
 
   /** Assemblies in flight, so two passes cannot write one file at once. @type {Set<string>} */
   #writing = new Set();
+  /** Bytes promised to assemblies that have not yet become held files. @type {Map<string, number>} */
+  #reservations = new Map();
+  /** Serialize allowance changes and admission decisions. @type {Promise<unknown>} */
+  #admission = Promise.resolve();
   #readers = new Map();
   #removeAfterRead = new Set();
+  #removing = new Set();
 
   /**
    * What this store may hold, handed to it by the owner of the disk.
@@ -142,7 +147,7 @@ export class CompletedFiles {
    */
   find(infoHash, fileIndex) {
     const key = this.#keyOf(infoHash, fileIndex);
-    if (this.#removeAfterRead.has(key)) return null;
+    if (this.#removeAfterRead.has(key) || this.#removing.has(key)) return null;
     const file = this.#held.get(key) ?? null;
     if (file) {
       // WHEN IT WAS LAST WANTED, which is the order it leaves in. A whole file
@@ -186,20 +191,38 @@ export class CompletedFiles {
    *   many files went.
    */
   async allow(bytes) {
-    this.#allowanceBytes = Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
-    let removed = 0;
-    if (this.#allowanceBytes === null) {
+    return this.#withAdmission(async () => {
+      this.#allowanceBytes = Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+      const removed = await this.#trimToAllowance();
       return { bytes: this.bytes, removed };
-    }
-    while (this.bytes > this.#allowanceBytes) {
+    });
+  }
+
+  /** Run one storage decision at a time. @param {() => Promise<unknown> | unknown} action */
+  #withAdmission(action) {
+    const result = this.#admission.then(action, action);
+    this.#admission = result.catch(() => undefined);
+    return result;
+  }
+
+  /** Include bytes currently being assembled when enforcing the allowance. */
+  #reservedBytes() {
+    let total = 0;
+    for (const length of this.#reservations.values()) total += length;
+    return total;
+  }
+
+  /** Remove eligible unused files until held and reserved bytes fit. */
+  async #trimToAllowance() {
+    let removed = 0;
+    if (this.#allowanceBytes === null) return removed;
+    while (this.bytes + this.#reservedBytes() > this.#allowanceBytes) {
       const victim = this.#longestUnread();
-      if (!victim) {
-        break;
-      }
-      await this.#remove(victim);
+      if (!victim) break;
+      if (!await this.#remove(victim)) break;
       removed += 1;
     }
-    return { bytes: this.bytes, removed };
+    return removed;
   }
 
   /**
@@ -215,7 +238,7 @@ export class CompletedFiles {
     if (this.#allowanceBytes === null) {
       return true;
     }
-    return this.bytes + Math.max(0, Number(length) || 0) <= this.#allowanceBytes;
+    return this.bytes + this.#reservedBytes() + Math.max(0, Number(length) || 0) <= this.#allowanceBytes;
   }
 
   /**
@@ -227,7 +250,7 @@ export class CompletedFiles {
     let oldest = null;
     let oldestAt = Number.POSITIVE_INFINITY;
     for (const key of this.#held.keys()) {
-      if (this.#writing.has(key) || this.#readers.has(key)) {
+      if (this.#writing.has(key) || this.#readers.has(key) || this.#removing.has(key)) {
         continue;
       }
       const at = this.#lastRead.get(key) ?? 0;
@@ -243,17 +266,24 @@ export class CompletedFiles {
    * Take one whole file off the disk.
    *
    * @param {string} key
-   * @returns {Promise<void>}
+   * @returns {Promise<boolean>} Whether the file was removed.
    */
   async #remove(key) {
-    if (this.#readers.has(key)) { this.#removeAfterRead.add(key); return; }
+    if (this.#removing.has(key)) return false;
+    if (this.#readers.has(key)) { this.#removeAfterRead.add(key); return false; }
     const file = this.#held.get(key);
+    if (!file) return true;
+    this.#removing.add(key);
+    try {
+      await fs.rm(file.path, REMOVAL);
+    } catch {
+      this.#removing.delete(key);
+      return false;
+    }
     this.#held.delete(key);
     this.#lastRead.delete(key);
-    if (!file) {
-      return;
-    }
-    await fs.rm(file.path, REMOVAL).catch(() => undefined);
+    this.#removing.delete(key);
+    return true;
   }
 
   /**
@@ -344,18 +374,30 @@ export class CompletedFiles {
   async keep({ infoHash, fileIndex, length, name, open }) {
     const key = this.#keyOf(infoHash, fileIndex);
     const held = this.#held.get(key);
-    if (held) {
+    if (held && !this.#removing.has(key)) {
       return held;
     }
+    if (this.#removing.has(key)) return null;
     if (this.#writing.has(key)) {
       return null;
     }
-    if (!this.hasRoomFor(length)) {
-      // Assembling it and then removing it is the same bytes written for
-      // nothing. The pieces still serve the read; this file simply is not kept.
+    this.#writing.add(key);
+    const admitted = await this.#withAdmission(async () => {
+      if (this.#held.has(key)) return false;
+      if (this.#allowanceBytes !== null && length > this.#allowanceBytes) return false;
+      while (this.#allowanceBytes !== null &&
+        this.bytes + this.#reservedBytes() + length > this.#allowanceBytes) {
+        const victim = this.#longestUnread();
+        if (!victim) return false;
+        if (!await this.#remove(victim)) return false;
+      }
+      this.#reservations.set(key, length);
+      return true;
+    });
+    if (!admitted) {
+      await this.#withAdmission(() => { this.#writing.delete(key); });
       return null;
     }
-    this.#writing.add(key);
     const directory = path.join(this.#root, String(infoHash));
     const where = path.join(directory, String(fileIndex));
     const partial = `${where}.partial`;
@@ -367,6 +409,9 @@ export class CompletedFiles {
       let written = 0;
       try {
         for await (const chunk of source) {
+          if (written + chunk.length > length) {
+            throw new Error("Whole-file read exceeded its declared length");
+          }
           await handle.write(chunk);
           written += chunk.length;
         }
@@ -382,14 +427,24 @@ export class CompletedFiles {
       }
       await fs.rename(partial, where);
       const file = { path: where, length, name: String(name ?? fileIndex) };
-      this.#held.set(key, file);
+      await this.#withAdmission(async () => {
+        this.#reservations.delete(key);
+        this.#held.set(key, file);
+        this.#lastRead.set(key, Date.now());
+        this.#writing.delete(key);
+        await this.#trimToAllowance();
+      });
       await this.#writeManifest(infoHash);
-      return file;
+      return this.#held.get(key) ?? null;
     } catch {
       await fs.rm(partial, REMOVAL).catch(() => undefined);
       return null;
     } finally {
-      this.#writing.delete(key);
+      await this.#withAdmission(async () => {
+        this.#reservations.delete(key);
+        this.#writing.delete(key);
+        await this.#trimToAllowance();
+      });
     }
   }
 

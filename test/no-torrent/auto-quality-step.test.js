@@ -284,6 +284,42 @@ test("a request stands while its conditions hold, and the next report that does 
   assert.equal(manager.viewers.get("viewer").qualityAsk, null, "let go by the judgement that did not repeat it");
 });
 
+test("an urgent machine downshift remains until the encoder and buffer recover together", async (t) => {
+  const { manager, session, dirPath } = await managerWithSession();
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await new Promise((resolve) => setImmediate(resolve));
+    await rm(dirPath, { recursive: true, force: true });
+  });
+
+  const viewer = manager.viewers.get("viewer");
+  const ask = {
+    height: 480,
+    at: Date.now() - 5_000,
+    reason: "machine-bound CPU-bound speed=0.85x",
+    urgent: true
+  };
+  viewer.qualityAsk = ask;
+  manager.encodeOrchestrator.noteStartupCosts({ firstByteWaitSec: 8.4, killCostSec: 0 });
+
+  // A single growing-buffer report does not prove the slower encoder is safe;
+  // at 0.9x it still cannot produce the film in real time.
+  measureSpeed([...session.runs][0], 0.9);
+  fillingReports(viewer, null);
+  await manager.quality.noteViewerReported(session.id, "viewer");
+  assert.equal(viewer.qualityAsk, ask, "keep the pending urgent request through a transient buffer recovery");
+
+  // Withdraw it only after the measured encoder rate and buffer both show room
+  // for another output to become ready.
+  measureSpeed([...session.runs][0], 1.2);
+  qualityStateOf(session).lastAloneSpeed = 1.2;
+  fillingReports(viewer, null);
+  await manager.quality.noteViewerReported(session.id, "viewer");
+  assert.notEqual(viewer.qualityAsk, ask, "the urgent request is withdrawn after measured recovery");
+  assert.ok(viewer.qualityAsk.height > ask.height, "the recovered output may ask for a step back up");
+  assert.equal(viewer.qualityAsk.urgent, false, "a recovery request waits for the cushion");
+});
+
 test("a request the next report asks for again stands", async (t) => {
   const { manager, session, dirPath } = await managerWithSession();
   t.after(async () => {

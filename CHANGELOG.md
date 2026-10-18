@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Judge separately served copied AAC segments against the published interval without applying the run's muxer-clock shift (#ttv-206).
+
 ## 2.101.17
 
 - **Fix**: Judge embedded copied sound against published segment boundaries after its packets are selected, without applying the run's muxer-clock shift twice (#ttv-206).

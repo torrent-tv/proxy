@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.20
 
 - **Fix**: Keep a viewer on the current picture preset until the proposed quality step proves it can encode at the source's required speed (#ttv-200).
 

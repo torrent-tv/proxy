@@ -430,7 +430,10 @@ export class QualityController {
       // it is read as a copy.
       const unchanged = standing && standingBefore &&
         standing.height === standingBefore.height && standing.at === standingBefore.at;
-      if (unchanged && !this.#affirmed.has(consumerId)) {
+      const urgentMachineDown = unchanged && standing.urgent === true &&
+        standing.reason.startsWith("machine-bound ");
+      const machineRecovered = !urgentMachineDown || this.#roomToSpare(session, consumerId);
+      if (unchanged && !this.#affirmed.has(consumerId) && machineRecovered) {
         this.#host.dropAskOf(base, consumerId);
         logger.info(
           `[budget] transcode ${base.id} no longer asks ${consumerId} for ${standing.height}p: ` +

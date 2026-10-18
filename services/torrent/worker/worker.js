@@ -1007,7 +1007,7 @@ const wholeSources = createWholeSources({ find: (infoHash, fileIndex) => complet
 /** Adopted files and newly completed files state the same availability event. */
 function announceWholeFiles(sourceKey, description) {
   for (const file of description?.files ?? []) {
-    const held = completedFiles.find(description.infoHash, file.index);
+    const held = completedFiles.peek(description.infoHash, file.index);
     if (!held || held.length !== file.length) continue;
     parentPort.postMessage({ type: Event.FILE_COMPLETE, sourceKey, infoHash: description.infoHash,
       fileIndex: file.index, path: held.path, length: held.length, name: file.name });
@@ -1085,6 +1085,9 @@ const beingKept = new Set();
  * @returns {Promise<void>}
  */
 async function keepWholeFiles() {
+  const expired = await completedFiles.expireIdle();
+  if (expired.removed > 0) holdingsChanged();
+
   for (const [sourceKey, torrent] of [...pool.torrents]) {
     // Lower case, because that is what the source key carries and the main
     // thread looks these up by the key alone.
@@ -1104,7 +1107,7 @@ async function keepWholeFiles() {
     const toKeep = filesToKeep({
       files: torrent.files,
       isKept: (fileIndex) =>
-        completedFiles.find(infoHash, fileIndex) !== null || beingKept.has(`${infoHash}/${fileIndex}`),
+        completedFiles.peek(infoHash, fileIndex) !== null || beingKept.has(`${infoHash}/${fileIndex}`),
       inUse: wanted
     });
     let announcedNow = false;
@@ -1169,7 +1172,7 @@ async function keepWholeFiles() {
     // above can take minutes and a read can open while it runs.
     const isRemovable = mayRemoveWholeTorrent({
       torrent,
-      isKept: (fileIndex) => completedFiles.find(infoHash, fileIndex) !== null,
+      isKept: (fileIndex) => completedFiles.peek(infoHash, fileIndex) !== null,
       openReads: openReads.values(),
       announcedNow
     });

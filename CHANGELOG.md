@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Expire completed source files after the shared idle period, preserve active reads, and remove unaccounted partial files left by interrupted writes.
+
 ## 2.101.23
 
 - **Fix**: Evict eligible unused output segments when the measured disk allowance is zero, while preserving active reads and current viewer segments (#ttv-211).
@@ -3368,3 +3372,5 @@ All eight were found by reading the file after the torrent worker was killed by 
 - **New**: WebRTC P2P tunnel architecture — replaced direct HTTP streaming with a persistent WebSocket tunnel to the server. Video is delivered from the proxy to the browser over a WebRTC data channel; the server acts only as a signalling relay.
 - **New**: `node-datachannel` dependency for server-side WebRTC.
 - **Removed**: `public_base_url` config — no longer needed.
+
+\n

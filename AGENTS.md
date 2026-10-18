@@ -293,21 +293,19 @@ Decided direction — full plan in the parent `../AGENTS.md`. Proxy-side pieces:
 
 All of this must stay deployment-agnostic (HA addon, bare npm, Docker).
 
-## Disk hygiene (open item — torrent data is NOT cleaned up today)
+## Storage lifecycle
 
-HLS segments are handled (`server/OutputLifecycle.js`: idle TTL, `disposeSession`,
-`disposeAll`). Torrent data is **partially** handled: shutdown cleanup is done
-(`TorrentPool.destroyAll()` with `destroyStore: true`, wired into the `onClose`
-hook — proxy 2.9.15), but `deselect()` only stops further download and nothing
-removes a torrent's data **while the proxy keeps running**, nor sweeps orphans
-left by a previous hard kill at startup.
+Memory and disk claimants are registered with `services/storage/wire.js` and
+receive shares from `MachineBudget`. Disk is accounted per physical device.
+Each representation keeps its own lifecycle and eviction rule; current owners,
+identity keys, shared demand, expiry, and field evidence are documented in
+`docs/storage-architecture.md`.
 
-Level 1 — remaining: `client.remove(torrent, { destroyStore: true })` on last-
-file refcount 0 + idle TTL (mirror the HLS session model); startup sweep of
-orphaned store dirs under `os.tmpdir()`; global disk cap with LRU eviction of
-whole torrents. (Shutdown teardown ✅ done.)
-Level 2 (research): sliding-window chunk store. Full rationale in the parent
-`../AGENTS.md` "Disk hygiene" section.
+Reusable torrents, generated segments, and completed source files use the
+shared `IDLE_KEEP_MS` period. Completed files also reserve concurrent writes,
+hold active reads against eviction, and remove interrupted `.partial` files
+at startup. Operation-only encode inputs and FFmpeg cache files are released
+when their requests or runs end.
 
 ## Cloud proxy
 
@@ -382,3 +380,5 @@ is done. Updating the add-on on the Home Assistant host is still done there.
 
 `.github/workflows/dependencies.yml` updates dependencies daily within the
 ranges, runs the same checks and pushes to `main`.
+
+\n

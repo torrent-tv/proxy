@@ -192,15 +192,16 @@ export function judgeNeighbors(left, right) {
  * soundtrack's at 1419.904 s against a final cut of 1419.993 s, and both last
  * pieces were refused, so no viewer could reach the end of the episode.
  */
-function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {}, shift = 0, endsWithSource = false, nextLeadingSeconds = 0 }) {
+function intervalFailure(coverage, { from, to, requiredKinds, sourceEnds = {}, shift = 0, shiftByKind = {}, endsWithSource = false, nextLeadingSeconds = 0 }) {
   if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from) || !requiredKinds?.length) return "segment-interval-is-not-declared";
   for (const kind of requiredKinds) {
     const track = coverage?.tracks?.find(track => track.kind === kind);
     if (!track?.ranges?.length || !(track.timescale > 0n)) return `segment-missing-${kind}`;
-    const start = BigInt(Math.round((from + shift) * Number(track.timescale)));
-    const cutAt = to + shift - (kind === "vide" && !endsWithSource ? nextLeadingSeconds : 0);
+    const trackShift = Number.isFinite(shiftByKind[kind]) ? shiftByKind[kind] : shift;
+    const start = BigInt(Math.round((from + trackShift) * Number(track.timescale)));
+    const cutAt = to + trackShift - (kind === "vide" && !endsWithSource ? nextLeadingSeconds : 0);
     const through = Number.isFinite(sourceEnds[kind]) ? Math.min(cutAt, sourceEnds[kind]) : cutAt;
-    if (!(through > from + shift)) return `segment-interval-is-empty-${kind}`;
+    if (!(through > from + trackShift)) return `segment-interval-is-empty-${kind}`;
     const end = BigInt(Math.round(through * Number(track.timescale)));
     const first = track.ranges[0];
     const frame = track.productionFrame ?? first.frame;

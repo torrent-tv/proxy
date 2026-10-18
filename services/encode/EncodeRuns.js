@@ -409,7 +409,8 @@ export class EncodeRuns {
    * @param {string | null} [following] - The working name of the file the muxer closed after it.
    * @returns {object | null | false}
    */
-  #wholeClosedPiece(session, name, index, admitted = false, bytes = null, run = null, timing = null, following = null, { tentative = false } = {}) {
+  #wholeClosedPiece(session, name, index, admitted = false, bytes = null, run = null, timing = null, following = null,
+    { tentative = false, audioOnPublishedGrid = false } = {}) {
 
     const format = session.segmentFormat;
     if (!format?.readMediaRanges || !Number.isInteger(index) || index < 0) {
@@ -422,6 +423,9 @@ export class EncodeRuns {
       const cut = cutOf(session.timeline, index);
       const grid = session.timeline.published ?? session.timeline.boundaries;
       const interval = admitted ? { from: grid?.[index], to: grid?.[index + 1],
+        // Embedded copied sound was selected by presentationSegment on the
+        // published grid, so its raw muxer cut shift no longer applies.
+        ...(audioOnPublishedGrid ? { shiftByKind: { soun: 0 } } : {}),
         ...(index === session.timeline.segmentCount - 1 ? { endsWithSource: true, sourceEnds: Object.fromEntries(
           (admitted.tracks ?? []).filter(input => Number.isFinite(input.sourceEndSeconds))
             .map(input => [input.track.type === "video" ? "vide" : "soun", input.sourceEndSeconds])) } : {}),
@@ -1181,7 +1185,8 @@ export class EncodeRuns {
             throw error;
           }
         }
-        const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes, run, timing, following, { tentative });
+        const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes, run, timing, following,
+          { tentative, audioOnPublishedGrid: soundInPiece });
         // Tried on its own line and not proved whole: it waits for the next file.
         if (mediaRanges === false && tentative) return null;
         if (mediaRanges === false) throw Object.assign(new Error(`Closed piece #${index} has incomplete media.`),

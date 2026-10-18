@@ -19,6 +19,43 @@ import { spawnSync } from "node:child_process";
 import ffmpegBin from "ffmpeg-static";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { cutShiftOf, judgePiece } from "../../services/encode/piece-completeness.js";
+import { presentationSegment } from "../../services/encode/segment-formats/presentation-segment.js";
+
+test("a copied MP4 soundtrack is judged on the published grid after its packets are selected", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv8-cut-grid-"));
+  try {
+    const run = (args) => {
+      const result = spawnSync(ffmpegBin, args, { cwd: directory, encoding: "utf8", windowsHide: true });
+      assert.equal(result.status, 0, result.stderr);
+    };
+    run(["-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "42", "-c:a", "aac", "-b:a", "128k", "input.mp4"]);
+    const grid = [0, 10.427094, 20.854188, 31.28125];
+    run(["-v", "error", "-seek_timestamp", "1", "-noaccurate_seek", "-ss", String(grid[1]), "-i", "input.mp4",
+      "-copyts", "-output_ts_offset", String(grid[1]), "-to", String(grid[3]), "-ss", String(grid[1]), "-vn", "-map", "0:a:0?",
+      "-c:a", "copy", "-avoid_negative_ts", "disabled", "-f", "segment", "-segment_times", `${(grid[2] - grid[1]).toFixed(3)},${(grid[3] - grid[1]).toFixed(3)}`,
+      "-segment_time_delta", "0", "-segment_start_number", "1", "-segment_list", "list.csv", "-segment_list_type", "csv",
+      "-segment_format", "mp4", "-segment_format_options",
+      "movflags=+frag_keyframe+empty_moov+default_base_moof+delay_moov:avoid_negative_ts=disabled:movie_timescale=1000000",
+      "making-%05d.mp4"]);
+    const raw = await Promise.all([1, 2].map(async index =>
+      fs.readFile(path.join(directory, `making-${String(index).padStart(5, "0")}.mp4`))));
+    const list = await fs.readFile(path.join(directory, "list.csv"), "utf8");
+    const endSeconds = Number(list.trim().split("\n")[0].trim().split(",")[2]);
+    const rawRanges = fmp4Format.readMediaRanges(raw[0]);
+    const shift = cutShiftOf(rawRanges, grid[1], "soun", BigInt(Math.round(endSeconds * 1_000_000)));
+    assert.ok(Number.isFinite(shift) && Math.abs(shift) < 1024 / 48000, `first AAC packet shift: ${shift}`);
+    const published = presentationSegment(raw[0], raw[1], { from: grid[1], to: grid[2] });
+    const ranges = fmp4Format.readMediaRanges(published);
+    ranges.cutShiftSeconds = -0.018917;
+    const interval = { from: grid[1], to: grid[2], requiredKinds: ["soun"] };
+    assert.equal(judgePiece(fmp4Format, ranges, undefined, interval).whole, false,
+      "the recorded muxer shift would reject sound already selected on the published grid");
+    assert.equal(judgePiece(fmp4Format, ranges, undefined, { ...interval, shiftByKind: { soun: 0 } }).whole, true,
+      "published-grid sound is judged against the published boundary");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 // Generated ordinary media only; no torrent imports.
 test("each piece of a copied AAC run is whole on the muxer's own clock, and only on it", async () => {

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Judge embedded copied sound against published segment boundaries after its packets are selected, without applying the run's muxer-clock shift twice (#ttv-206).
+
 ## 2.101.16
 
 - **Fix**: Do not cancel a viewer's picture preset move when a separate soundtrack closes a segment; reconsider the move against its prepared picture and the picture the viewer is leaving (#ttv-195).

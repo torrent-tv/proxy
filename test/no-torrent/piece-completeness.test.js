@@ -38,6 +38,25 @@ test("an audio piece ending within the delta of its cut is whole", () => {
   assert.equal(judgePiece(format, endingAt(4.738913832199547), cut).whole, true);
 });
 
+test("copied MP4 audio uses published cuts while refusing media lost beyond one AAC frame", () => {
+  const cases = [
+    { from: 31.28125, to: 41.708333, shift: -0.006583333333331609, start: 1501184n, end: 2002944n },
+    { from: 19.602917, to: 30.03, shift: -0.01891700000000185, start: 940032n, end: 1441792n }
+  ];
+  for (const { from, to, shift, start, end } of cases) {
+    const ranges = { cutShiftSeconds: shift, tracks: [{ kind: "soun", timescale: 48000n, productionFrame: 1024n,
+      positionErrorTicks: 0n, ranges: [{ start, end, frame: 1024n }] }] };
+    const interval = { from, to, requiredKinds: ["soun"] };
+    assert.equal(judgePiece(fmp4Format, ranges, undefined, interval).reason, "segment-end-outside-interval-soun",
+      "the raw run shift incorrectly moves a published audio boundary");
+    assert.equal(judgePiece(fmp4Format, ranges, undefined, { ...interval, shiftByKind: { soun: 0 } }).whole, true,
+      "the copied packet ends within one AAC frame of the published cut");
+    ranges.tracks[0].ranges[0].end -= 2048n;
+    assert.equal(judgePiece(fmp4Format, ranges, undefined, { ...interval, shiftByKind: { soun: 0 } }).reason,
+      "segment-end-outside-interval-soun", "a genuinely incomplete piece still fails");
+  }
+});
+
 test("a piece closed short of its cut is not whole", () => {
   // A run killed mid-piece: 84 ms of film where ten seconds were cut.
   assert.deepEqual(judgePiece(format, endingAt(456.084), 466), { whole: false, throughSeconds: 456.084 });

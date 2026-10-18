@@ -105,7 +105,7 @@ test("writes and physical reads protect material after expiry", t => {
   const release = store.holdRead(output.outputKey);
   lifecycle.keepWithinRoom();
   assert.equal(store.drop(output.outputKey, "unsafe concurrent removal"), false);
-  host.machineBudget.segmentBytes = () => 1;
+  host.machineBudget.segmentBytes = () => 0;
   lifecycle.keepWithinRoom();
   assert.equal(store.remove(output.outputKey, 0, "unsafe eviction"), 0);
   assert.deepEqual(store.provenNumbers(output.outputKey), [0]);
@@ -117,6 +117,34 @@ test("writes and physical reads protect material after expiry", t => {
   clock.at += IDLE_KEEP_MS;
   lifecycle.keepWithinRoom();
   assert.equal(store.addresses().length, 0);
+});
+
+test("a measured zero-byte allowance removes every unused segment", t => {
+  const { store, lifecycle, host, dir } = setup(t);
+  host.machineBudget.segmentBytes = () => 0;
+  lifecycle.keepWithinRoom();
+  assert.deepEqual(store.provenNumbers("retained-picture"), []);
+  assert.equal(existsSync(path.join(dir, "segment-00000.mp4")), false);
+});
+
+test("a measured zero-byte allowance keeps a segment currently requested by a viewer", t => {
+  const { store, lifecycle, output, host, dir } = setup(t);
+  const unused = path.join(dir, "segment-00001.mp4");
+  writeFileSync(unused, Buffer.from("unused segment"));
+  host.viewerSegmentsOn = () => [0];
+  host.machineBudget.segmentBytes = () => 0;
+  lifecycle.keepWithinRoom();
+  assert.deepEqual(store.provenNumbers(output.outputKey), [0]);
+  assert.equal(existsSync(store.pathOfName(output.outputKey, "segment-00000.mp4")), true);
+  assert.equal(existsSync(unused), false);
+});
+
+test("an unavailable segment allowance does not evict stored segments", t => {
+  const { store, lifecycle, output, host, dir } = setup(t);
+  host.machineBudget.segmentBytes = () => null;
+  lifecycle.keepWithinRoom();
+  assert.deepEqual(store.provenNumbers(output.outputKey), [0]);
+  assert.equal(existsSync(path.join(dir, "segment-00000.mp4")), true);
 });
 
 test("a response holds an output independently of its viewer relation", t => {

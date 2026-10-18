@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Keep a viewer on the current picture preset until the proposed quality step proves it can encode at the source's required speed (#ttv-200).
+
 ## 2.101.19
 
 - **Fix**: Keep an urgent machine-bound quality request active until the encoder and buffer both show measured recovery, so a brief buffer increase does not cancel the switch before the player receives it (#ttv-200).

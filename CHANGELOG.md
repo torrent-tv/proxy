@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.23
 
 - **Fix**: Evict eligible unused output segments when the measured disk allowance is zero, while preserving active reads and current viewer segments (#ttv-211).
 

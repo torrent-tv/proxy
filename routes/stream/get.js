@@ -7,6 +7,7 @@
  */
 
 import { open } from "node:fs/promises";
+import { Readable } from "node:stream";
 import { parseRange } from "../../utils/parse-range.js";
 import { logger } from "../../utils/logger.js";
 
@@ -109,32 +110,46 @@ function wholeFileFor(torrentPool, sourceKey, fileIndex) {
 }
 
 /**
- * Open the whole file a response under way can continue from, if there is one.
+ * Acquire the whole file a response can continue from, if there is one.
  *
- * Any failure to open it leaves the response on the torrent, which can still
+ * Any failure to acquire it leaves the response on the torrent, which can still
  * answer; a file the disk owner removed is also forgotten here, as the route
  * does before headers.
  *
- * @param {{ wholeFiles?: Map<string, { path: string, length: number, name: string }> }} torrentPool
+ * @param {{ wholeFiles?: Map<string, { path: string, length: number, name: string }>, acquireWholeFile: (source: { sourceKey: string, fileIndex: number }) => Promise<{ length: number, stream: (start: number, end: number, onRead: (length: number) => void) => import("node:stream").Readable | null, release: () => Promise<unknown> } | null> }} torrentPool
  * @param {string} sourceKey
  * @param {number} fileIndex
  * @param {number} length - The length the response was promised for.
- * @returns {Promise<import("node:fs/promises").FileHandle | null>}
+ * @returns {Promise<{ length: number, stream: (start: number, end: number, onRead: (length: number) => void) => import("node:stream").Readable | null, release: () => Promise<unknown> } | null>}
  */
-async function openWholeFileToContinue(torrentPool, sourceKey, fileIndex, length) {
+async function acquireWholeFileRead(torrentPool, sourceKey, fileIndex, length) {
   const whole = wholeFileFor(torrentPool, sourceKey, fileIndex);
   if (!whole || whole.length !== length) {
     return null;
   }
   try {
-    return await open(whole.path, "r");
+    const read = await torrentPool.acquireWholeFile({ sourceKey, fileIndex });
+    if (!read) {
+      forgetWholeFile(torrentPool, sourceKey, fileIndex, whole);
+      return null;
+    }
+    if (read.length !== length) {
+      await read.release();
+      forgetWholeFile(torrentPool, sourceKey, fileIndex, whole);
+      return null;
+    }
+    return read;
   } catch (error) {
     if (error.code === "ENOENT") {
-      const key = `${sourceKey.slice("torrent:".length).toLowerCase()}/${fileIndex}`;
-      if (torrentPool.wholeFiles.get(key) === whole) torrentPool.wholeFiles.delete(key);
+      forgetWholeFile(torrentPool, sourceKey, fileIndex, whole);
     }
     return null;
   }
+}
+
+function forgetWholeFile(torrentPool, sourceKey, fileIndex, whole) {
+  const key = `${sourceKey.slice("torrent:".length).toLowerCase()}/${fileIndex}`;
+  if (torrentPool.wholeFiles?.get(key) === whole) torrentPool.wholeFiles.delete(key);
 }
 
 /**
@@ -142,16 +157,19 @@ async function openWholeFileToContinue(torrentPool, sourceKey, fileIndex, length
  * for, and close the file.
  *
  * @param {import("node:http").ServerResponse} raw
- * @param {import("node:fs/promises").FileHandle} handle
+ * @param {{ stream: (start: number, end: number, onRead: (length: number) => void) => import("node:stream").Readable | null, release: () => Promise<unknown> }} read
  * @param {number} from - Inclusive.
  * @param {number} end - Inclusive.
  * @param {(length: number) => void} onWritten
  * @returns {Promise<number>} Bytes written.
  */
-async function writeFromWholeFile(raw, handle, from, end, onWritten) {
+async function writeFromWholeFile(raw, read, from, end, onWritten) {
   let written = 0;
+  let stream = null;
   try {
-    for await (const chunk of handle.createReadStream({ start: from, end, autoClose: false })) {
+    stream = read.stream(from, end, () => {});
+    if (!stream) throw new Error("Completed file did not provide the admitted range.");
+    for await (const chunk of stream) {
       if (raw.writableEnded || raw.destroyed) {
         break;
       }
@@ -162,7 +180,8 @@ async function writeFromWholeFile(raw, handle, from, end, onWritten) {
       onWritten(chunk.length);
     }
   } finally {
-    await handle.close().catch(() => undefined);
+    stream?.destroy();
+    await read.release();
   }
   return written;
 }
@@ -173,35 +192,41 @@ async function writeFromWholeFile(raw, handle, from, end, onWritten) {
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
  * @param {{ path: string, length: number, name: string }} file
- * @param {import("node:fs/promises").FileHandle} handle - Already open; closed for HEAD.
+ * @param {{ stream: (start: number, end: number, onRead: (length: number) => void) => import("node:stream").Readable | null, release: () => Promise<unknown> }} read
  * @returns {Promise<void> | void}
  */
-function serveWholeFile(req, reply, file, handle) {
+function serveWholeFile(req, reply, file, read) {
   const disposition = `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`;
-  if (req.method === "HEAD") {
-    reply.hijack();
-    reply.raw.writeHead(200, {
-      "Accept-Ranges": "bytes",
-      "Content-Type": "application/octet-stream",
-      "Content-Length": String(file.length),
-      "Content-Disposition": disposition
-    });
-    reply.raw.end();
-    return;
-  }
   reply.header("Accept-Ranges", "bytes");
   reply.header("Content-Type", "application/octet-stream");
   reply.header("Content-Disposition", disposition);
   const range = parseRange(req.headers.range, file.length);
+  if (file.length === 0) {
+    reply.header("Content-Length", "0");
+    void read.release().catch(() => undefined);
+    return reply.send(Readable.from([]));
+  }
+  const start = range?.start ?? 0;
+  const end = range?.end ?? file.length - 1;
+  const stream = read.stream(start, end, () => {});
+  if (!stream) {
+    void read.release().catch(() => undefined);
+    return null;
+  }
   if (!range) {
     reply.header("Content-Length", String(file.length));
-    return reply.send(handle.createReadStream());
+  } else {
+    reply.code(206);
+    reply.header("Content-Length", String(end - start + 1));
+    reply.header("Content-Range", `bytes ${start}-${end}/${file.length}`);
   }
-  const { start, end } = range;
-  reply.code(206);
-  reply.header("Content-Length", String(end - start + 1));
-  reply.header("Content-Range", `bytes ${start}-${end}/${file.length}`);
-  return reply.send(handle.createReadStream({ start, end }));
+  void read.release().catch(() => undefined);
+  try {
+    return reply.send(stream);
+  } catch (error) {
+    stream.destroy();
+    throw error;
+  }
 }
 
 export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool, noteInputBytes = null, noteInputWaiting = null }) {
@@ -224,23 +249,36 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
   // nothing the torrent would have told us.
   const whole = wholeFileFor(torrentPool, sourceKey, fileIndex);
   if (whole) {
-    let handle;
-    try {
-      // Open before committing headers: the disk owner may have removed an
-      // announced file. An open descriptor also preserves a live POSIX read.
-      handle = await open(whole.path, "r");
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-      const key = `${sourceKey.slice("torrent:".length).toLowerCase()}/${fileIndex}`;
-      if (torrentPool.wholeFiles.get(key) === whole) torrentPool.wholeFiles.delete(key);
-    }
-    if (handle) {
-      if (req.method === "HEAD") await handle.close();
+    if (req.method === "HEAD") {
+      let handle;
       try {
-        return serveWholeFile(req, reply, whole, handle);
+        handle = await open(whole.path, "r");
       } catch (error) {
-        await handle.close().catch(() => undefined);
-        throw error;
+        if (error.code !== "ENOENT") throw error;
+        forgetWholeFile(torrentPool, sourceKey, fileIndex, whole);
+      }
+      if (handle) {
+        await handle.close();
+        reply.hijack();
+        reply.raw.writeHead(200, {
+          "Accept-Ranges": "bytes",
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(whole.length),
+          "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(whole.name)}`
+        });
+        reply.raw.end();
+        return;
+      }
+    } else {
+      const read = await acquireWholeFileRead(torrentPool, sourceKey, fileIndex, whole.length);
+      if (read) {
+        try {
+          const sent = serveWholeFile(req, reply, whole, read);
+          if (sent) return sent;
+        } catch (error) {
+          await read.release().catch(() => undefined);
+          throw error;
+        }
       }
     }
   }
@@ -338,7 +376,7 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
             fragment.release();
             break;
           }
-          continueFrom = await openWholeFileToContinue(torrentPool, sourceKey, fileIndex, file.length);
+          continueFrom = await acquireWholeFileRead(torrentPool, sourceKey, fileIndex, file.length);
           if (continueFrom) {
             fragment.release();
             break;
@@ -368,7 +406,7 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
         }
       } catch (error) {
         if (sent >= contentLength || req.raw.aborted || reply.raw.destroyed) throw error;
-        continueFrom = await openWholeFileToContinue(torrentPool, sourceKey, fileIndex, file.length);
+        continueFrom = await acquireWholeFileRead(torrentPool, sourceKey, fileIndex, file.length);
         if (!continueFrom) throw error;
       }
       if (continueFrom) {

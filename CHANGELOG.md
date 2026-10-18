@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.24
 
 - **Fix**: Expire completed source files after the shared idle period, preserve active reads, and remove unaccounted partial files left by interrupted writes.
 

@@ -42,7 +42,7 @@
 /**
  * How long material nobody has read is kept, in milliseconds.
  *
- * Read by the torrent pool for a torrent and its downloaded bytes, and by the
- * session manager for the segments an encoder produced.
+ * Read by the torrent pool, the completed-file store, and the session manager
+ * for reusable torrents, source files, and generated segments.
  */
 export const IDLE_KEEP_MS = 60 * 60 * 1000;

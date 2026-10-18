@@ -24,8 +24,10 @@
  */
 
 import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { IDLE_KEEP_MS } from "../keep.js";
 
 /**
  * Where whole files live.
@@ -42,6 +44,17 @@ export function completedFilesRoot() {
 
 /** How a removal is asked for; Windows needs the retries, POSIX ignores them. */
 const REMOVAL = { force: true, maxRetries: 10, retryDelay: 20 };
+
+/** Whether another live process may still own an interrupted-write file. */
+function writerIsAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
 
 /**
  * One directory of whole files, keyed by the torrent they came from.
@@ -61,6 +74,11 @@ export class CompletedFiles {
   #readers = new Map();
   #removeAfterRead = new Set();
   #removing = new Set();
+  /** Last access time for idle expiry. @type {Map<string, number>} */
+  #lastUsedAt = new Map();
+  /** @type {() => number} */
+  #now;
+  #idleTtlMs;
 
   /**
    * What this store may hold, handed to it by the owner of the disk.
@@ -88,9 +106,13 @@ export class CompletedFiles {
    * @param {object} params
    * @param {string} params.root - Where whole files live. Outside any torrent's
    *   own store directory, which is removed with the torrent.
+   * @param {number} [params.idleTtlMs] - How long an unread file may remain.
+   * @param {() => number} [params.now]
    */
-  constructor({ root }) {
+  constructor({ root, idleTtlMs = IDLE_KEEP_MS, now = Date.now }) {
     this.#root = root;
+    this.#idleTtlMs = Math.max(0, Number(idleTtlMs) || 0);
+    this.#now = now;
   }
 
   /** Where these files live, for logging. */
@@ -148,21 +170,40 @@ export class CompletedFiles {
    * @returns {{ path: string, length: number, name: string } | null}
    */
   find(infoHash, fileIndex) {
+    const file = this.peek(infoHash, fileIndex);
+    if (file) this.#touch(this.#keyOf(infoHash, fileIndex));
+    return file;
+  }
+
+  /**
+   * Look up a file for bookkeeping without extending its idle period.
+   *
+   * @param {string} infoHash
+   * @param {number} fileIndex
+   * @returns {{ path: string, length: number, name: string } | null}
+   */
+  peek(infoHash, fileIndex) {
     const key = this.#keyOf(infoHash, fileIndex);
     if (this.#removeAfterRead.has(key) || this.#removing.has(key)) return null;
-    const file = this.#held.get(key) ?? null;
-    if (file) {
-      // WHEN IT WAS LAST WANTED, which is the order it leaves in. A whole file
-      // nobody has asked for in the longest is the one whose loss costs least:
-      // it can be downloaded again, and a read of it falls back to the pieces.
-      this.#touch(key);
-    }
-    return file;
+    return this.#held.get(key) ?? null;
   }
 
   /** Mark a file as more recently wanted than every earlier access. */
   #touch(key) {
     this.#lastRead.set(key, ++this.#accessOrder);
+    this.#lastUsedAt.set(key, this.#now());
+  }
+
+  /** Remove reusable whole files that have had no access for their idle period. */
+  async expireIdle(now = this.#now()) {
+    return this.#withAdmission(async () => {
+      let removed = 0;
+      for (const [key, lastUsedAt] of this.#lastUsedAt) {
+        if (now - lastUsedAt < this.#idleTtlMs || this.#readers.has(key) || this.#writing.has(key)) continue;
+        if (await this.#remove(key)) removed += 1;
+      }
+      return { bytes: this.bytes, removed };
+    });
   }
 
   /** Pin a completed file against eviction until all its offset reads finish. */
@@ -180,6 +221,7 @@ export class CompletedFiles {
       else {
         this.#readers.delete(key);
         if (this.#removeAfterRead.delete(key)) await this.#remove(key);
+        else this.#touch(key);
       }
       return this.allow(this.#allowanceBytes);
     } };
@@ -289,7 +331,10 @@ export class CompletedFiles {
     }
     this.#held.delete(key);
     this.#lastRead.delete(key);
+    this.#lastUsedAt.delete(key);
     this.#removing.delete(key);
+    const infoHash = key.slice(0, key.lastIndexOf("/"));
+    await this.#writeManifest(infoHash);
     return true;
   }
 
@@ -331,6 +376,23 @@ export class CompletedFiles {
         // a file named by its number is better than a file thrown away.
       }
       for (const held of files) {
+        const ownedPartial = held.isFile() && /^\d+\.partial-(\d+)-[0-9a-f-]+$/i.exec(held.name);
+        const legacyPartial = held.isFile() && /^\d+\.partial$/.test(held.name);
+        if (ownedPartial && !writerIsAlive(Number(ownedPartial[1]))) {
+          await fs.rm(path.join(this.#root, infoHash, held.name), REMOVAL).catch(() => undefined);
+          continue;
+        }
+        if (legacyPartial) {
+          const partial = path.join(this.#root, infoHash, held.name);
+          try {
+            const { mtimeMs } = await fs.stat(partial);
+            if (this.#now() - mtimeMs >= this.#idleTtlMs) await fs.rm(partial, REMOVAL);
+          } catch {
+            // Gone between listing and inspection, or still open on Windows.
+          }
+          continue;
+        }
+        if (ownedPartial) continue;
         const fileIndex = Number.parseInt(held.name, 10);
         if (!held.isFile() || !Number.isInteger(fileIndex) || fileIndex < 0) {
           continue;
@@ -348,11 +410,13 @@ export class CompletedFiles {
             length: size,
             name: String(manifest?.[String(fileIndex)]?.name ?? fileIndex)
           });
+          this.#touch(this.#keyOf(infoHash, fileIndex));
           adopted += 1;
         } catch {
           // Gone between the listing and the reading: not ours to worry about.
         }
       }
+      await this.#pruneTorrentDirectory(infoHash);
     }
     return adopted;
   }
@@ -407,12 +471,11 @@ export class CompletedFiles {
     }
     const directory = path.join(this.#root, String(infoHash));
     const where = path.join(directory, String(fileIndex));
-    const partial = `${where}.partial`;
+    const partial = `${where}.partial-${process.pid}-${randomUUID()}`;
     try {
       await fs.mkdir(directory, { recursive: true });
-      await fs.rm(partial, REMOVAL);
       const source = open();
-      const handle = await fs.open(partial, "w");
+      const handle = await fs.open(partial, "wx");
       let written = 0;
       try {
         for await (const chunk of source) {
@@ -440,8 +503,8 @@ export class CompletedFiles {
         this.#touch(key);
         this.#writing.delete(key);
         await this.#trimToAllowance();
+        await this.#writeManifest(infoHash);
       });
-      await this.#writeManifest(infoHash);
       return this.#held.get(key) ?? null;
     } catch {
       await fs.rm(partial, REMOVAL).catch(() => undefined);
@@ -451,6 +514,7 @@ export class CompletedFiles {
         this.#reservations.delete(key);
         this.#writing.delete(key);
         await this.#trimToAllowance();
+        await this.#pruneTorrentDirectory(infoHash);
       });
     }
   }
@@ -472,9 +536,24 @@ export class CompletedFiles {
         named[key.slice(infoHash.length + 1)] = { length: file.length, name: file.name };
       }
     }
-    await fs
-      .writeFile(path.join(this.#root, String(infoHash), "manifest.json"), JSON.stringify(named))
-      .catch(() => undefined);
+    const directory = path.join(this.#root, String(infoHash));
+    if (Object.keys(named).length === 0 && ![...this.#writing].some(key => key.startsWith(`${infoHash}/`))) {
+      await fs.rm(directory, { ...REMOVAL, recursive: true }).catch(() => undefined);
+      return;
+    }
+    await fs.writeFile(path.join(directory, "manifest.json"), JSON.stringify(named)).catch(() => undefined);
+  }
+
+  /** Remove an empty or partial-only directory discovered during startup. */
+  async #pruneTorrentDirectory(infoHash) {
+    if ([...this.#held.keys()].some(key => key.startsWith(`${infoHash}/`)) ||
+        [...this.#writing].some(key => key.startsWith(`${infoHash}/`))) return;
+    const directory = path.join(this.#root, String(infoHash));
+    let names = [];
+    try { names = await fs.readdir(directory); } catch { return; }
+    if (names.every(name => name === "manifest.json")) {
+      await fs.rm(directory, { ...REMOVAL, recursive: true }).catch(() => undefined);
+    }
   }
 
   /**
@@ -489,7 +568,8 @@ export class CompletedFiles {
         await this.#remove(key);
       }
     }
-    if (![...this.#held.keys()].some(key => key.startsWith(`${infoHash}/`))) {
+    if (![...this.#held.keys()].some(key => key.startsWith(`${infoHash}/`)) &&
+        ![...this.#writing].some(key => key.startsWith(`${infoHash}/`))) {
       await fs.rm(path.join(this.#root, String(infoHash)), { ...REMOVAL, recursive: true }).catch(() => undefined);
     }
   }

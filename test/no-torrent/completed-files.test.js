@@ -65,11 +65,7 @@ test("a read that ends early leaves nothing that looks whole", async () => {
     });
     assert.equal(kept, null, "a short file was kept as whole");
     assert.equal(files.find(INFO_HASH, 0), null);
-    assert.deepEqual(
-      (await fs.readdir(path.join(root, INFO_HASH))).filter((entry) => entry !== "manifest.json"),
-      [],
-      "a partial file was left behind"
-    );
+    await assert.rejects(fs.stat(path.join(root, INFO_HASH)), { code: "ENOENT" }, "an empty torrent directory was left behind");
   } finally {
     await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
@@ -225,6 +221,58 @@ test("a smaller allowance is enforced when an admitted write finishes", async ()
     assert.equal(files.bytes, 0);
   } finally {
     finishWrite();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("whole files expire after idle use, but an active read gets its full lease", async () => {
+  const root = await directory();
+  let now = 1_000;
+  const files = new CompletedFiles({ root, idleTtlMs: 100, now: () => now });
+  const bytes = Buffer.from("cached film");
+  try {
+    const kept = await files.keep({ infoHash: INFO_HASH, fileIndex: 0, length: bytes.length, name: "film.mkv", open: opens(bytes) });
+    assert.ok(kept);
+
+    now += 99;
+    assert.equal(files.peek(INFO_HASH, 0)?.path, kept.path);
+    now += 1;
+    const reader = files.acquire(INFO_HASH, 0);
+    assert.ok(reader);
+    now += 101;
+    assert.deepEqual(await files.expireIdle(), { bytes: bytes.length, removed: 0 });
+    assert.deepEqual(await fs.readFile(reader.path), bytes);
+
+    await reader.release();
+    now += 99;
+    assert.deepEqual(await files.expireIdle(), { bytes: bytes.length, removed: 0 });
+    now += 1;
+    assert.deepEqual(await files.expireIdle(), { bytes: 0, removed: 1 });
+    assert.equal(files.find(INFO_HASH, 0), null);
+    await assert.rejects(fs.stat(path.join(root, INFO_HASH)), { code: "ENOENT" });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("startup removes orphaned partial whole files and preserves a live writer", async () => {
+  const root = await directory();
+  try {
+    const torrentDirectory = path.join(root, INFO_HASH);
+    await fs.mkdir(torrentDirectory, { recursive: true });
+    await fs.writeFile(path.join(torrentDirectory, "3.partial"), Buffer.from("incomplete"));
+    await fs.utimes(path.join(torrentDirectory, "3.partial"), new Date(0), new Date(0));
+    await fs.writeFile(path.join(torrentDirectory, `4.partial-${Number.MAX_SAFE_INTEGER}-${"a".repeat(32)}`), Buffer.from("orphan"));
+    await fs.writeFile(path.join(torrentDirectory, `5.partial-${process.pid}-${"b".repeat(32)}`), Buffer.from("live write"));
+    await fs.writeFile(path.join(torrentDirectory, "manifest.json"), "{}");
+
+    const files = new CompletedFiles({ root });
+    assert.equal(await files.adopt(() => null), 0);
+    assert.deepEqual((await fs.readdir(torrentDirectory)).sort(), [
+      "5.partial-" + process.pid + "-" + "b".repeat(32),
+      "manifest.json"
+    ]);
+  } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
 });

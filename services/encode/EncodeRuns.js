@@ -423,8 +423,8 @@ export class EncodeRuns {
       const cut = cutOf(session.timeline, index);
       const grid = session.timeline.published ?? session.timeline.boundaries;
       const interval = admitted ? { from: grid?.[index], to: grid?.[index + 1],
-        // Embedded copied sound was selected by presentationSegment on the
-        // published grid, so its raw muxer cut shift no longer applies.
+        // Copied sound is cut on the published grid, so the run's raw muxer
+        // clock shift must not be applied to its AAC interval.
         ...(audioOnPublishedGrid ? { shiftByKind: { soun: 0 } } : {}),
         ...(index === session.timeline.segmentCount - 1 ? { endsWithSource: true, sourceEnds: Object.fromEntries(
           (admitted.tracks ?? []).filter(input => Number.isFinite(input.sourceEndSeconds))
@@ -1167,12 +1167,15 @@ export class EncodeRuns {
         const address = session.outputKey ?? "";
         // Read before anything rewrites it: when the encoder finished it.
         const writtenAt = this.#host.segmentFiles.writtenAtOf?.(address, name) ?? null;
-        const fmp4 = admittedInput && session.segmentFormat.id === "fmp4" && session.spec.carries !== "audio-only";
+        const fmp4 = admittedInput && session.segmentFormat.id === "fmp4";
+        const pictureFmp4 = fmp4 && session.spec.carries !== "audio-only";
         // The first piece of a run that read the picture from its keyframe:
         // its leading pictures are the ones the run before made, or none.
-        const firstOfRun = fmp4 && this.#copiesOriginalPicture(session, admittedInput) &&
+        const firstOfRun = pictureFmp4 && this.#copiesOriginalPicture(session, admittedInput) &&
           index === run.from && index > 0 && !fromKeyframeBefore;
-        const soundInPiece = fmp4 && session.spec.audio && !this.#host.servesAudioSeparately(session);
+        const soundInPiece = pictureFmp4 && session.spec.audio && !this.#host.servesAudioSeparately(session);
+        const audioOnPublishedGrid = fmp4 && session.spec.audio && !session.spec.transcodesAudio &&
+          (session.spec.carries === "audio-only" || !this.#host.servesAudioSeparately(session));
         if (firstOfRun || soundInPiece) {
           try {
             const grid = session.timeline.published ?? session.timeline.boundaries;
@@ -1186,7 +1189,7 @@ export class EncodeRuns {
           }
         }
         const mediaRanges = this.#wholeClosedPiece(session, name, index, admittedInput, bytes, run, timing, following,
-          { tentative, audioOnPublishedGrid: soundInPiece });
+          { tentative, audioOnPublishedGrid });
         // Tried on its own line and not proved whole: it waits for the next file.
         if (mediaRanges === false && tentative) return null;
         if (mediaRanges === false) throw Object.assign(new Error(`Closed piece #${index} has incomplete media.`),

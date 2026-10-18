@@ -41,7 +41,11 @@ test("an audio piece ending within the delta of its cut is whole", () => {
 test("copied MP4 audio uses published cuts while refusing media lost beyond one AAC frame", () => {
   const cases = [
     { from: 31.28125, to: 41.708333, shift: -0.006583333333331609, start: 1501184n, end: 2002944n },
-    { from: 19.602917, to: 30.03, shift: -0.01891700000000185, start: 940032n, end: 1441792n }
+    { from: 19.602917, to: 30.03, shift: -0.01891700000000185, start: 940032n, end: 1441792n },
+    // Aang field run: the separate copied-AAC output ended 14.75 ms past the
+    // published cut, within one AAC frame, but its -11.5 ms muxer shift made
+    // the validator refuse it by 4.917 ms.
+    { from: 20.854167, to: 31.28125, shift: -0.011500333333334112, start: 1000448n, end: 1502208n }
   ];
   for (const { from, to, shift, start, end } of cases) {
     const ranges = { cutShiftSeconds: shift, tracks: [{ kind: "soun", timescale: 48000n, productionFrame: 1024n,

@@ -346,7 +346,35 @@ test("first-frame outcomes retain each measured cold-start stage", () => {
     assert.equal(Object.hasOwn(Object.values(entries)[0][0], "seconds"), false,
       "the completed wait is not kept as a forecast value");
     observations.noteFirstFrame({ seconds: 2, features: { extension: "avi" }, stages: { totalMs: -1 } });
-    assert.equal(Object.values(JSON.parse(readFileSync(filePath, "utf8")).entries.firstFrame)[0][1].stages, null);
+    const afterInvalid = Object.values(JSON.parse(readFileSync(filePath, "utf8")).entries.firstFrame)[0];
+    assert.equal(afterInvalid.length, 1, "an outcome without all measured stages is not retained as forecast data");
+    assert.deepEqual(afterInvalid[0].stages, stages);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("first-frame retention excludes older outcomes without measured stages", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "ttv-first-frame-retention-"));
+  const filePath = path.join(directory, "local-observations.json");
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  const key = `firstFrame:${software}`;
+  const features = { extension: "avi", fileLength: 1000 };
+  const stages = { totalMs: 5000, transportMs: 1000, planMs: 1000, prepareMs: 1000,
+    prebufferMs: 1000, presentationMs: 1000 };
+  const legacy = Array.from({ length: 14 }, (_, index) => ({ ...features, at: index, stages: null }));
+  const measured = Array.from({ length: 6 }, (_, index) => ({ ...features, at: index + 14,
+    featureSnapshots: [features], stages: { ...stages, prepareMs: 2000 + index } }));
+  try {
+    writeFileSync(filePath, JSON.stringify({ version: 1, entries: { firstFrame: { [key]: [...legacy, ...measured] } } }));
+    const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
+    observations.load([software]);
+    observations.noteFirstFrame({ seconds: 8, features, stages });
+
+    const retained = JSON.parse(readFileSync(filePath, "utf8")).entries.firstFrame[key];
+    assert.equal(retained.length, 7);
+    assert.ok(retained.every(reading => reading.stages));
+    assert.equal(observations.firstFrameSeconds(features), 6.002);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

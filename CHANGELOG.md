@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.39
 
 - **Fix**: Yield between every unresolved segment while building a download map, including fallback range reads, so large maps do not stall session responses (#ttv-185).
 

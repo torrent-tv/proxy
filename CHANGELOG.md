@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.34
 
 - **Fix**: Use this proxy configuration's measured stage medians across file types when a file type has no prior first-frame observations (#ttv-185).
 

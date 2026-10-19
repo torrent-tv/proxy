@@ -276,13 +276,16 @@ export class LocalObservations {
    */
   noteFirstFrame({ seconds, features, featureSnapshots = null, stages = null }) {
     if (!Number.isFinite(seconds) || seconds < 0 || !features || typeof features !== "object") return;
+    const measuredStages = stagesOf(stages);
+    if (!measuredStages) return;
     const key = this.#firstFrameKey();
     const snapshots = [features, ...(Array.isArray(featureSnapshots) ? featureSnapshots : [])]
       .filter(value => value && typeof value === "object").slice(0, 2).map(firstFrameFeatures);
-    const readings = [...(this.#entries.firstFrame[key] ?? []), {
+    const usableReadings = (this.#entries.firstFrame[key] ?? []).filter(reading => stagesOf(reading.stages));
+    const readings = [...usableReadings, {
       ...snapshots[0],
       featureSnapshots: snapshots,
-      stages: stagesOf(stages),
+      stages: measuredStages,
       at: this.#now()
     }].slice(-READINGS_KEPT);
     this.#entries.firstFrame[key] = readings;

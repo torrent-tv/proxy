@@ -278,7 +278,7 @@ test("what is kept applies only on the configuration it was seen on, and survive
   }
 });
 
-test("first-frame wait observations are reused only on the matching proxy configuration and nearby measurements", () => {
+test("first-frame stage observations are reused only on the matching proxy configuration", () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "ttv-first-frame-"));
   const filePath = path.join(directory, "local-observations.json");
   const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
@@ -313,7 +313,7 @@ test("first-frame wait observations are reused only on the matching proxy config
   }
 });
 
-test("first-frame distance treats measured zeros separately from missing inputs", () => {
+test("first-frame stage medians do not select a past run by its numeric inputs", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
   observations.load([software]);
@@ -326,8 +326,8 @@ test("first-frame distance treats measured zeros separately from missing inputs"
 
   assert.equal(observations.firstFrameSeconds({
     extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 0, headerRemaining: 0, peers: 0
-  }), 6);
-  assert.equal(observations.firstFrameSeconds({ extension: "mkv" }), null);
+  }), 12);
+  assert.equal(observations.firstFrameSeconds({ extension: "mkv" }), 12);
 });
 
 test("first-frame outcomes retain each measured cold-start stage", () => {
@@ -352,7 +352,7 @@ test("first-frame outcomes retain each measured cold-start stage", () => {
   }
 });
 
-test("first-frame forecast sums weighted stage measurements instead of reusing a recorded total", () => {
+test("first-frame forecast sums per-stage medians instead of selecting a completed run", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
   observations.load([software]);
@@ -362,11 +362,14 @@ test("first-frame forecast sums weighted stage measurements instead of reusing a
     prebufferMs: 4000, presentationMs: 5000 };
   const stagesB = { totalMs: 1, transportMs: 3000, planMs: 4000, prepareMs: 5000,
     prebufferMs: 6000, presentationMs: 7000 };
-  observations.noteFirstFrame({ seconds: 999, features, stages: stagesA });
+  const stagesC = { totalMs: 500_000, transportMs: 2000, planMs: 4000, prepareMs: 3000,
+    prebufferMs: 5000, presentationMs: 6000 };
+  observations.noteFirstFrame({ seconds: 999, features, featureSnapshots: [features, features], stages: stagesA });
   observations.noteFirstFrame({ seconds: 0.001, features, stages: stagesB });
+  observations.noteFirstFrame({ seconds: 500, features, stages: stagesC });
 
   assert.equal(observations.firstFrameSeconds(features), 20,
-    "each stage is averaged independently; neither completed-run total is used");
+    "each stage median is calculated independently; no completed-run total or nearest run is used");
 });
 
 test("an unsplit historical first-frame total cannot produce a forecast", () => {
@@ -395,7 +398,7 @@ test("one start retains its original and refined input snapshots without countin
     "the same measured stages remain usable when later source readings are known");
 });
 
-test("first-frame distance uses the age of the separately measured client link", () => {
+test("first-frame stage medians do not select a past run by client-link age", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
   observations.load([software]);
@@ -404,10 +407,10 @@ test("first-frame distance uses the age of the separately measured client link",
   noteFirstFrame(observations, 6, { ...shared, linkSampleAgeMs: 100 });
   noteFirstFrame(observations, 18, { ...shared, linkSampleAgeMs: 10_000 });
 
-  assert.equal(observations.firstFrameSeconds({ ...shared, linkSampleAgeMs: 100 }), 6);
+  assert.equal(observations.firstFrameSeconds({ ...shared, linkSampleAgeMs: 100 }), 12);
 });
 
-test("first-frame distance distinguishes outputs with and without prepared segments", () => {
+test("first-frame stage medians distinguish prepared from unprepared output", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
   observations.load([software]);
@@ -420,7 +423,7 @@ test("first-frame distance distinguishes outputs with and without prepared segme
   assert.equal(observations.firstFrameSeconds({ ...shared, preparedOutputBytes: 0 }), 42);
 });
 
-test("first-frame distance distinguishes a complete file from an incomplete source at zero peer speed", () => {
+test("first-frame stage medians distinguish complete and incomplete sources", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
   observations.load([software]);
@@ -433,7 +436,7 @@ test("first-frame distance distinguishes a complete file from an incomplete sour
   assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: false }), 10.4824);
 });
 
-test("first-frame distance accounts for availability data absent from older observations", () => {
+test("known availability excludes observations that did not measure source availability", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
   observations.load([software]);
@@ -445,7 +448,7 @@ test("first-frame distance accounts for availability data absent from older obse
   assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: false }), 10.5);
 });
 
-test("first-frame distance uses the measured copy or encode path and per-track processing rates", () => {
+test("first-frame stage medians distinguish the measured copy or encode path", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
   observations.load([software]);

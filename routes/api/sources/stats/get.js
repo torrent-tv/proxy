@@ -1,4 +1,5 @@
 import { logger } from "../../../../utils/logger.js";
+import { performance } from "node:perf_hooks";
 
 /**
  * Return download statistics for a registered torrent source.
@@ -65,7 +66,13 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   // Awaited: with the torrent on its own thread this is a round trip, not a
   // local lookup. Without the await the reply was the pending promise itself,
   // which serialises to `{}` — the empty stats seen in the field 2026-08-02.
-  const stats = await torrentPool.getFileStats(torrent, fileIndex);
+  const statsStartedAt = performance.now();
+  let stats;
+  try {
+    stats = await torrentPool.getFileStats(torrent, fileIndex);
+  } finally {
+    logger.info(`[stats] ${sourceKey.slice(0, 8)} getFileStatsMs=${(performance.now() - statsStartedAt).toFixed(1)}`);
+  }
   if (stats?.pending || !stats) {
     const waitEstimate = initialEstimate();
     return reply.code(202).send({ pending: true, ...(waitEstimate ? { waitEstimate } : {}) });

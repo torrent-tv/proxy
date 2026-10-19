@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Chore**: Record proxy session-planning and source-stat wait durations for forecast diagnosis (#ttv-185).
+
 ## 2.101.35
 
 - **Fix**: Return keyframe-based playback sessions before their first playlist is written so the viewer can receive live readiness estimates during preparation (#ttv-185).

@@ -10,6 +10,7 @@
  */
 
 import { logger } from "../../../utils/logger.js";
+import { performance } from "node:perf_hooks";
 import { OUTPUT_NO_CAPACITY, OUTPUT_UNAVAILABLE } from "../../../services/encode/output/index.js";
 import { replyNoCapacity, replyOutputUnavailable } from "../../../services/server/http-responses.js";
 import { waitForPlan } from "../../../services/media/await-plan.js";
@@ -81,38 +82,49 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
   }
 
   const cancellation = new AbortController();
+  const timing = { startedAt: performance.now(), openMs: 0, openCalls: 0,
+    planWaitInclusiveMs: null, masterMs: null, offerMs: null, tracksMs: null };
   const cancelled = () => cancellation.abort();
   reply.raw?.once?.("close", cancelled);
   if (reply.raw?.destroyed) cancelled();
   try {
-    const open = () => viewerRequests.createOrGetSession({
-      signal: cancellation.signal,
-      sourceKey,
-      fileIndex,
-      transcodeVideo,
-      transcodeAudio,
-      consumerId,
-      fileName,
-      targetWidth: Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0,
-      targetHeight: Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0,
-      exactSize,
-      visiblePicture,
-      audioRenditions,
-      startPositionSeconds:
-        Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
-          ? startPositionSeconds
-          : 0,
-      viewerLinkMbps: Number.isFinite(viewerLinkMbps) && viewerLinkMbps > 0 ? viewerLinkMbps : null,
-      linkSampleMbps: Number.isFinite(linkSampleMbps) && linkSampleMbps > 0 ? linkSampleMbps : null,
-      linkSampleAt: Number.isFinite(linkSampleAt) && linkSampleAt > 0 ? linkSampleAt : null,
-      linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
-      bufferedAheadSec: Number.isFinite(bufferedAheadSec) && bufferedAheadSec >= 0 ? bufferedAheadSec : 0,
-      bufferLimitSeconds:
-        Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0 ? bufferLimitSeconds : null,
-      audioTrackIndex:
-        Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0,
-      segmentFormatId
-    });
+    const open = async () => {
+      const openStartedAt = performance.now();
+      timing.openCalls += 1;
+      try {
+        return await viewerRequests.createOrGetSession({
+          signal: cancellation.signal,
+          sourceKey,
+          fileIndex,
+          transcodeVideo,
+          transcodeAudio,
+          consumerId,
+          fileName,
+          targetWidth: Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0,
+          targetHeight: Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0,
+          exactSize,
+          visiblePicture,
+          audioRenditions,
+          startPositionSeconds:
+            Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
+              ? startPositionSeconds
+              : 0,
+          viewerLinkMbps: Number.isFinite(viewerLinkMbps) && viewerLinkMbps > 0 ? viewerLinkMbps : null,
+          linkSampleMbps: Number.isFinite(linkSampleMbps) && linkSampleMbps > 0 ? linkSampleMbps : null,
+          linkSampleAt: Number.isFinite(linkSampleAt) && linkSampleAt > 0 ? linkSampleAt : null,
+          linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
+          bufferedAheadSec: Number.isFinite(bufferedAheadSec) && bufferedAheadSec >= 0 ? bufferedAheadSec : 0,
+          bufferLimitSeconds:
+            Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0 ? bufferLimitSeconds : null,
+          audioTrackIndex:
+            Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0,
+          segmentFormatId
+        });
+      } finally {
+        timing.openMs += performance.now() - openStartedAt;
+      }
+    };
+    const planWaitStartedAt = performance.now();
     const session = subscribeSource ? (await waitForPlan({ signal: cancellation.signal,
       subscribe: listener => subscribeSource(sourceKey, fileIndex, listener),
       read: async () => {
@@ -123,13 +135,22 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
         }
       }
     })).session : await open();
+    timing.planWaitInclusiveMs = performance.now() - planWaitStartedAt;
     // The index of quality variants, when this session has more than one to
     // offer. Its presence is what tells the browser it can change quality
     // without a new session: the player switches variants itself, appending the
     // new one after what is already buffered. Absent for a copied video, whose
     // segments are cut at the source's own keyframes and so cannot be spliced
     // with a re-encoded rung.
+    let stageStartedAt = performance.now();
     const hasVariants = renditions.buildMasterPlaylist(session.id) !== null;
+    timing.masterMs = performance.now() - stageStartedAt;
+    stageStartedAt = performance.now();
+    const offeredHeights = quality.offeredHeights(session);
+    timing.offerMs = performance.now() - stageStartedAt;
+    stageStartedAt = performance.now();
+    const tracks = renditions.declaredTracks(session);
+    timing.tracksMs = performance.now() - stageStartedAt;
     return reply.send({
       sessionId: session.id,
       playlistPath: `/transcode/${session.id}/index.m3u8`,
@@ -149,12 +170,12 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
       // it, it fell back to a ladder of its own invention and offered rungs the
       // proxy had just refused, and picking one re-opened the session at a
       // height measured at a third of realtime.
-      offeredHeights: quality.offeredHeights(session),
+      offeredHeights,
       // What this session's output will carry, stated rather than left to be
       // discovered. The browser checks what it actually got against this: a
       // track that never arrives is otherwise noticed only by its absence,
       // minutes later, as a black picture with working sound.
-      tracks: renditions.declaredTracks(session),
+      tracks,
       // The soundtrack this viewer is sent and whether it is re-encoded — the
       // proxy's decision, which can differ from what the page asked for: a
       // track no figure states a rate for is re-encoded even for a browser that
@@ -196,5 +217,13 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
     return reply.code(500).send({ error: `Failed to prepare transcode session: ${message}` });
   } finally {
     reply.raw?.removeListener?.("close", cancelled);
+    const elapsed = (key) => Number.isFinite(timing[key]) ? timing[key].toFixed(1) : "n/a";
+    logger.info(
+      `transcode-session timing outcome=${cancellation.signal.aborted ? "cancelled" : "handler-return"} ` +
+        `consumer=${consumerId || "unknown"} file=${fileIndex} openCalls=${timing.openCalls} ` +
+        `openMs=${timing.openMs.toFixed(1)} planWaitInclusiveMs=${elapsed("planWaitInclusiveMs")} ` +
+        `masterMs=${elapsed("masterMs")} offerMs=${elapsed("offerMs")} tracksMs=${elapsed("tracksMs")} ` +
+        `handlerMs=${(performance.now() - timing.startedAt).toFixed(1)}`
+    );
   }
 }

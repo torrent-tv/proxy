@@ -36,6 +36,18 @@ const FINGERPRINT = Object.freeze({
   devices: { vaapi: { model: "0x8086:0x9a49", driver: "i915 (kernel 6.6.31)" } }
 });
 
+function noteFirstFrame(observations, seconds, features) {
+  const milliseconds = seconds * 1000 / 5;
+  observations.noteFirstFrame({ seconds, features, stages: {
+    totalMs: milliseconds * 4,
+    transportMs: milliseconds,
+    planMs: milliseconds,
+    prepareMs: milliseconds,
+    prebufferMs: milliseconds,
+    presentationMs: milliseconds
+  } });
+}
+
 /** A re-encoded picture's spec, the way `OutputOpening` builds one. */
 function specAt({ encoder = "libx264", width = 1280, height = 720, fps = 24, preset = "veryfast", rateControl = null } = {}) {
   return new OutputSpec({
@@ -281,7 +293,7 @@ test("first-frame wait observations are reused only on the matching proxy config
   try {
     const first = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
     first.load([software]);
-    first.noteFirstFrame({ seconds: 12.5, features });
+    noteFirstFrame(first, 12.5, features);
     assert.equal(first.firstFrameSeconds(features), 12.5);
 
     const restarted = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
@@ -305,17 +317,82 @@ test("first-frame distance treats measured zeros separately from missing inputs"
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
   observations.load([software]);
-  observations.noteFirstFrame({ seconds: 6, features: {
+  noteFirstFrame(observations, 6, {
     extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 0, headerRemaining: 0, peers: 0
-  } });
-  observations.noteFirstFrame({ seconds: 18, features: {
+  });
+  noteFirstFrame(observations, 18, {
     extension: "mkv", fileLength: 1000, downloadSpeed: 100, linkMbps: 10, headerRemaining: 100, peers: 8
-  } });
+  });
 
   assert.equal(observations.firstFrameSeconds({
     extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 0, headerRemaining: 0, peers: 0
   }), 6);
   assert.equal(observations.firstFrameSeconds({ extension: "mkv" }), null);
+});
+
+test("first-frame outcomes retain each measured cold-start stage", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "ttv-first-frame-stages-"));
+  const filePath = path.join(directory, "local-observations.json");
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  const stages = { totalMs: 1520, transportMs: 301, planMs: 113, prepareMs: 957, prebufferMs: 149,
+    presentationMs: 79.1 };
+  try {
+    const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
+    observations.load([software]);
+    observations.noteFirstFrame({ seconds: 1.5991, features: { extension: "avi" }, stages });
+
+    const entries = JSON.parse(readFileSync(filePath, "utf8")).entries.firstFrame;
+    assert.deepEqual(Object.values(entries)[0][0].stages, stages);
+    assert.equal(Object.hasOwn(Object.values(entries)[0][0], "seconds"), false,
+      "the completed wait is not kept as a forecast value");
+    observations.noteFirstFrame({ seconds: 2, features: { extension: "avi" }, stages: { totalMs: -1 } });
+    assert.equal(Object.values(JSON.parse(readFileSync(filePath, "utf8")).entries.firstFrame)[0][1].stages, null);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("first-frame forecast sums weighted stage measurements instead of reusing a recorded total", () => {
+  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  observations.load([software]);
+  const features = { extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 10,
+    linkSampleAgeMs: 10, preparedOutputBytes: 0, fileAvailable: false, headerRemaining: 0, peers: 2 };
+  const stagesA = { totalMs: 999_000, transportMs: 1000, planMs: 2000, prepareMs: 3000,
+    prebufferMs: 4000, presentationMs: 5000 };
+  const stagesB = { totalMs: 1, transportMs: 3000, planMs: 4000, prepareMs: 5000,
+    prebufferMs: 6000, presentationMs: 7000 };
+  observations.noteFirstFrame({ seconds: 999, features, stages: stagesA });
+  observations.noteFirstFrame({ seconds: 0.001, features, stages: stagesB });
+
+  assert.equal(observations.firstFrameSeconds(features), 20,
+    "each stage is averaged independently; neither completed-run total is used");
+});
+
+test("an unsplit historical first-frame total cannot produce a forecast", () => {
+  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
+  observations.load([configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" })]);
+  observations.noteFirstFrame({ seconds: 41.7321, features: {
+    extension: "avi", fileLength: 2_362_982_400, preparedOutputBytes: null, fileAvailable: null
+  } });
+
+  assert.equal(observations.firstFrameSeconds({ extension: "avi", fileLength: 2_362_982_400,
+    preparedOutputBytes: 0, fileAvailable: false }), null);
+});
+
+test("one start retains its original and refined input snapshots without counting twice", () => {
+  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  observations.load([software]);
+  const initial = { extension: "avi", fileLength: 1000, linkMbps: 20 };
+  const refined = { ...initial, preparedOutputBytes: 0, fileAvailable: false,
+    downloadSpeed: 0, peers: 0, headerRemaining: 0 };
+  const stages = { totalMs: 8000, transportMs: 1000, planMs: 1000, prepareMs: 2000,
+    prebufferMs: 4000, presentationMs: 100 };
+  observations.noteFirstFrame({ seconds: 9.1, features: initial, featureSnapshots: [refined], stages });
+
+  assert.equal(observations.firstFrameSeconds(refined), 8.1,
+    "the same measured stages remain usable when later source readings are known");
 });
 
 test("first-frame distance uses the age of the separately measured client link", () => {
@@ -324,8 +401,8 @@ test("first-frame distance uses the age of the separately measured client link",
   observations.load([software]);
   const shared = { extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 10,
     headerRemaining: 0, peers: 0 };
-  observations.noteFirstFrame({ seconds: 6, features: { ...shared, linkSampleAgeMs: 100 } });
-  observations.noteFirstFrame({ seconds: 18, features: { ...shared, linkSampleAgeMs: 10_000 } });
+  noteFirstFrame(observations, 6, { ...shared, linkSampleAgeMs: 100 });
+  noteFirstFrame(observations, 18, { ...shared, linkSampleAgeMs: 10_000 });
 
   assert.equal(observations.firstFrameSeconds({ ...shared, linkSampleAgeMs: 100 }), 6);
 });
@@ -336,8 +413,8 @@ test("first-frame distance distinguishes outputs with and without prepared segme
   observations.load([software]);
   const shared = { extension: "avi", fileLength: 1000, downloadSpeed: 0, linkMbps: 20,
     linkSampleAgeMs: 10, headerRemaining: 0, peers: 0 };
-  observations.noteFirstFrame({ seconds: 1.5, features: { ...shared, preparedOutputBytes: 12_000_000 } });
-  observations.noteFirstFrame({ seconds: 42, features: { ...shared, preparedOutputBytes: 0 } });
+  noteFirstFrame(observations, 1.5, { ...shared, preparedOutputBytes: 12_000_000 });
+  noteFirstFrame(observations, 42, { ...shared, preparedOutputBytes: 0 });
 
   assert.equal(observations.firstFrameSeconds({ ...shared, preparedOutputBytes: 12_000_000 }), 1.5);
   assert.equal(observations.firstFrameSeconds({ ...shared, preparedOutputBytes: 0 }), 42);
@@ -349,8 +426,8 @@ test("first-frame distance distinguishes a complete file from an incomplete sour
   observations.load([software]);
   const shared = { extension: "avi", fileLength: 2_362_982_400, downloadSpeed: 0, linkMbps: 113,
     linkSampleAgeMs: 10_758, preparedOutputBytes: 1_268_248, headerRemaining: 0, peers: 0 };
-  observations.noteFirstFrame({ seconds: 1.5991, features: { ...shared, fileAvailable: true } });
-  observations.noteFirstFrame({ seconds: 10.4824, features: { ...shared, fileAvailable: false } });
+  noteFirstFrame(observations, 1.5991, { ...shared, fileAvailable: true });
+  noteFirstFrame(observations, 10.4824, { ...shared, fileAvailable: false });
 
   assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: true }), 1.5991);
   assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: false }), 10.4824);
@@ -362,8 +439,8 @@ test("first-frame distance accounts for availability data absent from older obse
   observations.load([software]);
   const shared = { extension: "avi", fileLength: 1000, downloadSpeed: 0, linkMbps: 20,
     linkSampleAgeMs: 10, preparedOutputBytes: 500, headerRemaining: 0, peers: 0 };
-  observations.noteFirstFrame({ seconds: 1.5, features: shared });
-  observations.noteFirstFrame({ seconds: 10.5, features: { ...shared, fileAvailable: false } });
+  noteFirstFrame(observations, 1.5, shared);
+  noteFirstFrame(observations, 10.5, { ...shared, fileAvailable: false });
 
   assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: false }), 10.5);
 });
@@ -375,10 +452,8 @@ test("first-frame distance uses the measured copy or encode path and per-track p
   const shared = { extension: "mkv", fileLength: 1000, downloadSpeed: 500_000, linkMbps: 30,
     linkSampleAgeMs: 20, preparedOutputBytes: 0, fileAvailable: false, headerRemaining: 0, peers: 4,
     audioOperation: "copy", audioSpeedX: 60 };
-  observations.noteFirstFrame({ seconds: 8, features: { ...shared,
-    videoOperation: "encode", videoSpeedX: 1.2 } });
-  observations.noteFirstFrame({ seconds: 24, features: { ...shared,
-    videoOperation: "copy", videoSpeedX: 30 } });
+  noteFirstFrame(observations, 8, { ...shared, videoOperation: "encode", videoSpeedX: 1.2 });
+  noteFirstFrame(observations, 24, { ...shared, videoOperation: "copy", videoSpeedX: 30 });
 
   assert.equal(observations.firstFrameSeconds({ ...shared, videoOperation: "encode", videoSpeedX: 1.2 }), 8);
   assert.equal(observations.firstFrameSeconds({ ...shared, videoOperation: "copy", videoSpeedX: 30 }), 24);

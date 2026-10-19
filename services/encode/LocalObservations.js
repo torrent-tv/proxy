@@ -6,7 +6,7 @@
  * NOT A TABLE OF QUALITY, and not a condition for anything. The proxy selects,
  * admits and serves with nothing kept here at all: the startup calibration is
  * what qualifies a mode and prices it, and the admission is what decides
- * whether there is room. What is kept here makes three of those figures more
+ * whether there is room. What is kept here makes four of those figures more
  * exact on THIS machine once it has done the work for real:
  *
  * 1. how fast an encode of this mode, at this size, actually ran alone on this
@@ -19,6 +19,9 @@
  * 3. how long an output of this mode took to have the piece a viewer needed
  *    after it was asked for, and what that viewer held when they moved — used
  *    as the time to ready when deciding whether a draining buffer is a threat.
+ * 4. the measured transport, track-plan, output-preparation, prebuffer and
+ *    first-presented-frame stages for an earlier start on this proxy
+ *    configuration, used as separate inputs to an early wait forecast.
  *
  * WHAT IS NEVER KEPT: a picture, a clip, a segment, anything about a viewer
  * beyond the seconds they held, and anything that leaves this machine.
@@ -265,31 +268,21 @@ export class LocalObservations {
   }
 
   /**
-   * Keep a browser-measured wait outcome with the source and link readings
-   * visible before the container was inspected. These readings are useful
-   * only on the encoder configurations present on this host.
+   * The viewer presented its first audio-ready frame: keep the separately
+   * measured stage timings and the input snapshots from the start of that run.
    *
-   * @param {{ seconds: number, features: object }} params
+   * @param {{ seconds: number, features: object, featureSnapshots?: object[], stages?: object | null }} params
    * @returns {void}
    */
-  noteFirstFrame({ seconds, features }) {
+  noteFirstFrame({ seconds, features, featureSnapshots = null, stages = null }) {
     if (!Number.isFinite(seconds) || seconds < 0 || !features || typeof features !== "object") return;
     const key = this.#firstFrameKey();
+    const snapshots = [features, ...(Array.isArray(featureSnapshots) ? featureSnapshots : [])]
+      .filter(value => value && typeof value === "object").slice(0, 2).map(firstFrameFeatures);
     const readings = [...(this.#entries.firstFrame[key] ?? []), {
-      seconds,
-      extension: typeof features.extension === "string" ? features.extension : "",
-      fileLength: positive(features.fileLength),
-      downloadSpeed: nonNegative(features.downloadSpeed),
-      linkMbps: nonNegative(features.linkMbps),
-      linkSampleAgeMs: nonNegative(features.linkSampleAgeMs),
-      preparedOutputBytes: nonNegative(features.preparedOutputBytes),
-      fileAvailable: typeof features.fileAvailable === "boolean" ? features.fileAvailable : null,
-      headerRemaining: nonNegative(features.headerRemaining),
-      peers: nonNegative(features.peers),
-      videoOperation: operationOf(features.videoOperation),
-      audioOperation: operationOf(features.audioOperation),
-      videoSpeedX: nonNegative(features.videoSpeedX),
-      audioSpeedX: nonNegative(features.audioSpeedX),
+      ...snapshots[0],
+      featureSnapshots: snapshots,
+      stages: stagesOf(stages),
       at: this.#now()
     }].slice(-READINGS_KEPT);
     this.#entries.firstFrame[key] = readings;
@@ -297,62 +290,86 @@ export class LocalObservations {
   }
 
   /**
-   * Predict this host's first-frame wait from the closest measured start with
-   * the same media suffix. Distance uses squared log-ratios for numeric
-   * inputs and exact-state distance for categorical inputs; it does not mix
-   * bytes, bit rates, processing speed and peers in their raw units. Missing
-   * data contributes distance only when the other observation measured it.
+   * Predict the first-frame wait as the sum of separately predicted cold-start
+   * stages. Each stage uses all compatible measurements, weighted by the
+   * normalized distance between the measured inputs; no complete past wait is
+   * returned as the forecast. A known cache/source state must also be known in
+   * the training observation, otherwise that observation is not comparable.
    *
    * @param {object} features
    * @returns {number | null}
    */
   firstFrameSeconds(features) {
     if (!features || typeof features !== "object") return null;
-    const readings = this.#entries.firstFrame[this.#firstFrameKey()] ?? [];
-    const candidates = readings.filter(reading => reading.extension === (features.extension ?? ""));
+    const candidates = (this.#entries.firstFrame[this.#firstFrameKey()] ?? [])
+      .filter(reading => reading.extension === (features.extension ?? "") && reading.stages);
     if (candidates.length === 0) return null;
     const dimensions = ["fileLength", "downloadSpeed", "linkMbps", "linkSampleAgeMs", "preparedOutputBytes",
       "fileAvailable", "headerRemaining", "peers", "videoOperation", "audioOperation", "videoSpeedX", "audioSpeedX"];
-    const scales = new Map(dimensions.map(key => [key, median(candidates
-      .map(reading => FIRST_FRAME_CATEGORICAL.has(key) ? null : nonNegative(reading[key]))
+    const pointsOf = reading => Array.isArray(reading.featureSnapshots) && reading.featureSnapshots.length > 0
+      ? reading.featureSnapshots : [reading];
+    const scales = new Map(dimensions.map(key => [key, median(candidates.flatMap(reading => pointsOf(reading)
+      .map(point => FIRST_FRAME_CATEGORICAL.has(key) ? null : nonNegative(point[key])))
       .filter(value => value !== null && value > 0))]));
-    let best = null;
+    const distances = [];
     for (const reading of candidates) {
-      let distance = 0;
-      let used = 0;
-      let shared = 0;
-      for (const key of dimensions) {
-        const current = FIRST_FRAME_CATEGORICAL.has(key)
-          ? key === "fileAvailable" ? (typeof features[key] === "boolean" ? features[key] : null)
-            : operationOf(features[key])
-          : nonNegative(features[key]);
-        const previous = FIRST_FRAME_CATEGORICAL.has(key)
-          ? key === "fileAvailable" ? (typeof reading[key] === "boolean" ? reading[key] : null)
-            : operationOf(reading[key])
-          : nonNegative(reading[key]);
-        if (current === null && previous === null) continue;
-        if (current === null || previous === null) {
-          distance += 1;
-          used += 1;
-          continue;
-        }
-        shared += 1;
-        const scale = scales.get(key);
-        const difference = typeof current !== "number" && typeof previous !== "number"
-          ? Number(current !== previous)
-          : scale === null
+      let bestDistance = null;
+      for (const point of pointsOf(reading)) {
+        if ((features.preparedOutputBytes !== null && features.preparedOutputBytes !== undefined &&
+            point.preparedOutputBytes === null) ||
+            [...FIRST_FRAME_CATEGORICAL].some(key => {
+              const current = key === "fileAvailable" ? features[key] : operationOf(features[key]);
+              return current !== null && current !== undefined && point[key] !== current;
+            })) continue;
+        let distance = 0;
+        let used = 0;
+        let shared = 0;
+        for (const key of dimensions) {
+          const current = FIRST_FRAME_CATEGORICAL.has(key)
+            ? key === "fileAvailable" ? (typeof features[key] === "boolean" ? features[key] : null)
+              : operationOf(features[key])
+            : nonNegative(features[key]);
+          const previous = FIRST_FRAME_CATEGORICAL.has(key)
+            ? key === "fileAvailable" ? (typeof point[key] === "boolean" ? point[key] : null)
+              : operationOf(point[key])
+            : nonNegative(point[key]);
+          if (current === null && previous === null) continue;
+          if (current === null || previous === null) {
+            distance += 1;
+            used += 1;
+            continue;
+          }
+          shared += 1;
+          const scale = scales.get(key);
+          const difference = typeof current !== "number" && typeof previous !== "number"
             ? Number(current !== previous)
-            : Math.log1p(current / scale) - Math.log1p(previous / scale);
-        distance += difference * difference;
-        used += 1;
+            : scale === null
+              ? Number(current !== previous)
+              : Math.log1p(current / scale) - Math.log1p(previous / scale);
+          distance += difference * difference;
+          used += 1;
+        }
+        if (used === 0 || shared === 0) continue;
+        distance /= used;
+        if (bestDistance === null || distance < bestDistance) bestDistance = distance;
       }
-      if (used === 0 || shared === 0) continue;
-      distance /= used;
-      if (!best || distance < best.distance || (distance === best.distance && reading.at > best.reading.at)) {
-        best = { distance, reading };
-      }
+      if (bestDistance !== null) distances.push({ distance: bestDistance, reading });
     }
-    return best?.reading.seconds ?? null;
+    if (distances.length === 0) return null;
+    const exact = distances.filter(candidate => candidate.distance === 0);
+    const weighted = exact.length > 0
+      ? exact.map(candidate => ({ ...candidate, weight: 1 }))
+      : distances.map(candidate => ({ ...candidate, weight: 1 / candidate.distance }));
+    const stages = ["transportMs", "planMs", "prepareMs", "prebufferMs", "presentationMs"];
+    const predicted = stages.map(stage => {
+      const applicable = weighted.filter(candidate => Number.isFinite(candidate.reading.stages[stage]));
+      const totalWeight = applicable.reduce((sum, candidate) => sum + candidate.weight, 0);
+      return totalWeight > 0
+        ? applicable.reduce((sum, candidate) => sum + candidate.reading.stages[stage] * candidate.weight, 0) / totalWeight
+        : null;
+    });
+    if (predicted.some(value => value === null)) return null;
+    return predicted.reduce((sum, value) => sum + value, 0) / 1000;
   }
 
   #firstFrameKey() {
@@ -468,6 +485,33 @@ function nonNegative(value) {
 /** @param {unknown} value @returns {"copy" | "encode" | null} */
 function operationOf(value) {
   return value === "copy" || value === "encode" ? value : null;
+}
+
+/** @param {unknown} value @returns {{ totalMs: number, transportMs: number, planMs: number, prepareMs: number, prebufferMs: number, presentationMs: number } | null} */
+function stagesOf(value) {
+  if (!value || typeof value !== "object") return null;
+  const keys = ["totalMs", "transportMs", "planMs", "prepareMs", "prebufferMs", "presentationMs"];
+  const stages = Object.fromEntries(keys.map(key => [key, nonNegative(value[key])]));
+  return keys.every(key => stages[key] !== null) ? stages : null;
+}
+
+/** @param {object} features @returns {object} */
+function firstFrameFeatures(features) {
+  return {
+    extension: typeof features.extension === "string" ? features.extension : "",
+    fileLength: positive(features.fileLength),
+    downloadSpeed: nonNegative(features.downloadSpeed),
+    linkMbps: nonNegative(features.linkMbps),
+    linkSampleAgeMs: nonNegative(features.linkSampleAgeMs),
+    preparedOutputBytes: nonNegative(features.preparedOutputBytes),
+    fileAvailable: typeof features.fileAvailable === "boolean" ? features.fileAvailable : null,
+    headerRemaining: nonNegative(features.headerRemaining),
+    peers: nonNegative(features.peers),
+    videoOperation: operationOf(features.videoOperation),
+    audioOperation: operationOf(features.audioOperation),
+    videoSpeedX: nonNegative(features.videoSpeedX),
+    audioSpeedX: nonNegative(features.audioSpeedX)
+  };
 }
 
 /** @param {number[]} values @returns {number | null} */

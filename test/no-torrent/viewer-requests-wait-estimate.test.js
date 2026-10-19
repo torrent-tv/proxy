@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CutGrid, OutputSpec, VideoOutput } from "../../services/encode/output/index.js";
 import { ViewerRequests } from "../../services/server/ViewerRequests.js";
 
 test("early forecasts retain one wait identity, advance revisions, and learn the measured outcome", () => {
@@ -37,12 +38,13 @@ test("early forecasts retain one wait identity, advance revisions, and learn the
   });
 
   requests.noteFirstFrameObservation({ consumerId: "viewer", generation: 2, waitId: first.waitId, wait: 4, elapsedMs: 13_250 });
-  assert.equal(noted.length, 2);
+  assert.equal(noted.length, 1, "one actual run contributes one training observation");
   assert.ok(Math.abs(noted[0].seconds - 13.25) < 0.001);
-  assert.deepEqual(noted[0].features, features[1]);
-  assert.equal(noted[1].features.downloadSpeed, 1_300_000);
+  assert.deepEqual(noted[0].features, features[0], "the training inputs are those available when the estimate first appeared");
+  assert.deepEqual(noted[0].featureSnapshots, [features[2]],
+    "later source inputs refine the same run without counting it a second time");
   requests.noteFirstFrameObservation({ consumerId: "viewer", generation: 2, waitId: first.waitId, wait: 4, elapsedMs: 13_250 });
-  assert.equal(noted.length, 2);
+  assert.equal(noted.length, 1);
 });
 
 test("early source measurements include unique prepared output bytes for the selected file", () => {
@@ -57,6 +59,43 @@ test("early source measurements include unique prepared output bytes for the sel
 
   requests.waitEstimateForSource({ consumerId: "viewer", generation: 0, sourceKey: "source", fileIndex: 2,
     fileName: "Film.avi", stats: { downloadSpeed: 0, fileLength: 800, numPeers: 0 } });
+
+  assert.equal(features[0].preparedOutputBytes, 350);
+});
+
+test("a component forecast replaces the historical total when first-segment work is measured", () => {
+  let historicalLookupCalled = false;
+  const requests = new ViewerRequests({
+    viewers: { get: () => null },
+    firstFrameSecondsOf: () => { historicalLookupCalled = true; return 41.7321; }
+  });
+
+  const estimate = requests.waitEstimateForSource({ consumerId: "viewer", generation: 0, sourceKey: "source",
+    fileIndex: 2, fileName: "Film.avi", stats: { downloadSpeed: 0, fileLength: 800, fileAvailable: true },
+    waitElapsedMs: 500, processing: { firstRequiredSegmentsSeconds: 2 } });
+
+  assert.equal(estimate.remainingSeconds, 2);
+  assert.equal(historicalLookupCalled, false);
+});
+
+test("early source measurements include prepared output files that are only on disk", () => {
+  const features = [];
+  const outputKey = new OutputSpec({ sourceKey: "source", segmentFormatId: "fmp4",
+    grid: new CutGrid({ kind: "uniform", fileIndex: 2 }), video: new VideoOutput({ fileIndex: 2 }) }).toKey();
+  const otherFileKey = new OutputSpec({ sourceKey: "source", segmentFormatId: "fmp4",
+    grid: new CutGrid({ kind: "uniform", fileIndex: 3 }), video: new VideoOutput({ fileIndex: 3 }) }).toKey();
+  const requests = new ViewerRequests({
+    viewers: { get: () => null },
+    outputs: new Map(),
+    segmentStore: {
+      addresses: () => [outputKey, otherFileKey],
+      sizesOf: key => key === outputKey ? new Map([[0, 100], [1, 250]]) : new Map([[0, 800]])
+    },
+    firstFrameSecondsOf: value => { features.push(value); return 12; }
+  });
+
+  requests.waitEstimateForSource({ consumerId: "viewer", generation: 0, sourceKey: "source", fileIndex: 2,
+    fileName: "Film.avi", stats: { downloadSpeed: 0, fileLength: 800, fileAvailable: true } });
 
   assert.equal(features[0].preparedOutputBytes, 350);
 });
@@ -150,7 +189,7 @@ test("a delayed file list adds file facts without erasing earlier source reading
   assert.equal(forecasts.at(-1).peers, 4);
 });
 
-test("first-frame learning pairs each source snapshot with its remaining wait", () => {
+test("first-frame learning stores one input snapshot from when the estimate first appeared", () => {
   const noted = [];
   const requests = new ViewerRequests({
     viewers: { get: () => ({ linkReading: () => ({ linkMbps: 32 }) }) },
@@ -166,14 +205,12 @@ test("first-frame learning pairs each source snapshot with its remaining wait", 
   requests.noteFirstFrameObservation({ consumerId: "viewer", generation: 0, waitId: "source:2:0",
     wait: 1, elapsedMs: 10_000 });
 
-  assert.equal(noted.length, 2);
+  assert.equal(noted.length, 1);
   assert.ok(Math.abs(noted[0].seconds - 10) < 0.001);
-  assert.ok(Math.abs(noted[1].seconds - 10) < 0.001);
   assert.equal(noted[0].features.downloadSpeed, null);
   assert.equal(noted[0].features.preparedOutputBytes, null);
-  assert.equal(noted[1].features.downloadSpeed, 100);
   assert.equal(noted[0].features.linkMbps, 20);
-  assert.equal(noted[1].features.linkSampleAgeMs, 80);
+  assert.ok(noted[0].features.linkSampleAgeMs >= 80);
 });
 
 test("file-list outcomes keep their own source measurements when several videos are listed", () => {

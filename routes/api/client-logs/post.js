@@ -91,14 +91,19 @@ export async function handleApiClientLogsPost(req, reply, { clientLogs, viewerRe
   }
   for (const row of rows) {
     const message = row && typeof row.msg === "string" ? row.msg : "";
-    const match = /^\[first-frame-observation\] consumer=([^ ]+) generation=(\d+) waitId=([^ ]+) wait=(\d+) audioReady=(true|false) elapsedMs=([\d.]+)$/.exec(message);
+    const match = /^\[first-frame-observation\] consumer=([^ ]+) generation=(\d+) waitId=([^ ]+) wait=(\d+) audioReady=(true|false) elapsedMs=([\d.]+)(?: coldStartTotalMs=([\d.]+) transportMs=([\d.]+) planMs=([\d.]+) prepareMs=([\d.]+) prebufferMs=([\d.]+) presentationMs=([\d.]+))?$/.exec(message);
     if (match) {
       const elapsedMs = Number(match[6]);
       if (match[1].length <= 64 && Number.isSafeInteger(Number(match[2])) && match[3].length <= 256 &&
           Number.isSafeInteger(Number(match[4])) && match[5] === "true" &&
           Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+        const stageValues = match.slice(7).map(value => value === undefined ? null : Number(value));
+        const stages = stageValues.every(value => value !== null && Number.isFinite(value) && value >= 0)
+          ? { totalMs: stageValues[0], transportMs: stageValues[1], planMs: stageValues[2],
+            prepareMs: stageValues[3], prebufferMs: stageValues[4], presentationMs: stageValues[5] }
+          : null;
         viewerRequests?.noteFirstFrameObservation?.({ consumerId: match[1], generation: Number(match[2]),
-          waitId: match[3], wait: Number(match[4]), elapsedMs });
+          waitId: match[3], wait: Number(match[4]), elapsedMs, stages });
       }
     }
   }

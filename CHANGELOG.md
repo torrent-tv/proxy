@@ -1,6 +1,9 @@
-## 2.101.34
+## Unreleased
 
 - **Fix**: Return keyframe-based playback sessions before their first playlist is written so the viewer can receive live readiness estimates during preparation (#ttv-185).
+
+## 2.101.34
+
 - **Fix**: Use this proxy configuration's measured stage medians across file types when a file type has no prior first-frame observations (#ttv-185).
 
 ## 2.101.33

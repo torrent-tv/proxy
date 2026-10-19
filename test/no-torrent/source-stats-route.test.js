@@ -16,7 +16,8 @@ test("a registered source can return a file estimate before torrent metadata is 
   const reply = { status: 200, code(status) { this.status = status; return this; }, send: value => value };
   const calls = [];
   const result = await handleApiSourceStatsGet({ params: { sourceKey: "source" },
-    query: { fileIndex: "0", consumer: "viewer", generation: "3", fileName: "Film.mkv", fileLength: "800" } }, reply, {
+    query: { fileIndex: "0", consumer: "viewer", generation: "3", fileName: "Film.mkv", fileLength: "800",
+      linkMbps: "18.5", linkSampleAgeMs: "120" } }, reply, {
     sourceRegistry: { get: () => ({ sourceType: "magnet", source: "unused" }) },
     torrentPool: { knownTorrent: () => null },
     viewerRequests: { waitEstimateForFile: input => { calls.push(input); return {
@@ -26,7 +27,7 @@ test("a registered source can return a file estimate before torrent metadata is 
 
   assert.equal(reply.status, 202);
   assert.deepEqual(calls, [{ consumerId: "viewer", generation: 3, sourceKey: "source", fileIndex: 0,
-    fileName: "Film.mkv", fileLength: 800 }]);
+    fileName: "Film.mkv", fileLength: 800, linkMbps: 18.5, linkSampleAgeMs: 120 }]);
   assert.equal(result.pending, true);
   assert.equal(result.waitEstimate.remainingSeconds, 12);
 });
@@ -36,7 +37,8 @@ test("a pending torrent statistics answer keeps the file estimate stable until m
   let sourceEstimateCalls = 0;
   const fileEstimateCalls = [];
   const result = await handleApiSourceStatsGet({ params: { sourceKey: "source" },
-    query: { fileIndex: "0", consumer: "viewer", generation: "3", fileName: "Film.mkv", fileLength: "800" } }, reply, {
+    query: { fileIndex: "0", consumer: "viewer", generation: "3", fileName: "Film.mkv", fileLength: "800",
+      linkMbps: "18.5", linkSampleAgeMs: "120" } }, reply, {
     sourceRegistry: { get: () => ({ sourceType: "magnet", source: "unused" }) },
     torrentPool: { knownTorrent: () => ({}), getFileStats: async () => ({ pending: true }) },
     viewerRequests: {
@@ -49,7 +51,7 @@ test("a pending torrent statistics answer keeps the file estimate stable until m
 
   assert.equal(reply.status, 202);
   assert.deepEqual(fileEstimateCalls, [{ consumerId: "viewer", generation: 3, sourceKey: "source", fileIndex: 0,
-    fileName: "Film.mkv", fileLength: 800 }]);
+    fileName: "Film.mkv", fileLength: 800, linkMbps: 18.5, linkSampleAgeMs: 120 }]);
   assert.equal(sourceEstimateCalls, 0);
   assert.equal(result.waitEstimate.revision, 0);
 });
@@ -61,7 +63,7 @@ test("source statistics request an early estimate only for a stated viewer gener
   const stats = { downloadSpeed: 20, fileProgress: 0.5, fileLength: 10, fileDownloaded: 5,
     headerBytes: 4, headerDownloadedBytes: 2, numPeers: 1 };
   const result = await handleApiSourceStatsGet({ params: { sourceKey: "source" },
-    query: { fileIndex: "0", consumer: "viewer", generation: "3" } }, reply, {
+    query: { fileIndex: "0", consumer: "viewer", generation: "3", linkMbps: "18.5", linkSampleAgeMs: "120" } }, reply, {
     sourceRegistry: { get: () => ({ sourceType: "magnet", source: "unused" }) },
     torrentPool: { knownTorrent: () => torrent, getFileStats: async () => stats },
     viewerRequests: { waitEstimateForSource: input => { calls.push(input); return {
@@ -70,7 +72,7 @@ test("source statistics request an early estimate only for a stated viewer gener
   });
 
   assert.deepEqual(calls, [{ consumerId: "viewer", generation: 3, sourceKey: "source", fileIndex: 0,
-    fileName: "", fileLength: null, stats }]);
+    fileName: "", fileLength: null, stats, linkMbps: 18.5, linkSampleAgeMs: 120 }]);
   assert.equal(result.waitEstimate.remainingSeconds, 4);
   assert.equal(result.downloadSpeed, 20);
 });

@@ -1406,10 +1406,11 @@ export async function startProxyServer({
     return handleApiSourcesPost(req, reply, { sourceRegistry, viewers: outputParts.viewers });
   });
   app.get("/api/sources/:sourceKey/stats", async (req, reply) =>
-    handleApiSourceStatsGet(req, reply, { sourceRegistry, torrentPool })
+    handleApiSourceStatsGet(req, reply, { sourceRegistry, torrentPool, viewerRequests: outputParts.viewerRequests })
   );
   app.get("/api/sources/:sourceKey/files", async (req, reply) =>
-    handleApiSourceFilesGet(req, reply, { sourceRegistry, torrentPool, viewers: outputParts.viewers })
+    handleApiSourceFilesGet(req, reply, { sourceRegistry, torrentPool, viewers: outputParts.viewers,
+      viewerRequests: outputParts.viewerRequests })
   );
   app.get("/api/sources/:sourceKey/files/:fileIndex/fingerprint", async (req, reply) =>
     handleApiSourceFingerprintGet(req, reply, {
@@ -1463,7 +1464,7 @@ export async function startProxyServer({
     ? createClientLogFiles(logFile)
     : createClientLogConsole((message) => logger.info(message));
   app.post("/api/client-logs", async (req, reply) =>
-    handleApiClientLogsPost(req, reply, { clientLogs })
+    handleApiClientLogsPost(req, reply, { clientLogs, viewerRequests: outputParts.viewerRequests })
   );
   app.post("/api/playback-plan", async (req, reply) =>
     handleApiPlaybackPlanPost(req, reply, { playbackPlanner, viewers: outputParts.viewers })

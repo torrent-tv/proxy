@@ -15,14 +15,15 @@ import { logger } from "../../../../utils/logger.js";
  * @param {import("fastify").FastifyReply} reply
  * @param {{
  *   sourceRegistry: ReturnType<import("../../../../store/source-registry.js").createSourceRegistry>,
- *   torrentPool: import("../../../../services/torrent/torrent-pool.js").TorrentPool
+ *   torrentPool: import("../../../../services/torrent/torrent-pool.js").TorrentPool,
+ *   viewerRequests?: object
  * }} deps
  * @returns {Promise<void>}
  */
 
 const CANCELLED = Symbol("cancelled");
 
-export async function handleApiSourceFilesGet(req, reply, { sourceRegistry, torrentPool, viewers }) {
+export async function handleApiSourceFilesGet(req, reply, { sourceRegistry, torrentPool, viewers, viewerRequests }) {
   const sourceKey = typeof req.params?.sourceKey === "string" ? req.params.sourceKey.trim() : "";
   if (!sourceKey) {
     return reply.code(400).send({ error: "sourceKey is required." });
@@ -72,13 +73,21 @@ export async function handleApiSourceFilesGet(req, reply, { sourceRegistry, torr
   }
   const consumerId = typeof req.query?.consumerId === "string" ? req.query.consumerId.trim() : "";
   if (consumerId) viewers?.visibleFiles(consumerId, sourceKey, contents.items.map(item => item.fileIndex));
+  const generationRaw = typeof req.query?.generation === "string" ? req.query.generation : "";
+  const generation = generationRaw !== "" && /^\d+$/.test(generationRaw) ? Number(generationRaw) : null;
+  const files = contents.files().map(file => {
+    if (!consumerId || !Number.isSafeInteger(generation) || file.kind !== "video" || file.excludedReason) return file;
+    const waitEstimate = viewerRequests?.waitEstimateForFile?.({ consumerId, generation, sourceKey,
+      fileIndex: file.fileIndex, fileName: file.relativePath ?? file.name, fileLength: file.length }) ?? null;
+    return waitEstimate ? { ...file, waitEstimate } : file;
+  });
   return reply.send({
     name: torrent.name ?? "",
     infoHash: torrent.infoHash ?? "",
     // In the order a person reads them — by folder, then by name, with runs of
     // digits compared as numbers. A torrent's own order is whatever the tool
     // that made it chose, and it is routinely by size.
-    files: contents.files(),
+    files,
     // The pictures, each with what belongs to it. By index, because the files
     // themselves are in the list above and saying them twice is how two copies
     // of one fact start.

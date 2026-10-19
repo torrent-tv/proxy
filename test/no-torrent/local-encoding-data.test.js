@@ -266,6 +266,58 @@ test("what is kept applies only on the configuration it was seen on, and survive
   }
 });
 
+test("first-frame wait observations are reused only on the matching proxy configuration and nearby measurements", () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "ttv-first-frame-"));
+  const filePath = path.join(directory, "local-observations.json");
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  const features = {
+    extension: "mkv",
+    fileLength: 4_000_000_000,
+    downloadSpeed: 1_500_000,
+    linkMbps: 42,
+    headerRemaining: 1_000_000,
+    peers: 14
+  };
+  try {
+    const first = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
+    first.load([software]);
+    first.noteFirstFrame({ seconds: 12.5, features });
+    assert.equal(first.firstFrameSeconds(features), 12.5);
+
+    const restarted = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
+    restarted.load([software]);
+    assert.equal(restarted.firstFrameSeconds({ ...features, linkMbps: 41 }), 12.5);
+
+    const withAnotherEncoder = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
+    withAnotherEncoder.load([software, configurationKeyOf(FINGERPRINT, { name: "h264_vaapi", kind: "vaapi" })]);
+    assert.equal(withAnotherEncoder.firstFrameSeconds(features), null,
+      "a changed set of available proxy configurations does not reuse outcomes from another set");
+
+    const rebuilt = new LocalObservations({ fingerprint: { ...FINGERPRINT, x264: "core 165" }, filePath });
+    rebuilt.load([configurationKeyOf({ ...FINGERPRINT, x264: "core 165" }, { name: "libx264", kind: "software" })]);
+    assert.equal(rebuilt.firstFrameSeconds(features), null);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("first-frame distance treats measured zeros separately from missing inputs", () => {
+  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  observations.load([software]);
+  observations.noteFirstFrame({ seconds: 6, features: {
+    extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 0, headerRemaining: 0, peers: 0
+  } });
+  observations.noteFirstFrame({ seconds: 18, features: {
+    extension: "mkv", fileLength: 1000, downloadSpeed: 100, linkMbps: 10, headerRemaining: 100, peers: 8
+  } });
+
+  assert.equal(observations.firstFrameSeconds({
+    extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 0, headerRemaining: 0, peers: 0
+  }), 6);
+  assert.equal(observations.firstFrameSeconds({ extension: "mkv" }), null);
+});
+
 test("a speed seen on easier material is not applied to harder material, and the slowest comparable one is used", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const light = { codec: "hevc", bitDepth: 10, width: 1920, height: 1080, megabitsPerSecond: 4 };

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.32
 
 - **Fix**: Keep the active first-segment estimate during source polling so a historical prior cannot replace it (#ttv-185).
 

@@ -181,6 +181,34 @@ test("the loopback dispatcher forwards a real HTTP response through the channel"
   assert.equal(Buffer.concat(chunks).toString(), "held-media");
 });
 
+test("the loopback request carries its data-channel request ID", async (t) => {
+  let received;
+  const server = createServer((request, response) => {
+    received = request.headers["x-ttv-forwarded-request-id"];
+    response.end("ok");
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const channel = new FakeDataChannel("proxy");
+  const handler = createDataChannelHandler({ proxyPort: server.address().port });
+  handler.handleChannel("request-id-peer", channel);
+  t.after(async () => {
+    channel.close();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  });
+  const completed = new Promise((resolve) => {
+    const send = channel.sendMessage.bind(channel);
+    channel.sendMessage = message => {
+      send(message);
+      if (JSON.parse(message).type === "response-start") resolve();
+    };
+  });
+  channel.message(JSON.stringify({ type: "request", requestId: "trace-request", method: "GET", path: "/healthz",
+    headers: { "x-ttv-forwarded-request-id": "untrusted-value" } }));
+  await completed;
+  assert.equal(received, "trace-request");
+});
+
 test("cancellation releases a response stalled on a full outgoing channel", async (t) => {
   let cancelled;
   let reachedQueue;

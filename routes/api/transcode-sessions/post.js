@@ -219,6 +219,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
     return reply.code(500).send({ error: `Failed to prepare transcode session: ${message}` });
   } finally {
     reply.raw?.removeListener?.("close", cancelled);
+    const handlerReturnAt = performance.now();
     const elapsed = (key) => Number.isFinite(timing[key]) ? timing[key].toFixed(1) : "n/a";
     logger.info(
       `transcode-session timing outcome=${cancellation.signal.aborted ? "cancelled" : "handler-return"} ` +
@@ -226,7 +227,8 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
         `consumer=${consumerId || "unknown"} file=${fileIndex} openCalls=${timing.openCalls} ` +
         `openMs=${timing.openMs.toFixed(1)} planWaitInclusiveMs=${elapsed("planWaitInclusiveMs")} ` +
         `masterMs=${elapsed("masterMs")} offerMs=${elapsed("offerMs")} tracksMs=${elapsed("tracksMs")} ` +
-        `handlerMs=${(performance.now() - timing.startedAt).toFixed(1)}`
+        `handlerReturnAtMs=${handlerReturnAt.toFixed(3)} ` +
+        `handlerMs=${(handlerReturnAt - timing.startedAt).toFixed(1)}`
     );
   }
 }

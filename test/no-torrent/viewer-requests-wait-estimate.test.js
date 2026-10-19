@@ -16,7 +16,7 @@ test("early forecasts retain one wait identity, advance revisions, and learn the
     consumerId: "viewer", generation: 2, sourceKey: "torrent:hash", fileIndex: 4,
     fileName: "Film.mkv", linkMbps: 24, linkSampleAgeMs: 130,
     stats: { fileLength: 4_000_000, downloadSpeed: 1_200_000, headerBytes: 600, headerDownloadedBytes: 100,
-      connectedPeers: 8 }
+      connectedPeers: 8, fileAvailable: false }
   };
 
   const first = requests.waitEstimateForSource(source);
@@ -27,7 +27,7 @@ test("early forecasts retain one wait identity, advance revisions, and learn the
   assert.equal(second.revision, 1);
   assert.deepEqual(features[0], {
     extension: "mkv", fileLength: 4_000_000, downloadSpeed: 1_200_000, linkMbps: 24, linkSampleAgeMs: 130,
-    preparedOutputBytes: null, headerRemaining: 500, peers: 8
+    preparedOutputBytes: null, fileAvailable: false, headerRemaining: 500, peers: 8
   });
 
   requests.noteFirstFrameObservation({ consumerId: "viewer", generation: 2, waitId: first.waitId, wait: 4, elapsedMs: 13_250 });

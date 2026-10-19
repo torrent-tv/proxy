@@ -282,6 +282,7 @@ export class LocalObservations {
       linkMbps: nonNegative(features.linkMbps),
       linkSampleAgeMs: nonNegative(features.linkSampleAgeMs),
       preparedOutputBytes: nonNegative(features.preparedOutputBytes),
+      fileAvailable: typeof features.fileAvailable === "boolean" ? features.fileAvailable : null,
       headerRemaining: nonNegative(features.headerRemaining),
       peers: nonNegative(features.peers),
       at: this.#now()
@@ -292,9 +293,10 @@ export class LocalObservations {
 
   /**
    * Predict this host's first-frame wait from the closest measured start with
-   * the same media suffix. Distance is the sum of squared log-ratios for the
-   * independent measured inputs; it does not mix bytes, bit rates and peers
-   * in their raw units.
+   * the same media suffix. Distance uses squared log-ratios for numeric
+   * inputs and exact-state distance for categorical inputs; it does not mix
+   * bytes, bit rates and peers in their raw units. Missing data contributes
+   * distance only when the other observation measured that input.
    *
    * @param {object} features
    * @returns {number | null}
@@ -305,24 +307,39 @@ export class LocalObservations {
     const candidates = readings.filter(reading => reading.extension === (features.extension ?? ""));
     if (candidates.length === 0) return null;
     const dimensions = ["fileLength", "downloadSpeed", "linkMbps", "linkSampleAgeMs", "preparedOutputBytes",
-      "headerRemaining", "peers"];
+      "fileAvailable", "headerRemaining", "peers"];
     const scales = new Map(dimensions.map(key => [key, median(candidates
-      .map(reading => nonNegative(reading[key]))
+      .map(reading => key === "fileAvailable" ? null : nonNegative(reading[key]))
       .filter(value => value !== null && value > 0))]));
     let best = null;
     for (const reading of candidates) {
       let distance = 0;
       let used = 0;
+      let shared = 0;
       for (const key of dimensions) {
+        const current = key === "fileAvailable"
+          ? (typeof features[key] === "boolean" ? features[key] : null)
+          : nonNegative(features[key]);
+        const previous = key === "fileAvailable"
+          ? (typeof reading[key] === "boolean" ? reading[key] : null)
+          : nonNegative(reading[key]);
+        if (current === null && previous === null) continue;
+        if (current === null || previous === null) {
+          distance += 1;
+          used += 1;
+          continue;
+        }
+        shared += 1;
         const scale = scales.get(key);
-        const current = nonNegative(features[key]);
-        const previous = nonNegative(reading[key]);
-        if (scale === null || current === null || previous === null) continue;
-        const difference = Math.log1p(current / scale) - Math.log1p(previous / scale);
+        const difference = typeof current === "boolean" && typeof previous === "boolean"
+          ? Number(current !== previous)
+          : scale === null
+            ? Number(current !== previous)
+            : Math.log1p(current / scale) - Math.log1p(previous / scale);
         distance += difference * difference;
         used += 1;
       }
-      if (used === 0) continue;
+      if (used === 0 || shared === 0) continue;
       distance /= used;
       if (!best || distance < best.distance || (distance === best.distance && reading.at > best.reading.at)) {
         best = { distance, reading };

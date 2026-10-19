@@ -11,13 +11,6 @@ import { logger } from "../../utils/logger.js";
 import { isOutputName, OutputSpec } from "../encode/output/index.js";
 import { withSubtitleReadiness } from "./subtitle-readiness.js";
 
-function isWarmupTimeoutError(error) {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  return error.message === "HLS playlist is still warming up.";
-}
-
 /**
  * The segment number an assignment is recorded under for this file, −1 for the
  * init, or null for anything that is neither (a playlist).
@@ -93,7 +86,7 @@ export class ViewerRequests {
   #forecastPieces = new WeakMap();
 
   /**
-   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `disposeSession`, `planEncodersSoon`, `waitUntilReady`, `encodeRuns`, `encodeSpeedReadingsOf`, `outputTimes`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
+   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `planEncodersSoon`, `encodeRuns`, `encodeSpeedReadingsOf`, `outputTimes`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
    */
   constructor(host) {
     this.#host = host;
@@ -421,19 +414,13 @@ export class ViewerRequests {
       // Where the first encoder goes is the plan's, from where the viewers stand.
       this.#host.planEncodersSoon();
     }
-    try {
-      await this.#host.waitUntilReady(output);
-    } catch (error) {
-      if (!existed && this.#host.encodeRuns.hasFailed(output)) {
-        await this.#host.disposeSession(output.id);
-        throw error;
-      }
-      if (existed && !isWarmupTimeoutError(error)) {
-        throw error;
-      }
-      // Not a failure of the request: the synthetic playlist is already there
-      // and segments appear as the encoder produces them.
-    }
+    // Return the allocated session before a keyframe-based output writes its
+    // first playlist. The browser can then poll this session's live playback
+    // forecast while the source, proxy and client-link work is still underway;
+    // otherwise this request hides all revised estimates until the first
+    // segment is already ready. The playlist route and the viewer's existing
+    // wait loop handle output that is still being prepared, and the progress
+    // route reports a terminal encoder failure.
     return output;
   }
 

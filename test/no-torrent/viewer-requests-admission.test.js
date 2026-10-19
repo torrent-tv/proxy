@@ -95,3 +95,42 @@ test("the first opening holds capacity before a concurrent opening is admitted",
   assert.equal(viewers.forOutput({ outputKey: "source-a:0" }).has("viewer-a"), true);
   assert.equal(viewers.forOutput({ outputKey: "source-b:0" }).has("viewer-b"), false);
 });
+
+test("returns an allocated output without waiting for its first playlist", async () => {
+  let waitUntilReadyCalls = 0;
+  const viewer = {
+    position: null,
+    linkReading: () => null,
+    noteVisiblePicture: () => {},
+    report: () => {}
+  };
+  const output = { id: "source:0", outputKey: "source:0" };
+  let claimed = false;
+  const viewers = {
+    get: () => claimed ? viewer : null,
+    of: () => { claimed = true; return viewer; },
+    forOutput: () => new Set(["viewer"])
+  };
+  const requests = new ViewerRequests({
+    opening: {
+      async open({ claim }) {
+        const answer = claim(output);
+        assert.equal(answer.admitted, true);
+        return { output, existed: false, audio: null, verdict: null };
+      }
+    },
+    viewers,
+    admitsWatching: () => ({ admitted: true, reason: "", speedX: 1 }),
+    outputTimes: { segmentIndexForTime: () => 0 },
+    planEncodersSoon: () => {},
+    outputs: { touch: () => {} },
+    noteServingVerdict: () => {},
+    waitUntilReady: async () => { waitUntilReadyCalls += 1; }
+  });
+
+  const result = await requests.createOrGetSession({ sourceKey: "source", fileIndex: 0, consumerId: "viewer" });
+
+  assert.equal(result, output);
+  assert.equal(waitUntilReadyCalls, 0,
+    "the player must receive its session so it can poll the live forecast while segments are being prepared");
+});

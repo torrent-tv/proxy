@@ -343,6 +343,31 @@ test("first-frame distance distinguishes outputs with and without prepared segme
   assert.equal(observations.firstFrameSeconds({ ...shared, preparedOutputBytes: 0 }), 42);
 });
 
+test("first-frame distance distinguishes a complete file from an incomplete source at zero peer speed", () => {
+  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  observations.load([software]);
+  const shared = { extension: "avi", fileLength: 2_362_982_400, downloadSpeed: 0, linkMbps: 113,
+    linkSampleAgeMs: 10_758, preparedOutputBytes: 1_268_248, headerRemaining: 0, peers: 0 };
+  observations.noteFirstFrame({ seconds: 1.5991, features: { ...shared, fileAvailable: true } });
+  observations.noteFirstFrame({ seconds: 10.4824, features: { ...shared, fileAvailable: false } });
+
+  assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: true }), 1.5991);
+  assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: false }), 10.4824);
+});
+
+test("first-frame distance accounts for availability data absent from older observations", () => {
+  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  observations.load([software]);
+  const shared = { extension: "avi", fileLength: 1000, downloadSpeed: 0, linkMbps: 20,
+    linkSampleAgeMs: 10, preparedOutputBytes: 500, headerRemaining: 0, peers: 0 };
+  observations.noteFirstFrame({ seconds: 1.5, features: shared });
+  observations.noteFirstFrame({ seconds: 10.5, features: { ...shared, fileAvailable: false } });
+
+  assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: false }), 10.5);
+});
+
 test("a speed seen on easier material is not applied to harder material, and the slowest comparable one is used", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const light = { codec: "hevc", bitDepth: 10, width: 1920, height: 1080, megabitsPerSecond: 4 };

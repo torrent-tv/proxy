@@ -120,6 +120,7 @@ export class ViewerRequests {
         ? linkMbps : this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
       linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
       preparedOutputBytes: this.#preparedOutputBytes(sourceKey, fileIndex),
+      fileAvailable: null,
       headerRemaining: null,
       peers: null
     };
@@ -163,6 +164,7 @@ export class ViewerRequests {
       linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
       preparedOutputBytes: Number.isSafeInteger(fileIndex) && fileIndex >= 0
         ? this.#preparedOutputBytes(sourceKey, fileIndex) : null,
+      fileAvailable: typeof stats?.fileAvailable === "boolean" ? stats.fileAvailable : null,
       headerRemaining: Number.isFinite(stats?.headerBytes) && Number.isFinite(stats?.headerDownloadedBytes)
         ? Math.max(0, stats.headerBytes - stats.headerDownloadedBytes) : null,
       peers: stats?.connectedPeers ?? stats?.numPeers

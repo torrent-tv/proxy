@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Include source file availability in early wait observations so a completed file and a stalled incomplete source are compared separately (#ttv-185).
+
 ## 2.101.27
 
 - **Fix**: Include prepared output bytes in early first-frame observations so reused output data is compared with matching starts (#ttv-185).

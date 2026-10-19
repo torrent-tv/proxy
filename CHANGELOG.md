@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix** Use packet time bounds to avoid rescanning every reordered MP4 packet for each segment input (#ttv-185).
+
 ## 2.101.40
 
 - **Chore**: Readiness reports identify the source, track, segment and near-window or tail position of missing input ranges, including changes to the missing segment while its reason stays the same (#ttv-185).

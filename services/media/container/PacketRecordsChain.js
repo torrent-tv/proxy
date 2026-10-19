@@ -107,6 +107,21 @@ export class PacketRecordsChain {
     return low;
   }
 
+  forEachInTimeRange(from, to, visit) {
+    for (let part = 0; part < this.#parts.length; part++) {
+      const offset = this.#offsets[part];
+      this.#parts[part].forEachInTimeRange(from, to, (index, pts) => visit(offset + index, pts));
+    }
+  }
+
+  someAtTime(seconds, matches) {
+    for (let part = 0; part < this.#parts.length; part++) {
+      const offset = this.#offsets[part];
+      if (this.#parts[part].someAtTime(seconds, index => matches(offset + index))) return true;
+    }
+    return false;
+  }
+
   /** The tables are the container's: a request's index lets go of nothing. */
   dispose() {}
   releaseUnusedCapacity() {}

@@ -195,11 +195,12 @@ export class PacketIndex {
     const ordered = packets.ptsAscending;
     const scanFrom = ordered ? packets.firstAtOrAfter(startAt - packets.longestDuration) : 0;
     const scanTo = ordered ? packets.firstAtOrAfter(to) : packets.length;
-    for (let index = scanFrom; index < scanTo; index++) {
-      const pts = packets.ptsAt(index);
+    const consider = (index, pts = packets.ptsAt(index)) => {
       if (pts < to && (pts >= startAt ||
         ((mode === "transcode" || track.type === "audio") && pts + packets.durationAt(index) > startAt))) selected.push(index);
-    }
+    };
+    if (ordered) for (let index = scanFrom; index < scanTo; index++) consider(index);
+    else packets.forEachInTimeRange(startAt, to, consider);
     if (selected.length === 0) {
       if (track.type === "subtitle" && (track.complete || track.coveredThrough >= to)) {
         return { kind: "result", trackId, ranges: [], packets: [], from, to, decodeFrom: from };
@@ -221,7 +222,7 @@ export class PacketIndex {
         ? { kind: "terminal", reason: "video-interval-has-no-decode-start" }
         : { kind: "needs-index", trackId, from: startAt, to };
       let endsAtKeyframe = false;
-      if (mode === "copy") for (let index = 0; index < packets.length; index++) if (packets.ptsAt(index) === to && packets.keyframeAt(index)) { endsAtKeyframe = true; break; }
+      if (mode === "copy") endsAtKeyframe = packets.someAtTime(to, index => packets.keyframeAt(index));
       if (mode === "copy" && (packets.ptsAt(first) !== from ||
         (!endsAtKeyframe && (!track.complete || to < this.boundsOf(trackId).end)))) {
         return { kind: "terminal", reason: "video-copy-cut-is-not-a-keyframe" };

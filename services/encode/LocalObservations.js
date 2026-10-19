@@ -290,86 +290,30 @@ export class LocalObservations {
   }
 
   /**
-   * Predict the first-frame wait as the sum of separately predicted cold-start
-   * stages. Each stage uses all compatible measurements, weighted by the
-   * normalized distance between the measured inputs; no complete past wait is
-   * returned as the forecast. A known cache/source state must also be known in
-   * the training observation, otherwise that observation is not comparable.
+   * Price the early wait from separate measured stage medians for the same
+   * output path. Numeric proximity of a past file, source rate, or link rate
+   * does not select a completed run. Each observation contributes once, using
+   * its latest snapshot that states the current cache and operation path.
    *
    * @param {object} features
    * @returns {number | null}
    */
   firstFrameSeconds(features) {
     if (!features || typeof features !== "object") return null;
-    const candidates = (this.#entries.firstFrame[this.#firstFrameKey()] ?? [])
-      .filter(reading => reading.extension === (features.extension ?? "") && reading.stages);
-    if (candidates.length === 0) return null;
-    const dimensions = ["fileLength", "downloadSpeed", "linkMbps", "linkSampleAgeMs", "preparedOutputBytes",
-      "fileAvailable", "headerRemaining", "peers", "videoOperation", "audioOperation", "videoSpeedX", "audioSpeedX"];
-    const pointsOf = reading => Array.isArray(reading.featureSnapshots) && reading.featureSnapshots.length > 0
-      ? reading.featureSnapshots : [reading];
-    const scales = new Map(dimensions.map(key => [key, median(candidates.flatMap(reading => pointsOf(reading)
-      .map(point => FIRST_FRAME_CATEGORICAL.has(key) ? null : nonNegative(point[key])))
-      .filter(value => value !== null && value > 0))]));
-    const distances = [];
-    for (const reading of candidates) {
-      let bestDistance = null;
-      for (const point of pointsOf(reading)) {
-        if ((features.preparedOutputBytes !== null && features.preparedOutputBytes !== undefined &&
-            point.preparedOutputBytes === null) ||
-            [...FIRST_FRAME_CATEGORICAL].some(key => {
-              const current = key === "fileAvailable" ? features[key] : operationOf(features[key]);
-              return current !== null && current !== undefined && point[key] !== current;
-            })) continue;
-        let distance = 0;
-        let used = 0;
-        let shared = 0;
-        for (const key of dimensions) {
-          const current = FIRST_FRAME_CATEGORICAL.has(key)
-            ? key === "fileAvailable" ? (typeof features[key] === "boolean" ? features[key] : null)
-              : operationOf(features[key])
-            : nonNegative(features[key]);
-          const previous = FIRST_FRAME_CATEGORICAL.has(key)
-            ? key === "fileAvailable" ? (typeof point[key] === "boolean" ? point[key] : null)
-              : operationOf(point[key])
-            : nonNegative(point[key]);
-          if (current === null && previous === null) continue;
-          if (current === null || previous === null) {
-            distance += 1;
-            used += 1;
-            continue;
-          }
-          shared += 1;
-          const scale = scales.get(key);
-          const difference = typeof current !== "number" && typeof previous !== "number"
-            ? Number(current !== previous)
-            : scale === null
-              ? Number(current !== previous)
-              : Math.log1p(current / scale) - Math.log1p(previous / scale);
-          distance += difference * difference;
-          used += 1;
-        }
-        if (used === 0 || shared === 0) continue;
-        distance /= used;
-        if (bestDistance === null || distance < bestDistance) bestDistance = distance;
-      }
-      if (bestDistance !== null) distances.push({ distance: bestDistance, reading });
-    }
-    if (distances.length === 0) return null;
-    const exact = distances.filter(candidate => candidate.distance === 0);
-    const weighted = exact.length > 0
-      ? exact.map(candidate => ({ ...candidate, weight: 1 }))
-      : distances.map(candidate => ({ ...candidate, weight: 1 / candidate.distance }));
     const stages = ["transportMs", "planMs", "prepareMs", "prebufferMs", "presentationMs"];
-    const predicted = stages.map(stage => {
-      const applicable = weighted.filter(candidate => Number.isFinite(candidate.reading.stages[stage]));
-      const totalWeight = applicable.reduce((sum, candidate) => sum + candidate.weight, 0);
-      return totalWeight > 0
-        ? applicable.reduce((sum, candidate) => sum + candidate.reading.stages[stage] * candidate.weight, 0) / totalWeight
-        : null;
-    });
-    if (predicted.some(value => value === null)) return null;
-    return predicted.reduce((sum, value) => sum + value, 0) / 1000;
+    const candidates = [];
+    for (const reading of this.#entries.firstFrame[this.#firstFrameKey()] ?? []) {
+      if (reading.extension !== (features.extension ?? "") || !reading.stages) continue;
+      const points = Array.isArray(reading.featureSnapshots) && reading.featureSnapshots.length > 0
+        ? reading.featureSnapshots : [reading];
+      const point = [...points].reverse().find(candidate => firstFramePathMatches(features, candidate));
+      if (point) candidates.push(reading.stages);
+    }
+    if (candidates.length === 0) return null;
+    const prices = stages.map(stage => median(candidates.map(reading => reading[stage])
+      .filter(Number.isFinite)));
+    if (prices.some(value => value === null)) return null;
+    return prices.reduce((sum, value) => sum + value, 0) / 1000;
   }
 
   #firstFrameKey() {
@@ -485,6 +429,20 @@ function nonNegative(value) {
 /** @param {unknown} value @returns {"copy" | "encode" | null} */
 function operationOf(value) {
   return value === "copy" || value === "encode" ? value : null;
+}
+
+/** @param {object} current @param {object} previous @returns {boolean} */
+function firstFramePathMatches(current, previous) {
+  for (const key of FIRST_FRAME_CATEGORICAL) {
+    const expected = key === "fileAvailable" ? current[key] : operationOf(current[key]);
+    if (expected !== null && expected !== undefined && previous[key] !== expected) return false;
+  }
+  const preparedBytes = nonNegative(current.preparedOutputBytes);
+  if (preparedBytes !== null) {
+    const previousBytes = nonNegative(previous.preparedOutputBytes);
+    if (previousBytes === null || (previousBytes > 0) !== (preparedBytes > 0)) return false;
+  }
+  return true;
 }
 
 /** @param {unknown} value @returns {{ totalMs: number, transportMs: number, planMs: number, prepareMs: number, prebufferMs: number, presentationMs: number } | null} */

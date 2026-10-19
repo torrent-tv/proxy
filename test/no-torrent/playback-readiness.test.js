@@ -496,6 +496,24 @@ test("uses each track's own segment boundaries and requires continuous coverage 
   assert.equal(forecast.preparedSegments, 2);
 });
 
+test("overlaps independent track processing and serializes their shared client delivery", () => {
+  const common = input();
+  const video = { ...common.tracks[0], readySegmentIndices: [],
+    readings: [{ at: 9_000, value: 2 }, { at: 10_000, value: 2 }] };
+  const audio = { ...common.tracks[0], id: "audio", readySegmentIndices: [],
+    readings: [{ at: 9_000, value: 4 }, { at: 10_000, value: 4 }] };
+  const forecast = predictPlaybackReadiness({
+    ...common,
+    sources: [{ id: "source", complete: true, bytesPerMediaSecond: 1, readings: [] }],
+    tracks: [video, audio],
+    requiredAudio: true,
+    linkReadings: [{ at: 9_000, value: 3_200 }, { at: 10_000, value: 3_200 }]
+  });
+
+  assert.equal(forecast.firstRequiredSegmentsSeconds, 2.2,
+    "video and audio processing overlap; both outputs then share one delivery path");
+});
+
 test("does not start when only one required track has continuous coverage", () => {
   const common = input();
   const audio = {

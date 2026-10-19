@@ -33,7 +33,8 @@ test("early forecasts retain one wait identity, advance revisions, and learn the
   assert.equal(changed.remainingSeconds, 13);
   assert.deepEqual(features[0], {
     extension: "mkv", fileLength: 4_000_000, downloadSpeed: 1_200_000, linkMbps: 24, linkSampleAgeMs: 130,
-    preparedOutputBytes: null, fileAvailable: false, headerRemaining: 500, peers: 8,
+    preparedOutputBytes: null, fileAvailable: false, headerRemaining: 500,
+    peers: 8,
     videoOperation: null, audioOperation: null, videoSpeedX: null, audioSpeedX: null
   });
 

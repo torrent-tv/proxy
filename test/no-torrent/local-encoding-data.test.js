@@ -372,6 +372,22 @@ test("first-frame forecast sums per-stage medians instead of selecting a complet
     "each stage median is calculated independently; no completed-run total or nearest run is used");
 });
 
+test("first-frame forecast uses this proxy's stage measurements before the container is known", () => {
+  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
+  observations.load([configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" })]);
+  const avi = { extension: "avi" };
+  const mp4 = { extension: "mp4" };
+  const stagesA = { totalMs: 15_000, transportMs: 1000, planMs: 2000, prepareMs: 3000,
+    prebufferMs: 4000, presentationMs: 5000 };
+  const stagesB = { totalMs: 25_000, transportMs: 3000, planMs: 4000, prepareMs: 5000,
+    prebufferMs: 6000, presentationMs: 7000 };
+  observations.noteFirstFrame({ seconds: 15, features: avi, stages: stagesA });
+  observations.noteFirstFrame({ seconds: 25, features: mp4, stages: stagesB });
+
+  assert.equal(observations.firstFrameSeconds({ extension: "mkv" }), 20,
+    "unknown containers use the independently measured component medians from this proxy");
+});
+
 test("an unsplit historical first-frame total cannot produce a forecast", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   observations.load([configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" })]);

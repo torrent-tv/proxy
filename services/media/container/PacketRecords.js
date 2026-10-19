@@ -16,6 +16,8 @@ const HEADER_BYTES = 56;
 
 export class PacketRecords {
   #blocks = [];
+  // Conservative time bounds for each existing storage block.
+  #timeBounds = [];
   #addresses = [];
   #used = 0;
   #length = 0;
@@ -75,6 +77,7 @@ export class PacketRecords {
     const previousBytes = this.#bytes;
     if (value === 0) {
       this.#blocks = [];
+      this.#timeBounds = [];
       this.#addresses = [];
       this.#used = 0;
       this.#bytes = 0;
@@ -85,6 +88,8 @@ export class PacketRecords {
       const at = address.readUInt32LE(addressAt % BLOCK_BYTES + 4);
       const block = this.#blocks[blockIndex];
       this.#blocks.length = blockIndex + 1;
+      this.#timeBounds.length = blockIndex + 1;
+      this.#timeBounds[blockIndex].end = value;
       this.#addresses.length = Math.ceil(value * ADDRESS_BYTES / BLOCK_BYTES);
       // The last address block back to the size its records need, as it grew.
       const lastAddresses = this.#addresses.at(-1);
@@ -119,6 +124,27 @@ export class PacketRecords {
       else high = middle;
     }
     return low;
+  }
+
+  /** Visit records in presentation order storage whose time can overlap [from, to). */
+  forEachInTimeRange(from, to, visit) {
+    for (const bounds of this.#timeBounds) {
+      if (bounds.minPts >= to || (bounds.maxPts < from && bounds.maxEnd <= from)) continue;
+      for (let index = bounds.first; index < bounds.end; index++) {
+        const pts = this.ptsAt(index);
+        if (pts < to && (pts >= from || pts + this.durationAt(index) > from)) visit(index, pts);
+      }
+    }
+  }
+
+  someAtTime(seconds, matches) {
+    for (const bounds of this.#timeBounds) {
+      if (seconds < bounds.minPts || seconds > bounds.maxPts) continue;
+      for (let index = bounds.first; index < bounds.end; index++) {
+        if (this.ptsAt(index) === seconds && matches(index)) return true;
+      }
+    }
+    return false;
   }
 
   push(packet) {
@@ -161,6 +187,8 @@ export class PacketRecords {
     if (newBlock) {
       block = payloadAllocation;
       this.#blocks.push(block);
+      this.#timeBounds.push({ first: this.#length, end: this.#length, minPts: Infinity, maxPts: -Infinity,
+        maxEnd: -Infinity });
       this.#bytes += block.length;
       this.#used = 0;
     }
@@ -186,6 +214,11 @@ export class PacketRecords {
     if (packet.streamId !== undefined) block.writeUInt32LE(packet.streamId, at + bytes - 4 - (packet.decodeFromIndex !== undefined ? 4 : 0));
     if (packet.decodeFromIndex !== undefined) block.writeUInt32LE(packet.decodeFromIndex, at + bytes - 4);
     this.#used += bytes;
+    const timeBounds = this.#timeBounds.at(-1);
+    timeBounds.end = this.#length + 1;
+    timeBounds.minPts = Math.min(timeBounds.minPts, packet.pts);
+    timeBounds.maxPts = Math.max(timeBounds.maxPts, packet.pts);
+    if (Number.isFinite(packet.duration)) timeBounds.maxEnd = Math.max(timeBounds.maxEnd, packet.pts + packet.duration);
     if (this.#descentAt < 0 && packet.pts < this.#lastPts) this.#descentAt = this.#length;
     this.#lastPts = packet.pts;
     if (packet.duration > this.#longest) this.#longest = packet.duration;
@@ -258,6 +291,10 @@ export class PacketRecords {
     const [block, at] = this.#address(this.#length - 1);
     const duration = block.readDoubleLE(at + 8) + seconds;
     block.writeDoubleLE(duration, at + 8);
+    const address = this.#addresses[Math.floor((this.#length - 1) * ADDRESS_BYTES / BLOCK_BYTES)];
+    const blockIndex = address.readUInt32LE(((this.#length - 1) * ADDRESS_BYTES) % BLOCK_BYTES);
+    const bounds = this.#timeBounds[blockIndex];
+    bounds.maxEnd = Math.max(bounds.maxEnd, block.readDoubleLE(at) + duration);
     if (duration > this.#longest) this.#longest = duration;
   }
 
@@ -267,6 +304,10 @@ export class PacketRecords {
     }
     const [block, at] = this.#address(index);
     block.writeDoubleLE(seconds, at + 8);
+    const address = this.#addresses[Math.floor(index * ADDRESS_BYTES / BLOCK_BYTES)];
+    const blockIndex = address.readUInt32LE((index * ADDRESS_BYTES) % BLOCK_BYTES);
+    const bounds = this.#timeBounds[blockIndex];
+    bounds.maxEnd = Math.max(bounds.maxEnd, block.readDoubleLE(at) + seconds);
     if (seconds > this.#longest) this.#longest = seconds;
     const flags = block.readUInt32LE(at + 48);
     block.writeUInt32LE(derived ? flags | 4 : flags & ~4, at + 48);

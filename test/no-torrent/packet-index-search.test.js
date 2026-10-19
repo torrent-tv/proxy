@@ -58,7 +58,7 @@ test("an audio interval is found by search and holds exactly the packets the rul
   }
 });
 
-test("records say when their times go back, and are then read in full", () => {
+test("records whose times go back use block bounds and retain exact interval inputs", () => {
   const records = new PacketRecords();
   for (const pts of [0, 1, 2]) records.push({ pts, duration: 1, ranges: [[0, 0]] });
   assert.equal(records.ptsAscending, true);
@@ -80,5 +80,62 @@ test("records say when their times go back, and are then read in full", () => {
   for (const pts of [0, 2, 1, 3]) index.append(1, { pts, duration: 0.5, keyframe: true, ranges: [[pts * 10, pts * 10 + 9]] });
   index.complete(1);
   const input = index.inputFor({ trackId: 1, from: 0.9, to: 1.6, mode: "copy" });
-  assert.deepEqual(input.packets.map(packet => packet.pts), [1], "a track whose times go back is still read whole");
+  assert.deepEqual(input.packets.map(packet => packet.pts), [1], "reordered records retain decode order");
+});
+
+test("time bounds remain a safe superset after duration changes and truncation", () => {
+  const records = new PacketRecords();
+  for (let group = 0; group < 1000; group++) {
+    for (const offset of [0, 3, 1, 2]) {
+      records.push({ pts: group * 4 + offset, duration: 0.5, ranges: [[records.length, records.length]] });
+    }
+  }
+  records.setDuration(4, 5);
+  const actual = [];
+  records.forEachInTimeRange(3.5, 8, index => actual.push(index));
+  const expected = Array.from({ length: records.length }, (_, index) => index)
+    .filter(index => records.ptsAt(index) < 8 &&
+      (records.ptsAt(index) >= 3.5 || records.ptsAt(index) + records.durationAt(index) > 3.5));
+  assert.deepEqual(actual, expected);
+  assert.equal(records.someAtTime(7, index => records.ptsAt(index) === 7), true);
+
+  records.length = 2500;
+  const afterTruncate = [];
+  records.forEachInTimeRange(2490, 2500, index => afterTruncate.push(index));
+  const afterExpected = Array.from({ length: records.length }, (_, index) => index)
+    .filter(index => records.ptsAt(index) < 2500 &&
+      (records.ptsAt(index) >= 2490 || records.ptsAt(index) + records.durationAt(index) > 2490));
+  assert.deepEqual(afterTruncate, afterExpected);
+  const removed = [];
+  records.forEachInTimeRange(2500, 2504, index => removed.push(index));
+  assert.deepEqual(removed, []);
+});
+
+test("a narrow interval reads fewer timestamp entries than the reordered table contains", () => {
+  const records = new PacketRecords();
+  const order = [0, 3, 1, 2];
+  for (let group = 0; group < 3000; group++) {
+    for (const offset of order) {
+      records.push({ pts: (group * 4 + offset) / 24, duration: 1 / 24, keyframe: true,
+        ranges: [[records.length, records.length]] });
+    }
+  }
+  const index = new PacketIndex();
+  index.declareTrack(1, { type: "audio" });
+  index.sharePackets(1, records);
+  index.complete(1);
+  index.boundsOf(1);
+  const ordered = Array.from({ length: records.length }, (_, position) => records.ptsAt(position));
+  let reads = 0;
+  const ptsAt = records.ptsAt.bind(records);
+  records.ptsAt = position => { reads++; return ptsAt(position); };
+
+  const from = 6000 / 24, to = 6010 / 24;
+  const result = index.inputFor({ trackId: 1, from, to, mode: "copy" });
+  const selected = ordered.flatMap((pts, position) =>
+    pts < to && (pts >= from || pts + records.durationAt(position) > from) ? [position] : []);
+  assert.equal(result.kind, "result");
+  assert.deepEqual(result.packets.map(packet => packet.pts),
+    ordered.slice(selected[0], selected.at(-1) + 1));
+  assert.ok(reads < records.length, `${reads} timestamp reads for ${records.length} records`);
 });

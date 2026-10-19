@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.29
 
 - **Fix**: Merge early link, source and file readings, subtract elapsed action time, and revise the same wait with measured per-track copy/encode rates (#ttv-185).
 

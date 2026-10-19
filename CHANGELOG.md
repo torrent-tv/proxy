@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Merge early link, source and file readings, subtract elapsed action time, and revise the same wait with measured per-track copy/encode rates (#ttv-185).
+
 ## 2.101.28
 
 - **Fix**: Include source file availability in early wait observations so a completed file and a stalled incomplete source are compared separately (#ttv-185).

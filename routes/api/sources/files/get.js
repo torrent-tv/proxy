@@ -77,13 +77,16 @@ export async function handleApiSourceFilesGet(req, reply, { sourceRegistry, torr
   const generation = generationRaw !== "" && /^\d+$/.test(generationRaw) ? Number(generationRaw) : null;
   const linkMbps = Number(req.query?.linkMbps);
   const linkSampleAgeMs = Number(req.query?.linkSampleAgeMs);
+  const waitElapsedMs = Number(req.query?.waitElapsedMs);
   const earlyLink = Number.isFinite(linkMbps) && linkMbps > 0
     ? { linkMbps, linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null }
     : {};
+  const earlyWaitAge = Number.isFinite(waitElapsedMs) && waitElapsedMs >= 0 ? { waitElapsedMs } : {};
   const files = contents.files().map(file => {
     if (!consumerId || !Number.isSafeInteger(generation) || file.kind !== "video" || file.excludedReason) return file;
     const waitEstimate = viewerRequests?.waitEstimateForFile?.({ consumerId, generation, sourceKey,
-      fileIndex: file.fileIndex, fileName: file.relativePath ?? file.name, fileLength: file.length, ...earlyLink }) ?? null;
+      fileIndex: file.fileIndex, fileName: file.relativePath ?? file.name, fileLength: file.length,
+      ...earlyLink, ...earlyWaitAge }) ?? null;
     return waitEstimate ? { ...file, waitEstimate } : file;
   });
   return reply.send({

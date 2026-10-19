@@ -368,6 +368,22 @@ test("first-frame distance accounts for availability data absent from older obse
   assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: false }), 10.5);
 });
 
+test("first-frame distance uses the measured copy or encode path and per-track processing rates", () => {
+  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  observations.load([software]);
+  const shared = { extension: "mkv", fileLength: 1000, downloadSpeed: 500_000, linkMbps: 30,
+    linkSampleAgeMs: 20, preparedOutputBytes: 0, fileAvailable: false, headerRemaining: 0, peers: 4,
+    audioOperation: "copy", audioSpeedX: 60 };
+  observations.noteFirstFrame({ seconds: 8, features: { ...shared,
+    videoOperation: "encode", videoSpeedX: 1.2 } });
+  observations.noteFirstFrame({ seconds: 24, features: { ...shared,
+    videoOperation: "copy", videoSpeedX: 30 } });
+
+  assert.equal(observations.firstFrameSeconds({ ...shared, videoOperation: "encode", videoSpeedX: 1.2 }), 8);
+  assert.equal(observations.firstFrameSeconds({ ...shared, videoOperation: "copy", videoSpeedX: 30 }), 24);
+});
+
 test("a speed seen on easier material is not applied to harder material, and the slowest comparable one is used", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const light = { codec: "hevc", bitDepth: 10, width: 1920, height: 1080, megabitsPerSecond: 4 };

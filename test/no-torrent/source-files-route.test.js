@@ -98,7 +98,8 @@ test("a saved first-frame estimate is attached to eligible video files before se
     { path: "Film/episode.mkv", length: 900 },
     { path: "Film/subtitle.srt", length: 12 }
   ]);
-  req.query = { consumerId: "viewer", generation: "0", linkMbps: "18.5", linkSampleAgeMs: "120" };
+  req.query = { consumerId: "viewer", generation: "0", linkMbps: "18.5", linkSampleAgeMs: "120",
+    waitElapsedMs: "4250" };
   const calls = [];
   deps.viewerRequests = {
     waitEstimateForFile: value => {
@@ -111,8 +112,10 @@ test("a saved first-frame estimate is attached to eligible video files before se
 
   assert.equal(sent.body.files.find(file => file.kind === "video").waitEstimate.remainingSeconds, 15);
   assert.equal(sent.body.files.find(file => file.kind === "subtitle").waitEstimate, undefined);
-  assert.deepEqual(calls, [{ consumerId: "viewer", generation: 0, sourceKey: "key", fileIndex: 0,
-    fileName: "Film/episode.mkv", fileLength: 900, linkMbps: 18.5, linkSampleAgeMs: 120 }]);
+  const { waitElapsedMs, ...request } = calls[0];
+  assert.deepEqual(request, { consumerId: "viewer", generation: 0, sourceKey: "key", fileIndex: 0,
+    fileName: "Film/episode.mkv", fileLength: 900, linkMbps: 18.5, linkSampleAgeMs: 120 });
+  assert.ok(waitElapsedMs >= 4250 && waitElapsedMs < 4300);
 });
 
 test("each picture is named with what belongs to it, by index", () => {

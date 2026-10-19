@@ -106,19 +106,20 @@ export class ViewerRequests {
    * @param {{ consumerId: string, generation: number, sourceKey: string, fileIndex: number, fileName: string, fileLength: number }} params
    * @returns {object | null}
    */
-  waitEstimateForFile({ consumerId, generation, sourceKey, fileIndex, fileName, fileLength, linkMbps, linkSampleAgeMs }) {
+  waitEstimateForFile({ consumerId, generation, sourceKey, fileIndex, fileName, fileLength, linkMbps, linkSampleAgeMs,
+    waitElapsedMs }) {
     if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string" ||
         !Number.isSafeInteger(fileIndex) || fileIndex < 0) return null;
     const waitId = `${sourceKey}:${fileIndex}:${generation}`;
     const key = `${consumerId}:${waitId}`;
     const extension = typeof fileName === "string" ? fileName.split(".").at(-1)?.toLowerCase() ?? "" : "";
+    const link = linkMeasurementOf(this.#host.viewers.get(consumerId), linkMbps, linkSampleAgeMs);
     const features = {
       extension,
       fileLength,
       downloadSpeed: null,
-      linkMbps: Number.isFinite(linkMbps) && linkMbps > 0
-        ? linkMbps : this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
-      linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
+      linkMbps: link.mbps,
+      linkSampleAgeMs: link.ageMs,
       preparedOutputBytes: this.#preparedOutputBytes(sourceKey, fileIndex),
       fileAvailable: null,
       headerRemaining: null,
@@ -126,19 +127,27 @@ export class ViewerRequests {
     };
     const current = this.#earlyWaits.get(key);
     if (current?.waitId === waitId && current.hasSourceObservation) {
-      const seconds = this.#host.firstFrameSecondsOf?.(current.features) ?? null;
+      const context = this.#setEarlyWait({ consumerId, generation, fileIndex, waitId, features,
+        revision: current.revision, current, waitElapsedMs });
+      const changed = this.#recordEarlyWaitSnapshot(context, context.features);
+      if (changed) context.revision += 1;
+      this.#pruneEarlyWaits();
+      const totalSeconds = this.#host.firstFrameSecondsOf?.(context.features) ?? null;
+      const seconds = earlyWaitRemainingSeconds(totalSeconds, waitElapsedSince(context, waitElapsedMs));
       if (!Number.isFinite(seconds) || seconds < 0) return null;
-      return { version: 1, waitId, revision: current.revision, remainingSeconds: seconds, ageMs: 0 };
+      return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
     }
     const sameWait = current?.waitId === waitId;
     const revision = sameWait ? current.revision : 0;
-    const context = this.#setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current });
-    const changed = this.#recordEarlyWaitSnapshot(context, features);
+    const context = this.#setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current,
+      waitElapsedMs });
+    const changed = this.#recordEarlyWaitSnapshot(context, context.features);
     if (sameWait && changed) context.revision += 1;
     this.#pruneEarlyWaits();
-    const seconds = this.#host.firstFrameSecondsOf?.(features) ?? null;
+    const totalSeconds = this.#host.firstFrameSecondsOf?.(context.features) ?? null;
+    const seconds = earlyWaitRemainingSeconds(totalSeconds, waitElapsedSince(context, waitElapsedMs));
     if (!Number.isFinite(seconds) || seconds < 0) return null;
-    return { version: 1, waitId, revision, remainingSeconds: seconds, ageMs: 0 };
+    return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
   }
 
   /**
@@ -149,35 +158,42 @@ export class ViewerRequests {
    * @returns {object | null}
    */
   waitEstimateForSource({ consumerId, generation, sourceKey, fileIndex, fileName = "", fileLength = null,
-    stats = {}, linkMbps, linkSampleAgeMs }) {
+    stats = {}, linkMbps, linkSampleAgeMs, waitElapsedMs, processing = {} }) {
     if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string") return null;
     const waitId = `${sourceKey}:${fileIndex ?? "all"}:${generation}`;
     const key = `${consumerId}:${waitId}`;
     const extension = typeof fileName === "string" ? fileName.split(".").at(-1)?.toLowerCase() ?? "" : "";
+    const link = linkMeasurementOf(this.#host.viewers.get(consumerId), linkMbps, linkSampleAgeMs);
     const features = {
       extension,
       fileLength: Number.isFinite(stats?.fileLength) && stats.fileLength > 0
         ? stats.fileLength : fileLength,
       downloadSpeed: stats?.downloadSpeed,
-      linkMbps: Number.isFinite(linkMbps) && linkMbps > 0
-        ? linkMbps : this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
-      linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
+      linkMbps: link.mbps,
+      linkSampleAgeMs: link.ageMs,
       preparedOutputBytes: Number.isSafeInteger(fileIndex) && fileIndex >= 0
         ? this.#preparedOutputBytes(sourceKey, fileIndex) : null,
       fileAvailable: typeof stats?.fileAvailable === "boolean" ? stats.fileAvailable : null,
       headerRemaining: Number.isFinite(stats?.headerBytes) && Number.isFinite(stats?.headerDownloadedBytes)
         ? Math.max(0, stats.headerBytes - stats.headerDownloadedBytes) : null,
-      peers: stats?.connectedPeers ?? stats?.numPeers
+      peers: stats?.connectedPeers ?? stats?.numPeers,
+      videoOperation: processing.videoOperation ?? null,
+      audioOperation: processing.audioOperation ?? null,
+      videoSpeedX: processing.videoSpeedX ?? null,
+      audioSpeedX: processing.audioSpeedX ?? null
     };
     const current = this.#earlyWaits.get(key);
-    const revision = current?.waitId === waitId ? current.revision + 1 : 0;
+    const sameWait = current?.waitId === waitId;
+    const revision = sameWait ? current.revision : 0;
     const context = this.#setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current,
-      sourceObserved: true });
-    this.#recordEarlyWaitSnapshot(context, features);
+      sourceObserved: true, waitElapsedMs });
+    const changed = this.#recordEarlyWaitSnapshot(context, context.features);
+    if (sameWait && changed) context.revision += 1;
     this.#pruneEarlyWaits();
-    const seconds = this.#host.firstFrameSecondsOf?.(features) ?? null;
+    const totalSeconds = this.#host.firstFrameSecondsOf?.(context.features) ?? null;
+    const seconds = earlyWaitRemainingSeconds(totalSeconds, waitElapsedSince(context, waitElapsedMs));
     if (!Number.isFinite(seconds) || seconds < 0) return null;
-    return { version: 1, waitId, revision, remainingSeconds: seconds, ageMs: 0 };
+    return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
   }
 
   /**
@@ -200,7 +216,8 @@ export class ViewerRequests {
     early.updatedAt = Date.now();
   }
 
-  #setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current, sourceObserved = false }) {
+  #setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current,
+    sourceObserved = false, waitElapsedMs }) {
     const sameWait = current?.waitId === waitId;
     const context = sameWait ? current : {
       consumerId,
@@ -211,7 +228,17 @@ export class ViewerRequests {
       hasSourceObservation: false,
       observedWaits: new Set()
     };
-    Object.assign(context, { consumerId, generation, fileIndex, waitId, features, updatedAt: Date.now(), revision,
+    const measuredAt = performance.now();
+    const actionElapsedMs = Number.isFinite(waitElapsedMs) && waitElapsedMs >= 0 ? waitElapsedMs : null;
+    const startedAt = actionElapsedMs === null
+      ? Number.isFinite(context.startedAt) ? context.startedAt : measuredAt
+      : measuredAt - actionElapsedMs;
+    const ageElapsedMs = Number.isFinite(context.featuresMeasuredAt)
+      ? Math.max(0, measuredAt - context.featuresMeasuredAt)
+      : 0;
+    const mergedFeatures = mergeWaitFeatures(context.features, features, ageElapsedMs);
+    Object.assign(context, { consumerId, generation, fileIndex, waitId, features: mergedFeatures,
+      featuresMeasuredAt: measuredAt, startedAt, updatedAt: Date.now(), revision,
       hasSourceObservation: context.hasSourceObservation || sourceObserved });
     this.#earlyWaits.set(`${consumerId}:${waitId}`, context);
     return context;
@@ -768,6 +795,7 @@ export class ViewerRequests {
 
     const sourceMeasurements = new Map();
     const sourceForecasts = new Map();
+    let primarySourceStats = null;
     const tracks = [];
     for (const output of outputs) {
       const trackProgress = output === session ? progress : this.#host.encodeRuns.progressOf(output);
@@ -803,6 +831,7 @@ export class ViewerRequests {
         } catch {
           stats = null;
         }
+        if (output === session && fileIndex === session.file.fileIndex) primarySourceStats = stats;
         parts.statsMs += performance.now() - statsAt;
         parts.workerForecastMs += Number(stats?.forecastMs) || 0;
         if (!sourceForecasts.has(output.file.sourceKey)) sourceForecasts.set(output.file.sourceKey, stats?.downloadForecast ?? { ranges: [] });
@@ -929,6 +958,27 @@ export class ViewerRequests {
           outputCodec: output.spec.audio.transcode ? "aac" : null }] : [])
       ];
     });
+    const generation = consumerId ? this.#host.generationOfRequest(consumerId) : null;
+    const earlyWaitId = Number.isSafeInteger(generation)
+      ? `${session.file.sourceKey}:${session.file.fileIndex}:${generation}` : null;
+    if (earlyWaitId && this.#earlyWaits.has(`${consumerId}:${earlyWaitId}`) && primarySourceStats) {
+      const linkMeasuredAt = Number(viewerReading?.linkMeasuredAt);
+      const videoOperation = forecast.operations.find(operation => operation.track === "video");
+      const audioOperation = forecast.operations.find(operation => operation.track === "audio");
+      const waitEstimate = this.waitEstimateForSource({ consumerId, generation,
+        sourceKey: session.file.sourceKey, fileIndex: session.file.fileIndex,
+        fileName: session.file.relativePath ?? session.file.name ?? "",
+        fileLength: primarySourceStats.fileLength, stats: primarySourceStats,
+        linkMbps: viewerReading?.linkMbps,
+        linkSampleAgeMs: Number.isFinite(linkMeasuredAt) ? Math.max(0, Date.now() - linkMeasuredAt) : undefined,
+        processing: {
+          videoOperation: videoOperation?.operation,
+          audioOperation: audioOperation?.operation,
+          videoSpeedX: videoOperation?.speed,
+          audioSpeedX: audioOperation?.speed
+        } });
+      if (waitEstimate) forecast.waitEstimate = waitEstimate;
+    }
     if (measurement.forecastReason !== forecast.reason) {
       measurement.forecastReason = forecast.reason;
       logger.info(`playback readiness ${session.id} consumer=${consumerId} ${JSON.stringify({
@@ -1132,6 +1182,91 @@ export class ViewerRequests {
     const source = state.sources.get(id);
     return source ? { free: source.free.snapshot(), delivered: source.delivered.snapshot() } : null;
   }
+}
+
+/**
+ * Keep a wait's measurements when a later response omits a field. Zero is a
+ * measurement for rates, peers and byte counts; only null or an invalid value
+ * means that this response did not measure the field.
+ *
+ * @param {object | null | undefined} previous
+ * @param {object} incoming
+ * @param {number} ageElapsedMs
+ * @returns {object}
+ */
+function mergeWaitFeatures(previous, incoming, ageElapsedMs) {
+  const merged = { ...(previous ?? {}) };
+  for (const [key, value] of Object.entries(incoming ?? {})) {
+    if (value === null || value === undefined) {
+      if (!Object.hasOwn(merged, key)) merged[key] = null;
+      continue;
+    }
+    if (key === "extension") {
+      if (typeof value === "string" && value.length > 0) merged[key] = value;
+      continue;
+    }
+    if (key === "fileAvailable") {
+      if (typeof value === "boolean") merged[key] = value;
+      continue;
+    }
+    if (key === "videoOperation" || key === "audioOperation") {
+      if (value === "copy" || value === "encode") merged[key] = value;
+      continue;
+    }
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 ||
+        ((key === "fileLength" || key === "linkMbps") && value === 0)) continue;
+    merged[key] = value;
+  }
+  const hasIncomingAge = Number.isFinite(incoming?.linkSampleAgeMs) && incoming.linkSampleAgeMs >= 0;
+  if (Number.isFinite(merged.linkSampleAgeMs) && !hasIncomingAge) {
+    merged.linkSampleAgeMs += Number.isFinite(ageElapsedMs) ? Math.max(0, ageElapsedMs) : 0;
+  }
+  return merged;
+}
+
+/**
+ * Read the separately measured viewer-to-proxy link and retain the age of the
+ * sample when an older page does not send it with its source request.
+ *
+ * @param {object | null | undefined} viewer
+ * @param {number | null | undefined} reportedMbps
+ * @param {number | null | undefined} reportedAgeMs
+ * @returns {{ mbps: number | null, ageMs: number | null }}
+ */
+function linkMeasurementOf(viewer, reportedMbps, reportedAgeMs) {
+  const reading = viewer?.linkReading?.() ?? null;
+  const mbps = Number.isFinite(reportedMbps) && reportedMbps > 0
+    ? reportedMbps
+    : Number.isFinite(reading?.linkMbps) && reading.linkMbps > 0 ? reading.linkMbps : null;
+  const ageMs = Number.isFinite(reportedAgeMs) && reportedAgeMs >= 0
+    ? reportedAgeMs
+    : Number.isFinite(reading?.linkMeasuredAt) ? Math.max(0, Date.now() - reading.linkMeasuredAt) : null;
+  return { mbps, ageMs };
+}
+
+/**
+ * Convert a learned full wait into the time still expected after this action.
+ *
+ * @param {number | null} totalSeconds
+ * @param {number} elapsedMs
+ * @returns {number | null}
+ */
+function earlyWaitRemainingSeconds(totalSeconds, elapsedMs) {
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0 || !Number.isFinite(elapsedMs) || elapsedMs < 0) return null;
+  return Math.max(0, totalSeconds - elapsedMs / 1000);
+}
+
+/**
+ * Prefer the browser's monotonic age of the original action; retain a proxy
+ * monotonic clock fallback for older pages that do not send it.
+ *
+ * @param {object} context
+ * @param {number | undefined} reportedElapsedMs
+ * @returns {number}
+ */
+function waitElapsedSince(context, reportedElapsedMs) {
+  if (Number.isFinite(reportedElapsedMs) && reportedElapsedMs >= 0) return reportedElapsedMs;
+  return Number.isFinite(context.startedAt) ? Math.max(0, performance.now() - context.startedAt) : 0;
 }
 
 /**

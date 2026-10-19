@@ -11,6 +11,7 @@ import fastifyCors from "@fastify/cors";
 import fastifyHelmet from "@fastify/helmet";
 import getPort from "get-port";
 import { createRequire } from "node:module";
+import { performance } from "node:perf_hooks";
 import { handleHealthGet } from "./routes/health/get.js";
 import { handleMediaGet } from "./routes/media/get.js";
 import { ProbeRequests } from "./services/media/ProbeRequests.js";
@@ -169,6 +170,22 @@ export async function startProxyServer({
   // without triggering Chromium's Private Network Access permission prompt.
   app.addHook("onRequest", async (_req, reply) => {
     reply.header("Access-Control-Allow-Private-Network", "true");
+  });
+  app.addHook("onRequest", async (req, reply) => {
+    const requestId = req.headers["x-ttv-forwarded-request-id"];
+    if (typeof requestId !== "string") return;
+    const startedAt = performance.now();
+    reply.raw.once("finish", () => {
+      logger.info(`[http-response] requestId=${requestId} method=${req.method} url=${req.url} ` +
+        `responseMs=${(performance.now() - startedAt).toFixed(1)} status=${reply.statusCode} ` +
+        `contentLength=${reply.raw.getHeader("content-length") ?? "unknown"}`);
+    });
+    reply.raw.once("close", () => {
+      if (!reply.raw.writableFinished) {
+        logger.warn(`[http-response] requestId=${requestId} method=${req.method} url=${req.url} ` +
+          `closedMs=${(performance.now() - startedAt).toFixed(1)} status=${reply.statusCode}`);
+      }
+    });
   });
 
   const sourceRegistry = createSourceRegistry(200);

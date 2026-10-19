@@ -84,6 +84,8 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
   const cancellation = new AbortController();
   const timing = { startedAt: performance.now(), openMs: 0, openCalls: 0,
     planWaitInclusiveMs: null, masterMs: null, offerMs: null, tracksMs: null };
+  const forwardedRequestId = typeof req.headers?.["x-ttv-forwarded-request-id"] === "string"
+    ? req.headers["x-ttv-forwarded-request-id"] : "unknown";
   const cancelled = () => cancellation.abort();
   reply.raw?.once?.("close", cancelled);
   if (reply.raw?.destroyed) cancelled();
@@ -220,6 +222,7 @@ export async function handleApiTranscodeSessionsPost(req, reply, { viewerRequest
     const elapsed = (key) => Number.isFinite(timing[key]) ? timing[key].toFixed(1) : "n/a";
     logger.info(
       `transcode-session timing outcome=${cancellation.signal.aborted ? "cancelled" : "handler-return"} ` +
+        `requestId=${forwardedRequestId} ` +
         `consumer=${consumerId || "unknown"} file=${fileIndex} openCalls=${timing.openCalls} ` +
         `openMs=${timing.openMs.toFixed(1)} planWaitInclusiveMs=${elapsed("planWaitInclusiveMs")} ` +
         `masterMs=${elapsed("masterMs")} offerMs=${elapsed("offerMs")} tracksMs=${elapsed("tracksMs")} ` +

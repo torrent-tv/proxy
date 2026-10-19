@@ -1171,7 +1171,11 @@ export function createDataChannelHandler({
     log(`[dc] ${method} ${path}${queryInfo}${bodyInfo}`);
 
     const targetUrl = `http://127.0.0.1:${proxyPort}${path}${query ? `?${query}` : ""}`;
-    const requestHeaders = { ...(forwardedHeaders ?? {}), host: `127.0.0.1:${proxyPort}` };
+    const requestHeaders = {
+      ...(forwardedHeaders ?? {}),
+      host: `127.0.0.1:${proxyPort}`,
+      "x-ttv-forwarded-request-id": requestId
+    };
 
     let response;
     // [net-debug] TEMPORARY: time spent in the local fetch (waiting for the

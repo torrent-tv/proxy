@@ -1,6 +1,9 @@
-## 2.101.31
+## Unreleased
 
 - **Fix**: Keep the active first-segment estimate during source polling so a historical prior cannot replace it (#ttv-185).
+
+## 2.101.31
+
 - **Fix**: Estimate the early first-frame wait from per-stage medians for the current cache and copy/encode path (#ttv-185).
 
 ## 2.101.30

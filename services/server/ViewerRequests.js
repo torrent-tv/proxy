@@ -958,7 +958,8 @@ export class ViewerRequests {
           outputCodec: output.spec.audio.transcode ? "aac" : null }] : [])
       ];
     });
-    const generation = consumerId ? this.#host.generationOfRequest(consumerId) : null;
+    const generation = consumerId && viewer?.assignments
+      ? this.#host.generationOfRequest(consumerId) : null;
     const earlyWaitId = Number.isSafeInteger(generation)
       ? `${session.file.sourceKey}:${session.file.fileIndex}:${generation}` : null;
     if (earlyWaitId && this.#earlyWaits.has(`${consumerId}:${earlyWaitId}`) && primarySourceStats) {

@@ -126,7 +126,7 @@ export class PacketRecords {
     return low;
   }
 
-  /** Visit records in presentation order storage whose time can overlap [from, to). */
+  /** Visit stored records whose presentation intervals can overlap [from, to). */
   forEachInTimeRange(from, to, visit) {
     for (const bounds of this.#timeBounds) {
       if (bounds.minPts >= to || (bounds.maxPts < from && bounds.maxEnd <= from)) continue;

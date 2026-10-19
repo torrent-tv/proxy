@@ -1,6 +1,6 @@
 ## Unreleased
 
-- **Fix** Use packet time bounds to avoid rescanning every reordered MP4 packet for each segment input (#ttv-185).
+- **Fix**: Use packet time bounds to avoid rescanning every reordered MP4 packet for each segment input (#ttv-185).
 
 ## 2.101.40
 

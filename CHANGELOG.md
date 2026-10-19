@@ -1,7 +1,7 @@
-## 2.101.25
+## Unreleased
 
 - **Fix**: Include the separately measured client link and its sample age in saved early first-frame wait observations (#ttv-185).
-- **Fix**: Learn host-specific first-frame waits per viewer, source, file and generation after required audio is buffered; return a saved estimate from source statistics before metadata is ready when the selected file is known, and include it in the file list when available (#ttv-185).
+
 
 ## 2.101.24
 

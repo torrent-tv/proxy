@@ -11,8 +11,8 @@ requires that declaration before using event-driven preparation.
 | Request | Required input | Successful answer |
 |---|---|---|
 | `POST /api/sources` | `{ sourceType, source, consumerId }`; older pages may omit `consumerId` | `{ sourceKey, playbackMapVersion: 1 }` identifies the source and declares source viewer reports and event-driven preparation. The page reports an update requirement if the declaration is missing. |
-| `GET /api/sources/:sourceKey/files?consumerId=ID&generation=N` | Registered `sourceKey`; viewer and action identity when available | Waits for metadata, terminal failure or cancellation without an elapsed deadline. Success returns `{ name, infoHash, files, items, shape }`. `files` carries `fileIndex`, `name`, `relativePath`, `length`, `kind`, exclusion facts and, when a host-matched observation exists, `waitEstimate` for video files. `items` omits samples and release-group promos, maps video indices to audio, subtitle and image indices, and carries filename-derived `episode` metadata. The visible indices are recorded for the viewer. |
-| `GET /api/sources/:sourceKey/stats?fileIndex=N&consumer=ID&generation=N&fileName=NAME&fileLength=BYTES` | Registered source; viewer action identity and, before torrent metadata, the selected file facts when locally known | Current peer, transfer, header, and file progress readings. A reading may not contain every measurement; absent or `null` measurements are unknown. While source or torrent metadata is pending, the response may still carry a host-matched `waitEstimate` when the page supplied the selected file facts; absent history leaves it out. |
+| `GET /api/sources/:sourceKey/files?consumerId=ID&generation=N&linkMbps=M&linkSampleAgeMs=MS` | Registered `sourceKey`; viewer/action identity and the client's separately measured link and sample age when available | Waits for metadata, terminal failure or cancellation without an elapsed deadline. Success returns `{ name, infoHash, files, items, shape }`. `files` carries `fileIndex`, `name`, `relativePath`, `length`, `kind`, exclusion facts and, when a host-matched observation exists, `waitEstimate` for video files. `items` omits samples and release-group promos, maps video indices to audio, subtitle and image indices, and carries filename-derived `episode` metadata. The visible indices are recorded for the viewer. |
+| `GET /api/sources/:sourceKey/stats?fileIndex=N&consumer=ID&generation=N&fileName=NAME&fileLength=BYTES&linkMbps=M&linkSampleAgeMs=MS` | Registered source; viewer action identity, selected file facts when locally known, and the client's separately measured link and sample age when available | Current peer, transfer, header, and file progress readings. A reading may not contain every measurement; absent or `null` measurements are unknown. While source or torrent metadata is pending, the response may still carry a host-matched `waitEstimate` when the page supplied the selected file facts; absent history leaves it out. |
 | `POST /api/sources/:sourceKey/warm` | Registered source | Compatibility acknowledgement `{ started, swarm, edges: false, fill: false }`. This does not create a download order; present viewers determine preparation. |
 | `POST /api/sources/:sourceKey/files/:fileIndex/viewer` | `{ consumerId, positionSeconds, generation, playing, waiting }` and optional seek, buffer and visibility readings | `{ received: true }` records direct playback. An obsolete selection returns `409`, `code: REQUEST_OBSOLETE`, `canRetry: false`. Older generations cannot restore a previous position. |
 | `GET /api/sources/:sourceKey/files/:fileIndex/container-metadata` | Registered source; file index | `200` with what the file states about the work: `{ title, otherTitles, segmentTitle, seriesTitle, season, episode, episodeId, episodeTitle, year, itemYear, genres, description, externalIds, trackTitles, chapterTitles, cover, outsideEdges }` (`services/media/container/work-tags.js`). `202 { status: "pending" }` while the first or last piece of the file has not arrived; `404` where the format states nothing this proxy reads. Read only from the edges of the file, which opening it fetches anyway, and from bytes already held; `outsideEdges` says something lay elsewhere and was left out. |
@@ -150,12 +150,15 @@ The file list may carry an initial `waitEstimate` before a transcode session
 exists, so the browser can start its countdown at file selection without a new
 round trip. The source statistics response may revise that estimate as current
 source readings arrive. The optional viewer and `generation` query fields scope
-both responses to one viewer action. The proxy uses the closest saved
-first-frame outcome measured on the current encoder configuration and compares
-the source file size, file suffix, source download rate, remaining header bytes,
-connected peers and browser link rate. The browser subtracts elapsed wait using
-its monotonic clock. This value is an initial point estimate; it does not
-authorize playback and does not replace the full readiness calculation.
+both responses to one viewer action. Before a transcode session exists, the
+page supplies its separately measured client-link rate and the age of its
+newest sample; this does not combine client delivery with peer-to-proxy
+download. The proxy compares all measurements shared with its closest saved
+first-frame outcome on the current encoder configuration. Older saved outcomes
+may not have a link reading, so that dimension cannot affect their match. The
+browser subtracts elapsed wait using its monotonic clock. This value is an
+initial point estimate; it does not authorize playback and does not replace the
+full readiness calculation.
 
 | Field | Meaning |
 |---|---|

@@ -280,6 +280,7 @@ export class LocalObservations {
       fileLength: positive(features.fileLength),
       downloadSpeed: nonNegative(features.downloadSpeed),
       linkMbps: nonNegative(features.linkMbps),
+      linkSampleAgeMs: nonNegative(features.linkSampleAgeMs),
       headerRemaining: nonNegative(features.headerRemaining),
       peers: nonNegative(features.peers),
       at: this.#now()
@@ -302,7 +303,7 @@ export class LocalObservations {
     const readings = this.#entries.firstFrame[this.#firstFrameKey()] ?? [];
     const candidates = readings.filter(reading => reading.extension === (features.extension ?? ""));
     if (candidates.length === 0) return null;
-    const dimensions = ["fileLength", "downloadSpeed", "linkMbps", "headerRemaining", "peers"];
+    const dimensions = ["fileLength", "downloadSpeed", "linkMbps", "linkSampleAgeMs", "headerRemaining", "peers"];
     const scales = new Map(dimensions.map(key => [key, median(candidates
       .map(reading => nonNegative(reading[key]))
       .filter(value => value !== null && value > 0))]));

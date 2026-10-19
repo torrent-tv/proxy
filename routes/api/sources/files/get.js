@@ -75,10 +75,15 @@ export async function handleApiSourceFilesGet(req, reply, { sourceRegistry, torr
   if (consumerId) viewers?.visibleFiles(consumerId, sourceKey, contents.items.map(item => item.fileIndex));
   const generationRaw = typeof req.query?.generation === "string" ? req.query.generation : "";
   const generation = generationRaw !== "" && /^\d+$/.test(generationRaw) ? Number(generationRaw) : null;
+  const linkMbps = Number(req.query?.linkMbps);
+  const linkSampleAgeMs = Number(req.query?.linkSampleAgeMs);
+  const earlyLink = Number.isFinite(linkMbps) && linkMbps > 0
+    ? { linkMbps, linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null }
+    : {};
   const files = contents.files().map(file => {
     if (!consumerId || !Number.isSafeInteger(generation) || file.kind !== "video" || file.excludedReason) return file;
     const waitEstimate = viewerRequests?.waitEstimateForFile?.({ consumerId, generation, sourceKey,
-      fileIndex: file.fileIndex, fileName: file.relativePath ?? file.name, fileLength: file.length }) ?? null;
+      fileIndex: file.fileIndex, fileName: file.relativePath ?? file.name, fileLength: file.length, ...earlyLink }) ?? null;
     return waitEstimate ? { ...file, waitEstimate } : file;
   });
   return reply.send({

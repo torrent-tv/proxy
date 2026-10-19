@@ -37,9 +37,14 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   const requestedFileName = typeof req.query.fileName === "string" ? req.query.fileName : "";
   const requestedFileLength = typeof req.query.fileLength === "string" && /^\d+$/.test(req.query.fileLength)
     ? Number(req.query.fileLength) : null;
+  const linkMbps = Number(req.query.linkMbps);
+  const linkSampleAgeMs = Number(req.query.linkSampleAgeMs);
+  const earlyLink = Number.isFinite(linkMbps) && linkMbps > 0
+    ? { linkMbps, linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null }
+    : {};
   const initialEstimate = () => consumerId && Number.isSafeInteger(generation) && Number.isSafeInteger(fileIndex)
     ? viewerRequests?.waitEstimateForFile?.({ consumerId, generation, sourceKey, fileIndex,
-      fileName: requestedFileName, fileLength: requestedFileLength }) ?? null
+      fileName: requestedFileName, fileLength: requestedFileLength, ...earlyLink }) ?? null
     : null;
 
   let torrent;
@@ -137,7 +142,7 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
 
   const waitEstimate = consumerId && Number.isSafeInteger(generation)
     ? viewerRequests?.waitEstimateForSource?.({ consumerId, generation, sourceKey, fileIndex,
-      fileName: torrent.files?.[fileIndex]?.name ?? requestedFileName, fileLength: requestedFileLength, stats }) ?? null
+      fileName: torrent.files?.[fileIndex]?.name ?? requestedFileName, fileLength: requestedFileLength, stats, ...earlyLink }) ?? null
     : null;
   return reply.send(waitEstimate ? { ...stats, waitEstimate } : stats);
 }

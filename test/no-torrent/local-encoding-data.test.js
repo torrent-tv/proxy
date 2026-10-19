@@ -318,6 +318,18 @@ test("first-frame distance treats measured zeros separately from missing inputs"
   assert.equal(observations.firstFrameSeconds({ extension: "mkv" }), null);
 });
 
+test("first-frame distance uses the age of the separately measured client link", () => {
+  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  observations.load([software]);
+  const shared = { extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 10,
+    headerRemaining: 0, peers: 0 };
+  observations.noteFirstFrame({ seconds: 6, features: { ...shared, linkSampleAgeMs: 100 } });
+  observations.noteFirstFrame({ seconds: 18, features: { ...shared, linkSampleAgeMs: 10_000 } });
+
+  assert.equal(observations.firstFrameSeconds({ ...shared, linkSampleAgeMs: 100 }), 6);
+});
+
 test("a speed seen on easier material is not applied to harder material, and the slowest comparable one is used", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const light = { codec: "hevc", bitDepth: 10, width: 1920, height: 1080, megabitsPerSecond: 4 };

@@ -106,7 +106,7 @@ export class ViewerRequests {
    * @param {{ consumerId: string, generation: number, sourceKey: string, fileIndex: number, fileName: string, fileLength: number }} params
    * @returns {object | null}
    */
-  waitEstimateForFile({ consumerId, generation, sourceKey, fileIndex, fileName, fileLength }) {
+  waitEstimateForFile({ consumerId, generation, sourceKey, fileIndex, fileName, fileLength, linkMbps, linkSampleAgeMs }) {
     if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string" ||
         !Number.isSafeInteger(fileIndex) || fileIndex < 0) return null;
     const waitId = `${sourceKey}:${fileIndex}:${generation}`;
@@ -116,7 +116,9 @@ export class ViewerRequests {
       extension,
       fileLength,
       downloadSpeed: null,
-      linkMbps: this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
+      linkMbps: Number.isFinite(linkMbps) && linkMbps > 0
+        ? linkMbps : this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
+      linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
       headerRemaining: null,
       peers: null
     };
@@ -144,7 +146,8 @@ export class ViewerRequests {
    * @param {{ consumerId: string, generation: number, sourceKey: string, fileIndex: number | null, fileName?: string, fileLength?: number | null, stats?: object }} params
    * @returns {object | null}
    */
-  waitEstimateForSource({ consumerId, generation, sourceKey, fileIndex, fileName = "", fileLength = null, stats = {} }) {
+  waitEstimateForSource({ consumerId, generation, sourceKey, fileIndex, fileName = "", fileLength = null,
+    stats = {}, linkMbps, linkSampleAgeMs }) {
     if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string") return null;
     const waitId = `${sourceKey}:${fileIndex ?? "all"}:${generation}`;
     const key = `${consumerId}:${waitId}`;
@@ -154,7 +157,9 @@ export class ViewerRequests {
       fileLength: Number.isFinite(stats?.fileLength) && stats.fileLength > 0
         ? stats.fileLength : fileLength,
       downloadSpeed: stats?.downloadSpeed,
-      linkMbps: this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
+      linkMbps: Number.isFinite(linkMbps) && linkMbps > 0
+        ? linkMbps : this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
+      linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
       headerRemaining: Number.isFinite(stats?.headerBytes) && Number.isFinite(stats?.headerDownloadedBytes)
         ? Math.max(0, stats.headerBytes - stats.headerDownloadedBytes) : null,
       peers: stats?.connectedPeers ?? stats?.numPeers

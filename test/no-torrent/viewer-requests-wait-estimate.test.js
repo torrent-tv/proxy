@@ -14,7 +14,7 @@ test("early forecasts retain one wait identity, advance revisions, and learn the
   });
   const source = {
     consumerId: "viewer", generation: 2, sourceKey: "torrent:hash", fileIndex: 4,
-    fileName: "Film.mkv",
+    fileName: "Film.mkv", linkMbps: 24, linkSampleAgeMs: 130,
     stats: { fileLength: 4_000_000, downloadSpeed: 1_200_000, headerBytes: 600, headerDownloadedBytes: 100,
       connectedPeers: 8 }
   };
@@ -26,7 +26,7 @@ test("early forecasts retain one wait identity, advance revisions, and learn the
   assert.equal(second.waitId, first.waitId);
   assert.equal(second.revision, 1);
   assert.deepEqual(features[0], {
-    extension: "mkv", fileLength: 4_000_000, downloadSpeed: 1_200_000, linkMbps: 32,
+    extension: "mkv", fileLength: 4_000_000, downloadSpeed: 1_200_000, linkMbps: 24, linkSampleAgeMs: 130,
     headerRemaining: 500, peers: 8
   });
 
@@ -45,9 +45,10 @@ test("the file-list estimate is immediately refined by source readings for the s
     noteFirstFrame: () => {}
   });
   const early = requests.waitEstimateForFile({ consumerId: "viewer", generation: 0, sourceKey: "source",
-    fileIndex: 2, fileName: "Film.avi", fileLength: 800 });
+    fileIndex: 2, fileName: "Film.avi", fileLength: 800, linkMbps: 20, linkSampleAgeMs: 80 });
   const revised = requests.waitEstimateForSource({ consumerId: "viewer", generation: 0, sourceKey: "source",
-    fileIndex: 2, fileName: "Film.avi", stats: { downloadSpeed: 100, fileLength: 800, numPeers: 4 } });
+    fileIndex: 2, fileName: "Film.avi", linkMbps: 20, linkSampleAgeMs: 80,
+    stats: { downloadSpeed: 100, fileLength: 800, numPeers: 4 } });
 
   assert.equal(early.waitId, revised.waitId);
   assert.equal(revised.revision, early.revision + 1);
@@ -77,9 +78,10 @@ test("first-frame learning pairs each source snapshot with its remaining wait", 
     noteFirstFrame: value => noted.push(value)
   });
   requests.waitEstimateForFile({ consumerId: "viewer", generation: 0, sourceKey: "source",
-    fileIndex: 2, fileName: "Film.avi", fileLength: 800 });
+    fileIndex: 2, fileName: "Film.avi", fileLength: 800, linkMbps: 20, linkSampleAgeMs: 80 });
   requests.waitEstimateForSource({ consumerId: "viewer", generation: 0, sourceKey: "source", fileIndex: 2,
-    fileName: "Film.avi", stats: { downloadSpeed: 100, fileLength: 800, numPeers: 4 } });
+    fileName: "Film.avi", linkMbps: 20, linkSampleAgeMs: 80,
+    stats: { downloadSpeed: 100, fileLength: 800, numPeers: 4 } });
 
   requests.noteFirstFrameObservation({ consumerId: "viewer", generation: 0, waitId: "source:2:0",
     wait: 1, elapsedMs: 10_000 });
@@ -89,6 +91,8 @@ test("first-frame learning pairs each source snapshot with its remaining wait", 
   assert.ok(Math.abs(noted[1].seconds - 10) < 0.001);
   assert.equal(noted[0].features.downloadSpeed, null);
   assert.equal(noted[1].features.downloadSpeed, 100);
+  assert.equal(noted[0].features.linkMbps, 20);
+  assert.equal(noted[1].features.linkSampleAgeMs, 80);
 });
 
 test("file-list outcomes keep their own source measurements when several videos are listed", () => {

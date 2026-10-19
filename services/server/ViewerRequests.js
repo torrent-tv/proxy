@@ -8,7 +8,7 @@
  */
 
 import { logger } from "../../utils/logger.js";
-import { isOutputName } from "../encode/output/index.js";
+import { isOutputName, OutputSpec } from "../encode/output/index.js";
 import { withSubtitleReadiness } from "./subtitle-readiness.js";
 
 function isWarmupTimeoutError(error) {
@@ -190,7 +190,10 @@ export class ViewerRequests {
     const changed = this.#recordEarlyWaitSnapshot(context, context.features);
     if (sameWait && changed) context.revision += 1;
     this.#pruneEarlyWaits();
-    const totalSeconds = this.#host.firstFrameSecondsOf?.(context.features) ?? null;
+    const measuredWorkSeconds = processing.firstRequiredSegmentsSeconds;
+    const totalSeconds = Number.isFinite(measuredWorkSeconds) && measuredWorkSeconds >= 0
+      ? waitElapsedSince(context, waitElapsedMs) / 1000 + measuredWorkSeconds
+      : this.#host.firstFrameSecondsOf?.(context.features) ?? null;
     const seconds = earlyWaitRemainingSeconds(totalSeconds, waitElapsedSince(context, waitElapsedMs));
     if (!Number.isFinite(seconds) || seconds < 0) return null;
     return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
@@ -201,16 +204,20 @@ export class ViewerRequests {
    * viewing. The saved source and link readings are the ones available at
    * selection time, before the full track plan existed.
    *
-   * @param {{ consumerId: string, generation: number, waitId: string, wait: number, elapsedMs: number }} params
+   * @param {{ consumerId: string, generation: number, waitId: string, wait: number, elapsedMs: number,
+   *   stages?: { totalMs: number, transportMs: number, planMs: number, prepareMs: number,
+   *     prebufferMs: number, presentationMs: number } | null }} params
    * @returns {void}
    */
-  noteFirstFrameObservation({ consumerId, generation, waitId, wait, elapsedMs }) {
+  noteFirstFrameObservation({ consumerId, generation, waitId, wait, elapsedMs, stages = null }) {
     const key = `${consumerId}:${waitId}`;
     const early = this.#earlyWaits.get(key);
     if (!early || early.generation !== generation || !Number.isSafeInteger(wait) || wait < 0 || early.observedWaits.has(wait) ||
         !Number.isFinite(elapsedMs) || elapsedMs < 0) return;
-    for (const snapshot of early.snapshots) {
-      this.#host.noteFirstFrame?.({ seconds: elapsedMs / 1000, features: snapshot });
+    const initialFeatures = early.snapshots[0];
+    if (initialFeatures) {
+      this.#host.noteFirstFrame?.({ seconds: elapsedMs / 1000, features: initialFeatures,
+        featureSnapshots: early.snapshots.slice(1), stages });
     }
     early.observedWaits.add(wait);
     early.updatedAt = Date.now();
@@ -259,11 +266,21 @@ export class ViewerRequests {
     if (!outputs?.values || !segmentStore?.sizesOf) return null;
     let bytes = 0;
     const seen = new Set();
-    for (const output of outputs.values()) {
-      if (output.file?.sourceKey !== sourceKey || output.file?.fileIndex !== fileIndex || !output.outputKey) continue;
-      if (seen.has(output.outputKey)) continue;
-      seen.add(output.outputKey);
-      for (const size of segmentStore.sizesOf(output.outputKey).values()) {
+    const liveOutputs = [...outputs.values()];
+    const keys = new Set([
+      ...liveOutputs.map(output => output.outputKey),
+      ...(segmentStore.addresses?.() ?? [])
+    ].filter(key => typeof key === "string" && key.length > 0));
+    for (const outputKey of keys) {
+      const output = liveOutputs.find(candidate => candidate.outputKey === outputKey);
+      const spec = output ? null : OutputSpec.fromKey(outputKey);
+      const matchesFile = output
+        ? output.file?.sourceKey === sourceKey && output.file?.fileIndex === fileIndex
+        : spec?.sourceKey === sourceKey &&
+          (spec.video?.fileIndex === fileIndex || spec.audio?.fileIndex === fileIndex);
+      if (!matchesFile || seen.has(outputKey)) continue;
+      seen.add(outputKey);
+      for (const size of segmentStore.sizesOf(outputKey).values()) {
         if (Number.isFinite(size) && size > 0) bytes += size;
       }
     }
@@ -976,7 +993,8 @@ export class ViewerRequests {
           videoOperation: videoOperation?.operation,
           audioOperation: audioOperation?.operation,
           videoSpeedX: videoOperation?.speed,
-          audioSpeedX: audioOperation?.speed
+          audioSpeedX: audioOperation?.speed,
+          firstRequiredSegmentsSeconds: forecast.firstRequiredSegmentsSeconds
         } });
       if (waitEstimate) forecast.waitEstimate = waitEstimate;
     }

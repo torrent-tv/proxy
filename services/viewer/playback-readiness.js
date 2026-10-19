@@ -542,6 +542,15 @@ export function predictPlaybackReadiness(input = {}) {
         ...(stop.unavailableSource ? { unavailableSource: stop.unavailableSource } : {}) };
     }
   }
+  const firstRequiredTrackSeconds = trackState.slice(0, requiredTracks).map((state, trackIndex) => {
+    const first = state.segments.find(segment => segment.endSeconds > position);
+    if (!first) return 0;
+    if (first.ranges.every(range => contains(state.clientRanges, range.start, range.end))) return 0;
+    const completion = completions.find(item => item.trackIndex === trackIndex && item.segment.index === first.index);
+    return completion?.at ?? null;
+  });
+  const firstRequiredSegmentsSeconds = firstRequiredTrackSeconds.every(Number.isFinite)
+    ? Math.max(0, ...firstRequiredTrackSeconds) : null;
   const delay = Math.max(0, ...constraints);
   const originReady = trackState.every(({ clientRanges }) => compare(contiguousEnd(clientRanges, at), at) > 0);
   const ready = delay === 0 && originReady;
@@ -549,6 +558,7 @@ export function predictPlaybackReadiness(input = {}) {
     Math.max(0, reserve - buffered), ready ? 'trajectory-safe-now' :
       Number.isFinite(delay) ? 'minimum-safe-delay' : 'service-not-advancing', preparedSegments);
   return { ...forecast, measuredAt: now, predictedStartAt: Number.isFinite(delay) ? now + delay * 1000 : null,
+    firstRequiredSegmentsSeconds,
     // The piece whose `kind` — its production, or its delivery to the page —
     // comes `atSeconds` from now while the media before it lasts
     // `aheadSeconds`: the difference is the delay.

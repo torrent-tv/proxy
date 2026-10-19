@@ -58,6 +58,12 @@ test("finds the first safe start from segments delivered before playback", () =>
   assert.ok(Math.abs(forecast.delaySeconds - 1) < 1e-8);
 });
 
+test("forecasts the first required segment from source, processing, and client delivery service", () => {
+  const forecast = predictPlaybackReadiness(input());
+
+  assert.equal(forecast.firstRequiredSegmentsSeconds, 1);
+});
+
 test("an encoder's rate is its pieces over their time, and a swarm's its bytes over the span", () => {
   // A first piece of credits read 6.49x and the next 0.57x (Home Assistant
   // 2026-10-12, torrent-tv/meta#178): the film they make together took the
@@ -251,6 +257,8 @@ test("an unmapped source piece stays unknown without positive measured download 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "service-not-advancing");
   assert.equal(forecast.delaySeconds, null);
+  assert.equal(forecast.firstRequiredSegmentsSeconds ?? null, null,
+    "an unavailable first required segment has an unknown arrival time, not zero seconds");
 });
 
 test("overlapping unordered arrivals preserve the latest required byte and ignore unrelated arrivals", () => {
@@ -444,6 +452,7 @@ test("does not produce an ETA without a client-link measurement", () => {
 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.delaySeconds, null);
+  assert.equal(forecast.firstRequiredSegmentsSeconds ?? null, null);
   assert.equal(forecast.reason, "link-rate-unavailable");
 });
 

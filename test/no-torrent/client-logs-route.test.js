@@ -38,12 +38,15 @@ test("a presented-frame measurement is tied to the viewer and viewing generation
   const reply = { code: () => reply, send: () => reply };
   await handleApiClientLogsPost({ body: { lines: [{
     ...line,
-    msg: "[first-frame-observation] consumer=consumer-123 generation=2 waitId=source:4:2 wait=4 audioReady=true elapsedMs=12500.500"
+    msg: "[first-frame-observation] consumer=consumer-123 generation=2 waitId=source:4:2 wait=4 audioReady=true elapsedMs=12500.500 " +
+      "coldStartTotalMs=12000 transportMs=100 planMs=200 prepareMs=300 prebufferMs=11400 presentationMs=500.500"
   }] } }, reply, {
     clientLogs: null,
     viewerRequests: { noteFirstFrameObservation: value => { observation = value; } }
   });
-  assert.deepEqual(observation, { consumerId: "consumer-123", generation: 2, waitId: "source:4:2", wait: 4, elapsedMs: 12500.5 });
+  assert.deepEqual(observation, { consumerId: "consumer-123", generation: 2, waitId: "source:4:2", wait: 4,
+    elapsedMs: 12500.5, stages: { totalMs: 12000, transportMs: 100, planMs: 200, prepareMs: 300,
+      prebufferMs: 11400, presentationMs: 500.5 } });
 });
 
 test("a malformed presented-frame measurement is ignored", async () => {

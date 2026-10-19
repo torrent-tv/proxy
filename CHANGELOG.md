@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Predict the first-frame wait from separately measured startup stages, reject prior observations missing known source/cache state, and use the first displayed estimate inputs once per run (#ttv-185).
+
 ## 2.101.29
 
 - **Fix**: Merge early link, source and file readings, subtract elapsed action time, and revise the same wait with measured per-track copy/encode rates (#ttv-185).

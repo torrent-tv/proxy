@@ -1032,48 +1032,6 @@ export class SegmentServing {
   }
 
   /**
-   * Wait for a valid HLS playlist or a terminal output state, without polling.
-   *
-   * @param {HlsSession} session
-   * @returns {Promise<void>}
-   */
-  async waitUntilReady(session) {
-    // With a synthetic VOD playlist there is nothing to wait for: the playlist
-    // is generated from the probed duration and is available immediately.
-    // Individual segments are long-polled by the segment route as ffmpeg
-    // produces them.
-    if (session.useSyntheticPlaylist) {
-      if (this.#host.encodeRuns.hasFailed(session)) {
-        throw new Error(this.#host.encodeRuns.lastErrorOf(session) || "ffmpeg failed to start HLS session.");
-      }
-      return;
-    }
-
-    const playlistPath = path.join(this.#host.segmentStore.pathFor(session.outputKey ?? ""), PLAYLIST_FILE_NAME);
-    while (this.#host.outputs.get(session.id) === session) {
-      const change = this.subscribeFileChange(session.id);
-      try {
-      if (this.#host.encodeRuns.hasFailed(session)) {
-        throw new Error(this.#host.encodeRuns.lastErrorOf(session) || "ffmpeg failed to start HLS session.");
-      }
-      try {
-        await access(playlistPath);
-        const text = await readFile(playlistPath, "utf8");
-        if (text.includes("#EXTM3U")) {
-            return;
-        }
-      } catch (_error) {
-        // Playlist is not ready yet.
-      }
-      await change.changed;
-      } finally {
-        change.release();
-      }
-    }
-    throw new Error("HLS output was disposed before its playlist became available.");
-  }
-
-  /**
    * Answer the player's report that a delivered fragment sits far from the edge
    * of its buffer, with the one fact only this side holds: which boundary the
    * segment of that number really begins at.

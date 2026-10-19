@@ -631,7 +631,6 @@ export function wireOutputs({
     getSourceStats: (...args) => parts.getSourceStats?.(...args) ?? null,
     disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
     planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
-    waitUntilReady: (...args) => parts.serving.waitUntilReady(...args),
     noteViewerWaiting: (viewer, wait) => parts.encodeOrchestrator?.noteViewerWaiting(viewer, wait),
     get encodeRuns() { return parts.encodeRuns; },
     // When this viewer's playback can start and run to the end: the viewer

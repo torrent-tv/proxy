@@ -203,9 +203,11 @@ export class ViewerRequests {
     const changed = featuresChanged || activeEstimateChanged;
     if (sameWait && changed) context.revision += 1;
     this.#pruneEarlyWaits();
-    const totalSeconds = Number.isFinite(activeTotalSeconds)
-      ? activeTotalSeconds
-      : this.#host.firstFrameSecondsOf?.(context.features) ?? null;
+    const progressHasComponentForecast = Object.hasOwn(processing, "firstRequiredSegmentsSeconds");
+    let totalSeconds = activeTotalSeconds;
+    if (!Number.isFinite(totalSeconds) && !progressHasComponentForecast) {
+      totalSeconds = this.#host.firstFrameSecondsOf?.(context.features) ?? null;
+    }
     const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
     if (!Number.isFinite(seconds) || seconds < 0) return null;
     return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };

@@ -79,6 +79,45 @@ test("a component forecast replaces the historical total when first-segment work
   assert.equal(historicalLookupCalled, false);
 });
 
+test("source polls and delayed file lists preserve the component estimate once it exists", () => {
+  const requests = new ViewerRequests({
+    viewers: { get: () => null },
+    firstFrameSecondsOf: () => 52.371
+  });
+  const source = { consumerId: "viewer", generation: 0, sourceKey: "source", fileIndex: 2,
+    fileName: "Film.avi", fileLength: 800, stats: { downloadSpeed: 100, fileLength: 800, numPeers: 4 } };
+  requests.waitEstimateForSource({ ...source, waitElapsedMs: 0 });
+  const active = requests.waitEstimateForSource({ ...source, waitElapsedMs: 50_000,
+    processing: { firstRequiredSegmentsSeconds: 14.2 } });
+  const sourcePoll = requests.waitEstimateForSource({ ...source,
+    stats: { ...source.stats, downloadSpeed: 200 }, waitElapsedMs: 50_500 });
+  const delayedFileList = requests.waitEstimateForFile({ consumerId: "viewer", generation: 0,
+    sourceKey: "source", fileIndex: 2, fileName: "Film.avi", fileLength: 800, waitElapsedMs: 50_500 });
+
+  assert.ok(Math.abs(active.remainingSeconds - 14.2) < 0.001);
+  assert.ok(Math.abs(sourcePoll.remainingSeconds - 13.7) < 0.001,
+    "a source-only poll must count down the latest component forecast, not restore the historical prior");
+  assert.equal(sourcePoll.revision, active.revision + 1);
+  assert.ok(Math.abs(delayedFileList.remainingSeconds - 13.7) < 0.001,
+    "a delayed file-list answer must not replace the active component forecast");
+});
+
+test("a changed component forecast advances its revision even when source readings do not change", () => {
+  const requests = new ViewerRequests({
+    viewers: { get: () => null },
+    firstFrameSecondsOf: () => 52.371
+  });
+  const source = { consumerId: "viewer", generation: 0, sourceKey: "source", fileIndex: 2,
+    fileName: "Film.avi", fileLength: 800, stats: { downloadSpeed: 100, fileLength: 800, numPeers: 4 } };
+  const first = requests.waitEstimateForSource({ ...source, waitElapsedMs: 50_000,
+    processing: { firstRequiredSegmentsSeconds: 14.2 } });
+  const revised = requests.waitEstimateForSource({ ...source, waitElapsedMs: 51_000,
+    processing: { firstRequiredSegmentsSeconds: 13 } });
+
+  assert.equal(revised.remainingSeconds, 13);
+  assert.equal(revised.revision, first.revision + 1);
+});
+
 test("early source measurements include prepared output files that are only on disk", () => {
   const features = [];
   const outputKey = new OutputSpec({ sourceKey: "source", segmentFormatId: "fmp4",

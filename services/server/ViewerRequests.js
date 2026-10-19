@@ -132,7 +132,9 @@ export class ViewerRequests {
       const changed = this.#recordEarlyWaitSnapshot(context, context.features);
       if (changed) context.revision += 1;
       this.#pruneEarlyWaits();
-      const totalSeconds = this.#host.firstFrameSecondsOf?.(context.features) ?? null;
+      const totalSeconds = Number.isFinite(context.activeTotalSeconds)
+        ? context.activeTotalSeconds
+        : this.#host.firstFrameSecondsOf?.(context.features) ?? null;
       const seconds = earlyWaitRemainingSeconds(totalSeconds, waitElapsedSince(context, waitElapsedMs));
       if (!Number.isFinite(seconds) || seconds < 0) return null;
       return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
@@ -144,7 +146,9 @@ export class ViewerRequests {
     const changed = this.#recordEarlyWaitSnapshot(context, context.features);
     if (sameWait && changed) context.revision += 1;
     this.#pruneEarlyWaits();
-    const totalSeconds = this.#host.firstFrameSecondsOf?.(context.features) ?? null;
+    const totalSeconds = Number.isFinite(context.activeTotalSeconds)
+      ? context.activeTotalSeconds
+      : this.#host.firstFrameSecondsOf?.(context.features) ?? null;
     const seconds = earlyWaitRemainingSeconds(totalSeconds, waitElapsedSince(context, waitElapsedMs));
     if (!Number.isFinite(seconds) || seconds < 0) return null;
     return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
@@ -187,14 +191,22 @@ export class ViewerRequests {
     const revision = sameWait ? current.revision : 0;
     const context = this.#setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current,
       sourceObserved: true, waitElapsedMs });
-    const changed = this.#recordEarlyWaitSnapshot(context, context.features);
+    const featuresChanged = this.#recordEarlyWaitSnapshot(context, context.features);
+    const elapsedMs = waitElapsedSince(context, waitElapsedMs);
+    const measuredWorkSeconds = processing.firstRequiredSegmentsSeconds;
+    const hasActiveEstimate = Number.isFinite(measuredWorkSeconds) && measuredWorkSeconds >= 0;
+    const activeTotalSeconds = hasActiveEstimate
+      ? elapsedMs / 1000 + measuredWorkSeconds
+      : context.activeTotalSeconds;
+    const activeEstimateChanged = hasActiveEstimate && activeTotalSeconds !== context.activeTotalSeconds;
+    if (hasActiveEstimate) context.activeTotalSeconds = activeTotalSeconds;
+    const changed = featuresChanged || activeEstimateChanged;
     if (sameWait && changed) context.revision += 1;
     this.#pruneEarlyWaits();
-    const measuredWorkSeconds = processing.firstRequiredSegmentsSeconds;
-    const totalSeconds = Number.isFinite(measuredWorkSeconds) && measuredWorkSeconds >= 0
-      ? waitElapsedSince(context, waitElapsedMs) / 1000 + measuredWorkSeconds
+    const totalSeconds = Number.isFinite(activeTotalSeconds)
+      ? activeTotalSeconds
       : this.#host.firstFrameSecondsOf?.(context.features) ?? null;
-    const seconds = earlyWaitRemainingSeconds(totalSeconds, waitElapsedSince(context, waitElapsedMs));
+    const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
     if (!Number.isFinite(seconds) || seconds < 0) return null;
     return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
   }

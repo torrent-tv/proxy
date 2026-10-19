@@ -1,6 +1,6 @@
 ## 2.101.36
 
-- **Chore**: Record proxy session-planning and source-stat wait durations for forecast diagnosis (#ttv-185).
+- **Chore**: Correlate proxy route completion and local HTTP response timing for forecast diagnosis (#ttv-185).
 
 ## 2.101.35
 

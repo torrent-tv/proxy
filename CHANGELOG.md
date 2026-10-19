@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Do not publish the historical wait prior as a segment forecast before source ranges are mapped (#ttv-185).
+
 ## 2.101.32
 
 - **Fix**: Keep the active first-segment estimate during source polling so a historical prior cannot replace it (#ttv-185).

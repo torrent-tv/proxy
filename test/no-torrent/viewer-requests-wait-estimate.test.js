@@ -79,6 +79,27 @@ test("a component forecast replaces the historical total when first-segment work
   assert.equal(historicalLookupCalled, false);
 });
 
+test("progress without mapped source ranges does not relabel the history prior as a component forecast", () => {
+  let historicalLookups = 0;
+  const requests = new ViewerRequests({
+    viewers: { get: () => null },
+    firstFrameSecondsOf: () => { historicalLookups += 1; return 14; }
+  });
+  const source = { consumerId: "viewer", generation: 0, sourceKey: "source", fileIndex: 2,
+    fileName: "Film.avi", stats: { fileLength: 800, downloadSpeed: 100, numPeers: 2 } };
+
+  const initial = requests.waitEstimateForSource({ ...source, waitElapsedMs: 0 });
+  const unavailable = requests.waitEstimateForSource({ ...source, waitElapsedMs: 5_000,
+    processing: { firstRequiredSegmentsSeconds: null } });
+  const measured = requests.waitEstimateForSource({ ...source, waitElapsedMs: 6_000,
+    processing: { firstRequiredSegmentsSeconds: 2.5 } });
+
+  assert.equal(initial.remainingSeconds, 14);
+  assert.equal(unavailable, null, "progress without source ranges must leave the initial estimate intact");
+  assert.equal(measured.remainingSeconds, 2.5);
+  assert.equal(historicalLookups, 1, "the progress path must not recompute a historical stage estimate");
+});
+
 test("source polls and delayed file lists preserve the component estimate once it exists", () => {
   const requests = new ViewerRequests({
     viewers: { get: () => null },

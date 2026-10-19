@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Estimate the early first-frame wait from per-stage medians for the current cache and copy/encode path (#ttv-185).
+
 ## 2.101.30
 
 - **Fix**: Estimate the early first-frame wait from per-stage medians for the current cache and copy/encode path (#ttv-185).

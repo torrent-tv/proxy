@@ -1,5 +1,8 @@
-## 2.101.38
+## Unreleased
 
+- **Fix**: Yield between every unresolved segment while building a download map, including fallback range reads, so large maps do not stall session responses (#ttv-185).
+
+## 2.101.38
 - **Chore**: Trace forwarded session request queue and response lifecycle timings for forecast diagnosis (#ttv-185).
 
 ## 2.101.37

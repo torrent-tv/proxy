@@ -708,8 +708,13 @@ export async function startProxyServer({
       const waiting = new Set();
       const turn = takeTurns();
       // ONLY THE SEGMENTS WHOSE RANGES ARE NOT KNOWN are worked out, in the
-      // order the swarm is to fetch them.
+      // order the swarm is to fetch them. Range resolution can use either a
+      // direct source index or the fallback reads below; yield between zones
+      // in both cases so a large map cannot hold the main thread across its
+      // full projection.
       for (const zone of projection.unresolved()) {
+        if (!map.isCurrent()) return [];
+        await turn();
         if (!map.isCurrent()) return [];
         const reader = readers.get(zone.outputKey);
         if (!reader) continue;
@@ -764,14 +769,7 @@ export async function startProxyServer({
             waiting.add(zone.outputKey);
             continue;
           }
-          // The pass shares the thread in equal turns (`takeTurns`): in one
-          // stretch the first pass over a film's 4000 zones held the main thread
-          // for all of its work, and handed back after every zone it took
-          // 14.7-22 s while the start forecast waited for it. What was worked
-          // out is kept, so a pass a newer map ends is not lost
-          // (torrent-tv/meta#178).
           if (value?.kind === "result") segmentSourceRanges.set(rangesKey, value.ranges);
-          if (await turn() && !map.isCurrent()) return [];
           if (value?.kind === "result") {
             convert(value.ranges);
             continue;

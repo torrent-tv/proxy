@@ -1182,6 +1182,13 @@ export function createDataChannelHandler({
     // route to return a response — e.g. long-polling until an HLS segment is
     // finalized by ffmpeg) vs. the body transfer over the data channel.
     const fetchStartedAt = Date.now();
+    const traceSessionResponse = method === "POST" && path === "/api/transcode-sessions" &&
+      typeof requestId === "string";
+    const fetchStartedAtMonotonic = traceSessionResponse ? performance.now() : null;
+    if (traceSessionResponse) {
+      log(`[forecast-http] stage=local-fetch-start requestId=${requestId} ` +
+        `atMs=${fetchStartedAtMonotonic.toFixed(3)}`);
+    }
     try {
       response = await fetch(targetUrl, {
         method,
@@ -1196,6 +1203,12 @@ export function createDataChannelHandler({
       log(`[dc] ${method} ${path}${queryInfo} → error: ${fetchError?.message ?? String(fetchError)}`);
       send(channel, { type: "response-error", requestId, error: fetchError?.message ?? String(fetchError) });
       return;
+    }
+    if (traceSessionResponse) {
+      const headersAt = performance.now();
+      log(`[forecast-http] stage=local-fetch-headers requestId=${requestId} ` +
+        `atMs=${headersAt.toFixed(3)} elapsedMs=${(headersAt - fetchStartedAtMonotonic).toFixed(3)} ` +
+        `status=${response.status}`);
     }
 
     if (response.status !== 200 && response.status !== 206) {

@@ -999,8 +999,13 @@ export class ViewerRequests {
         } });
       if (waitEstimate) forecast.waitEstimate = waitEstimate;
     }
-    if (measurement.forecastReason !== forecast.reason) {
+    const unavailableInput = forecast.unavailableSource;
+    const forecastInputKey = unavailableInput ? JSON.stringify([
+      unavailableInput.sourceId, unavailableInput.trackId, unavailableInput.segmentIndex, unavailableInput.phase
+    ]) : null;
+    if (measurement.forecastReason !== forecast.reason || measurement.forecastInputKey !== forecastInputKey) {
       measurement.forecastReason = forecast.reason;
+      measurement.forecastInputKey = forecastInputKey;
       logger.info(`playback readiness ${session.id} consumer=${consumerId} ${JSON.stringify({
         ...forecast,
         positionSeconds,

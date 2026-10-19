@@ -283,6 +283,30 @@ test("missing packet addresses cannot be replaced by file-average density even w
   const forecast = predictPlaybackReadiness(state);
   assert.equal(forecast.reason, "source-input-ranges-unavailable");
   assert.equal(forecast.delaySeconds, null);
+  assert.deepEqual(forecast.unavailableSource, {
+    sourceId: "source", trackId: "video", segmentIndex: 1, phase: "near"
+  });
+});
+
+test("an unmapped tail segment identifies the dependency preventing startup even when its bytes are held", () => {
+  const state = input({ lookaheadSeconds: 4, reserveSeconds: 0, bufferedAheadSeconds: 4 });
+  state.tracks[0].clientRanges = [{ start: 0, end: 4 }];
+  state.sources[0] = { id: "source", complete: false, residence: [{ start: 0, end: 8, location: "disk" }] };
+  const segment = state.tracks[0].segments[1];
+  const mapped = segment.sourceInputs;
+  delete segment.sourceInputs;
+
+  const waiting = predictPlaybackReadiness(state);
+  assert.equal(waiting.ready, false);
+  assert.equal(waiting.delaySeconds, null);
+  assert.equal(waiting.reason, "source-input-ranges-unavailable");
+  assert.deepEqual(waiting.unavailableSource, {
+    sourceId: "source", trackId: "video", segmentIndex: 1, phase: "tail"
+  });
+
+  segment.sourceInputs = mapped;
+  assert.equal(predictPlaybackReadiness(state).ready, true,
+    "the same held bytes and measured services suffice once their segment dependency is known");
 });
 
 test("subtracts progress only inside the actual processing run interval", () => {

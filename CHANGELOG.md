@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Chore**: Readiness reports identify the source, track, segment and near-window or tail position of missing input ranges, including changes to the missing segment while its reason stays the same (#ttv-185).
+
 ## 2.101.39
 
 - **Fix**: Yield between every unresolved segment while building a download map, including fallback range reads, so large maps do not stall session responses (#ttv-185).

@@ -258,6 +258,7 @@ export function predictPlaybackReadiness(input = {}) {
   }
   const link = rateCurve(input.linkReadings, now);
   let unknownReason = null;
+  let unavailableSource = null;
   if (!link) {
     return result(false, null, buffered, reserve, null, "link-rate-unavailable", 0);
   }
@@ -323,7 +324,10 @@ export function predictPlaybackReadiness(input = {}) {
           } else if (source.source.complete !== true) {
             const ranges = exactInputs ? inputRangesOf(exactInputs, sourceId) : null;
             if (ranges === null) {
-              unknownReason ??= "source-input-ranges-unavailable";
+              if (unknownReason === null) {
+                unknownReason = "source-input-ranges-unavailable";
+                unavailableSource = { sourceId, trackId: track.id, segmentIndex: segment.index, phase: "near" };
+              }
             } else {
               if (sourceByteIntervals === NO_SOURCE_BYTES) sourceByteIntervals = new Map();
               sourceByteIntervals.set(sourceId, ranges);
@@ -348,7 +352,8 @@ export function predictPlaybackReadiness(input = {}) {
   }
 
   if (unknownReason) {
-    return result(false, null, buffered, reserve, null, unknownReason, preparedSegments);
+    return { ...result(false, null, buffered, reserve, null, unknownReason, preparedSegments),
+      ...(unavailableSource ? { unavailableSource } : {}) };
   }
   for (const { track, curve } of trackState) {
     if (jobs.some((job) => job.track === track && !job.produced) && !curve) {
@@ -671,7 +676,8 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArriv
         if (!source) return { reason: "source-measurement-unavailable" };
         if (source.source.complete === true) continue;
         const ranges = exactInputs ? inputRangesOf(exactInputs, sourceId) : null;
-        if (ranges === null) return { reason: "source-input-ranges-unavailable" };
+        if (ranges === null) return { reason: "source-input-ranges-unavailable",
+          unavailableSource: { sourceId, trackId: track.id, segmentIndex: segment.index, phase: "tail" } };
         const bytes = supplyOf(sourceId);
         let order = 0;
         for (const range of ranges) {

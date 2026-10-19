@@ -220,6 +220,7 @@ The progress response may include `playbackReadiness`:
 | `reserveSeconds` | Maximum interruption reserve across the required video and selected audio outputs, derived from each output's measured supply waits and next segment duration. |
 | `neededSeconds` | Reserve shortfall at the current client buffer. |
 | `reason` | Machine-readable result of the forecast. |
+| `unavailableSource` | Optional diagnostic for unavailable source service or input ranges. Missing-range reports identify `sourceId`, `trackId`, `segmentIndex` and `phase` (`near` or `tail`); these facts explain the unavailable forecast and do not authorize playback. |
 | `preparedSegments` | Number of already-produced output segments available across required tracks. |
 | `bufferedAtStartSeconds` | Forecast playable buffer at the proposed start time, when a finite delay is available. |
 | `subtitles` | The subtitle this viewer chose for the file, as `{ fileIndex, trackIndex, ready }`, or `null` when none is chosen. Always present, so the browser can tell a proxy that weighed the choice from one that predates it. While the chosen track has not been read at the viewer's position, `ready` is false with reason `subtitles-pending` and `delaySeconds: null`. |

@@ -59,6 +59,7 @@ export const PROXY_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url))
  * figure follows the host as it changes.
  */
 const READINGS_KEPT = 20;
+const FIRST_FRAME_CATEGORICAL = new Set(["fileAvailable", "videoOperation", "audioOperation"]);
 
 /** The version of the file's shape; a file of another shape is not read. */
 const FILE_VERSION = 1;
@@ -285,6 +286,10 @@ export class LocalObservations {
       fileAvailable: typeof features.fileAvailable === "boolean" ? features.fileAvailable : null,
       headerRemaining: nonNegative(features.headerRemaining),
       peers: nonNegative(features.peers),
+      videoOperation: operationOf(features.videoOperation),
+      audioOperation: operationOf(features.audioOperation),
+      videoSpeedX: nonNegative(features.videoSpeedX),
+      audioSpeedX: nonNegative(features.audioSpeedX),
       at: this.#now()
     }].slice(-READINGS_KEPT);
     this.#entries.firstFrame[key] = readings;
@@ -295,8 +300,8 @@ export class LocalObservations {
    * Predict this host's first-frame wait from the closest measured start with
    * the same media suffix. Distance uses squared log-ratios for numeric
    * inputs and exact-state distance for categorical inputs; it does not mix
-   * bytes, bit rates and peers in their raw units. Missing data contributes
-   * distance only when the other observation measured that input.
+   * bytes, bit rates, processing speed and peers in their raw units. Missing
+   * data contributes distance only when the other observation measured it.
    *
    * @param {object} features
    * @returns {number | null}
@@ -307,9 +312,9 @@ export class LocalObservations {
     const candidates = readings.filter(reading => reading.extension === (features.extension ?? ""));
     if (candidates.length === 0) return null;
     const dimensions = ["fileLength", "downloadSpeed", "linkMbps", "linkSampleAgeMs", "preparedOutputBytes",
-      "fileAvailable", "headerRemaining", "peers"];
+      "fileAvailable", "headerRemaining", "peers", "videoOperation", "audioOperation", "videoSpeedX", "audioSpeedX"];
     const scales = new Map(dimensions.map(key => [key, median(candidates
-      .map(reading => key === "fileAvailable" ? null : nonNegative(reading[key]))
+      .map(reading => FIRST_FRAME_CATEGORICAL.has(key) ? null : nonNegative(reading[key]))
       .filter(value => value !== null && value > 0))]));
     let best = null;
     for (const reading of candidates) {
@@ -317,11 +322,13 @@ export class LocalObservations {
       let used = 0;
       let shared = 0;
       for (const key of dimensions) {
-        const current = key === "fileAvailable"
-          ? (typeof features[key] === "boolean" ? features[key] : null)
+        const current = FIRST_FRAME_CATEGORICAL.has(key)
+          ? key === "fileAvailable" ? (typeof features[key] === "boolean" ? features[key] : null)
+            : operationOf(features[key])
           : nonNegative(features[key]);
-        const previous = key === "fileAvailable"
-          ? (typeof reading[key] === "boolean" ? reading[key] : null)
+        const previous = FIRST_FRAME_CATEGORICAL.has(key)
+          ? key === "fileAvailable" ? (typeof reading[key] === "boolean" ? reading[key] : null)
+            : operationOf(reading[key])
           : nonNegative(reading[key]);
         if (current === null && previous === null) continue;
         if (current === null || previous === null) {
@@ -331,7 +338,7 @@ export class LocalObservations {
         }
         shared += 1;
         const scale = scales.get(key);
-        const difference = typeof current === "boolean" && typeof previous === "boolean"
+        const difference = typeof current !== "number" && typeof previous !== "number"
           ? Number(current !== previous)
           : scale === null
             ? Number(current !== previous)
@@ -456,6 +463,11 @@ function nonNegative(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+/** @param {unknown} value @returns {"copy" | "encode" | null} */
+function operationOf(value) {
+  return value === "copy" || value === "encode" ? value : null;
 }
 
 /** @param {number[]} values @returns {number | null} */

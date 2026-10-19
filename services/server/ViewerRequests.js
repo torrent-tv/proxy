@@ -60,6 +60,8 @@ export class ViewerRequests {
   #host;
   /** @type {WeakMap<object, Map<string, object>>} */
   #rateStateBySession = new WeakMap();
+  /** @type {Map<string, { consumerId: string, generation: number, fileIndex: number | null, waitId: string, features: object, updatedAt: number, revision: number, observedWaits: Set<number> }>} */
+  #earlyWaits = new Map();
   /**
    * What the start forecasts cost, said once a minute: how many there were,
    * their time on the main thread, and for each track whether the times of its
@@ -95,6 +97,131 @@ export class ViewerRequests {
    */
   constructor(host) {
     this.#host = host;
+  }
+
+  /**
+   * Attach a host-matched estimate to the file list before the viewer chooses
+   * a file, so the original action need not wait for a torrent-worker round trip.
+   *
+   * @param {{ consumerId: string, generation: number, sourceKey: string, fileIndex: number, fileName: string, fileLength: number }} params
+   * @returns {object | null}
+   */
+  waitEstimateForFile({ consumerId, generation, sourceKey, fileIndex, fileName, fileLength }) {
+    if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string" ||
+        !Number.isSafeInteger(fileIndex) || fileIndex < 0) return null;
+    const waitId = `${sourceKey}:${fileIndex}:${generation}`;
+    const key = `${consumerId}:${waitId}`;
+    const extension = typeof fileName === "string" ? fileName.split(".").at(-1)?.toLowerCase() ?? "" : "";
+    const features = {
+      extension,
+      fileLength,
+      downloadSpeed: null,
+      linkMbps: this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
+      headerRemaining: null,
+      peers: null
+    };
+    const current = this.#earlyWaits.get(key);
+    if (current?.waitId === waitId && current.hasSourceObservation) {
+      const seconds = this.#host.firstFrameSecondsOf?.(current.features) ?? null;
+      if (!Number.isFinite(seconds) || seconds < 0) return null;
+      return { version: 1, waitId, revision: current.revision, remainingSeconds: seconds, ageMs: 0 };
+    }
+    const sameWait = current?.waitId === waitId;
+    const revision = sameWait ? current.revision : 0;
+    const context = this.#setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current });
+    const changed = this.#recordEarlyWaitSnapshot(context, features);
+    if (sameWait && changed) context.revision += 1;
+    this.#pruneEarlyWaits();
+    const seconds = this.#host.firstFrameSecondsOf?.(features) ?? null;
+    if (!Number.isFinite(seconds) || seconds < 0) return null;
+    return { version: 1, waitId, revision, remainingSeconds: seconds, ageMs: 0 };
+  }
+
+  /**
+   * Keep the measurements available before the container is inspected and
+   * predict the complete first-frame wait from this host's earlier outcomes.
+   *
+   * @param {{ consumerId: string, generation: number, sourceKey: string, fileIndex: number | null, fileName?: string, fileLength?: number | null, stats?: object }} params
+   * @returns {object | null}
+   */
+  waitEstimateForSource({ consumerId, generation, sourceKey, fileIndex, fileName = "", fileLength = null, stats = {} }) {
+    if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string") return null;
+    const waitId = `${sourceKey}:${fileIndex ?? "all"}:${generation}`;
+    const key = `${consumerId}:${waitId}`;
+    const extension = typeof fileName === "string" ? fileName.split(".").at(-1)?.toLowerCase() ?? "" : "";
+    const features = {
+      extension,
+      fileLength: Number.isFinite(stats?.fileLength) && stats.fileLength > 0
+        ? stats.fileLength : fileLength,
+      downloadSpeed: stats?.downloadSpeed,
+      linkMbps: this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
+      headerRemaining: Number.isFinite(stats?.headerBytes) && Number.isFinite(stats?.headerDownloadedBytes)
+        ? Math.max(0, stats.headerBytes - stats.headerDownloadedBytes) : null,
+      peers: stats?.connectedPeers ?? stats?.numPeers
+    };
+    const current = this.#earlyWaits.get(key);
+    const revision = current?.waitId === waitId ? current.revision + 1 : 0;
+    const context = this.#setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current,
+      sourceObserved: true });
+    this.#recordEarlyWaitSnapshot(context, features);
+    this.#pruneEarlyWaits();
+    const seconds = this.#host.firstFrameSecondsOf?.(features) ?? null;
+    if (!Number.isFinite(seconds) || seconds < 0) return null;
+    return { version: 1, waitId, revision, remainingSeconds: seconds, ageMs: 0 };
+  }
+
+  /**
+   * Learn from the browser's presented-frame measurement for the current
+   * viewing. The saved source and link readings are the ones available at
+   * selection time, before the full track plan existed.
+   *
+   * @param {{ consumerId: string, generation: number, waitId: string, wait: number, elapsedMs: number }} params
+   * @returns {void}
+   */
+  noteFirstFrameObservation({ consumerId, generation, waitId, wait, elapsedMs }) {
+    const key = `${consumerId}:${waitId}`;
+    const early = this.#earlyWaits.get(key);
+    if (!early || early.generation !== generation || !Number.isSafeInteger(wait) || wait < 0 || early.observedWaits.has(wait) ||
+        !Number.isFinite(elapsedMs) || elapsedMs < 0) return;
+    for (const snapshot of early.snapshots) {
+      this.#host.noteFirstFrame?.({ seconds: elapsedMs / 1000, features: snapshot });
+    }
+    early.observedWaits.add(wait);
+    early.updatedAt = Date.now();
+  }
+
+  #setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current, sourceObserved = false }) {
+    const sameWait = current?.waitId === waitId;
+    const context = sameWait ? current : {
+      consumerId,
+      generation,
+      fileIndex,
+      waitId,
+      snapshots: [],
+      hasSourceObservation: false,
+      observedWaits: new Set()
+    };
+    Object.assign(context, { consumerId, generation, fileIndex, waitId, features, updatedAt: Date.now(), revision,
+      hasSourceObservation: context.hasSourceObservation || sourceObserved });
+    this.#earlyWaits.set(`${consumerId}:${waitId}`, context);
+    return context;
+  }
+
+  #recordEarlyWaitSnapshot(context, features) {
+    const previous = context.snapshots.at(-1);
+    if (previous && JSON.stringify(previous) === JSON.stringify(features)) return false;
+    const snapshot = { ...features };
+    if (context.snapshots.length < 2) context.snapshots.push(snapshot);
+    else context.snapshots[1] = snapshot;
+    return true;
+  }
+
+  #pruneEarlyWaits() {
+    const cutoff = Date.now() - 30 * 60_000;
+    for (const [key, value] of this.#earlyWaits) {
+      if (value.updatedAt < cutoff) this.#earlyWaits.delete(key);
+    }
+    while (this.#earlyWaits.size > 1000) this.#earlyWaits.delete(this.#earlyWaits.keys().next().value);
   }
 
   /**

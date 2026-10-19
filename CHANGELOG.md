@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Learn host-specific first-frame waits per viewer, source, file and generation after required audio is buffered; return a saved estimate from source statistics before metadata is ready when the selected file is known, and include it in the file list when available (#ttv-185).
+
 ## 2.101.24
 
 - **Fix**: Expire completed source files after the shared idle period, preserve active reads, and remove unaccounted partial files left by interrupted writes.

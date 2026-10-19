@@ -63,10 +63,10 @@ function sanitizeLine(value) {
  *
  * @param {import("fastify").FastifyRequest} req
  * @param {import("fastify").FastifyReply} reply
- * @param {{ clientLogs: { write: (session: object, lines: string[]) => void } | null }} deps
+ * @param {{ clientLogs: { write: (session: object, lines: string[]) => void } | null, viewerRequests?: object }} deps
  * @returns {Promise<unknown>}
  */
-export async function handleApiClientLogsPost(req, reply, { clientLogs }) {
+export async function handleApiClientLogsPost(req, reply, { clientLogs, viewerRequests }) {
   const body = req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : {};
   const session = {
     sessionId: safeString(body.sessionId, MAX_SID_LEN) || "unknown",
@@ -88,6 +88,19 @@ export async function handleApiClientLogsPost(req, reply, { clientLogs }) {
 
   if (lines.length > 0) {
     clientLogs?.write(session, lines);
+  }
+  for (const row of rows) {
+    const message = row && typeof row.msg === "string" ? row.msg : "";
+    const match = /^\[first-frame-observation\] consumer=([^ ]+) generation=(\d+) waitId=([^ ]+) wait=(\d+) audioReady=(true|false) elapsedMs=([\d.]+)$/.exec(message);
+    if (match) {
+      const elapsedMs = Number(match[6]);
+      if (match[1].length <= 64 && Number.isSafeInteger(Number(match[2])) && match[3].length <= 256 &&
+          Number.isSafeInteger(Number(match[4])) && match[5] === "true" &&
+          Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+        viewerRequests?.noteFirstFrameObservation?.({ consumerId: match[1], generation: Number(match[2]),
+          waitId: match[3], wait: Number(match[4]), elapsedMs });
+      }
+    }
   }
   return reply.code(204).send();
 }

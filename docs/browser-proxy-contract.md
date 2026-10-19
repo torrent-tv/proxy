@@ -11,8 +11,8 @@ requires that declaration before using event-driven preparation.
 | Request | Required input | Successful answer |
 |---|---|---|
 | `POST /api/sources` | `{ sourceType, source, consumerId }`; older pages may omit `consumerId` | `{ sourceKey, playbackMapVersion: 1 }` identifies the source and declares source viewer reports and event-driven preparation. The page reports an update requirement if the declaration is missing. |
-| `GET /api/sources/:sourceKey/files?consumerId=ID` | Registered `sourceKey`; viewer identifier when available | Waits for metadata, terminal failure or cancellation without an elapsed deadline. Success returns `{ name, infoHash, files, items, shape }`. `files` carries `fileIndex`, `name`, `relativePath`, `length`, `kind` and exclusion facts; `items` omits samples and release-group promos, maps video indices to audio, subtitle and image indices, and carries filename-derived `episode` metadata. The visible indices are recorded for the viewer. |
-| `GET /api/sources/:sourceKey/stats?fileIndex=N` | Registered source; optional file index | Current peer, transfer, header, and file progress readings. A reading may not contain every measurement; absent or `null` measurements are unknown. |
+| `GET /api/sources/:sourceKey/files?consumerId=ID&generation=N` | Registered `sourceKey`; viewer and action identity when available | Waits for metadata, terminal failure or cancellation without an elapsed deadline. Success returns `{ name, infoHash, files, items, shape }`. `files` carries `fileIndex`, `name`, `relativePath`, `length`, `kind`, exclusion facts and, when a host-matched observation exists, `waitEstimate` for video files. `items` omits samples and release-group promos, maps video indices to audio, subtitle and image indices, and carries filename-derived `episode` metadata. The visible indices are recorded for the viewer. |
+| `GET /api/sources/:sourceKey/stats?fileIndex=N&consumer=ID&generation=N&fileName=NAME&fileLength=BYTES` | Registered source; viewer action identity and, before torrent metadata, the selected file facts when locally known | Current peer, transfer, header, and file progress readings. A reading may not contain every measurement; absent or `null` measurements are unknown. While source or torrent metadata is pending, the response may still carry a host-matched `waitEstimate` when the page supplied the selected file facts; absent history leaves it out. |
 | `POST /api/sources/:sourceKey/warm` | Registered source | Compatibility acknowledgement `{ started, swarm, edges: false, fill: false }`. This does not create a download order; present viewers determine preparation. |
 | `POST /api/sources/:sourceKey/files/:fileIndex/viewer` | `{ consumerId, positionSeconds, generation, playing, waiting }` and optional seek, buffer and visibility readings | `{ received: true }` records direct playback. An obsolete selection returns `409`, `code: REQUEST_OBSOLETE`, `canRetry: false`. Older generations cannot restore a previous position. |
 | `GET /api/sources/:sourceKey/files/:fileIndex/container-metadata` | Registered source; file index | `200` with what the file states about the work: `{ title, otherTitles, segmentTitle, seriesTitle, season, episode, episodeId, episodeTitle, year, itemYear, genres, description, externalIds, trackTitles, chapterTitles, cover, outsideEdges }` (`services/media/container/work-tags.js`). `202 { status: "pending" }` while the first or last piece of the file has not arrived; `404` where the format states nothing this proxy reads. Read only from the edges of the file, which opening it fetches anyway, and from bytes already held; `outsideEdges` says something lay elsewhere and was left out. |
@@ -145,6 +145,53 @@ continue to work without sending `connectionId`.
 | `GET /stream?sourceKey=…&fileIndex=N` | Direct file bytes with HTTP range support. |
 
 ### Playback readiness forecast
+
+The file list may carry an initial `waitEstimate` before a transcode session
+exists, so the browser can start its countdown at file selection without a new
+round trip. The source statistics response may revise that estimate as current
+source readings arrive. The optional viewer and `generation` query fields scope
+both responses to one viewer action. The proxy uses the closest saved
+first-frame outcome measured on the current encoder configuration and compares
+the source file size, file suffix, source download rate, remaining header bytes,
+connected peers and browser link rate. The browser subtracts elapsed wait using
+its monotonic clock. This value is an initial point estimate; it does not
+authorize playback and does not replace the full readiness calculation.
+
+| Field | Meaning |
+|---|---|
+| `version` | Initial-estimate contract version (`1`). |
+| `waitId` | Source, file and viewer-action identity; a different action starts a separate countdown. |
+| `revision` | Increases when a new source-statistics observation updates the same wait. |
+| `remainingSeconds` | Host-matched first-frame wait observation used as the initial prediction, in seconds. |
+| `ageMs` | Age supplied to the browser countdown. The browser uses its own monotonic wait-start time when available. |
+
+If the current encoder configuration has no saved first-frame observation for
+the same file suffix, this field is omitted. A first-frame observation is
+learned only when the browser reports that the required audio range covers the
+presented frame. This does not meet the one-second availability requirement
+for an action without a matching observation; do not substitute the time to
+read the container header for the time to present the first frame.
+
+The initial value is an empirical estimate, not the playback permission. The
+proxy keeps up to 20 measured first-frame outcomes for the same current set of
+proxy encoder configurations. Each outcome records the original wait duration
+with the file size, suffix, source download rate, remaining container-header
+bytes, connected peer count, and browser-proxy link rate available at the file
+list and latest source-statistics readings. Missing readings stay missing;
+measured zero rates and zero peers stay zero. Outcomes from another available
+encoder-configuration set are discarded, because its proxy work is not known to
+match this one.
+
+For a prediction, outcomes with another file suffix are excluded. Each available
+numeric input is transformed as `ln(1 + x / s)`, where `s` is the median
+positive value for that input in the candidate observations. The proxy chooses
+the observation with the smallest mean squared difference over inputs present
+in both the current readings and that observation; ties choose the newer
+observation. The measured outcome includes the proxy's actual work, rather than
+adding a second estimate for proxy work. This closest-observation model has no
+measured 90th-percentile error result yet and cannot return a value before the
+proxy has at least one usable outcome. The full readiness forecast later
+replaces this initial value when it has a finite delay.
 
 The progress response may include `playbackReadiness`:
 

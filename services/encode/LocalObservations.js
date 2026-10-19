@@ -85,8 +85,11 @@ export class LocalObservations {
   /** @type {() => number} */
   #now;
 
-  /** @type {{ speed: Record<string, object[]>, rates: Record<string, object[]>, preparation: Record<string, object[]> }} */
-  #entries = { speed: {}, rates: {}, preparation: {} };
+  /** @type {Set<string>} */
+  #configurations = new Set();
+
+  /** @type {{ speed: Record<string, object[]>, rates: Record<string, object[]>, preparation: Record<string, object[]>, firstFrame: Record<string, object[]> }} */
+  #entries = { speed: {}, rates: {}, preparation: {}, firstFrame: {} };
 
   /**
    * @param {object} params
@@ -152,6 +155,7 @@ export class LocalObservations {
    * @returns {void}
    */
   load(currentConfigurations) {
+    this.#configurations = new Set(currentConfigurations);
     if (!this.#filePath) {
       return;
     }
@@ -168,11 +172,14 @@ export class LocalObservations {
     const allowed = new Set(currentConfigurations);
     let kept = 0;
     let dropped = 0;
-    for (const kind of ["speed", "rates", "preparation"]) {
+    const firstFrameKey = this.#firstFrameKey();
+    for (const kind of ["speed", "rates", "preparation", "firstFrame"]) {
       const section = raw.entries[kind] && typeof raw.entries[kind] === "object" ? raw.entries[kind] : {};
       for (const [key, readings] of Object.entries(section)) {
-        const configuration = key.split("|")[0];
-        if (!allowed.has(configuration) || !Array.isArray(readings)) {
+        const matches = kind === "firstFrame"
+          ? key === firstFrameKey
+          : allowed.has(key.split("|")[0]);
+        if (!matches || !Array.isArray(readings)) {
           dropped += 1;
           continue;
         }
@@ -254,6 +261,75 @@ export class LocalObservations {
       at: this.#now()
     });
     this.#save();
+  }
+
+  /**
+   * Keep a browser-measured wait outcome with the source and link readings
+   * visible before the container was inspected. These readings are useful
+   * only on the encoder configurations present on this host.
+   *
+   * @param {{ seconds: number, features: object }} params
+   * @returns {void}
+   */
+  noteFirstFrame({ seconds, features }) {
+    if (!Number.isFinite(seconds) || seconds < 0 || !features || typeof features !== "object") return;
+    const key = this.#firstFrameKey();
+    const readings = [...(this.#entries.firstFrame[key] ?? []), {
+      seconds,
+      extension: typeof features.extension === "string" ? features.extension : "",
+      fileLength: positive(features.fileLength),
+      downloadSpeed: nonNegative(features.downloadSpeed),
+      linkMbps: nonNegative(features.linkMbps),
+      headerRemaining: nonNegative(features.headerRemaining),
+      peers: nonNegative(features.peers),
+      at: this.#now()
+    }].slice(-READINGS_KEPT);
+    this.#entries.firstFrame[key] = readings;
+    this.#save();
+  }
+
+  /**
+   * Predict this host's first-frame wait from the closest measured start with
+   * the same media suffix. Distance is the sum of squared log-ratios for the
+   * independent measured inputs; it does not mix bytes, bit rates and peers
+   * in their raw units.
+   *
+   * @param {object} features
+   * @returns {number | null}
+   */
+  firstFrameSeconds(features) {
+    if (!features || typeof features !== "object") return null;
+    const readings = this.#entries.firstFrame[this.#firstFrameKey()] ?? [];
+    const candidates = readings.filter(reading => reading.extension === (features.extension ?? ""));
+    if (candidates.length === 0) return null;
+    const dimensions = ["fileLength", "downloadSpeed", "linkMbps", "headerRemaining", "peers"];
+    const scales = new Map(dimensions.map(key => [key, median(candidates
+      .map(reading => nonNegative(reading[key]))
+      .filter(value => value !== null && value > 0))]));
+    let best = null;
+    for (const reading of candidates) {
+      let distance = 0;
+      let used = 0;
+      for (const key of dimensions) {
+        const scale = scales.get(key);
+        const current = nonNegative(features[key]);
+        const previous = nonNegative(reading[key]);
+        if (scale === null || current === null || previous === null) continue;
+        const difference = Math.log1p(current / scale) - Math.log1p(previous / scale);
+        distance += difference * difference;
+        used += 1;
+      }
+      if (used === 0) continue;
+      distance /= used;
+      if (!best || distance < best.distance || (distance === best.distance && reading.at > best.reading.at)) {
+        best = { distance, reading };
+      }
+    }
+    return best?.reading.seconds ?? null;
+  }
+
+  #firstFrameKey() {
+    return `firstFrame:${[...this.#configurations].sort().join("||")}`;
   }
 
   /**
@@ -347,6 +423,27 @@ export class LocalObservations {
       content.width > 0 && content.height > 0 &&
       Number.isFinite(content.megabitsPerSecond) && content.megabitsPerSecond > 0;
   }
+}
+
+/** @param {unknown} value @returns {number | null} */
+function positive(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+/** @param {unknown} value @returns {number | null} */
+function nonNegative(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+/** @param {number[]} values @returns {number | null} */
+function median(values) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
 /**

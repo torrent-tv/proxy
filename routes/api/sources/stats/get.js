@@ -13,11 +13,12 @@ import { logger } from "../../../../utils/logger.js";
  * @param {import("fastify").FastifyReply} reply
  * @param {{
  *   sourceRegistry: ReturnType<import("../../../../store/source-registry.js").createSourceRegistry>,
- *   torrentPool: import("../../../../services/torrent/torrent-pool.js").TorrentPool
+ *   torrentPool: import("../../../../services/torrent/torrent-pool.js").TorrentPool,
+ *   viewerRequests?: object
  * }} deps
  * @returns {Promise<void>}
  */
-export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torrentPool }) {
+export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torrentPool, viewerRequests }) {
   const sourceKey = typeof req.params.sourceKey === "string" ? req.params.sourceKey.trim() : "";
   if (!sourceKey) {
     return reply.code(400).send({ error: "sourceKey is required." });
@@ -28,6 +29,19 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
     return reply.code(404).send({ error: "Source key was not found." });
   }
 
+  const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
+  const fileIndex = fileIndexRaw !== "" && /^\d+$/.test(fileIndexRaw) ? Number(fileIndexRaw) : null;
+  const consumerId = typeof req.query.consumer === "string" ? req.query.consumer : "";
+  const generationRaw = typeof req.query.generation === "string" ? req.query.generation : "";
+  const generation = generationRaw !== "" && /^\d+$/.test(generationRaw) ? Number(generationRaw) : null;
+  const requestedFileName = typeof req.query.fileName === "string" ? req.query.fileName : "";
+  const requestedFileLength = typeof req.query.fileLength === "string" && /^\d+$/.test(req.query.fileLength)
+    ? Number(req.query.fileLength) : null;
+  const initialEstimate = () => consumerId && Number.isSafeInteger(generation) && Number.isSafeInteger(fileIndex)
+    ? viewerRequests?.waitEstimateForFile?.({ consumerId, generation, sourceKey, fileIndex,
+      fileName: requestedFileName, fileLength: requestedFileLength }) ?? null
+    : null;
+
   let torrent;
   try {
     torrent = torrentPool.knownTorrent(sourceKey);
@@ -37,18 +51,18 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
     return reply.code(500).send({ error: `Failed to load torrent: ${message}` });
   }
   if (!torrent) {
-    return reply.code(202).send({ pending: true });
+    const waitEstimate = initialEstimate();
+    return reply.code(202).send({ pending: true, ...(waitEstimate ? { waitEstimate } : {}) });
   }
-
-  const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
-  const fileIndex = fileIndexRaw !== "" && /^\d+$/.test(fileIndexRaw) ? Number(fileIndexRaw) : null;
-
 
   // Awaited: with the torrent on its own thread this is a round trip, not a
   // local lookup. Without the await the reply was the pending promise itself,
   // which serialises to `{}` — the empty stats seen in the field 2026-08-02.
   const stats = await torrentPool.getFileStats(torrent, fileIndex);
-  if (stats?.pending || !stats) return reply.code(202).send({ pending: true });
+  if (stats?.pending || !stats) {
+    const waitEstimate = initialEstimate();
+    return reply.code(202).send({ pending: true, ...(waitEstimate ? { waitEstimate } : {}) });
+  }
 
   // Diagnostic: surface the real swarm state per poll so a cold-start download
   // stall (0 peers / header not advancing → playback-plan blocks on the codec
@@ -121,5 +135,9 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
     `file=${filePct} header=${header}${detail}`
   );
 
-  return reply.send(stats);
+  const waitEstimate = consumerId && Number.isSafeInteger(generation)
+    ? viewerRequests?.waitEstimateForSource?.({ consumerId, generation, sourceKey, fileIndex,
+      fileName: torrent.files?.[fileIndex]?.name ?? requestedFileName, fileLength: requestedFileLength, stats }) ?? null
+    : null;
+  return reply.send(waitEstimate ? { ...stats, waitEstimate } : stats);
 }

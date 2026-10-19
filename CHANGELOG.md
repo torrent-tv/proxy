@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.27
 
 - **Fix**: Include prepared output bytes in early first-frame observations so reused output data is compared with matching starts (#ttv-185).
 

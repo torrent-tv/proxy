@@ -1,6 +1,7 @@
 ## 2.101.26
 
 - **Fix**: Include the separately measured client link and its sample age in saved early first-frame wait observations (#ttv-185).
+- **Fix**: Include prepared output bytes in early first-frame observations so reused output data is compared with matching starts (#ttv-185).
 
 
 ## 2.101.25

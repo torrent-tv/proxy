@@ -330,6 +330,19 @@ test("first-frame distance uses the age of the separately measured client link",
   assert.equal(observations.firstFrameSeconds({ ...shared, linkSampleAgeMs: 100 }), 6);
 });
 
+test("first-frame distance distinguishes outputs with and without prepared segments", () => {
+  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
+  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
+  observations.load([software]);
+  const shared = { extension: "avi", fileLength: 1000, downloadSpeed: 0, linkMbps: 20,
+    linkSampleAgeMs: 10, headerRemaining: 0, peers: 0 };
+  observations.noteFirstFrame({ seconds: 1.5, features: { ...shared, preparedOutputBytes: 12_000_000 } });
+  observations.noteFirstFrame({ seconds: 42, features: { ...shared, preparedOutputBytes: 0 } });
+
+  assert.equal(observations.firstFrameSeconds({ ...shared, preparedOutputBytes: 12_000_000 }), 1.5);
+  assert.equal(observations.firstFrameSeconds({ ...shared, preparedOutputBytes: 0 }), 42);
+});
+
 test("a speed seen on easier material is not applied to harder material, and the slowest comparable one is used", () => {
   const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
   const light = { codec: "hevc", bitDepth: 10, width: 1920, height: 1080, megabitsPerSecond: 4 };

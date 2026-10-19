@@ -119,6 +119,7 @@ export class ViewerRequests {
       linkMbps: Number.isFinite(linkMbps) && linkMbps > 0
         ? linkMbps : this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
       linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
+      preparedOutputBytes: this.#preparedOutputBytes(sourceKey, fileIndex),
       headerRemaining: null,
       peers: null
     };
@@ -160,6 +161,8 @@ export class ViewerRequests {
       linkMbps: Number.isFinite(linkMbps) && linkMbps > 0
         ? linkMbps : this.#host.viewers.get(consumerId)?.linkReading()?.linkMbps,
       linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null,
+      preparedOutputBytes: Number.isSafeInteger(fileIndex) && fileIndex >= 0
+        ? this.#preparedOutputBytes(sourceKey, fileIndex) : null,
       headerRemaining: Number.isFinite(stats?.headerBytes) && Number.isFinite(stats?.headerDownloadedBytes)
         ? Math.max(0, stats.headerBytes - stats.headerDownloadedBytes) : null,
       peers: stats?.connectedPeers ?? stats?.numPeers
@@ -219,6 +222,23 @@ export class ViewerRequests {
     if (context.snapshots.length < 2) context.snapshots.push(snapshot);
     else context.snapshots[1] = snapshot;
     return true;
+  }
+
+  #preparedOutputBytes(sourceKey, fileIndex) {
+    const outputs = this.#host.outputs;
+    const segmentStore = this.#host.segmentStore;
+    if (!outputs?.values || !segmentStore?.sizesOf) return null;
+    let bytes = 0;
+    const seen = new Set();
+    for (const output of outputs.values()) {
+      if (output.file?.sourceKey !== sourceKey || output.file?.fileIndex !== fileIndex || !output.outputKey) continue;
+      if (seen.has(output.outputKey)) continue;
+      seen.add(output.outputKey);
+      for (const size of segmentStore.sizesOf(output.outputKey).values()) {
+        if (Number.isFinite(size) && size > 0) bytes += size;
+      }
+    }
+    return bytes;
   }
 
   #pruneEarlyWaits() {

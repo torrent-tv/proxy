@@ -27,7 +27,7 @@ test("early forecasts retain one wait identity, advance revisions, and learn the
   assert.equal(second.revision, 1);
   assert.deepEqual(features[0], {
     extension: "mkv", fileLength: 4_000_000, downloadSpeed: 1_200_000, linkMbps: 24, linkSampleAgeMs: 130,
-    headerRemaining: 500, peers: 8
+    preparedOutputBytes: null, headerRemaining: 500, peers: 8
   });
 
   requests.noteFirstFrameObservation({ consumerId: "viewer", generation: 2, waitId: first.waitId, wait: 4, elapsedMs: 13_250 });
@@ -36,6 +36,22 @@ test("early forecasts retain one wait identity, advance revisions, and learn the
   assert.deepEqual(noted[0].features, features[1]);
   requests.noteFirstFrameObservation({ consumerId: "viewer", generation: 2, waitId: first.waitId, wait: 4, elapsedMs: 13_250 });
   assert.equal(noted.length, 1);
+});
+
+test("early source measurements include unique prepared output bytes for the selected file", () => {
+  const features = [];
+  const output = { file: { sourceKey: "source", fileIndex: 2 }, outputKey: "output" };
+  const requests = new ViewerRequests({
+    viewers: { get: () => null },
+    outputs: new Map([["session-a", output], ["session-b", { ...output }]]),
+    segmentStore: { sizesOf: key => key === "output" ? new Map([[0, 100], [1, 250]]) : new Map() },
+    firstFrameSecondsOf: value => { features.push(value); return 12; }
+  });
+
+  requests.waitEstimateForSource({ consumerId: "viewer", generation: 0, sourceKey: "source", fileIndex: 2,
+    fileName: "Film.avi", stats: { downloadSpeed: 0, fileLength: 800, numPeers: 0 } });
+
+  assert.equal(features[0].preparedOutputBytes, 350);
 });
 
 test("the file-list estimate is immediately refined by source readings for the same action", () => {
@@ -90,6 +106,7 @@ test("first-frame learning pairs each source snapshot with its remaining wait", 
   assert.ok(Math.abs(noted[0].seconds - 10) < 0.001);
   assert.ok(Math.abs(noted[1].seconds - 10) < 0.001);
   assert.equal(noted[0].features.downloadSpeed, null);
+  assert.equal(noted[0].features.preparedOutputBytes, null);
   assert.equal(noted[1].features.downloadSpeed, 100);
   assert.equal(noted[0].features.linkMbps, 20);
   assert.equal(noted[1].features.linkSampleAgeMs, 80);
@@ -112,6 +129,7 @@ test("file-list outcomes keep their own source measurements when several videos 
 
   assert.equal(noted.length, 1);
   assert.equal(noted[0].features.fileLength, 100);
+  assert.equal(noted[0].features.preparedOutputBytes, null);
 });
 
 test("an outcome from another generation cannot train the current wait", () => {

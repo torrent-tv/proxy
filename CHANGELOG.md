@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Use this proxy configuration's measured stage medians across file types when a file type has no prior first-frame observations (#ttv-185).
+
 ## 2.101.33
 
 - **Fix**: Do not publish the historical wait prior as a segment forecast before source ranges are mapped (#ttv-185).

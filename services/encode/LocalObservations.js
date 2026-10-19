@@ -290,10 +290,13 @@ export class LocalObservations {
   }
 
   /**
-   * Price the early wait from separate measured stage medians for the same
-   * output path. Numeric proximity of a past file, source rate, or link rate
-   * does not select a completed run. Each observation contributes once, using
-   * its latest snapshot that states the current cache and operation path.
+   * Price the early wait from separate measured stage medians on this proxy
+   * configuration. Before the container and track operations are known, use
+   * measurements from every observed file type; once current cache and
+   * operation facts are known, retain only observations that match those
+   * facts. Numeric proximity to a past file, source rate, or link rate never
+   * selects a completed run. Each observation contributes once, using its
+   * latest snapshot that states the current cache and operation path.
    *
    * @param {object} features
    * @returns {number | null}
@@ -303,7 +306,7 @@ export class LocalObservations {
     const stages = ["transportMs", "planMs", "prepareMs", "prebufferMs", "presentationMs"];
     const candidates = [];
     for (const reading of this.#entries.firstFrame[this.#firstFrameKey()] ?? []) {
-      if (reading.extension !== (features.extension ?? "") || !reading.stages) continue;
+      if (!reading.stages) continue;
       const points = Array.isArray(reading.featureSnapshots) && reading.featureSnapshots.length > 0
         ? reading.featureSnapshots : [reading];
       const point = [...points].reverse().find(candidate => firstFramePathMatches(features, candidate));

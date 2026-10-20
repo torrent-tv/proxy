@@ -64,6 +64,21 @@ test("forecasts the first required segment from source, processing, and client d
   assert.equal(forecast.firstRequiredSegmentsSeconds, 1);
 });
 
+test("a delivered first segment does not hide a later delivery gap", () => {
+  const state = input();
+  state.tracks[0].clientRanges = [{ start: 0, end: 4 }];
+  state.tracks[0].readySegmentIndices = [1];
+  state.tracks[0].segmentSizesBytes = new Map([[1, 400]]);
+
+  const forecast = predictPlaybackReadiness(state);
+
+  assert.equal(forecast.firstRequiredSegmentsSeconds, 0);
+  assert.equal(forecast.ready, false);
+  // Segment 1 is 400 bytes: at 320 bit/s it takes 10 s to deliver.
+  // The browser already holds 4 s, so playback needs a 10 - 4 = 6 s delay.
+  assert.ok(Math.abs(forecast.delaySeconds - 6) < 1e-5, `${forecast.delaySeconds} seconds`);
+});
+
 test("an encoder's rate is its pieces over their time, and a swarm's its bytes over the span", () => {
   // A first piece of credits read 6.49x and the next 0.57x (Home Assistant
   // 2026-10-12, torrent-tv/meta#178): the film they make together took the

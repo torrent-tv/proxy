@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Record explicit duration fields and error outcomes for W7 priority-map and W10 statistics spans (#ttv-185).
+
 ## 2.104.0
 
 - **New**: Record monotonic durations for W1–W6, W8–W9, including separate W3 first-peer, W4 magnet-metadata, and W9 piece-storage spans (#ttv-185).

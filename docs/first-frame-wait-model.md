@@ -409,6 +409,131 @@ parser boundary. R2/R3/R5/R6/R7 are shared resources, and
 their load is not fully apportioned to one wait. Keep these boundaries explicit
 when comparing traced intervals with the browser's first advancing frame.
 
+### 8.1 Atomic action inventory with real session examples
+
+This table lists every process id in sections 3–5, including conditional and
+per-output actions. Detailed implementation boundaries are in those sections.
+Examples come from the saved Home Assistant field sessions on 2026-10-20:
+field 04, wait `6a2e02ac-13ff-4f7b-b386-c0dbc7222297`; and field 05, wait
+`f1e0068f-7804-4fb3-983e-4d2dfb84bb3c`. Browser durations use the browser clock;
+proxy and worker durations use their own clocks. These are observed spans, not
+additive estimates. `not observed` means the branch or independent boundary
+did not occur in those captured attempts; it never means zero duration.
+
+| Parallel lane | ID | Atomic action | Example from a saved session |
+|---|---|---|---|
+| Browser: input | A0 | Accept viewer action; set `t0` | Field 05: `t0=13306.9 ms` |
+| Browser: input | A0.0 | Decode torrent bytes from address | Not observed: local `.torrent` input |
+| Browser: input | A0.1 | Read selected torrent file | Field 05, attempt 0: 3.0 ms |
+| Browser: input | A0.2 | Parse bencode and derive info hash | Field 05, attempt 0: 0.7 ms |
+| Browser: input | A1 | Store parsed source details | Field 05, attempt 0: 1.6 ms |
+| Browser: connection | A2 | Acquire transport, including any unfinished early connection | Field 05, attempt 0: 0.3 ms; early connection was already ready |
+| Browser: connection | A2.1 | Ask server to choose a proxy | Not separately timed in this attempt |
+| Browser: connection | A2.2 | Signal media connection and apply answer | Not separately timed in this attempt |
+| Browser: parallel connection lanes | A2.2m | Open media data channel | Not separately timed in this attempt |
+| Browser: parallel connection lanes | A2.2c | Open separate control channel | Not separately timed in this attempt |
+| Browser: connection join | A2.J | Join media and control readiness | Not separately timed in this attempt |
+| Browser: connection | A2.3 | Ping control connection | Included in coarse A2; no separate span |
+| Browser: retry branch | A2.4 | Ask permission and reconnect with local candidates | Branch not taken |
+| Browser background lane | A2.5 | Probe media-link rate | No completed span retained in this attempt |
+| Browser: source selection | A3 | Choose proxy holding the source | Field 05, attempt 0: 78.7 ms |
+| Browser: retry branch | A3r | Close and connect to named proxy | Branch not taken |
+| Browser: source setup | A4 | Register source on proxy | Field 05, attempt 0: 67.7 ms browser request; proxy handler 18.0 ms |
+| Browser background lane | A5 | Request early source estimate | Field 05, attempt 0: 55.9 ms |
+| Browser: source setup | A6 | Request file list; wait for torrent readiness if needed | Field 05, attempt 0: 58.8 ms |
+| Browser: viewer input | A7 | Choose a file from multi-file playlist | Branch not taken: one selected file |
+| Browser background lane | A8 | Register warm-up source request | Field 05: 7.6 ms in attempt 0; 1.8 ms in attempt 1 |
+| Browser: source setup | A9 | Ask server for filename capacity | Field 05, attempt 1: 1.1 ms |
+| Browser: retry branch | A9r | Reconnect within restricted proxy pool | Branch not taken |
+| Browser: source setup | A10 | Acquire transport and register source | Field 05, attempt 1: connect 1.8 ms; register 0.2 ms |
+| Browser background lane | A11 | Poll source statistics while plan runs | Field 05, attempt 1: 67.5 ms; proxy handler 6.6 ms |
+| Browser: plan lane | A12 | Request playback plan | Field 05, attempt 1: 70.6 ms; proxy handler 21.9 ms |
+| Browser parallel setup lane | A13 | Request fingerprint and container/track metadata | Field 05, attempt 1: fingerprint 2.3 ms; container metadata 2.1 ms |
+| Browser parallel setup lane | A14 | Report opening subtitle track | Field 05, attempt 1: 1.7 ms |
+| Browser parallel setup lane | A15 | Query codec support | Field 05, attempt 1: 1.1 ms |
+| Browser: retry branch | A16 | Re-run on a proxy after `cannotServe` | Branch not taken |
+| Browser: direct-play branch | A17 | Probe direct HTTP playback | Branch not taken: WebRTC path |
+| Browser: output setup | B1 | Open picture output and wait for session | Field 05, attempt 1: 483.5 ms through manifest setup; output request 145.6 ms |
+| Browser background lane | B2 | Send progress report and keep-alive requests | Field 05, attempt 1: 60.4–424.5 ms per observed report |
+| Browser: playlist lane | B3 | Wait for media playlist | Field 05, attempt 1: 81.1–164.7 ms per observed request |
+| Browser: playlist lane | B4 | Restate position changed during allocation | No iteration in captured path |
+| Browser: manifest lane | B5 | Parse manifest and start HLS loading | Field 05, attempt 1: 141.1 ms |
+| Browser: picture stream lane | B6.v | Request picture init segment (fMP4 only) | No separate timed span in captured path |
+| Browser: soundtrack stream lane | B6.a.p | Request soundtrack playlist | No separate timed span in captured path |
+| Browser: soundtrack stream lane | B6.a.i | Request soundtrack init segment (fMP4 only) | No separate timed span in captured path |
+| Browser parallel stream lanes | B7.v | Request first picture fragment | Field 05: fragment-response spans 148.7–512.1 ms; streams are not separated in this log |
+| Browser parallel stream lanes | B7.a | Request first soundtrack fragment | Field 05: fragment-response spans 148.7–512.1 ms; streams are not separated in this log |
+| Browser parallel stream lanes | B8.v | Remux picture fragment and declare codecs | Field 05, attempt 1: 34.9 ms |
+| Browser parallel stream lanes | B8.a | Remux soundtrack fragment and declare codecs | Point event only; no separate duration |
+| Browser: track join | B9 | Create all expected SourceBuffers | Point event; no span boundary |
+| Browser parallel append lanes | B10.v | Append picture init segment | Field 05, attempt 1: 35.9 ms |
+| Browser parallel append lanes | B10.a | Append soundtrack init segment | Field 05, attempt 1: 1.7 ms |
+| Browser: metadata gate | B11 | Reach `HAVE_METADATA` | Field 05, attempt 1: 415.2 ms |
+| Browser parallel append lanes | B12.v | Append first picture fragment | Append acknowledgement not separately observed in this capture |
+| Browser parallel append lanes | B12.a | Append first soundtrack fragment | Field 05, attempt 1: 14.0 ms |
+| Browser: readiness gate | C1 | Wait for continuous-playback readiness | Field 05, attempt 1: 500.7 ms |
+| Browser background lane | C2 | Send buffered ranges, position and link samples | Timed through B2 request spans; no separate C2 work duration |
+| Browser: readiness gate | C3 | Hold readiness until opening subtitle track is known | No separate timed hold in captured path |
+| Browser: playback state | C4 | Publish `PLAYBACK_READY` / `ADVANCING` | Point event; no duration |
+| Browser: playback | C5 | Call `play()` and receive `playing` | Field 05, attempt 1: 39.6 ms |
+| Browser: presentation | C6 | Wait for first presented frame callback | Field 05, attempt 1: 91.9 ms from observer start; 89.8 ms from `playing` |
+| Browser: audio observation | C7 | Check audio at the first advancing frame's media time | Point event at the first advancing frame; field 05 total action-to-frame 1857.5 ms |
+| Browser: main-thread observation | R6 | Record browser long tasks when supported | Field 05, attempt 1: 128 ms and 65 ms long tasks |
+| Proxy main lane | P1 | Resolve torrent and wait for ready state | Field 05, attempt 1: 8.7 ms median over 138 cached lookups |
+| Proxy main lane | P2 | Read container declarations through per-file queue | Field 05, attempt 1: 0.1 ms median over 1,524 reads |
+| Proxy main lane | P3 | Build plan and select offered outputs | Included in plan response; no separate span |
+| Proxy main lane, repeated pass | P4 | Resolve demanded source ranges and publish priority map | Field 05, attempt 1: 132.7 ms median over 134 passes |
+| Proxy main lane | P5 | Read keyframe index for copied video | Not separately observed in captured path |
+| Proxy output lane | P6.v | Open picture output | Field 05, attempt 1: 55.2 ms median over 3 opens |
+| Proxy output lane | P6.a | Open separate soundtrack output | Not separately timed in captured path |
+| Proxy parallel output lanes | P7.v | Plan picture encoder runs | Field 05: one picture run plan took 254.8 ms |
+| Proxy parallel output lanes | P7.a | Plan soundtrack encoder runs | Same interval as P7.v: 254.8 ms, on proxy clock |
+| Proxy parallel output lanes | P8.v | Admit and copy picture run input | Field 05, attempt 1: 331.6 ms median over 2 completed spans |
+| Proxy parallel output lanes | P8.a | Admit and copy soundtrack run input | Field 05, attempt 1: 354.6 ms median over 250 completed spans |
+| Proxy parallel output lanes | P11.v | Publish closed picture piece | Publication event observed; no exclusive duration |
+| Proxy parallel output lanes | P11.a | Publish closed soundtrack piece | Publication event observed; no exclusive duration |
+| Proxy parallel output lanes | P13.v | Make picture init segment readable (fMP4) | No separate completed span in captured path |
+| Proxy parallel output lanes | P13.a | Make soundtrack init segment readable (fMP4) | No separate completed span in captured path |
+| Proxy parallel output lanes | P12.v | Serve and transfer picture bytes | Captured in request/network records; no single end-to-end span |
+| Proxy parallel output lanes | P12.a | Serve and transfer soundtrack bytes | Captured in request/network records; no single end-to-end span |
+| Proxy main lane, repeated poll | P14 | Compute playback readiness forecast | Readiness observations recorded; no exclusive end-to-end compute span |
+| Proxy main lane, observer | P15 | Emit early-estimate revision | Point observations; no duration |
+| Proxy main lane, conditional | X1 | Run ffprobe for unrecognised container | Not taken: container was recognised |
+| Encoder lane | F1.v | Hand first picture input bytes to FFmpeg | Start recorded; no valid isolated completion span in these logs |
+| Encoder lane | F1.a | Hand first soundtrack input bytes to FFmpeg | Start recorded; no valid isolated completion span in these logs |
+| Encoder parallel output lanes | F2.v | Produce first picture segment | Field 05, attempt 1: 5,401.1 ms |
+| Encoder parallel output lanes | F2.a | Produce first soundtrack segment | No valid isolated completion span in these logs |
+| Torrent worker: startup | W1 | Add, parse and listen | No matched startup span in fields 04/05; source was already available to the captured wait |
+| Torrent worker: startup | W2 | Start peer discovery | No matched startup span in fields 04/05 |
+| Torrent worker: peer lane | W3 | Connect to peers and complete handshakes | Field 04: peer-arrival point events; not a duration |
+| Torrent worker: metadata lane | W4 | Receive magnet metadata from peers | Not taken for the selected `.torrent` |
+| Torrent worker: startup | W5 | Verify stored pieces | No matched verification span in fields 04/05 |
+| Torrent worker: startup | W6 | Publish store-ready state | No matched startup span in fields 04/05 |
+| Torrent worker: selection | W7 | Apply priority-map piece selection | Field 04: 1.5 ms median over 8 commands |
+| Torrent worker: download lane | W8 | Request, receive and verify pieces | Field 04: 2,038.8 ms median over 288 completed piece spans |
+| Torrent worker: storage lane | W9 | Report newly readable piece ranges | Field 04: 288 point events; write duration is not separately measured |
+| Torrent worker: stats lane | W10 | Return file statistics and arrival forecast | Field 04: 3.4 ms median over 137 commands |
+
+### 8.2 Parallel actions in the field traces
+
+Each column is a separate execution lane. Side-by-side entries show concurrent
+work; measured overlap is stated only where the intervals use the same
+monotonic clock. Durations are not to be added.
+
+| Concurrent phase | Browser lane | Proxy main-thread lane | Torrent worker / encoder lane | Picture stream lane | Soundtrack stream lane | Measured overlap |
+|---|---|---|---|---|---|---|
+| Source setup, field 05 attempt 0 | A5 early estimate: 55.9 ms; A6 file-list request: 58.8 ms | A6 handler: 21.4 ms (nested in its request; proxy clock) | — | — | — | Browser A5/A6 intervals overlapped by 55.7 ms |
+| Plan, field 05 attempt 1 | A11 statistics poll: 67.5 ms; A12 plan request: 70.6 ms | P2 reads: 0.1 ms median per read, within plan processing | W10 is sampled on the worker clock; no cross-clock overlap value | — | — | Browser A11/A12 overlapped by 66.4 ms |
+| Plan completion, field 05 attempt 1 | A13 metadata/fingerprint: 2.1–2.3 ms; A14 subtitles: 1.7 ms; A15 codecs: 1.1 ms | P2 repeated reads and P4 map passes | W7/W8/W9 have separate worker-clock records; exact cross-clock overlap is not calculated | — | — | A13, A14 and A15 intervals overlap on the browser clock |
+| First media and readiness, field 05 attempt 1 | B2 progress report: 424.5 ms; C1 gate: 500.7 ms | P4 repeated map passes | W8 piece requests continue | B7 fragment response: 512.1 ms; B10.v init append: 35.9 ms | B10.a init append: 1.7 ms | B2 overlapped B7 by 422.3 ms; C1 overlapped B2 by 414.7 ms; B10.v/a overlapped by 1.7 ms |
+| Per-output encoder planning, field 05 attempt 1 | — | P7.v picture plan: 254.8 ms | P7.a soundtrack plan: same 254.8 ms interval | — | — | Full 254.8 ms overlap on proxy clock |
+| First-frame endpoint, field 05 attempt 1 | C5 `play()`: 39.6 ms; C6 frame callback: 91.9 ms; C7 audio-ready point | P14 readiness observations continue on progress requests | — | Picture frame advanced | Required audio was ready at that media time | First advancing frame: 1,857.5 ms after original action; this elapsed value is not the sum of concurrent rows |
+
+The worker and proxy main-thread columns are shown as parallel lanes because
+they are separate threads. Their clocks are not aligned, so the table does not
+claim measured wall-time overlap between them. The session files and analysis
+are linked in [the field-check note](https://github.com/torrent-tv/meta/blob/main/research/first-frame-wait-trace-field-check-2026-10-20.md).
+
 ## 9. Seek, soundtrack and quality change
 
 1. The seek starts with the viewer's input, which is not logged. The player's
@@ -738,7 +863,120 @@ conditions: exactly one is present for an fMP4 output, and P13 does not exist
 for an MPEG-TS output. P6.a is opened by whichever of its three requests comes
 first; the others then find it open.
 
-### 10.2 Trace events and log destinations
+### 10.2 Measured atomic actions and parallel dependencies
+
+Every ID in the timing inventory above appears as its own node. Columns are
+execution lanes; branches in the same row or joined at a later node represent
+parallel work. This map describes observed action boundaries and dependencies,
+not additive durations.
+
+```mermaid
+flowchart LR
+  subgraph BROWSER1["Browser: input, connection and source setup"]
+    A0(["A0 viewer action, t0"]) --> A00["A0.0 address decode"] --> A01["A0.1 file read"] --> A02["A0.2 parse and hash"] --> A1["A1 store source"]
+    A0 --> A01
+    A1 --> A2["A2 acquire transport"] --> A21["A2.1 choose proxy"] --> A22["A2.2 signal media"]
+    A22 --> A22m["A2.2m media channel"] --> A2J["A2.J connection join"]
+    A22 --> A22c["A2.2c control channel"] --> A2J
+    A2J --> A23["A2.3 ping"] --> A3["A3 choose holder"]
+    A23 -.-> A25["A2.5 link probe"]
+    A22 -. connection failure .-> A24["A2.4 local-network retry"] --> A21
+    A3 --> A3r["A3r proxy move"] --> A4["A4 register source"]
+    A3 --> A4
+    A4 --> A5["A5 early estimate"]
+    A4 --> A6["A6 file list"] --> A7["A7 viewer file choice"] --> A9["A9 capacity check"]
+    A6 --> A9
+    A6 -.-> A8["A8 warm registration"]
+    A9 --> A9r["A9r restricted-pool reconnect"] --> A10["A10 acquire and register"]
+    A9 --> A10
+    A10 --> A11["A11 statistics poll"]
+    A10 --> A12["A12 playback plan"]
+    A12 --> A13["A13 metadata and fingerprint"]
+    A12 --> A14["A14 subtitle report"]
+    A12 --> A15["A15 codec support"]
+    A15 --> A16["A16 cannotServe retry"]
+    A15 --> A17["A17 direct-play probe"]
+  end
+
+  subgraph PROXY["Proxy main thread"]
+    P1["P1 torrent ready"] --> P2["P2 container declarations"] --> P3["P3 plan completion"]
+    P2 -.-> X1["X1 ffprobe when needed"]
+    P2 -.-> P4["P4 range map pass"]
+    P2 -.-> P5["P5 keyframe index"]
+    P4 --> W7["W7 priority selection"]
+    P5 --> P6v["P6.v picture output"]
+    A6 -.-> P1
+    A12 -.-> P1
+    A16 -. cannotServe .-> A9
+    A5 -.-> P15["P15 early estimate"]
+    A6 -.-> P15
+    A11 -.-> P14["P14 readiness forecast"]
+    P14 -.-> P15
+    P6v --> P7v["P7.v picture run plan"]
+    P6a["P6.a soundtrack output"] --> P7a["P7.a soundtrack run plan"]
+    P7v --> P8v["P8.v picture input admission"]
+    P7a --> P8a["P8.a soundtrack input admission"]
+    P11v["P11.v publish picture piece"]
+    P11a["P11.a publish soundtrack piece"]
+    P13v["P13.v picture init readable"]
+    P13a["P13.a soundtrack init readable"]
+    P11v --> P12v["P12.v serve picture bytes"]
+    P13v --> P12v
+    P11a --> P12a["P12.a serve soundtrack bytes"]
+    P13a --> P12a
+    P4 --> P14
+  end
+
+  subgraph WORKER["Torrent worker thread"]
+    W1["W1 add, parse, listen"] --> W2["W2 discovery"] --> W3["W3 peer connection"]
+    W3 --> W4["W4 magnet metadata"] --> W5["W5 stored-piece verification"]
+    W1 --> W5
+    W5 --> W6["W6 store ready"] --> P1
+    W3 --> W8["W8 piece download"]
+    W7 --> W8 --> W9["W9 piece stored and readable"]
+    W10["W10 statistics and arrival forecast"]
+    W9 -. new bytes .-> P2
+    W9 -. new bytes .-> P4
+    W9 -. new bytes .-> P8v
+    W9 -. new bytes .-> P8a
+    W10 -.-> P14
+  end
+
+  subgraph OUTPUT["Encoder and browser media lanes"]
+    P8v --> F1v["F1.v first picture bytes to FFmpeg"] --> F2v["F2.v first picture piece"] --> P11v
+    P8a --> F1a["F1.a first soundtrack bytes to FFmpeg"] --> F2a["F2.a first soundtrack piece"] --> P11a
+    B1["B1 open output"] --> B2["B2 progress and keep-alive"]
+    B1 --> B3["B3 playlist wait"] --> B4["B4 position restatement"] --> B5["B5 manifest and startLoad"]
+    B5 --> B6v["B6.v picture init request"] --> B7v["B7.v picture fragment request"] --> B8v["B8.v picture remux/codecs"]
+    B5 --> B6ap["B6.a.p soundtrack playlist"] --> B6ai["B6.a.i soundtrack init request"] --> B7a["B7.a soundtrack fragment request"] --> B8a["B8.a soundtrack remux/codecs"]
+    B5 --> B7a
+    B6ai -. first request opens .-> P6a
+    B7a -. first request opens .-> P6a
+    B8v --> B9["B9 SourceBuffers ready"]
+    B8a --> B9
+    B9 --> B10v["B10.v picture init append"]
+    B9 --> B10a["B10.a soundtrack init append"]
+    B10v --> B11["B11 HAVE_METADATA"]
+    B10a --> B11
+    B10v --> B12v["B12.v picture fragment append"]
+    B10a --> B12a["B12.a soundtrack fragment append"]
+    B11 --> C1["C1 continuous-playback gate"]
+    P4 -.-> P14
+    W10 -.-> P14
+    P11v -.-> P14
+    P11a -.-> P14
+    B2 --> C2["C2 buffered ranges and link report"] --> P14
+    A14 --> C3["C3 subtitle hold"] --> C1
+    P14 --> C1 --> C4["C4 PLAYBACK_READY"] --> C5["C5 play and playing"] --> C6["C6 first presented frame"] --> C7["C7 audio-ready observation"]
+    R6["R6 browser long-task observation"]
+  end
+```
+
+The dot-dashed arrows mark background starts or repeated input, as in section
+2. Audio and picture lanes stay separate through output planning, run input,
+piece publication, transfer and append; B9/C1 are their explicit joins.
+
+### 10.3 Trace events and log destinations
 
 This diagram shows where the opt-in observations are recorded. It is separate
 from the process-flow graph: log-routing arrows do not add process dependencies
@@ -781,7 +1019,7 @@ Use wait, attempt, operation, request and source identifiers to correlate these
 files; do not subtract timestamps from different clocks. See [logs.md](logs.md)
 for log retention and collection details.
 
-### 10.3 Shared resources
+### 10.4 Shared resources
 
 Each line pairs the processes with the resource they take service from
 (`-.-`, section 2). The main event loop itself runs on one of the processor
@@ -801,7 +1039,7 @@ flowchart LR
   U6["B8-B12 remux and append, page code, frame callbacks"] -.- R6[("R6 browser main thread")]
 ```
 
-### 10.4 Start of a seek wait
+### 10.5 Start of a seek wait
 
 ```mermaid
 flowchart TB

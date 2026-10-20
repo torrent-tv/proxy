@@ -12,9 +12,14 @@ test("source observations expire and do not claim a request caused shared work",
   assert.equal(events[0].operation, null);
   assert.equal(events[0].at, 100);
   assert.equal(events[0].wait, "wait");
-  now = 60_001;
+  trace.process("source", "P2", "begin", { at: 110, requestId: "read-1" });
+  trace.process("source", "P2", "end", { at: 200, startedAt: 110, endedAt: 200, requestId: "read-1" });
+  assert.deepEqual(events.slice(1).map(event => [event.process, event.phase, event.at]), [
+    ["P2", "begin", 110], ["P2", "end", 200]
+  ]);
+  now = 30 * 60_000 + 1;
   trace.source("source", "container-read");
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 3);
 });
 
 test("untraced requests produce no events; traced finish is recorded once", async () => {
@@ -28,7 +33,8 @@ test("untraced requests produce no events; traced finish is recorded once", asyn
   await hooks.onRequest({ headers: {} }, reply);
   assert.equal(events.length, 0);
   const req = { method: "POST", url: "/api/playback-plan", headers: { "x-ttv-wait-trace": "a",
-    "x-ttv-wait-attempt": "1", "x-ttv-wait-operation": "b1" }, body: { sourceKey: "source" } };
+    "x-ttv-wait-attempt": "1", "x-ttv-wait-operation": "b1", "x-ttv-wait-process": "A12" },
+  body: { sourceKey: "source" } };
   await hooks.onRequest(req, reply);
   await hooks.preHandler(req);
   now = 100;
@@ -38,4 +44,6 @@ test("untraced requests produce no events; traced finish is recorded once", asyn
   assert.equal(events.filter(event => event.event === "http-end").length, 1);
   assert.equal(events.at(-1).duration, 90);
   assert.equal(events.at(-1).operation, "b1");
+  assert.equal(events.find(event => event.event === "http-start").process, "A12");
+  assert.equal(events.find(event => event.event === "http-end").phase, "end");
 });

@@ -164,9 +164,8 @@ export class ContainerOrchestrator {
       const result = await this.#inspectRead({ ...params, isCurrent }, statement);
       const endedAt = performance.now();
       params.onTimed?.(statement, startedAt - askedAt, endedAt - startedAt);
-      if (statement !== "source-ranges" || endedAt - askedAt >= 10) params.onObserved?.({ statement, askedAt,
-        startedAt, endedAt, queuedMs: startedAt - askedAt, readMs: endedAt - startedAt, cached: aside,
-        result: result.kind, reason: result.reason, ranges: result.ranges });
+      params.onObserved?.({ statement, askedAt, startedAt, endedAt, queuedMs: startedAt - askedAt,
+        readMs: endedAt - startedAt, cached: aside, result: result.kind, reason: result.reason, ranges: result.ranges });
       return { result, revision };
     });
     if (!aside) this.#reads.set(key, reading);

@@ -23,7 +23,7 @@ function getPayload(body) {
   return {};
 }
 
-export async function handleApiSourcesPost(req, reply, { sourceRegistry, viewers }) {
+export async function handleApiSourcesPost(req, reply, { sourceRegistry, viewers, associateWaitTrace }) {
   const payload = getPayload(req.body);
   const sourceType = typeof payload.sourceType === "string" ? payload.sourceType : "";
   const source = typeof payload.source === "string" ? payload.source : "";
@@ -34,6 +34,7 @@ export async function handleApiSourcesPost(req, reply, { sourceRegistry, viewers
   const consumerId = typeof payload.consumerId === "string" ? payload.consumerId.trim() : "";
   const viewer = consumerId ? viewers?.present(consumerId) : null;
   const sourceKey = await sourceRegistry.upsert(sourceType, source);
+  associateWaitTrace?.(req, sourceKey);
   if (viewer && viewers.get(consumerId) === viewer) viewers.selectsSource(consumerId, sourceKey);
   return reply.send({ sourceKey, playbackMapVersion: 1 });
 }

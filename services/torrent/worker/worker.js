@@ -92,6 +92,13 @@ const pool = new TorrentPool({
 const torrentsByKey = new Map();
 /** Resolved handles for reads that must never wait for or revive a source. */
 const resolvedTorrents = new Map();
+const waitTraceSources = new Set();
+
+function emitWaitTrace(sourceKey, process, phase, fields = {}) {
+  if (!waitTraceSources.has(sourceKey)) return;
+  parentPort.postMessage({ type: Event.WAIT_TRACE, version: 1, clock: "torrent-worker", sourceKey,
+    process, phase, at: performance.now(), ...fields });
+}
 
 /** In-flight reads, so a cancel can stop one mid-body. */
 const readsById = new Map();
@@ -327,6 +334,7 @@ async function streamRange({ id, sourceKey, fileIndex, start, end }) {
 async function runCommand(command, params, id) {
   switch (command) {
     case Command.ADD_SOURCE: {
+      if (params.trace === true) waitTraceSources.add(params.sourceKey);
       const retained = wholeSources.describe(params.sourceKey);
       if (retained) {
         announceWholeFiles(params.sourceKey, retained);
@@ -338,7 +346,10 @@ async function runCommand(command, params, id) {
       // racing to open the same torrent into one.
       let pending = torrentsByKey.get(params.sourceKey);
       if (!pending) {
-        pending = pool.getTorrent(params.sourceType, params.source);
+        emitWaitTrace(params.sourceKey, "W1", "event", { moment: "add-request" });
+        pending = pool.getTorrent(params.sourceType, params.source, {
+          sourceKey: params.sourceKey, trace: params.trace === true, emitWaitTrace
+        });
         torrentsByKey.set(params.sourceKey, pending);
         // A failed add must not be remembered, or every later attempt at this
         // source replays the same failure. The handler also marks the rejection
@@ -463,9 +474,14 @@ async function runCommand(command, params, id) {
 
 
     case Command.FILE_STATS: {
+      const statsStartedAt = performance.now();
+      emitWaitTrace(params.sourceKey, "W10", "begin", { startedAt: statsStartedAt,
+        fileIndex: params.fileIndex, forecast: params.forecast === true });
       const torrent = await knownTorrent(params.sourceKey);
       if (!torrent) {
         const whole = wholeSources.fileOf(params.sourceKey, params.fileIndex);
+        emitWaitTrace(params.sourceKey, "W10", "end", { startedAt: statsStartedAt,
+          endedAt: performance.now(), outcome: whole ? "whole-file" : "pending", fileIndex: params.fileIndex });
         return whole ? wholeFileStats(whole.length) : { pending: true };
       }
       // What this file's own interruptions demand, measured by the reader in
@@ -485,6 +501,9 @@ async function runCommand(command, params, id) {
         const end = Math.min(torrent.length, (piece + 1) * torrent.pieceLength);
         if (end > start) ranges.push({ start, end, availableAt });
       }
+      emitWaitTrace(params.sourceKey, "W10", "end", { startedAt: statsStartedAt,
+        endedAt: performance.now(), outcome: "ok", fileIndex: params.fileIndex,
+        forecast: params.forecast === true });
       return {
         ...stats,
         ...(params.forecast === true ? { downloadForecast: {
@@ -514,9 +533,12 @@ async function runCommand(command, params, id) {
       // zone becomes a window of the register and the swarm is told again
       // (torrent-tv/meta#166).
       const startedAt = performance.now();
+      emitWaitTrace(params.sourceKey, "W7", "begin", { fileIndex: params.fileIndex });
       ensureArrivalsWired(params.sourceKey, torrent);
       pool.applyPriorityMap(torrent, params.fileIndex, zones, params.durationSeconds);
       torrent.emit("priority-map-changed", params.fileIndex);
+      emitWaitTrace(params.sourceKey, "W7", "end", { startedAt, endedAt: performance.now(),
+        fileIndex: params.fileIndex });
       return { appliedMs: performance.now() - startedAt, receivedAt, repliedAt: performance.timeOrigin + performance.now() };
     }
 
@@ -918,6 +940,8 @@ function describePieceBuffers() {
  * @returns {void}
  */
 function announceArrivals(sourceKey, torrent, reason = "verified", piece = null) {
+  if (Number.isSafeInteger(piece)) emitWaitTrace(sourceKey, "W9", "event", { piece, reason,
+    bytes: bytesOfPiece(torrent, piece) });
   const fileIndexes = [...demandFor(torrent).register.files()];
   if (fileIndexes.length === 0) {
     return;

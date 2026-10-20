@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Chore**: Add opt-in process events for container reads, playback-map resolution, encoder input and output, init delivery, and torrent-worker stages (#ttv-185).
+
 ## 2.102.2
 
 - **Chore**: Include the selected historical stages and current first-required estimate in early forecast logs (#ttv-185).

@@ -65,10 +65,13 @@ export class EncodeInputs {
    * @type {(output: object, from: number, to: number, input: object) => void}
    */
   #stretchCopied;
+  #observeWait;
 
   constructor({ resolve, readRanges, openWholeFile = null, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
-    rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now, stretchCopied = () => {} }) {
+    rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now, stretchCopied = () => {},
+    observeWait = null }) {
     this.#stretchCopied = stretchCopied;
+    this.#observeWait = observeWait;
     this.#openOf = openOf;
     this.#resolve = resolve;
     this.#read = readRanges;
@@ -101,6 +104,14 @@ export class EncodeInputs {
     this.#log(`encode input #${request.from}..#${request.to} of ${request.output.outputKey ?? request.output.id}: ${state}` +
       ` (held ${this.held()} of ${this.#allowed} allowed; for #${serves}` +
       `${rank ? `, rank ${rank.rank} of ${rank.topRank}` : ""})${detail}`);
+  }
+
+  #observe(request, phase, fields = {}) {
+    const sourceKey = request.output?.file?.sourceKey;
+    if (typeof sourceKey !== "string") return;
+    const process = request.output?.spec?.carries === "audio-only" ? "P8.a" : "P8.v";
+    this.#observeWait?.(sourceKey, "process", { process, phase, at: performance.now(),
+      output: request.output.outputKey ?? request.output.id, from: request.from, to: request.to, ...fields });
   }
 
   /** The container's statement of an interval, its time added to the request's account. */
@@ -258,7 +269,8 @@ export class EncodeInputs {
       return existing.result;
     }
     if (existing?.pending || existing?.revision === this.#revision || existing?.result?.kind === "terminal") return null;
-    const request = existing ?? { output, from, to, key, serves };
+    const request = existing ?? { output, from, to, key, serves, traceStartedAt: performance.now() };
+    if (!existing) this.#observe(request, "begin", { request: key });
     this.#requests.set(key, request);
     this.#prepare(request);
     return null;
@@ -403,6 +415,7 @@ export class EncodeInputs {
     request.timing ??= { askedAt: this.#now(), attempts: 0, resolutions: 0, resolveMs: 0,
       reads: 0, queuedMs: 0, readMs: 0, heldMs: 0, budgetMs: 0 };
     request.timing.attempts += 1;
+    this.#observe(request, "attempt", { request: request.key, attempt: request.timing.attempts });
     request.promise = (async () => {
       // A request the plan withdraws stops its reads: a soundtrack piece's
       // packet walk, left to run, held the file's reads and the piece the
@@ -449,10 +462,20 @@ export class EncodeInputs {
           : `, copied in ${result.copyMs}ms`) : "")
         : `${result.kind}${result.reason ? ` ${result.reason}` : ""}${Number.isFinite(result.bytes) ? ` ${result.bytes} bytes` : ""}`,
       describeTiming(request.timing, this.#now()));
+      if (result.kind === "result" || result.kind === "terminal") {
+        this.#observe(request, "end", { request: request.key, startedAt: request.traceStartedAt,
+          endedAt: performance.now(), outcome: result.kind, reason: result.reason ?? null,
+          bytes: result.bytes ?? null, attempts: request.timing.attempts });
+      } else {
+        this.#observe(request, "waiting", { request: request.key, reason: result.kind,
+          bytes: result.bytes ?? null, attempts: request.timing.attempts });
+      }
       if (result.kind === "result" || result.kind === "terminal") this.#changed(request.output, result);
     })().catch(error => {
       if (this.#requests.get(request.key) === request) {
         request.result = { kind: "terminal", reason: "input-preparation-failed", message: error.message };
+        this.#observe(request, "end", { request: request.key, startedAt: request.traceStartedAt,
+          endedAt: performance.now(), outcome: "error", reason: "input-preparation-failed", attempts: request.timing.attempts });
         this.#failed(request.output, error);
       }
     }).finally(() => {

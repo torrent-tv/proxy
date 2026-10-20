@@ -32,6 +32,7 @@ export class WorkerTorrentPool {
   #torrents = new Map();
   #pending = new Map();
   #observed;
+  #isWaitTraced;
 
   /**
    * @param {{ memoryBytes?: number, stateDir?: string }} [options]
@@ -39,6 +40,7 @@ export class WorkerTorrentPool {
    */
   constructor(options = {}, client = null) {
     this.#observed = options.onObserved;
+    this.#isWaitTraced = options.isWaitTraced ?? (() => false);
     this.#client = client ?? new TorrentWorkerClient({ ...options, onSourceForgotten: event => {
       this.forget(event.sourceKey);
       options.onSourceForgotten?.(event);
@@ -52,7 +54,7 @@ export class WorkerTorrentPool {
    * @param {string} source
    * @returns {Promise<object>}
    */
-  async getTorrent(sourceType, source) {
+  async getTorrent(sourceType, source, options = {}) {
     const startedAt = performance.now();
     const sourceKey = await deriveSourceKey(sourceType, source);
     const observed = outcome => this.#observed?.({ sourceKey, startedAt, endedAt: performance.now(), outcome });
@@ -63,7 +65,8 @@ export class WorkerTorrentPool {
     }
     const joined = this.#pending.get(sourceKey);
     if (joined) return joined.finally(() => observed("joined"));
-    const pending = this.#client.getTorrent({ sourceKey, sourceType, source }).then(torrent => {
+    const pending = this.#client.getTorrent({ sourceKey, sourceType, source,
+      trace: options.trace === true || this.#isWaitTraced(sourceKey) }).then(torrent => {
       if (this.#pending.get(sourceKey) !== pending) {
         const error = new Error("Source was forgotten while its metadata was being read.");
         error.code = "SOURCE_FORGOTTEN";

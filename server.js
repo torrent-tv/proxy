@@ -178,7 +178,8 @@ export async function startProxyServer({
   await app.register(fastifyCors, {
     origin: true,
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Range", "X-Ttv-Wait-Trace", "X-Ttv-Wait-Attempt", "X-Ttv-Wait-Operation"]
+    allowedHeaders: ["Content-Type", "Range", "X-Ttv-Wait-Trace", "X-Ttv-Wait-Attempt", "X-Ttv-Wait-Operation",
+      "X-Ttv-Wait-Process"]
   });
 
   // Allow browser requests from an HTTPS page to this private-network proxy
@@ -223,7 +224,15 @@ export async function startProxyServer({
   // 10 MB file took 12-23 s against 125 ms to hand it to the channel. The
   // adapter keeps TorrentPool's interface, so nothing downstream changed.
   const torrentPool = new WorkerTorrentPool({
-    onObserved: fields => waitTrace.source(fields.sourceKey, "torrent-ready", fields),
+    isWaitTraced: sourceKey => waitTrace.has(sourceKey),
+    onWaitTrace: event => waitTrace.process(event.sourceKey, event.process, event.phase, event),
+    onObserved: fields => {
+      waitTrace.source(fields.sourceKey, "process", { process: "P1", phase: "begin", at: fields.startedAt,
+        outcome: fields.outcome });
+      waitTrace.source(fields.sourceKey, "process", { process: "P1", phase: "end", at: fields.endedAt,
+        startedAt: fields.startedAt, endedAt: fields.endedAt, durationMs: fields.endedAt - fields.startedAt,
+        outcome: fields.outcome });
+    },
     memoryBytes,
     stateDir,
     heapSnapshots,
@@ -254,8 +263,8 @@ export async function startProxyServer({
     // only once the worker thread is up and a piece has verified, which is long
     // after the declarations below have run.
     onPiecesArrived: ({ sourceKey, fileIndexes, arrived }) => {
-      waitTrace.source(sourceKey, "held-bytes-changed", { fileIndexes, arrived: arrived?.slice?.(0, 32),
-        arrivedCount: arrived?.length });
+      waitTrace.source(sourceKey, "process", { process: "W9", phase: "end", fileIndexes,
+        arrived: arrived?.slice?.(0, 32), arrivedCount: arrived?.length });
       for (const fileIndex of fileIndexes) {
         mediaReads.bytesChanged(sourceKey, fileIndex);
         probeReads.bytesChanged(sourceKey, fileIndex);
@@ -654,6 +663,7 @@ export async function startProxyServer({
     // already from the projection; this packs them with the native ones.
     pack: (zones) => coalescedZones(zones),
     log: (line) => logger.info(line),
+    observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
     resolvePlayback: async (map) => {
       const fileKey = `${map.sourceKey}:${map.fileIndex}`;
       if (map.zones.length === 0) {
@@ -877,7 +887,16 @@ export async function startProxyServer({
         } }),
       label: String(file.name ?? ""),
       fileOffset: file.offset,
-      onObserved: fields => waitTrace.source(sourceKey, "container-read", { fileIndex, requestId, ...fields }),
+      onObserved: fields => {
+        const process = fields.statement === "keyframes" ? "P5"
+          : String(fields.statement).startsWith("ffprobe:") ? "X1" : "P2";
+        const details = { process, fileIndex, requestId, statement: fields.statement, cached: fields.cached,
+          result: fields.result, reason: fields.reason, ranges: fields.ranges,
+          queuedMs: fields.queuedMs, readMs: fields.readMs };
+        waitTrace.source(sourceKey, "process", { ...details, phase: "begin", at: fields.askedAt });
+        waitTrace.source(sourceKey, "process", { ...details, phase: "end", at: fields.endedAt,
+          startedAt: fields.askedAt, endedAt: fields.endedAt });
+      },
       onTracks: (tracks) => contentsOf(torrent).noteVideo(fileIndex, tracks.some((track) => track.type === "video")),
       onReadStart: () => ({ storage: mediaReads.revision(sourceKey, fileIndex), memory: mediaReads.memoryRevision(), demand: downloadMaps.epoch(sourceKey, fileIndex) }),
       onReadResult: async (statement, result, revision) => {
@@ -1474,7 +1493,8 @@ export async function startProxyServer({
   app.post("/api/sources", async (req, reply) => {
     // A cold start begins with the first source opened (torrent-tv/meta#177).
     startupProfile.begin();
-    return handleApiSourcesPost(req, reply, { sourceRegistry, viewers: outputParts.viewers });
+    return handleApiSourcesPost(req, reply, { sourceRegistry, viewers: outputParts.viewers,
+      associateWaitTrace: (request, sourceKey) => waitTrace.associate(request, sourceKey) });
   });
   app.get("/api/sources/:sourceKey/stats", async (req, reply) =>
     handleApiSourceStatsGet(req, reply, { sourceRegistry, torrentPool, viewerRequests: outputParts.viewerRequests })
@@ -1563,6 +1583,7 @@ export async function startProxyServer({
   );
   app.get("/encode-input/:token/:fileIndex", (req, reply) =>
     handleEncodeInputGet(req, reply, { inputOf: token => outputParts.encodeRuns.originalInputOf(token),
+      noteFirstInputBytes: (token, fileIndex, bytes) => outputParts.encodeRuns.noteFirstInputBytes(token, fileIndex, bytes),
       refused: ({ fileIndex, start, runTag }) => logger.warn(`encode input: run ${runTag ?? "?"} asked for byte ${start} of file ${fileIndex}, which it was not given`) })
   );
   app.get("/stream", async (req, reply) =>
@@ -1573,6 +1594,7 @@ export async function startProxyServer({
       // fed. The route knows only files; the session id rides on the URL the
       // session itself built.
       noteInputBytes: (sessionId, bytes) => outputParts.encodeRuns.noteInputBytes(sessionId, bytes),
+      noteFirstInputBytes: (token, fileIndex, bytes) => outputParts.encodeRuns.noteFirstInputBytes(token, fileIndex, bytes),
       // When the encoder reading this waits for its input, so its speed is
       // measured over its own work and not over the swarm's.
       noteInputWaiting: (runToken, waiting) => outputParts.encodeRuns.noteInputWaiting(runToken, waiting)

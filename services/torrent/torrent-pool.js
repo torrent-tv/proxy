@@ -969,6 +969,8 @@ export class TorrentPool {
    * @type {WeakMap<import("webtorrent").Torrent, { addedAt: number, firstPeerAt: number | null }>}
    */
   #swarmTimingByTorrent = new WeakMap();
+  #waitTraceByTorrent = new WeakMap();
+  #waitTraceHooks = new WeakSet();
 
   /**
    * Sources every file of which this proxy holds whole.
@@ -1502,7 +1504,60 @@ export class TorrentPool {
    * @param {import("webtorrent").Torrent} torrent
    * @returns {void}
    */
-  #attachSwarmDiagnostics(torrent) {
+  #attachSwarmDiagnostics(torrent, waitTrace = null) {
+    if (waitTrace?.trace === true && typeof waitTrace.sourceKey === "string") {
+      this.#waitTraceByTorrent.set(torrent, waitTrace);
+    }
+    const trace = (process, phase, fields = {}) => {
+      const context = this.#waitTraceByTorrent.get(torrent);
+      if (context?.trace === true) context.emitWaitTrace?.(context.sourceKey, process, phase, fields);
+    };
+    const wrap = (method, process) => {
+      const original = torrent[method];
+      if (typeof original !== "function") return;
+      torrent[method] = function (...args) {
+        const startedAt = performance.now();
+        trace(process, "begin", { startedAt });
+        try {
+          const result = original.apply(this, args);
+          if (result && typeof result.then === "function") {
+            return result.then(value => {
+              trace(process, "end", { startedAt, endedAt: performance.now(), outcome: "resolved" });
+              return value;
+            }, error => {
+              trace(process, "end", { startedAt, endedAt: performance.now(), outcome: "error",
+                error: String(error?.message ?? error) });
+              throw error;
+            });
+          }
+          trace(process, "end", { startedAt, endedAt: performance.now(), outcome: "returned" });
+          return result;
+        } catch (error) {
+          trace(process, "end", { startedAt, endedAt: performance.now(), outcome: "error",
+            error: String(error?.message ?? error) });
+          throw error;
+        }
+      };
+    };
+    if (waitTrace?.trace === true && !this.#waitTraceHooks.has(torrent)) {
+      this.#waitTraceHooks.add(torrent);
+      wrap("_onListening", "W1");
+      wrap("_startDiscovery", "W2");
+      wrap("_onStore", "W6");
+      const verify = torrent._verifyPieces;
+      if (typeof verify === "function") {
+        torrent._verifyPieces = function (callback, ...args) {
+          const startedAt = performance.now();
+          trace("W5", "begin", { startedAt });
+          return verify.call(this, (...results) => {
+            trace("W5", "end", { startedAt, endedAt: performance.now(), outcome: "verified" });
+            callback?.(...results);
+          }, ...args);
+        };
+      }
+      torrent.on("metadata", metadata => trace("W4", "event", { files: metadata?.files?.length ?? null }));
+      torrent.on("wire", wire => trace("W3", "event", { peer: String(wire?.remoteAddress ?? "?") }));
+    }
     // Attached ONCE per torrent. WebTorrent answers a duplicate add by handing
     // back the torrent it already has, and this used to run again on it: a
     // torrent with twelve connections and a first peer five minutes old had its
@@ -1510,7 +1565,8 @@ export class TorrentPool {
     // connection printed "first peer connected after 0.3s" — a false statement
     // about a swarm that had been healthy for minutes. The same film opened
     // once as a .torrent and once as a magnet is exactly that case, and the
-    // roadmap already records it happening.
+    // roadmap already records it happening. Trace hooks above are installed
+    // separately and only for an explicitly traced source.
     if (this.#swarmTimingByTorrent.has(torrent)) {
       return;
     }
@@ -1560,6 +1616,7 @@ export class TorrentPool {
         const queued = this.requests.length;
         const answer = request.call(this, index, offset, length, callback);
         if (this.requests.length > queued) {
+          trace("W8", "event", { moment: "block-requested", piece: index, offset, length, peer });
           const now = Date.now();
           timings.asked(index, offset, peer, now);
           // When this wire was asked for the block: how long it has held it is
@@ -1568,7 +1625,10 @@ export class TorrentPool {
         }
         return answer;
       };
-      wire.on("piece", (index, offset) => timings.arrived(index, offset, peer, Date.now()));
+      wire.on("piece", (index, offset) => {
+        timings.arrived(index, offset, peer, Date.now());
+        trace("W8", "event", { moment: "block-received", piece: index, offset, peer });
+      });
     });
     torrent.on("verified", (piece) => {
       logger.info(`download ${label()} verified piece=${piece}${describePieceTiming(timings.verified(piece, Date.now()))}`);
@@ -1694,7 +1754,7 @@ export class TorrentPool {
    * @param {string} source - Magnet URI or base64-encoded .torrent bytes.
    * @returns {Promise<import("webtorrent").Torrent>}
    */
-  async getTorrent(sourceType, source) {
+  async getTorrent(sourceType, source, waitTrace = null) {
     // Keyed by the torrent's own infohash, not the source bytes — a magnet
     // and a `.torrent` file for the same content must name the same swarm.
     const key = await deriveSourceKey(sourceType, source);
@@ -1702,6 +1762,7 @@ export class TorrentPool {
     // Already resolved — return immediately.
     const existing = this.torrents.get(key);
     if (existing) {
+      this.#attachSwarmDiagnostics(existing, waitTrace);
       this.#lastAccess.set(existing, Date.now());
       return existing;
     }
@@ -1740,7 +1801,7 @@ export class TorrentPool {
             );
             existing.destroy({ destroyStore: false }, () => {
               this.#pending.delete(key);
-              resolve(this.getTorrent(sourceType, source));
+              resolve(this.getTorrent(sourceType, source, waitTrace));
             });
             return;
           }
@@ -1792,10 +1853,10 @@ export class TorrentPool {
                   this.torrents.set(key, replacement);
                   this.#lastAccess.set(replacement, Date.now());
                   this.#pending.delete(key);
-                  this.#attachSwarmDiagnostics(replacement);
+                  this.#attachSwarmDiagnostics(replacement, waitTrace);
                   resolve(replacement);
                 });
-                this.#attachSwarmDiagnostics(addedReplacement);
+                this.#attachSwarmDiagnostics(addedReplacement, waitTrace);
               });
               return;
             }
@@ -1816,6 +1877,10 @@ export class TorrentPool {
       // piece across threads detached memory still in use. Ours owns what it
       // hands out, holds pieces in shared memory the main thread can read
       // directly, and spills to disk instead of losing them.
+      const skipVerify = this.#wholeSources.has(key);
+      if (skipVerify && waitTrace?.trace === true) {
+        waitTrace.emitWaitTrace?.(waitTrace.sourceKey, "W5", "event", { outcome: "skipped" });
+      }
       const added = this.client.add(torrentId, {
         store: this.#pieceStore,
         storeCacheSlots: 0,
@@ -1831,7 +1896,7 @@ export class TorrentPool {
         // whole: what would be verified was written out of pieces this client
         // had hashed, and the file's size was checked against what the torrent
         // says. See `#wholeSources`.
-        skipVerify: this.#wholeSources.has(key)
+        skipVerify
       }, (readyTorrent) => {
         this.client.off("error", onError);
         this.torrents.set(key, readyTorrent);
@@ -1842,7 +1907,7 @@ export class TorrentPool {
         // back the one it already had. Watching only what `add` returned would
         // leave the survivor unwatched. Attaching twice costs nothing — the
         // guard makes the second call a no-op when it is the same object.
-        this.#attachSwarmDiagnostics(readyTorrent);
+        this.#attachSwarmDiagnostics(readyTorrent, waitTrace);
         // On the clock from the moment it exists. A torrent nobody ever states
         // anything about — a file list fetched and never played — used to be
         // held for the life of the process, because the only thing that ever
@@ -1858,7 +1923,7 @@ export class TorrentPool {
       // `wire` is emitted at the moment of connection and never replayed. The
       // torrent that waited minutes for its first peer would have been the one
       // case this could not measure.
-      this.#attachSwarmDiagnostics(added);
+      this.#attachSwarmDiagnostics(added, waitTrace);
     });
 
     this.#pending.set(key, promise);

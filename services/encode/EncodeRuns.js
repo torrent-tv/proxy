@@ -285,6 +285,21 @@ export class EncodeRuns {
     }
   }
 
+  noteFirstInputBytes(runToken, fileIndex, bytes) {
+    const run = this.#runsByInputToken.get(runToken);
+    if (!run || run.firstWaitTraceInputAt !== undefined) return;
+    const endedAt = performance.now();
+    run.firstWaitTraceInputAt = endedAt;
+    const { sourceKey, process } = run.waitTraceInput ?? {};
+    this.#host.observeWait?.(sourceKey, "process", { process, phase: "end", runToken, fileIndex, bytes,
+      startedAt: run.startedAt, endedAt, durationMs: endedAt - run.startedAt });
+    const f2Process = process === "F1.a" ? "F2.a" : "F2.v";
+    run.waitTraceInput.f2Process = f2Process;
+    run.waitTraceInput.f2StartedAt = endedAt;
+    this.#host.observeWait?.(sourceKey, "process", { process: f2Process, phase: "begin", runToken,
+      fileIndex, bytes, startedAt: endedAt });
+  }
+
   originalInputOf(runToken) {
     return this.#runsByInputToken.get(runToken)?.originalInput ?? null;
   }
@@ -561,6 +576,7 @@ export class EncodeRuns {
   }
 
   planEncodersNow() {
+    const planStartedAt = performance.now();
     const byOutput = this.#outputsWithSessions();
     for (const [address, sessions] of byOutput) {
       // From the TIMELINE, which is where how a file is cut has lived since
@@ -609,7 +625,22 @@ export class EncodeRuns {
         ) ?? []
       );
     }
+    for (const [address, sessions] of byOutput) {
+      const sourceKey = sessions[0]?.file?.sourceKey;
+      if (typeof sourceKey !== "string") continue;
+      const process = sessions[0]?.spec?.carries === "audio-only" ? "P7.a" : "P7.v";
+      this.#host.observeWait?.(sourceKey, "process", { process, phase: "begin", at: planStartedAt,
+        output: address, sessions: sessions.length });
+    }
     this.#host.encodeOrchestrator.reconcile();
+    const planEndedAt = performance.now();
+    for (const [address, sessions] of byOutput) {
+      const sourceKey = sessions[0]?.file?.sourceKey;
+      if (typeof sourceKey !== "string") continue;
+      const process = sessions[0]?.spec?.carries === "audio-only" ? "P7.a" : "P7.v";
+      this.#host.observeWait?.(sourceKey, "process", { process, phase: "end", at: planEndedAt,
+        startedAt: planStartedAt, endedAt: planEndedAt, output: address, sessions: sessions.length });
+    }
   }
 
   /**
@@ -1164,6 +1195,13 @@ export class EncodeRuns {
         // It belongs to no requested output segment and must not condemn the
         // complete input or overwrite a neighboring run's segment.
         if (Number.isInteger(index) && (index < safeIndex || index > run.to)) return null;
+        if (index === safeIndex && run.waitTraceInput?.f2StartedAt && !run.waitTraceInput.f2EndedAt) {
+          const endedAt = performance.now();
+          run.waitTraceInput.f2EndedAt = endedAt;
+          this.#host.observeWait?.(session.file.sourceKey, "process", { process: run.waitTraceInput.f2Process,
+            phase: "end", runToken: inputToken, segment: index, startedAt: run.waitTraceInput.f2StartedAt,
+            endedAt, durationMs: endedAt - run.waitTraceInput.f2StartedAt, outcome: "piece-closed" });
+        }
         let bytes = null;
         const address = session.outputKey ?? "";
         // Read before anything rewrites it: when the encoder finished it.
@@ -1223,6 +1261,13 @@ export class EncodeRuns {
         this.#host.noteRunSpeedMeasured?.(session, run);
       },
       onEnded: (ended) => {
+        if (run.waitTraceInput?.f2StartedAt && !run.waitTraceInput.f2EndedAt) {
+          const endedAt = performance.now();
+          run.waitTraceInput.f2EndedAt = endedAt;
+          this.#host.observeWait?.(session.file.sourceKey, "process", { process: run.waitTraceInput.f2Process,
+            phase: "end", runToken: inputToken, segment: safeIndex, startedAt: run.waitTraceInput.f2StartedAt,
+            endedAt, durationMs: endedAt - run.waitTraceInput.f2StartedAt, outcome: ended.ending ?? "ended" });
+        }
         this.#runsByInputToken.delete(inputToken);
         if (admittedInput.original) {
           const reads = admittedInput.reads?.();
@@ -1244,6 +1289,11 @@ export class EncodeRuns {
         this.#host.encodersChanged?.();
       }
     });
+    const f1Process = session.spec.carries === "audio-only" ? "F1.a" : "F1.v";
+    run.waitTraceInput = { sourceKey: session.file.sourceKey, process: f1Process };
+    this.#host.observeWait?.(session.file.sourceKey, "process", { process: f1Process,
+      phase: "begin", runToken: inputToken, startedAt: run.startedAt, output: session.outputKey,
+      from: run.from, to: run.to });
     if (admittedInput.original) {
       run.originalInput = admittedInput;
       // Every number of the stretch answers to its one key, so a failure

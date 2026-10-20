@@ -152,6 +152,8 @@ export const Event = {
   CHUNK_ACK: "chunk-ack",
   /** A log line, so worker output reaches the same place as everything else. */
   LOG: "log",
+  /** A structured process observation from the torrent thread. */
+  WAIT_TRACE: "wait-trace",
   /**
    * Pieces of these files have arrived.
    *

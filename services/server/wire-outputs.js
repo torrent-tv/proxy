@@ -535,6 +535,7 @@ export function wireOutputs({
   });
   // Answering a request for a playlist, an init segment or a segment: from the store when the piece is made and whole, otherwise held until it is.
   parts.serving = new SegmentServing({
+    observeWait,
     // What a key names, read back from the key: how to find a gone output's
     // stored pieces and whether they are cut at given times.
     segmentFormatOfKey,
@@ -624,6 +625,7 @@ export function wireOutputs({
   });
   // What a viewer asks for: an output of a file, a position, a report of progress.
   parts.viewerRequests = new ViewerRequests({
+    observeWait,
     // Whether this machine has a place for one more viewer on this output —
     // asked in the same synchronous stretch as they are put on it.
     admitsWatching: (output) => parts.admission.admitsWatching(output?.outputKey ?? ""),
@@ -1189,6 +1191,7 @@ export function wireOutputs({
     // The piece's rank in the output's own map, said with an input's state.
     rankAt: (output, index) => parts.encodeOrchestrator?.rankAt?.(output.outputKey ?? "", index) ?? null,
     log: line => logger.info(line),
+    observeWait,
     changed: (output, result) => {
       if (result.kind === "terminal") {
         logger.warn(`encode input output=${output.outputKey} terminal=${result.reason}: ${result.message ?? ""}` +

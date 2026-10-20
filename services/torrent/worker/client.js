@@ -137,11 +137,13 @@ export class TorrentWorkerClient {
   #onSourceForgotten;
   /** Told when what this proxy holds changed; see `Event.HOLDINGS_CHANGED`. */
   #onHoldingsChanged;
+  #onWaitTrace;
 
   /**
    * @param {{ memoryBytes?: number, stateDir?: string, onPiecesArrived?: (event: object) => void }} [options]
    */
-  constructor({ memoryBytes, stateDir, heapSnapshots = false, onPiecesArrived, onSourceForgotten, onHoldingsChanged } = {}) {
+  constructor({ memoryBytes, stateDir, heapSnapshots = false, onPiecesArrived, onSourceForgotten, onHoldingsChanged,
+    onWaitTrace } = {}) {
     this.#worker = new Worker(fileURLToPath(WORKER_URL), {
       // `stateDir` travels because the worker writes heap snapshots of its own
       // isolate there. It cannot choose a directory any other way: a worker may
@@ -153,6 +155,7 @@ export class TorrentWorkerClient {
     this.#onPiecesArrived = onPiecesArrived ?? (() => undefined);
     this.#onSourceForgotten = onSourceForgotten ?? (() => undefined);
     this.#onHoldingsChanged = onHoldingsChanged ?? (() => undefined);
+    this.#onWaitTrace = onWaitTrace ?? (() => undefined);
 
     this.#worker.on("message", (message) => {
       // A failed read must fail its stream. This is checked BEFORE the caller
@@ -254,6 +257,9 @@ export class TorrentWorkerClient {
           // taken twice on two different histories.
           writeAlreadyDecided(message.level ?? "info", `torrent-worker: ${message.message}`);
           break;
+        case Event.WAIT_TRACE:
+          this.#onWaitTrace(message);
+          break;
         case Event.FILE_COMPLETE:
           // Recorded here so the stream route can answer from the file without
           // going near the torrent thread at all.
@@ -346,8 +352,8 @@ export class TorrentWorkerClient {
    * @param {{ sourceKey: string, sourceType: "magnet" | "torrent", source: string }} params
    * @returns {Promise<{ infoHash: string, name: string, files: { index: number, name: string, path: string, length: number }[] }>}
    */
-  async addSource({ sourceKey, sourceType, source }) {
-    return this.#caller.call(Command.ADD_SOURCE, { sourceKey, sourceType, source });
+  async addSource({ sourceKey, sourceType, source, trace = false }) {
+    return this.#caller.call(Command.ADD_SOURCE, { sourceKey, sourceType, source, trace });
   }
 
   /**
@@ -675,8 +681,8 @@ export class TorrentWorkerClient {
    * @param {{ sourceKey: string, sourceType: "magnet" | "torrent", source: string }} params
    * @returns {Promise<{ infoHash: string, name: string, pieceLength: number, sourceKey: string, files: object[] }>}
    */
-  async getTorrent({ sourceKey, sourceType, source }) {
-    const info = await this.addSource({ sourceKey, sourceType, source });
+  async getTorrent({ sourceKey, sourceType, source, trace = false }) {
+    const info = await this.addSource({ sourceKey, sourceType, source, trace });
     const client = this;
     return {
       infoHash: info.infoHash,

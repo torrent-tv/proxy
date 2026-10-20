@@ -179,3 +179,28 @@ test("an input's state names the piece it is prepared for and that piece's rank,
   assert.deepEqual(asked, [5]);
   assert.match(lines.at(-1), /encode input #4\.\.#9 of output: needs-bytes \(held 0 of 0 allowed; for #5, rank 2 of 3\)/);
 });
+
+test("input preparation logs one P8 span across missing-byte retries", async () => {
+  const events = [];
+  const tracedOutput = { ...output, file: { sourceKey: "source" }, spec: { carries: "picture" } };
+  let calls = 0;
+  const inputs = new EncodeInputs({
+    resolve: async () => ++calls === 1 ? { kind: "needs-bytes" } : { kind: "result", sources: [source] },
+    readRanges: async () => [Buffer.from("ab")],
+    reviseBudget: async () => inputs.allow(100),
+    changed: () => {}, failed: (_output, error) => { throw error; },
+    observeWait: (sourceKey, event, fields) => events.push({ sourceKey, event, ...fields })
+  });
+  inputs.take(tracedOutput, 0, 0);
+  await setImmediate();
+  assert.ok(events.some(event => event.process === "P8.v" && event.phase === "waiting" && event.reason === "needs-bytes"));
+  inputs.bytesChanged();
+  await setImmediate();
+  const admitted = inputs.take(tracedOutput, 0, 0);
+  assert.equal(admitted?.kind, "result");
+  const span = events.filter(event => event.process === "P8.v");
+  assert.equal(span[0].phase, "begin");
+  assert.equal(span.at(-1).phase, "end");
+  assert.equal(span.filter(event => event.phase === "begin").length, 1);
+  admitted.release();
+});

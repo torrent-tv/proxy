@@ -20,9 +20,10 @@ export class DownloadMaps {
   #clock;
   /** What the torrent is told of the playback zones: as many windows as say the same thing. */
   #pack;
+  #observeWait;
 
   constructor({ publish, resolvePlayback = async map => map.zones, log = null, now = Date.now,
-    clock = () => performance.timeOrigin + performance.now(), pack = zones => zones }) {
+    clock = () => performance.timeOrigin + performance.now(), pack = zones => zones, observeWait = null }) {
     if (typeof publish !== "function") throw new TypeError("Download map publication is required.");
     this.#publish = publish;
     this.#resolvePlayback = resolvePlayback;
@@ -30,6 +31,7 @@ export class DownloadMaps {
     this.#log = typeof log === "function" ? log : null;
     this.#now = now;
     this.#clock = clock;
+    this.#observeWait = typeof observeWait === "function" ? observeWait : null;
   }
 
   async playback({ sourceKey, fileIndex, durationSeconds, zones }) {
@@ -117,8 +119,23 @@ export class DownloadMaps {
       this.#setZones(file, withRetained(zones, retained));
       this.#emit(file).catch(() => undefined);
     };
-    const resolved = await this.#resolvePlayback({ sourceKey, fileIndex, durationSeconds, zones: file.sourceZones,
-      isCurrent, workingOut });
+    const resolverStartedAt = performance.now();
+    this.#observeWait?.(sourceKey, "process", { process: "P4", phase: "begin", fileIndex,
+      revision, zones: file.sourceZones.length, startedAt: resolverStartedAt });
+    let resolved;
+    let resolverOutcome = "ok";
+    try {
+      resolved = await this.#resolvePlayback({ sourceKey, fileIndex, durationSeconds, zones: file.sourceZones,
+        isCurrent, workingOut });
+    } catch (error) {
+      resolverOutcome = "error";
+      throw error;
+    } finally {
+      const resolverEndedAt = performance.now();
+      this.#observeWait?.(sourceKey, "process", { process: "P4", phase: "end", fileIndex, revision,
+        startedAt: resolverStartedAt, endedAt: resolverEndedAt, durationMs: resolverEndedAt - resolverStartedAt,
+        outcome: resolverOutcome, resolvedZones: Array.isArray(resolved) ? resolved.length : null });
+    }
     if (revision !== file.revision) return;
     this.#setZones(file, resolved);
     return this.#emit(file);

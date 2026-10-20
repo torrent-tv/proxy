@@ -208,8 +208,8 @@ orchestration. The torrent runs in one worker thread
 | ID | Process | Starts after | Ends when | Edge |
 |---|---|---|---|---|
 | X1 | ffprobe (`probe-packets.js`) for a container the sniff does not recognise (`FfprobeContainer`): reads the file over loopback `/media`, which serves held bytes only; a missing byte aborts the probe as `needs-ranges` | P2 | streams or packets listed | blocking for P2 |
-| F1.v / F1.a | FFmpeg spawn and open of the run's input over loopback HTTP (`/encode-input/:token/:fileIndex` or `/stream`) | P8 of the output | first packet read | blocking for F2 |
-| F2.v / F2.a | Encode or copy the first piece up to its cut | F1 of the output | piece closed | blocking for P11 |
+| F1.v / F1.a | FFmpeg spawn and open of the run's input over loopback HTTP (`/encode-input/:token/:fileIndex` or `/stream`) | P8 of the output | first source bytes handed to FFmpeg by the proxy | blocking for F2 |
+| F2.v / F2.a | Encode or copy the first piece up to its cut | F1 of the output | first output piece closed | blocking for P11 |
 
 ### 3.6 Torrent worker thread and swarm (WebTorrent 2.8.5)
 
@@ -237,7 +237,7 @@ orchestration. The torrent runs in one worker thread
 | R5.m | Media connection (one `RTCPeerConnection`) | segments, init, playlists, `/stream`, `/media`, link probe, subtitles, covers (`isBulkPath`) | The proxy forwards each request on its own (`forwardRequest` per `requestId`) and sends chunks with backpressure; responses can be in flight together | that transfers are serial; the forecast's single link queue (`transferFinish` in `predictPlaybackReadiness`) is an assumption of the calculation |
 | R5.c | Control connection (a second `RTCPeerConnection` when `separateControl: 2`) | plan, sources, progress, seek, net reports, client logs | It does not carry segments | its effect on R5.m's rate; whether the two directions limit each other |
 | R5.n | The network path between viewer and proxy | R5.m and R5.c | — | its capacity; the link probe measures only R5.m |
-| R6 | Browser main thread | hls.js remux and append, page code, frame callbacks | — | not measured |
+| R6 | Browser main thread | hls.js remux and append, page code, frame callbacks | browser `PerformanceObserver` long-task entry | point event with task start and duration; shorter work is not measured |
 | R7 | Proxy disk | piece spill, segment files, original-input copies | — | not measured as a service |
 | R8 | Read queue of one file (`ContainerOrchestrator.inspect`, `#reads`) | P2, P4 (fallback reads), P5, P8 resolution | Reads of one file run one after another; a statement answerable from what was already read is answered beside the queue | queue wait is logged for P8 only |
 
@@ -339,6 +339,15 @@ orchestration. The torrent runs in one worker thread
 
 ## 8. Observability
 
+With `?waitTrace=1`, browser and proxy emit structured process events with a
+process id, phase, and monotonic timestamp where the code has a measurable
+boundary. Browser intervals carry a wait id and attempt; proxy intervals carry
+the source key and inherit the most recent browser wait context. The clocks are
+separate: identifiers join events, but timestamps from different processes
+cannot be subtracted. Point observations and shared-resource readings are not
+durations. A missing end event means the operation was interrupted or its
+outcome was not observed.
+
 Clock owners: `B` browser `performance.now()` (wall time in `[evt]` lines),
 `P` proxy, `F` FFmpeg run times reported to the proxy. "Direct" is an event
 logged at the process boundary; "derived" is computed from other values;
@@ -346,45 +355,59 @@ logged at the process boundary; "derived" is computed from other values;
 
 | Process | Clock | Identifier | Start event | End event | Queue | Work, units | Source |
 |---|---|---|---|---|---|---|---|
-| A0 | B | wait sequence; `waitId = sourceKey:fileIndex:generation` in later lines | `[wait-start]` | — | — | — | direct |
-| A2.2, A2.2m, A2.2c, A2.J, A2.3 | B | signalling session id of each connection | none for the start | `[ice] … State=` (media), `[ice-control]` (control) state lines; ping round trip only in the debug state | — | — | direct state changes; no duration line, no `connect()` resolution line |
-| A2.1, A3, A9 | B | — | none | `[proxy-selector]` (only when narrowed), `filename hints` (only when it moves) | server | one request | none for durations |
-| A6 | B | — | none | none | P1 | one request | none |
-| A12 / P2–P3 | B / P | `sourceKey:fileIndex` | `t1` | `t2`; proxy `plan … torrent-ready= probe= total=` per attempt | R8 | reads, bytes | direct (per attempt on P) |
-| X1 | P | `readId` in `/media` | none | none | R3 | packets | none |
-| P5 | P | file name | `warmKeyframeIndex` (no line) | `keyframe index "<name>": … waited <ms>`; `cold-start … keyframes=` | R8 | index bytes | direct |
-| B1 / P6.v | B / P | `requestId` (proxy), session id | none on B | B `[evt] transcode-session create`; P `transcode-session timing … requestId= openMs= planWaitInclusiveMs= handlerMs=`, `cold-start "<name>": media-info= keyframes= create-total=` | — | — | direct |
-| P6.a | P | output key | none | none | — | — | none |
-| P7 | P | output key, run `#from..#to` | none | `restart for #… decided` (only after a wanted segment) | — | — | partial |
-| P8 | P | output key, `#from..#to` | first state line | `encode input #a..#b of <key>: ready …; asked <ms> ago over <n> attempt(s): <n> resolution(s) <ms> (… queued <ms>, reading <ms>), held ranges <ms>, budget <ms>` | R8, W9, R4 | bytes, copy ms | direct |
-| F1 | F | run `#from..#to`, output key | spawn (no line) | none | R3 | — | derived only: `opened in <s>` is the time to the first named piece less the processing estimate and the copy wait (`run-open.js`); not a first-packet event |
-| F2 | F | run, output key | — | `… first piece named at <ms>` in the same run-end line | R3 | film seconds | direct but reported at run end |
+| A0.0–A0.2 | B | wait sequence and attempt | `A0.0` address decode; `A0.1` file read; `A0.2` bencode parse and info-hash derivation | each operation has its own `end` event | — | bytes | direct spans; parse and hash remain one operation |
+| A2.2, A2.2m, A2.2c, A2.J, A2.3 | B | signalling session id | `process` begin events for signalling, media/control channel, and join | corresponding end events; ping end | — | — | direct for these coarse boundaries; ICE subphases remain state events |
+| A2.5 | B | wait, attempt, operation | `measureLink` starts | probe loop resolves, fails or is aborted | media data channel | probe bytes and transfer durations | direct operation span; each probe also has its own HTTP transfer record |
+| A2.1, A3, A9, A16 | B / P | wait, attempt, operation | structured `http-start` | structured `http-end` | server fanout for capacity checks | one request | direct request spans |
+| A6 | B / P | wait, attempt, operation, source key | structured `http-start` | structured `http-end` | includes P1 if it waits | file-list response | direct request span |
+| A7 | B | wait, attempt, file count | playlist choice shown | viewer selects a file | viewer input | file index | direct span; its duration remains separate from the selected file's new `t0` |
+| A8 | B / P | wait, attempt, source key | warm-up registration request | response or close | source-add work may be shared with P1 | file index | request span; shared source work is not attributed as exclusive A8 time |
+| A11 | B / P | wait, attempt, request id, source key | every stats poll | response or close | worker queue and W10 | file statistics and forecast fields | direct request span; polling runs alongside A12 |
+| A13 / A14 | B / P | wait, attempt, source key, track | each fingerprint, metadata or subtitle request | response or close | shared source reads | track or metadata result | direct request spans; asynchronous work remains outside blocking startup time |
+| A12 / P2–P3 | B / P | wait, attempt, source key and file | structured `http-start`; P2/P5/X1 begin | structured `http-end`; paired P2/P5/X1 ends; `t2` | R8 queued and read times on proxy source events | ranges, bytes | direct for each instrumented read |
+| P3 | P | wait operation, source and file | playback-plan handler entry | handler response or close | P2 and P4 | plan fields | direct route span on proxy clock |
+| X1 | P | source key, request id | `process=X1 phase=begin` | `process=X1 phase=end` | R8 | probe request and result | direct, operation elapsed on proxy clock |
+| P5 | P | source key, file index, request id | `process=P5 phase=begin` | `process=P5 phase=end` | R8 | index bytes and read result | direct, operation elapsed on proxy clock |
+| B1 / P6.v | B / P | wait, attempt, request id | browser output-session request / proxy open | browser response / proxy handler return | R4 | open calls and plan wait | separate clocked request spans; proxy logs inner open durations |
+| B2 | B | wait, attempt, request id | each net-report request | response or close | control connection R5.c | buffered ranges, position and link sample | direct request span on browser clock |
+| B4 | B | wait, attempt, request id | position-restatement request | response or close | control connection R5.c | position seconds | direct request span on browser clock |
+| P6.a | P | output key | HTTP request that first opens the alternate output | output response; session creation logs open calls, aggregate open time and plan wait | memory / encoder admission | — | request span plus open-duration fields; output-specific event still shares the request process id |
+| P7 | P | source key, output key | `process=P7.v/a phase=begin` | `process=P7.v/a phase=end` | R2 event loop | outputs and active sessions | direct, proxy monotonic clock |
+| P8 | P | source key, output key, run range, input request | `process=P8.v/a phase=begin` | paired end at input admitted or terminal; attempt/wait events for retries | R8, W9, R4 detailed in adjacent input/read records | bytes, queue/read/copy times | direct, proxy monotonic clock |
+| F1.v / F1.a | P | source key, run token, output, file | run spawn | first input bytes delivered by `/encode-input` or `/stream` | R3 | bytes | direct proxy-monotonic span; endpoint is byte handoff, not FFmpeg's internal packet parser |
+| F2.v / F2.a | P | source key, run token, output, segment | first input bytes delivered | first output piece closed | R3 | segment | direct proxy-monotonic span; P11 separately records publication |
 | P11 | P | output key, segment index | encoder run start | `encode-run … #<index> … named +<ms>, published +<ms>` (`EncodeRuns.onClosed`), relative to that run's start | — | one piece | direct publication observation; `cold-start <id>: first-segment ready +<ms>` is a different event, written when the first segment is **served** (`SegmentServing`) |
-| P13 | P | output key | none | none | — | — | none |
+| P13 | P | source key, output key, init filename | init request start | init request answer | read/production wait is within request | bytes | direct request span, proxy monotonic clock |
 | P12 + transfer | P / B | P `requestId`; B path | P route entry (in `fetchMs`) | P `[net-debug] sent … requestId= fetchMs= sendMs= readMs= chanMs= drainMs= loopMax=`; B `[net-debug] dc-load {path, waitMs, transferMs}` | R2, R5.m | bytes | direct on each side; B line carries the path, not the `requestId` |
-| B5 | B | — | `[torrent-tv][hls] start-up: manifest requested` | `… manifest parsed` | — | — | direct |
-| B8–B10, B12 | B | — | none | none | R6 | bytes | none |
+| B5 | B | wait, attempt, level | manifest loading / parsed events | `MANIFEST_PARSED` plus level/fragment events | R6 | playlist and level | direct hls.js events; master and media playlist HTTP spans are separate |
+| B8–B10, B12 | B | wait, attempt, stream and segment | hls.js `FRAG_PARSING_INIT_SEGMENT` or `BUFFER_APPENDING` | `BUFFER_CODECS` or `BUFFER_APPENDED` acknowledgement | R6 | segment and track | direct event boundaries; internal decode and native updateend are not exposed |
 | B11 (`t3`) | B | — | — | `cold-start prepare=` | — | — | direct |
 | C1 (`t4`) | B | — | `t3` | `[evt] prebuffer ready …`; `prebuffer waiting … reason=` on each reason change | — | — | direct |
 | P14 | P | session id, consumer | request | `readiness parts … in all <ms>`; `playback readiness {…}` on a reason or missing-input change; `playback held …` | R2 | — | direct |
-| C5 | B | — | `[evt] player.play reason=state` | `[evt] <wall time> playing currentTime= bufferedAhead=` (`#attachPlaybackDiagnostics`) | — | — | direct, on wall time; the `playing` line carries no wait identifier and no monotonic time |
+| P15 | P | source key, wait id, consumer, revision | estimate selected for a revision | `process=P15 phase=event` with remaining and total seconds and estimate basis | R2 | seconds | direct point observation; estimate calculation is synchronous |
+| C3–C5 | B / P | wait, attempt, consumer and selected track | C3 readiness-state events; C5 `play` | C3 readiness state, C4 playback-ready, C5 `playing` | C1 gate | track and state | direct point or state observations; C3 is logged when readiness changes |
 | Seek start (section 9) | B | — | the viewer's input: none; `[evt] <wall time> seeking` for native controls and Media Session | `[evt] seek intent → <s>`; `[wait-start]` at the hold | — | — | input not logged; `seeking` and `seek intent` on wall time, `[wait-start]` monotonic |
-| C6, C7 | B | wait sequence, `waitId` | — | `[first-frame]`, `[first-frame-buffers]`, `[first-frame-observation] audioReady=` | — | — | direct for `tFrame`; `tPlay` none |
-| W1–W6 | P | info hash | none | tracker update lines; `ready` not logged with a duration | — | — | partial |
-| W7 | P | file | — | `download: first class …`; per-minute `download map … delivered … applied in the torrent thread …` | — | — | aggregated |
-| P4 | P | file | none per pass | per-minute `download map passes in <s>: … longest <ms>` | R2, R8 | segments | aggregated |
-| W3 | worker wall clock | torrent label | torrent added | `first peer connected after <s>` (`torrent-pool.js`) | swarm | one first connection | existing duration rounded to 0.1 s; not a monotonic span linked to a browser wait |
-| W8, W9 | worker wall clock | torrent label, piece | `wire` piece timings | `download … verified piece=<index>…` (`torrent-pool.js`) | R1 | bytes | existing per-piece diagnostics; not linked to the browser's monotonic clock |
-| W10 | P | file | — | `[stats] … getFileStatsMs=` (stats route); `readiness parts … arrival forecast <ms>` | — | — | direct |
+| C6, C7 | B | wait, attempt, media time | `requestVideoFrameCallback` observations | advancing frame and audio-ready point events | R6 | media time, audio state | direct observations with wait identity |
+| P4 | P | source key, file, map revision | `process=P4 phase=begin` at range-resolution pass | `process=P4 phase=end`, with resolved zone count and outcome | R2, R8 | zones | direct resolver span; separate from the aggregate map-pass timing |
+| W1–W2, W5–W6 | torrent worker | source key | `client.add` request; internal `_onListening`, `_startDiscovery`, `_verifyPieces`, `_onStore` begin events | corresponding end events; skipped verification is a point event | — | files, outcome | direct worker-monotonic spans; WebTorrent internal method boundaries pinned to installed 2.8.5 |
+| W3–W4 | torrent worker | source key, peer | first `wire`; `metadata` | peer/metadata arrival events | swarm | peer, file count | direct event observations; not a wait duration |
+| W7 | torrent worker | source key, file | priority-map command begins | priority-map command ends, including applied file and duration | worker command queue | windows | direct span |
+| W8 | torrent worker | source key, peer, piece and byte offset | accepted block request | block received; existing per-piece diagnostics retain request-to-arrival timing | R1 | bytes | direct block events; one event per accepted request and received block |
+| W9 | torrent worker | source key, piece and affected file ranges | piece verified / storage availability changed | point event when readable; withdrawal is a separate event | R7 | bytes and ranges | direct storage-availability event; no separate write-duration boundary |
+| W10 | torrent worker | source key, file | statistics command begins | statistics/forecast response ends | forecast walk | forecast requested | direct command span; response retains arrival forecast |
 
-Missing events, by the interval they leave unexplained: A2 start, A2.1 and
-A2.2 durations, the completion of A2.2m and A2.2c each and A2.J; A6 duration;
-P1 alone; X1; P6.a and the request that opened it; a browser-linked monotonic P11 publication time; P13;
-B8–B12 (append and `updateend`); a wait identifier and monotonic time on the
-existing `[evt] … playing` and `[evt] … seeking` lines; the viewer's seek
-input; a frame callback with advancing `mediaTime`; audio ready after
-`tFrame`; a browser-linked monotonic W3 first-peer event, W4, W6 duration; per-pass P4 time and the moment a
-missing segment's addresses become known; R8 queue wait outside P8.
+The opt-in trace now emits process ids for A0.0–A0.2, P4, and W1–W10 in
+addition to the previously listed browser and proxy operations. Worker events
+use the torrent worker's monotonic clock and are joined to browser events by
+`sourceKey`; clock values from separate processes cannot be subtracted. Remaining
+limits are specific: A2.2 ICE candidate substeps are state events rather than
+separate spans; B9 and C7 are point observations; B8 spans hls.js init-segment
+parsing to codec readiness without splitting internal remux work; B10/B12 end
+at `BUFFER_APPENDED`, not native `SourceBuffer.updateend`; F1 ends at the
+proxy's first input-byte handoff and does not expose FFmpeg's internal packet
+parser boundary. R2/R3/R5/R6/R7 are shared resources, and
+their load is not fully apportioned to one wait. Keep these boundaries explicit
+when comparing traced intervals with the browser's first advancing frame.
 
 ## 9. Seek, soundtrack and quality change
 
@@ -813,7 +836,7 @@ Against proxy `aa67015` (the second review in torrent-tv/meta#185):
 
 1. No durations; it is not a forecast. Field magnitudes come from the research
    notes of torrent-tv/meta#185.
-2. The events missing in section 8 limit what a field run can attribute.
+2. Section 8 lists the remaining boundary and resource-measurement limits; a field run must mark those as unobserved instead of assigning their time to another process.
 3. hls.js behaviour is read from its 1.7.3 source, not measured in this player.
 4. Soundtrack and quality change holds (section 9, item 5), the magnet open
    path in the page (`#processMagnetPlayback`), the direct-play path (A17) and
@@ -848,12 +871,13 @@ permission rules. The default page does not emit these records.
    held bytes, container queue/read boundaries and missing-range answers, and
    the first published piece of a run. Shared source work has no claimed
    request-operation parent: its `operation` is null. Source subscriptions
-   expire after 60 s and are bounded to 64 sources. Fast source-range reads
-   below 10 ms are omitted; the records are not a complete per-segment map
-   account. The existing input and worker diagnostics remain necessary.
+   expire after 30 minutes and are bounded to 64 sources. Short source reads
+   are included; map events still do not enumerate every cached segment range.
+   Worker pieces and encoder input use their owning process's monotonic clock.
 5. hls.js events identify manifest/track loading, codec declarations, buffer
    creation, appends and buffered fragments. Their dispatch timestamps do not
-   establish exclusive CPU time or the native decoder's internal queue.
+   establish exclusive CPU time or the native decoder's internal queue. Long
+   browser main-thread tasks are separately logged as R6 events when supported.
 6. The diagnostic observer confirms increasing `mediaTime` and frame count
    across two callbacks while unpaused. When audio is required it also checks
    the selected audio ranges and nonzero decoded audio bytes. It reports the

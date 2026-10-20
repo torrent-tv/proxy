@@ -1,6 +1,9 @@
-## 2.101.41
+## Unreleased
 
 - **Fix**: Include CPU model, thread count and bound CPU capacity in hardware encode observation keys so moved state does not reuse measurements from a different processor allocation (#ttv-185).
+
+## 2.101.41
+
 - **Fix**: Use packet time bounds to avoid rescanning every reordered MP4 packet for each segment input (#ttv-185).
 
 ## 2.101.40

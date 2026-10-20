@@ -589,6 +589,64 @@ durations cannot be placed on the browser timeline by subtracting host
 timestamps. The trace details and limits are in the
 [reconciliation note](https://github.com/torrent-tv/meta/blob/main/research/first-frame-event-time-reconciliation-2026-10-20-ttv185.md).
 
+### 8.4 Current-release field reconciliation
+
+The following three real-torrent runs used the deployed server `0.59.0`, proxy
+`2.104.2` and addon `0.97.2` on 2026-10-21. An independent browser observer
+recorded the file-selection action and the first advancing frame with decoded
+audio. The client journal contains the per-action trace. Durations in the
+parallel lanes overlap and must not be added to one another.
+
+| Parallel lane | Alien Romulus, 1080p | Frankenstein, 1080p | Below the Surface S01E01, 1080p |
+|---|---:|---:|---:|
+| Independent action → first advancing frame | 3,703.0 ms | 21,568.0 ms | 17,597.9 ms |
+| Client `first-frame-observation` elapsed | 3,703.6 ms | 21,577.3 ms | 17,599.3 ms |
+| A0–A10 transport and source setup | transport 341.7 ms | transport 1,293.4 ms | transport 749.1 ms |
+| A12 plan | 51.1 ms | 5,694.2 ms | 3,682.1 ms |
+| A13–A15 preparation | prepare 1,435.6 ms | 13,433.0 ms | 9,007.4 ms |
+| B/C buffering before first presentation | prebuffer 549.2 ms | 1,053.6 ms | 4,059.5 ms |
+| C6 first-frame presentation | presentation 1,326.0 ms | 103.1 ms | 101.2 ms |
+| Sum of client phase fields | **3,703.6 ms** | **21,577.3 ms** | **17,599.3 ms** |
+| Direct action-span union plus R6 long-task intervals | 3,671.7 ms covered; 31.3 ms between spans | 21,529.7 ms covered; 38.3 ms between spans | 17,571.0 ms covered; 26.9 ms between spans |
+| R6 long tasks during the wait | 5 tasks: 54, 52, 157, 191 and 50 ms | 1 task: 51 ms | None observed |
+| Trace emission time (`emitMs`) | 34.1 ms through confirmation | 32.2 ms through confirmation | 16.9 ms through confirmation |
+
+For all three runs, transport + plan + prepare + prebuffer equals
+`coldStartTotalMs`; adding presentation equals `elapsedMs` exactly at the
+logged 0.1 ms precision. The independent action-to-frame observation differs
+from that total by 0.6 ms for Alien Romulus, 9.3 ms for Frankenstein, and
+1.4 ms for Below the Surface. The union of the individually timed operations
+and R6 intervals leaves 31.3 ms, 38.3 ms, and 26.9 ms between recorded
+intervals. All are below the 43.6 ms event-boundary tolerance used for this
+trace. The trace reports 16.9–34.1 ms spent emitting trace events; this is
+measurement overhead, not a playback stage. These checks found no missing
+named cold-start process in the three successful runs.
+
+The timed action rows remain parallel as shown in 8.1–8.2 and in the Mermaid
+map: for example, plan requests, metadata/subtitle setup and the HLS stream
+requests can overlap. Their durations are not summed into the end-to-end
+result. The full logs, independent observer captures, failed field attempts
+and calculation are linked in the
+[2026-10-21 current-release reconciliation note](https://github.com/torrent-tv/meta/blob/main/research/first-frame-current-release-reconciliation-2026-10-21-ttv185.md).
+
+The same Alien Romulus session also sought from 38.374 s to 20 s while the
+browser reported a buffered range of 10.417–156.235 s. `seeking` arrived
+12.2 ms after the seek request, `seeked` at 543.8 ms, and the first advancing
+frame at 834.7 ms; two advancing frames were observed by 1,850.9 ms. The
+client's generation-1 first-frame line reports 570.4 ms from its wait start.
+The independent input timestamp precedes that wait by 264.3 ms, consistent
+with the seek path's separately documented input-to-hold interval in section
+9. This seek resumed playback.
+
+The Frankenstein seek to 30 s reached `seeked` at 511.3 ms and produced a
+frame at 520.5 ms, but that frame was paused and no advancing frame followed.
+It is not counted as a successful seek-to-playback reconciliation. Two
+Nightmare on Elm Street attempts also did not reach playback: the 1080p source
+was refused at a measured 4.77 Mbit/s against 7.2 Mbit/s required, and the
+720p source had one connected peer and a 26-minute readiness estimate before
+the check was stopped. These failed attempts are excluded from the cold-start
+coverage comparison.
+
 ## 9. Seek, soundtrack and quality change
 
 1. The seek starts with the viewer's input, which is not logged. The player's

@@ -1,7 +1,6 @@
 ## 2.103.0
 
-- **New**: Record each verified torrent piece's storage duration as a separate W9 span inside the existing W8 piece interval (#ttv-185).
-- **New**: Record the W3 first-peer wait and W4 magnet-metadata wait as monotonic worker spans (#ttv-185).
+- **New**: Record monotonic durations for W1–W6, W8–W9, including separate W3 first-peer, W4 magnet-metadata, and W9 piece-storage spans (#ttv-185).
 
 ## 2.102.4
 

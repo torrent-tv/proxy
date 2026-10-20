@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.0
 
 - **New**: Return separate sidecar subtitle team and track-title metadata while preserving the existing releaser value (#ttv-118).
 

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.104.2
 
 - **Fix**: Record explicit duration and error outcomes for W5 piece-verification spans (#ttv-185).
 - **Fix**: Include source lookup and source-not-ready outcomes in W7 priority-map durations (#ttv-185).

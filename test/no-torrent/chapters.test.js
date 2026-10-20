@@ -57,6 +57,17 @@ test("Matroska chapter times are nanoseconds, UID strings preserve all bits", as
   assert.equal(result.tailContent, "unknown");
 });
 
+test("nested Matroska chapters retain their declared parent identifiers", async () => {
+  const bytes = mkv(ebml(0x1043a770, edition(atom(1, 0, "Part", atom(2, 1000000000, "Scene")))));
+  const { held, container } = heldFile(bytes, MatroskaContainer);
+  const result = await container.readChapters(held);
+
+  assert.deepEqual(result.sections.map(({ id, parentId, titles }) => [id, parentId, titles[0].text]), [
+    [result.editions[0].chapters[0].id, null, "Part"],
+    [result.editions[0].chapters[0].children[0].id, result.editions[0].chapters[0].id, "Scene"]
+  ]);
+});
+
 test("hidden parent does not hide a visible child; BCP47 replaces legacy language/country", async () => {
   const display = ebml(0x80, ebml(0x85, "Начало"), ebml(0x437c, "eng"), ebml(0x437d, "ru-RU"), ebml(0x437e, "us"));
   const bytes = mkv(ebml(0x1043a770, edition(atom(1, 0, "Parent", ebml(0x98, Buffer.from([1])),

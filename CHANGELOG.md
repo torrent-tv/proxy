@@ -1,4 +1,4 @@
-## Unreleased
+## 2.102.4
 
 - **Chore**: Limit opt-in torrent-piece observations to one span per piece (#ttv-185).
 

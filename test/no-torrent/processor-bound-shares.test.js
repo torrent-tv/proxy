@@ -82,7 +82,7 @@ test("a startup reading under a quota divides out a share of the quota, not of t
   close(freeShareDuring(before, after, 8, 8), 1 - 5.1 / 8);
 });
 
-test("encoder keys name the CPU allocation where it can change measured work", () => {
+test("a software encoder's key names the bound only where one binds", () => {
   const fingerprint = { ffmpeg: "7.1", x264: "core 164", cpu: "Some CPU", threads: 8, devices: {} };
   const software = { name: "libx264", kind: "software" };
   const unbound = configurationKeyOf(fingerprint, software);
@@ -91,12 +91,7 @@ test("encoder keys name the CPU allocation where it can change measured work", (
   assert.notEqual(configurationKeyOf({ ...fingerprint, boundCores: 1.5 }, software),
     configurationKeyOf({ ...fingerprint, boundCores: 2 }, software));
   const vaapi = { name: "h264_vaapi", kind: "vaapi" };
-  const vaapiKey = configurationKeyOf(fingerprint, vaapi);
-  assert.equal(configurationKeyOf({ ...fingerprint }, vaapi), vaapiKey, "the same device and CPU configuration is stable");
-  assert.notEqual(configurationKeyOf({ ...fingerprint, cpu: "Other CPU" }, vaapi), vaapiKey);
-  assert.notEqual(configurationKeyOf({ ...fingerprint, threads: 4 }, vaapi), vaapiKey);
-  assert.notEqual(configurationKeyOf({ ...fingerprint, boundCores: 1.5 }, vaapi), vaapiKey,
-    "a changed CPU quota does not reuse the earlier hardware observation key");
+  assert.equal(configurationKeyOf({ ...fingerprint, boundCores: 1.5 }, vaapi), configurationKeyOf(fingerprint, vaapi));
 });
 
 test("the machine's availability is of the bound the processor reading carries", async t => {

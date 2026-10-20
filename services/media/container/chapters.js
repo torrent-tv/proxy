@@ -76,7 +76,10 @@ export function classifyChapter(titles) {
     if (/^(credits|end credits|closing credits|титры)$/.test(title)) types.add("credits");
     if (/^(post[- ]credits?(?: scene)?|after[- ]credits?(?: scene)?)$/.test(title)) types.add("post-credits");
   }
-  return { type: types.size === 1 ? [...types][0] : "chapter", classification: types.size === 1 ? "title-hint" : "unclassified" };
+  const inferred = types.size === 1;
+  return { type: inferred ? [...types][0] : "chapter",
+    classification: inferred ? "title-hint" : "unclassified",
+    confidence: inferred ? "unconfirmed" : "declared" };
 }
 
 /** Build navigation intervals without promoting inferred ends to file facts. */

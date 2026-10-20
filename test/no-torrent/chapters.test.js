@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MatroskaContainer } from "../services/media/container/MatroskaContainer.js";
-import { Mp4Container } from "../services/media/container/Mp4Container.js";
-import { ContainerOrchestrator } from "../services/media/ContainerOrchestrator.js";
-import { ChapterOrchestrator } from "../services/media/ChapterOrchestrator.js";
-import { MediaReadRequests } from "../services/media/MediaReadRequests.js";
-import { IndexMemory } from "../services/storage/IndexMemory.js";
-import { navigationSections } from "../services/media/container/chapters.js";
-import { BytesUnavailable } from "../services/media/container/unavailable.js";
-import { handleApiSourceChaptersGet } from "../routes/api/sources/chapters/get.js";
-import { ChapterController } from "../services/server/controllers/ChapterController.js";
+import { MatroskaContainer } from "../../services/media/container/MatroskaContainer.js";
+import { Mp4Container } from "../../services/media/container/Mp4Container.js";
+import { ContainerOrchestrator } from "../../services/media/ContainerOrchestrator.js";
+import { ChapterOrchestrator } from "../../services/media/ChapterOrchestrator.js";
+import { MediaReadRequests } from "../../services/media/MediaReadRequests.js";
+import { IndexMemory } from "../../services/storage/IndexMemory.js";
+import { navigationSections } from "../../services/media/container/chapters.js";
+import { BytesUnavailable } from "../../services/media/container/unavailable.js";
+import { handleApiSourceChaptersGet } from "../../routes/api/sources/chapters/get.js";
+import { ChapterController } from "../../services/server/controllers/ChapterController.js";
 
 const u64 = (value) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(value)); return b; };
 const u32 = (value) => { const b = Buffer.alloc(4); b.writeUInt32BE(value); return b; };
@@ -231,6 +231,15 @@ test("ordinary navigation end does not prove a later scene is absent", () => {
   const section = navigationSections({ chapters: [{ id: "1", startSeconds: 0, endSeconds: null, enabled: true, hidden: false, titles: [{ text: "Credits" }], children: [] }] }, 100)[0];
   assert.equal(section.endSource, "navigation");
   assert.equal(section.automaticSkipAllowed, false);
+  assert.equal(section.confidence, "unconfirmed");
+});
+
+test("an ordinary chapter stays unclassified with declared confidence", () => {
+  const section = navigationSections({ chapters: [{ id: "2", startSeconds: 4, endSeconds: null,
+    enabled: true, hidden: false, titles: [{ text: "Scene 2" }], children: [] }] })[0];
+  assert.equal(section.type, "chapter");
+  assert.equal(section.classification, "unclassified");
+  assert.equal(section.confidence, "declared");
 });
 
 test("orchestrator shares reads, retries on bytes, emits changes only for changed answers", async () => {
@@ -262,6 +271,32 @@ test("orchestrator shares reads, retries on bytes, emits changes only for change
   for (let attempt = 0; attempt < 30 && orchestrator.get("source", 0).state !== "available"; attempt++) await settle();
   assert.equal(orchestrator.get("source", 0).state, "available");
   assert.equal(changes.length, 2);
+});
+
+test("chapter snapshots are shared for one file and isolated across file indices", async () => {
+  const reads = [];
+  const orchestrator = new ChapterOrchestrator({
+    containers: { inspect: async (params) => {
+      reads.push(params.fileIndex);
+      const value = { version: 1, state: "available", complete: true,
+        sections: [{ id: `file:${params.fileIndex}`, startSeconds: params.fileIndex + 10 }] };
+      params.acceptChapterResult(value);
+      await params.onReadResult("chapters", { kind: "result", value });
+    } },
+    fileFor: async (sourceKey, fileIndex) => ({ sourceKey, fileIndex })
+  });
+  const first = orchestrator.get("source", 0);
+  orchestrator.get("source", 0);
+  orchestrator.get("source", 1);
+  await Promise.all([...orchestrator.files.values()].map((entry) => entry.reading));
+
+  const firstFile = orchestrator.get("source", 0);
+  const secondFile = orchestrator.get("source", 1);
+  assert.equal(reads.length, 2);
+  assert.equal(firstFile.generation, first.generation);
+  assert.notEqual(firstFile.generation, secondFile.generation);
+  assert.equal(firstFile.sections[0].startSeconds, 10);
+  assert.equal(secondFile.sections[0].startSeconds, 11);
 });
 
 test("forgotten in-flight read cannot repopulate the file result", async () => {
@@ -329,6 +364,7 @@ test("route rejects missing index and does not await discovery", () => {
   assert.equal(status, 400);
   handleApiSourceChaptersGet({ params: { sourceKey: "source" }, query: { fileIndex: "0" } }, reply, { chapterController: controller });
   assert.equal(body.state, "pending");
+  assert.equal(body.capability, "supported");
 });
 
 test("container forget prevents stale detection from repopulating its cache", async () => {

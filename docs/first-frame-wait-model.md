@@ -738,7 +738,50 @@ conditions: exactly one is present for an fMP4 output, and P13 does not exist
 for an MPEG-TS output. P6.a is opened by whichever of its three requests comes
 first; the others then find it open.
 
-### 10.2 Shared resources
+### 10.2 Trace events and log destinations
+
+This diagram shows where the opt-in observations are recorded. It is separate
+from the process-flow graph: log-routing arrows do not add process dependencies
+or waiting time. Browser, proxy and worker monotonic clocks remain independent.
+
+```mermaid
+flowchart LR
+  subgraph BROWSER["Browser"]
+    PROC["waitTrace process events\nB clock; wait and attempt"]
+    LOGGER["Client logger\nqueue, batch and retry"]
+    PROC --> LOGGER
+  end
+
+  subgraph SERVER["Signalling server"]
+    SERVERLOG["/var/log/torrent-tv/client.log"]
+  end
+
+  subgraph PROXY["Proxy"]
+    ROUTES["HTTP route and source events\nP clock; requestId and sourceKey"]
+    WORKER["Torrent worker events\nworker clock; sourceKey and piece"]
+    RECEIVER["Per-viewer client-log receiver"]
+    CLIENTFILE["/data/client-*.log"]
+    PROXYFILE["/data/proxy.log"]
+    ROUTES --> PROXYFILE
+    WORKER --> PROXYFILE
+    RECEIVER --> CLIENTFILE
+  end
+
+  LOGGER -->|"before data channel; unload; proxy send failure"| SERVERLOG
+  LOGGER -->|"data channel open; queued batches replayed"| RECEIVER
+  PROC -.->|"wait and attempt identity"| ROUTES
+  ROUTES -.->|"sourceKey joins shared source work"| WORKER
+```
+
+The server file is the browser-log fallback before the data channel opens, on
+page unload, or when a proxy send fails. During playback, browser batches are
+sent to the proxy and stored in the per-viewer file when `--log-file` is set.
+The proxy's own route/source events and worker events go to `/data/proxy.log`.
+Use wait, attempt, operation, request and source identifiers to correlate these
+files; do not subtract timestamps from different clocks. See [logs.md](logs.md)
+for log retention and collection details.
+
+### 10.3 Shared resources
 
 Each line pairs the processes with the resource they take service from
 (`-.-`, section 2). The main event loop itself runs on one of the processor
@@ -758,7 +801,7 @@ flowchart LR
   U6["B8-B12 remux and append, page code, frame callbacks"] -.- R6[("R6 browser main thread")]
 ```
 
-### 10.3 Start of a seek wait
+### 10.4 Start of a seek wait
 
 ```mermaid
 flowchart TB
@@ -850,9 +893,12 @@ Against proxy `aa67015` (the second review in torrent-tv/meta#185):
 
 Add `?waitTrace=1` to the page address before an initial open. This enables
 `[wait-trace]` JSON records without changing the forecast, admission or playback
-permission rules. The browser logger forwards them to the proxy log after the
-proxy connection opens; events from earlier in the same wait are queued and
-replayed there. The default page does not emit these records.
+permission rules. Before the data channel opens, on page unload, or when a
+proxy send fails, browser logs go to the server's `/var/log/torrent-tv/client.log`.
+During playback the logger sends batches to the proxy; earlier queued events
+are replayed into that viewer's `/data/client-*.log` file when the proxy sink
+opens. The proxy's own route, source and worker records are in `/data/proxy.log`.
+The default page does not emit these trace records.
 
 1. Browser `action` records preserve the original input timestamp. Each selected
    file has a wait identity; retries of that file get increasing attempt
@@ -897,3 +943,13 @@ replayed there. The default page does not emit these records.
    calculated serial, parallel, cache and retry examples check the scheduling
    and overlap accounting. Case coverage, timing uncertainty and limitations
    are recorded in the meta research note linked from issue #185.
+
+The 2026-10-20 field check reached the first advancing frame and decoded-audio
+observation on the Home Assistant proxy (server 0.52.5, proxy 2.102.4). For
+wait `f1e0068f-7804-4fb3-983e-4d2dfb84bb3c`, the browser recorded 163 trace
+records; attempt 1 followed attempt 0. The first advancing frame occurred
+1857.5 ms after the original browser action (15164.4 ms minus 13306.9 ms).
+The proxy log contained 7,239 records for that wait. This verifies trace
+delivery and the observed path through the first frame; it does not show that
+the logged intervals sum to elapsed wait or establish a forecast. Full logs
+and limits are recorded in the [field-check note](https://github.com/torrent-tv/meta/blob/main/research/first-frame-wait-trace-field-check-2026-10-20.md).

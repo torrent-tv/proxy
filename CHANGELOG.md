@@ -1,4 +1,4 @@
-## Unreleased
+## 2.102.1
 
 - **Fix**: Record opt-in, correlated startup request, source-read queue and first-piece publication events for validating actual playback waits (#ttv-185).
 

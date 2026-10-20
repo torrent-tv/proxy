@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SourceWaitTrace } from "../../utils/wait-trace.js";
 import { tracePieceStorePut } from "../../services/torrent/worker/trace-piece-store-put.js";
+import { beginSwarmLifecycleTrace, noteSwarmDiscovery, noteSwarmMetadata, noteSwarmPeer } from "../../services/torrent/worker/trace-swarm-lifecycle.js";
 
 test("source observations expire and do not claim a request caused shared work", () => {
   let now = 0;
@@ -68,5 +69,21 @@ test("W9 records the exact piece-store write duration and preserves callback res
   assert.deepEqual(callbackResults, [null]);
   assert.deepEqual(events.map(event => [event.process, event.phase, event.piece, event.durationMs]), [
     ["W9", "begin", 7, undefined], ["W9", "end", 7, 4.5]
+  ]);
+});
+
+test("W3 and W4 measure first-peer and magnet-metadata waits on the worker clock", () => {
+  let now = 10;
+  const events = [];
+  const timing = { addedAtMonotonic: 5, firstPeerAtMonotonic: null, peerWaitStartedAt: null, metadataWaitStartedAt: null };
+  const trace = (process, phase, fields) => events.push({ process, phase, ...fields });
+  beginSwarmLifecycleTrace(timing, trace, false, () => now);
+  noteSwarmDiscovery(timing, trace, now);
+  now = 30;
+  noteSwarmPeer(timing, trace, false, () => now);
+  now = 47;
+  noteSwarmMetadata(timing, trace, 4, () => now);
+  assert.deepEqual(events.map(event => [event.process, event.phase, event.durationMs]), [
+    ["W3", "begin", undefined], ["W3", "end", 20], ["W4", "begin", undefined], ["W4", "end", 17]
   ]);
 });

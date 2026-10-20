@@ -28,11 +28,18 @@ durations.
       with `originalOpen: true`.
    2. Multi-file torrent: the file choice. The time spent choosing is not part
       of the wait.
-   3. Seek: the moment `#moveToPosition` takes the seek hold, which moves the
-      application to `SWITCHING` (section 9). For the player's controls
-      (`media-seek-request` from `#player__controller`) this is the action;
-      for native controls and Media Session it is 300 ms after the element's
-      `seeking` event.
+   3. Seek: the viewer's seek input. The code does not log the input itself;
+      it observes it later. The player's controls raise `media-seek-request`,
+      handled by `#onMediaSeekRequest`, which calls `#moveToPosition` at
+      once. Native controls and Media Session are seen first as the
+      element's `seeking` event (logged `[evt] <wall time> seeking`) and then
+      through a debounce timer of `SEEK_REPORT_DEBOUNCE_MS` = 300 ms, which
+      fires no earlier and may fire later. `#moveToPosition` logs
+      `[evt] seek intent → <s>` and takes the seek hold, which moves the
+      application to `SWITCHING` and makes `waiting.js` record
+      `[wait-start]`. That record is a late observation of `t0`: the time from
+      the input to the hold is part of the wait and is not measured
+      (section 9).
    4. Soundtrack or quality change: the moment the page takes its hold
       (`#holdForAudio`, `#cushionHeld`); its distance from the viewer's click
       is not traced here.
@@ -95,10 +102,15 @@ durations.
 |---|---|---|---|---|
 | A0 | Original action (`t0`) | viewer | `FILE_CHOSEN` dispatched | — |
 | A1 | Parse the `.torrent` in the page (`openParsedTorrentDetails`, synchronous) | A0 | parsed | blocking |
-| A2 | Media connection (`#acquireTransport` → `ProxySelector.chooseBestProxy`): A2.1 ask the server which proxy (`POST /api/proxy-clients/choose`); A2.2 signalling WebSocket, SDP relayed by the server, ICE, DTLS, SCTP, the media data channel; A2.3 liveness ping. Joins the connect `#connectEarly` started at page load and costs nothing when that has finished. Limits: 12 s public-only, 5 s on the same network, 30 s overall | A1 | channel open and ping answered | blocking |
-| A2c | Control connection: when the proxy's answer carries `separateControl: 2` (proxy `webrtc-manager.js`), a second `RTCPeerConnection` with its own ICE, DTLS and SCTP (`ControlConnection`). `#settleConnected` waits for it; otherwise a control channel on the media connection | A2.2 | control channel open | blocking for A2 |
-| A2.4 | Branch: public-only attempt failed → local-network permission (one viewer click) → A2 again with private candidates | A2 failure | second connection open | blocking; outcome 4 while waiting |
-| A2.5 | Link probe (`measureLink`) over the media connection | A2 | probe answered | start without waiting |
+| A2 | Connect (`#acquireTransport` → `ProxySelector.chooseBestProxy`), made of A2.1–A2.3. Joins the connect `#connectEarly` started at page load and costs nothing when that has finished. Limits: 12 s public-only, 5 s on the same network, 30 s overall | A1 | A2.3 ends | blocking |
+| A2.1 | Ask the server which proxy (`POST /api/proxy-clients/choose`) | A2 | answer | blocking |
+| A2.2 | Media connection signalling: WebSocket `/ws/browser-signal`, session, SDP offer, answer relayed by the server, answer applied (`setRemoteDescription`, buffered candidates added) | A2.1 | answer applied | blocking |
+| A2.2m | Media connection transport: ICE, DTLS, SCTP, media data channel open | A2.2 | media channel open | parallel with A2.2c |
+| A2.2c | Control connection. With `separateControl: 2` in the answer (proxy `webrtc-manager.js`) it is started while the answer is processed (`#openSeparateControl`) and has its own WebSocket signalling, offer/answer, ICE, DTLS and SCTP (`ControlConnection`). Without it, a control channel is opened on the media connection (`#openLegacyControl`) | A2.2 | control channel open | parallel with A2.2m |
+| A2.J | Both ready: `#settleConnected` requires the answer applied, the media channel open and, with a separate control connection, its channel open | A2.2m, A2.2c | `connect()` resolves | blocking |
+| A2.3 | Liveness ping (`proxy.ping()`): waits for the control link, then sends on the control channel (`#controlChannelFor`) | A2.J | pong | blocking |
+| A2.4 | Branch: the public-only attempt fails in A2.2m, A2.2c, A2.J or A2.3 → local-network permission (one viewer click) → A2.1–A2.3 again with private candidates | the failure | second connection ready | blocking; outcome 4 while waiting |
+| A2.5 | Link probe (`measureLink`) over the media connection, after the connection is adopted | A2.3 | probe answered | start without waiting |
 | A3 | Ask for the proxy that holds this film (`#useProxyThatHoldsTheFilm`, `POST /choose` with the info hash) | A2 | answer | blocking |
 | A3r | Branch: move → close, connect to the named proxy (A2 steps) | A3 | connected | blocking |
 | A4 | Register the source (`POST /api/sources`; cached per transport; the proxy only records it) | A3 or A3r | `sourceKey` | blocking |
@@ -126,18 +138,27 @@ durations.
 | B3 | Media playlist wait (`waitForHlsPlaylist`); a synthetic VOD playlist answers at once, otherwise retry with `min(3000, 500 + 250·n)` ms | B1 | playlist with `#EXTINF` | blocking |
 | B4 | Restate a position changed during allocation (`reportSeek` loop) | B3 | position acknowledged | blocking (normally no iteration) |
 | B5 | hls.js: master playlist when variants exist, `MANIFEST_PARSED`, level pinned, `startLoad` | B4 | `startLoad` called | blocking |
-| B6.v | Main stream: level playlist, init request; held by the proxy until P13.v, then P12.v | B5 | init bytes received | per stream |
-| B6.a | Separate soundtrack: its playlist request (this first request opens P6.a), then its init, held until P13.a | B5 | init bytes received | per stream |
-| B7.v / B7.a | First fragment request of the stream, held until its piece is published (P11) or answered at once when it already is | B6 of the stream | fragment bytes received | per stream |
-| B8.v / B8.a | Remux of init and first fragment (hls.js `PassThroughRemuxer.remux` returns the init only together with a fragment that has samples), `BUFFER_CODECS` | B6 and B7 of the stream | event raised | per stream |
+| B6.v | Main stream init request (fMP4 only: `#EXT-X-MAP`); held by the proxy until P13.v, then P12.v. An MPEG-TS output has no init file (`mpegtsFormat.initFileName` is null, no `#EXT-X-MAP`), so this request does not exist | B5 | init bytes received | per stream |
+| B6.a.p | Separate soundtrack: playlist request. Answered from the base output (`resolveAudioRenditionFile` returns `base.id` for a playlist); it creates no output | B5 | playlist received | per stream |
+| B6.a.i | Separate soundtrack: init request (fMP4 only). The first init or segment request of the soundtrack is what opens P6.a; held until P13.a | B6.a.p | init bytes received | per stream |
+| B7.v / B7.a | First fragment request of the stream, held until its piece is published (P11) or answered at once when it already is. For an MPEG-TS soundtrack this is the request that opens P6.a | B6 of the stream (fMP4) or its playlist (MPEG-TS) | fragment bytes received | per stream |
+| B8.v / B8.a | Remux and `BUFFER_CODECS`. fMP4: `MP4Demuxer` + `PassThroughRemuxer`, whose `remux` returns the init only together with a fragment that has samples. MPEG-TS: `TSDemuxer` + `MP4Remuxer`, which builds the track description and init from the first fragment's samples (`generateIS` inside `remux`). In both formats the stream's first `BUFFER_CODECS` follows its first fragment | B6 (fMP4) and B7 of the stream | event raised | per stream |
 | B9 | SourceBuffers created: hls.js waits for every expected `BUFFER_CODECS` — two with an alternate soundtrack, otherwise one (`buffer-controller.ts` `onManifestParsed`, `checkPendingTracks`) | every present B8 | buffers exist | blocking |
 | B10.v / B10.a | Init append to the stream's SourceBuffer | B9 | `updateend` | per buffer |
 | B11 | `t3`: `readyState >= HAVE_METADATA` (`#ensureVideoReady`, no decoded frame required). Under Media Source this follows the init of every SourceBuffer. A progress poll runs every 1 s meanwhile | every present B10 | `loadedmetadata` | blocking |
 | B12.v / B12.a | First fragment append | B10 of the stream | `updateend` | per buffer |
 
-Because hls.js passes the init to the buffer only with a fragment, `t3` follows
-the production and delivery of the first fragment of every required stream,
-whichever way the proxy makes the init (P13).
+Because hls.js produces a stream's buffer description only from its first
+fragment, in fMP4 and in MPEG-TS, `t3` follows the production and delivery of
+the first fragment of every required stream, whichever way the proxy makes the
+init (P13).
+
+The segment format belongs to the base output and to its soundtrack outputs.
+It is fMP4 by default (`DEFAULT_SEGMENT_FORMAT_ID`, `--segment-format`). The
+page asks for MPEG-TS when a soundtrack it copies cannot be appended from fMP4
+but can from MPEG-TS (`#requiredSegmentFormat`, `canAppendCopiedAudio`; copied
+MP3 is the case its comment names); the proxy also uses MPEG-TS when started
+with `--segment-format mpegts`.
 
 ### 3.3 Browser: readiness gate and presentation
 
@@ -167,12 +188,12 @@ orchestration. The torrent runs in one worker thread
 | P4 | Download map pass (`DownloadMaps.resolvePlayback`, proxy `server.js`): on each change of demand, the source byte ranges of every unresolved segment of every watched output (`directSegmentInput` / `PacketIndex.inputFor`, or reads through R8), recorded in `SegmentInputTable`, the priority map published to the worker; yields between zones | any demand change | pass ends | repeated; feeds W7 and P14 |
 | P5 | Keyframe index (`KeyframeTables`; warmed during P2 by `warmKeyframeIndex`, read through R8 by `getKeyframeIndex`). A missing range is stated to the map like any read (`onReadResult` → `downloadMaps.metadata`); the table is read again when pieces arrive (`readAgainIfUnanswered`). Required only when the video is copied | P2 (warm), B1 | table answered | blocking for P6.v (copy) |
 | P6.v | Picture output open (`OutputOpening.open`): media info from the plan, file length, P5 for a copy, cut grid and timeline, capacity admission (`admitsWatching`), viewer placed; answered before any segment exists | B1 | output returned | blocking for B1 |
-| P6.a | Soundtrack output open on its first file request (`Renditions.resolveAudioRenditionFile`) | B6.a | output returned | blocking for B6.a |
+| P6.a | Soundtrack output open (`#resolveAudioRenditionSession`): on the soundtrack's first init request (fMP4) or first segment request (MPEG-TS) through `resolveAudioRenditionFile`; earlier when the `…/a/:track/warm` route (`prepareAudioTrack`) asks for it, which the page uses for a soundtrack change and to restate its soundtrack after a reconnect. A playlist request does not open it | B6.a.i, B7.a or the warm route, whichever comes first | output returned | blocking for that request |
 | P7.v / P7.a | Encoder plan (`planEncodersSoon` → microtask → `planEncodersNow` → `encodeOrchestrator.reconcile`), run again after each output opens and after each seek; it reads each output's priority map, built from where its viewers stand (`PriorityOrchestrator.mapForOutput`, not the P4 pass), and the host's capacity | P6 of the output, a seek | that output's runs decided | blocking for P8 of the output |
 | P8.v / P8.a | Run input (`EncodeInputs`): input ranges of the run's first segments (reads through R8), wait until those bytes are held (W9), memory admission, copy of the held bytes. A copy may continue while the run opens (`deferredBytes`) | P7 of the output | input admitted | blocking for F1 |
 | P11.v / P11.a | Piece closure: FFmpeg names the closed piece on its fourth descriptor, completeness judged (`encode/piece-completeness.js`), published in `SegmentStore` | F2 of the output | published | blocking for P12 |
-| P13.v / P13.a | Init readable. Alternatives: written by FFmpeg at the run's start; or, for an output cut at given times (`cutsAtGivenTimes`), lifted from the first produced piece (`#initFromFirstSegment`); or already kept by `SegmentStore` / readable from a published piece when the output was made before | F1 or P11 of the output, or nothing (exactly one) | init readable | blocking for B6 |
-| P12.v / P12.a | Held request answered (`SegmentServing`) and streamed through the data-channel handler | P11 or P13 of the output, or the piece already published | response sent | blocking for B6, B7 |
+| P13.v / P13.a | Init readable; fMP4 only. Alternatives: written by FFmpeg at the run's start; or, for an output cut at given times (`cutsAtGivenTimes`), lifted from the first produced piece (`#initFromFirstSegment`); or already kept by `SegmentStore` / readable from a published piece when the output was made before | F1 or P11 of the output, or nothing (exactly one) | init readable | blocking for B6 |
+| P12.v / P12.a | Held request answered (`SegmentServing`) and streamed through the data-channel handler | P11 or P13 of the output, or the piece already published | response sent | blocking for B6 (fMP4), B7 |
 | P14 | Readiness forecast on each progress request (`getSessionProgress` → `#playbackReadinessFor` → `predictPlaybackReadiness`): worker statistics (W10), segment inputs from `SegmentInputTable`, rates, client ranges (C2) | progress request | answer | gate input to C1 |
 | P15 | Early estimate (`waitEstimateForFile` / `waitEstimateForSource` → `LocalObservations.firstFrameSeconds`) | A5, A6, A11, P14 | value or null | observer |
 
@@ -220,7 +241,9 @@ orchestration. The torrent runs in one worker thread
 2. Whole files on disk: W5 does no work; W8 is not needed for their bytes.
 3. Connection already made by `#connectEarly`: A2 costs nothing.
 4. Public-only attempt fails: A2.4, waiting for the viewer.
-5. `separateControl: 2`: A2c and the R5.c connection exist.
+5. `separateControl: 2`: A2.2c is a separate connection (R5.c) built in
+   parallel with A2.2m; otherwise the control channel is on the media
+   connection.
 6. A better proxy holds the film (A3r) or the pool is restricted by the
    filename (A9r).
 7. Several videos: a new `t0` at the choice (A7).
@@ -234,14 +257,17 @@ orchestration. The torrent runs in one worker thread
 13. Soundtrack muxed into the picture or served separately: the `.a`
     processes exist only in the second case, and only then does the forecast
     require two tracks (`requiredAudio`).
-14. Init written by FFmpeg or lifted from the first piece (P13).
-15. First piece at the position already published: P7, P8, F1, F2 and P11 do
+14. Segment format: fMP4 (init request, P13) or MPEG-TS (no init request; the
+    soundtrack output opens on its first segment request).
+15. Init written by FFmpeg or lifted from the first piece (P13, fMP4 only).
+16. First piece at the position already published: P7, P8, F1, F2 and P11 do
     no work for it; P12 answers at once.
-16. Opening subtitle track: C3 holds the gate until the proxy states it read.
-17. Viewer had stopped: `PAUSED`, no `play()` (outcome 3).
-18. Autoplay refused: C5 waits for a gesture (outcome 4).
-19. Cancellation and errors: outcomes 5 and 6 can end any browser process.
-20. Seek, soundtrack and quality change: section 9.
+17. Opening subtitle track: C3 holds the gate until the proxy states it read.
+18. Viewer had stopped: `PAUSED`, no `play()` (outcome 3).
+19. Autoplay refused: C5 waits for a gesture (outcome 4).
+20. Cancellation and errors: outcomes 5 and 6 can end any browser process.
+21. Soundtrack output opened early by the warm route (`prepareAudioTrack`).
+22. Seek, soundtrack and quality change: section 9.
 
 ## 6. What the coarse intervals contain
 
@@ -249,7 +275,7 @@ orchestration. The torrent runs in one worker thread
 |---|---|---|
 | `transport = t1 − t0` | A1, A2 (when not finished early), A3/A3r, A4, A6 (waits for P1: W1–W6), A9/A9r | A9/A9r, A10 |
 | `plan = t2 − t1` | A12: P2 (R8 queue, X1 when not sniffed, `needs-ranges` → P4 → W7–W9 → read again), P3 | same |
-| `prepare = t3 − t2` | A13–A15, B1 (P6.v, P5 for a copy), B2–B5, then per required stream: P6.a (soundtrack), P7, P8, F1, F2, P11, P13, P12, the init and first-fragment transfers on R5.m, B8, B9, B10 | same |
+| `prepare = t3 − t2` | A13–A15, B1 (P6.v, P5 for a copy), B2–B5, then per required stream: P6.a (soundtrack, opened by its first init or segment request), P7, P8, F1, F2, P11, P13 and the init transfer (fMP4), P12, the first-fragment transfer on R5.m, B8, B9, B10 | same |
 | `prebuffer = t4 − t3` | gate C1: the continuity forecast to the end of the film (P14, needing P4 inputs for every remaining segment of an incomplete source), further production and delivery, poll and net-report latency, C3 | same |
 | `presentation = tFrame − t4` | C4, C5, C6 | same |
 
@@ -315,7 +341,7 @@ logged at the process boundary; "derived" is computed from other values;
 | Process | Clock | Identifier | Start event | End event | Queue | Work, units | Source |
 |---|---|---|---|---|---|---|---|
 | A0 | B | wait sequence; `waitId = sourceKey:fileIndex:generation` in later lines | `[wait-start]` | — | — | — | direct |
-| A2, A2c | B | signalling session id | none for the start | `[ice] connectionState=`, `[ice-control]` lines | — | — | direct state changes; no duration line |
+| A2.2, A2.2m, A2.2c, A2.J, A2.3 | B | signalling session id of each connection | none for the start | `[ice] … State=` (media), `[ice-control]` (control) state lines; ping round trip only in the debug state | — | — | direct state changes; no duration line, no `connect()` resolution line |
 | A2.1, A3, A9 | B | — | none | `[proxy-selector]` (only when narrowed), `filename hints` (only when it moves) | server | one request | none for durations |
 | A6 | B | — | none | none | P1 | one request | none |
 | A12 / P2–P3 | B / P | `sourceKey:fileIndex` | `t1` | `t2`; proxy `plan … torrent-ready= probe= total=` per attempt | R8 | reads, bytes | direct (per attempt on P) |
@@ -335,7 +361,8 @@ logged at the process boundary; "derived" is computed from other values;
 | B11 (`t3`) | B | — | — | `cold-start prepare=` | — | — | direct |
 | C1 (`t4`) | B | — | `t3` | `[evt] prebuffer ready …`; `prebuffer waiting … reason=` on each reason change | — | — | direct |
 | P14 | P | session id, consumer | request | `readiness parts … in all <ms>`; `playback readiness {…}` on a reason or missing-input change; `playback held …` | R2 | — | direct |
-| C5 | B | — | `[evt] player.play reason=state` | none for `playing` | — | — | partial |
+| C5 | B | — | `[evt] player.play reason=state` | `[evt] <wall time> playing currentTime= bufferedAhead=` (`#attachPlaybackDiagnostics`) | — | — | direct, on wall time; the `playing` line carries no wait identifier and no monotonic time |
+| Seek start (section 9) | B | — | the viewer's input: none; `[evt] <wall time> seeking` for native controls and Media Session | `[evt] seek intent → <s>`; `[wait-start]` at the hold | — | — | input not logged; `seeking` and `seek intent` on wall time, `[wait-start]` monotonic |
 | C6, C7 | B | wait sequence, `waitId` | — | `[first-frame]`, `[first-frame-buffers]`, `[first-frame-observation] audioReady=` | — | — | direct for `tFrame`; `tPlay` none |
 | W1–W6 | P | info hash | none | tracker update lines; `ready` not logged with a duration | — | — | partial |
 | W7 | P | file | — | `download: first class …`; per-minute `download map … delivered … applied in the torrent thread …` | — | — | aggregated |
@@ -343,28 +370,35 @@ logged at the process boundary; "derived" is computed from other values;
 | W8, W9 | P | piece | none | none | R1 | bytes | none per piece; rates in statistics |
 | W10 | P | file | — | `[stats] … getFileStatsMs=` (stats route); `readiness parts … arrival forecast <ms>` | — | — | direct |
 
-Missing events, by the interval they leave unexplained: A2 start and the
-split of A2.1/A2.2/A2c/A2.3; A6 duration; P1 alone; X1; P6.a; P11 publication
-time; P13; B8–B12 (append and `updateend`); `playing`; a frame callback with
-advancing `mediaTime`; audio ready after `tFrame`; W3 first peer, W4, W6
-duration; per-pass P4 time and the moment a missing segment's addresses become
-known; R8 queue wait outside P8.
+Missing events, by the interval they leave unexplained: A2 start, A2.1 and
+A2.2 durations, the completion of A2.2m and A2.2c each and A2.J; A6 duration;
+P1 alone; X1; P6.a and the request that opened it; P11 publication time; P13;
+B8–B12 (append and `updateend`); a wait identifier and monotonic time on the
+existing `[evt] … playing` and `[evt] … seeking` lines; the viewer's seek
+input; a frame callback with advancing `mediaTime`; audio ready after
+`tFrame`; W3 first peer, W4, W6 duration; per-pass P4 time and the moment a
+missing segment's addresses become known; R8 queue wait outside P8.
 
 ## 9. Seek, soundtrack and quality change
 
-1. A seek from the player's controls (`media-seek-request`,
-   `#onMediaSeekRequest`) calls `#moveToPosition` directly;
-   native controls and Media Session reach it through the element's `seeking`
-   event and a 300 ms debounce (`SEEK_REPORT_DEBOUNCE_MS`). `#moveToPosition`
-   resets the waiting model and, while playback is live, takes the seek hold
-   (`#holds.beginSeek`), which raises `SWITCH_REQUESTED`: the state becomes
-   `SWITCHING` and `waiting.js` records `[wait-start]`.
+1. The seek starts with the viewer's input, which is not logged. The player's
+   controls raise `media-seek-request`; `#onMediaSeekRequest` calls
+   `#moveToPosition` at once. Native controls and Media Session move the
+   element first: its `seeking` event is logged (`[evt] <wall time>
+   seeking`), `#reportSeekIntent` ignores a move the player made itself, and a
+   debounce timer of at least 300 ms (`SEEK_REPORT_DEBOUNCE_MS`; a timer may
+   fire later) calls `#moveToPosition`. `#moveToPosition` logs `[evt] seek
+   intent → <s>`, resets the waiting model and, while playback is live, takes
+   the seek hold (`#holds.beginSeek`), which raises `SWITCH_REQUESTED`: the
+   state becomes `SWITCHING` and `waiting.js` records `[wait-start]`. The time
+   from the input to the hold belongs to the wait; the issue's `t0` is the
+   input, so `[wait-start]` of a seek starts late by that time.
 2. It then stops the loader, reports the position (`POST
    /api/transcode-sessions/:id/seek` over R5.c → `ViewerRequests.requestSeek`:
    the viewer moves, held requests are woken, `planEncodersSoon`), and
    restarts loading at the position.
 3. The proxy repeats P4, P7, P8, F1, F2, P11, P12 for the segments at the new
-   position unless they are published (branch 15). B7–B12 repeat for the new
+   position unless they are published (branch 16). B7–B12 repeat for the new
    fragments; B8–B10 do not repeat the init.
 4. `#holdSeekUntilReady` asks for progress every 1.5 s, sooner when the
    forecast names a shorter delay or the element reports `seeked`/`canplay`,
@@ -388,10 +422,14 @@ flowchart TB
   subgraph BROWSER["Browser main thread"]
     T0(["A0 t0"])
     A1["A1 parse .torrent"]
-    A2["A2 media connection: choose, WebRTC, ping"]
-    A2c["A2c control connection"]
-    QA2{"public-only failed?"}
-    A24["A2.4 viewer permits local network, connect again"]
+    A21["A2.1 ask the server which proxy"]
+    A22["A2.2 media signalling, answer applied"]
+    A22m["A2.2m media ICE, DTLS, SCTP, channel"]
+    A22c["A2.2c separate control connection"]
+    A2J["A2.J both channels open"]
+    A23["A2.3 ping on the control channel"]
+    QA2{"public-only attempt failed?"}
+    A24["A2.4 viewer permits local network, A2.1-A2.3 again"]
     A25["A2.5 link probe"]
     A3["A3 ask for the proxy holding the film"]
     QA3{"move?"}
@@ -422,12 +460,15 @@ flowchart TB
     B4["B4 restate a moved position"]
     B5["B5 manifest parsed, startLoad"]
     QSEP{"soundtrack served separately?"}
+    QFMT{"segment format of the output"}
     B6v["B6.v main init request"]
     B7v["B7.v first main fragment request"]
-    B8v["B8.v remux init and fragment"]
-    B6a["B6.a soundtrack playlist and init request"]
+    B8v["B8.v remux, BUFFER_CODECS"]
+    B6ap["B6.a.p soundtrack playlist, answered from the base output"]
+    B6ai["B6.a.i soundtrack init request"]
     B7a["B7.a first soundtrack fragment request"]
-    B8a["B8.a remux init and fragment"]
+    B8a["B8.a remux, BUFFER_CODECS"]
+    BW["soundtrack warm request: change or reconnect"]
     B9["B9 SourceBuffers created"]
     B10v["B10.v main init append"]
     B10a["B10.a soundtrack init append"]
@@ -476,8 +517,8 @@ flowchart TB
     P8a["P8.a run input"]
     P11v["P11.v piece published"]
     P11a["P11.a piece published"]
-    P13v["P13.v init readable"]
-    P13a["P13.a init readable"]
+    P13v["P13.v init readable, fMP4"]
+    P13a["P13.a init readable, fMP4"]
     P12v6["P12.v init answered"]
     P12v7["P12.v fragment answered"]
     P12a6["P12.a init answered"]
@@ -513,14 +554,16 @@ flowchart TB
     E1["WaitingModel deadline, overlay render"]
   end
 
-  T0 --> A1 --> A2
-  A2 -.- S1
-  A2 -.- S2
-  A2 -- separateControl 2 --> A2c --> QA2
-  A2 -- no separate control --> QA2
+  T0 --> A1 --> A21 --> A22
+  A21 -.- S1
+  A22 -.- S2
+  A22 --> A22m --> A2J
+  A22 -- separateControl 2 --> A22c --> A2J
+  A22c -.- S2
+  A2J --> A23 --> QA2
   QA2 -- yes --> A24 --> A3
   QA2 -- no --> A3
-  A2 -.-> A25
+  A23 -.-> A25
   A3 -.- S1
   A3 --> QA3
   QA3 -- yes --> A3r --> A4
@@ -579,7 +622,9 @@ flowchart TB
   P6v -. viewer placed .-> P4
   P6v --> P7v
 
-  B5 --> B6v --> B7v
+  B5 --> QFMT
+  QFMT -- fMP4 --> B6v --> B7v
+  QFMT -- MPEG-TS: no init --> B7v
   P7v --> QRv
   QRv -- no --> P8v
   W9 --> P8v
@@ -594,8 +639,12 @@ flowchart TB
   B6v --> B8v
   B7v --> B8v
 
-  QSEP -- yes --> B6a
-  B6a -.-> P6a
+  QSEP -- yes --> B6ap
+  B6ap -- fMP4 --> B6ai
+  B6ap -- MPEG-TS: no init --> B7a
+  B6ai -. first request opens .-> P6a
+  B7a -. MPEG-TS: first request opens .-> P6a
+  BW -. opens early .-> P6a
   P6a --> P7a
   P6a -.-> P4
   P7a --> QRa
@@ -605,12 +654,12 @@ flowchart TB
   F1a -- FFmpeg writes the init --> P13a
   P11a -- cut at given times: init lifted --> P13a
   QRa -- yes: init kept or in the published piece --> P13a
-  P13a --> P12a6 --> B6a
+  P13a --> P12a6 --> B6ai
   QRa -- yes --> P12a7
   P11a --> P12a7
   P12a7 --> B7a
-  B6a --> B7a
-  B6a --> B8a
+  B6ai --> B7a
+  B6ai --> B8a
   B7a --> B8a
 
   B8v --> B9
@@ -652,7 +701,9 @@ flowchart TB
 ```
 
 The three edges into P13.v (and into P13.a) carry mutually exclusive
-conditions: exactly one is present for an output.
+conditions: exactly one is present for an fMP4 output, and P13 does not exist
+for an MPEG-TS output. P6.a is opened by whichever of its three requests comes
+first; the others then find it open.
 
 ### 10.2 Shared resources
 
@@ -674,11 +725,44 @@ flowchart LR
   U6["B8-B12 remux and append, page code, frame callbacks"] -.- R6[("R6 browser main thread")]
 ```
 
-## 11. Changes against proxy `7b646fe`
+### 10.3 Start of a seek wait
+
+```mermaid
+flowchart TB
+  IN(["viewer's seek input: not logged"])
+  QC{"which control?"}
+  MSR["media-seek-request, #onMediaSeekRequest"]
+  SK["element seeking event, logged on wall time"]
+  OWN{"a move the player made itself?"}
+  IGN(["not a seek: nothing reported"])
+  DEB["debounce timer, at least 300 ms"]
+  MOVE["#moveToPosition, logged seek intent"]
+  HOLD["seek hold taken while playback is live: SWITCHING, wait-start"]
+  STOP["loader stopped"]
+  REP["seek reported over the control connection"]
+  LOAD["loading restarted at the position"]
+  GATE{{"seek hold gate: same readiness answer as C1"}}
+  REL(["hold released, picture resumes"])
+
+  IN --> QC
+  QC -- player controls --> MSR --> MOVE
+  QC -- native controls or Media Session --> SK --> OWN
+  OWN -- yes --> IGN
+  OWN -- no --> DEB --> MOVE
+  MOVE --> HOLD --> STOP --> REP --> LOAD --> GATE --> REL
+```
+
+The wait of a seek runs from the input; `[wait-start]` is recorded at the hold,
+after every step above it.
+
+## 11. Changes against earlier revisions
+
+Against proxy `7b646fe` (review 6285126911):
+
 
 1. Processes are split per output and per stream (`.v`, `.a`); P13 has two
    conditional predecessors instead of two required ones; a published piece
-   bypasses production (branch 15); B10 is split into SourceBuffer creation,
+   bypasses production (branch 16); B10 is split into SourceBuffer creation,
    init append and fragment append.
 2. `t3` follows the first fragment of every required stream (hls.js 1.7.3
    remux), and the soundtrack output opens only on its first file request
@@ -699,6 +783,22 @@ flowchart LR
    `onReadResult` → `downloadMaps.metadata`; the earlier open question is
    closed.
 
+Against proxy `aa67015` (the second review in torrent-tv/meta#185):
+
+1. The soundtrack output is opened by the soundtrack's first init request
+   (fMP4) or first segment request (MPEG-TS), or earlier by the warm route;
+   its playlist request is answered from the base output and opens nothing.
+2. The MPEG-TS path is added: no init request and no P13; hls.js uses
+   `TSDemuxer` + `MP4Remuxer`, which still builds the buffer description from
+   the first fragment.
+3. The two connections are drawn as parallel work after the media answer,
+   joined by `#settleConnected`, and followed by the ping on the control
+   channel.
+4. A seek's `t0` is the viewer's input; the `seeking` event and the hold are
+   named as later observations of it.
+5. `[evt] … playing` is listed as an existing line; what it lacks is a wait
+   identifier and monotonic time.
+
 ## 12. Limits of this model
 
 1. No durations; it is not a forecast. Field magnitudes come from the research
@@ -708,5 +808,7 @@ flowchart LR
 4. Soundtrack and quality change holds (section 9, item 5), the magnet open
    path in the page (`#processMagnetPlayback`), the direct-play path (A17) and
    web seeds are described at process level only.
-5. P2, P4, P5 and P8 repeat on new bytes, memory or demand; the tables name
+5. The viewer's seek input is not observed by the code; the model names it but
+   cannot place it in time.
+6. P2, P4, P5 and P8 repeat on new bytes, memory or demand; the tables name
    the pass that matters for the first frame.

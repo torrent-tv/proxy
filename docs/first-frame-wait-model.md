@@ -239,7 +239,7 @@ orchestration. The torrent runs in one worker thread
 | R5.n | The network path between viewer and proxy | R5.m and R5.c | — | its capacity; the link probe measures only R5.m |
 | R6 | Browser main thread | hls.js remux and append, page code, frame callbacks | browser `PerformanceObserver` long-task entry | point event with task start and duration; shorter work is not measured |
 | R7 | Proxy disk | piece spill, segment files, original-input copies | — | not measured as a service |
-| R8 | Read queue of one file (`ContainerOrchestrator.inspect`, `#reads`) | P2, P4 (fallback reads), P5, P8 resolution | Reads of one file run one after another; a statement answerable from what was already read is answered beside the queue | queue wait is logged for P8 only |
+| R8 | Read queue of one file (`ContainerOrchestrator.inspect`, `#reads`) | P2, P4 (fallback reads), P5, P8 resolution | Reads of one file run one after another; a statement answerable from what was already read is answered beside the queue | P2/P5/X1 source events and P8 input records carry queue and read durations |
 
 ## 5. Branch points
 
@@ -392,7 +392,7 @@ logged at the process boundary; "derived" is computed from other values;
 | W1–W2, W5–W6 | torrent worker | source key | `client.add` request; internal `_onListening`, `_startDiscovery`, `_verifyPieces`, `_onStore` begin events | corresponding end events; skipped verification is a point event | — | files, outcome | direct worker-monotonic spans; WebTorrent internal method boundaries pinned to installed 2.8.5 |
 | W3–W4 | torrent worker | source key, peer | first `wire`; `metadata` | peer/metadata arrival events | swarm | peer, file count | direct event observations; not a wait duration |
 | W7 | torrent worker | source key, file | priority-map command begins | priority-map command ends, including applied file and duration | worker command queue | windows | direct span |
-| W8 | torrent worker | source key, peer, piece and byte offset | accepted block request | block received; existing per-piece diagnostics retain request-to-arrival timing | R1 | bytes | direct block events; one event per accepted request and received block |
+| W8 | torrent worker | source key and piece | first accepted block request for the piece | piece verified; existing per-piece diagnostics retain request-to-arrival timing and retry counts | R1 | bytes | direct per-piece span; block detail stays in the existing aggregate diagnostic, so trace volume is two records per piece |
 | W9 | torrent worker | source key, piece and affected file ranges | piece verified / storage availability changed | point event when readable; withdrawal is a separate event | R7 | bytes and ranges | direct storage-availability event; no separate write-duration boundary |
 | W10 | torrent worker | source key, file | statistics command begins | statistics/forecast response ends | forecast walk | forecast requested | direct command span; response retains arrival forecast |
 
@@ -850,7 +850,9 @@ Against proxy `aa67015` (the second review in torrent-tv/meta#185):
 
 Add `?waitTrace=1` to the page address before an initial open. This enables
 `[wait-trace]` JSON records without changing the forecast, admission or playback
-permission rules. The default page does not emit these records.
+permission rules. The browser logger forwards them to the proxy log after the
+proxy connection opens; events from earlier in the same wait are queued and
+replayed there. The default page does not emit these records.
 
 1. Browser `action` records preserve the original input timestamp. Each selected
    file has a wait identity; retries of that file get increasing attempt

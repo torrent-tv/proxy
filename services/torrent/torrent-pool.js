@@ -1603,6 +1603,7 @@ export class TorrentPool {
     // its blocks were in flight, and from whom (`piece-timing.js`). One line
     // per piece: a 2.3 GB film is 563.
     const timings = new PieceTimings();
+    const waitTracePieceStarts = new Map();
     tailRepeats.set(torrent, new TailRepeat({ torrent, requiredPieces: () => demandFor(torrent).selection.requiredPieces(),
       log: (line) => logger.info(`download ${label()} ${line}`) }));
     torrent.on("wire", (wire) => {
@@ -1616,9 +1617,13 @@ export class TorrentPool {
         const queued = this.requests.length;
         const answer = request.call(this, index, offset, length, callback);
         if (this.requests.length > queued) {
-          trace("W8", "event", { moment: "block-requested", piece: index, offset, length, peer });
           const now = Date.now();
-          timings.asked(index, offset, peer, now);
+          const firstAsk = timings.asked(index, offset, peer, now);
+          if (firstAsk) {
+            const startedAt = performance.now();
+            waitTracePieceStarts.set(index, startedAt);
+            trace("W8", "begin", { piece: index, startedAt, firstOffset: offset, blockLength: length });
+          }
           // When this wire was asked for the block: how long it has held it is
           // what decides whether a second peer is asked (`duplicateTailFor`).
           this.requests.at(-1).askedAt = now;
@@ -1627,11 +1632,19 @@ export class TorrentPool {
       };
       wire.on("piece", (index, offset) => {
         timings.arrived(index, offset, peer, Date.now());
-        trace("W8", "event", { moment: "block-received", piece: index, offset, peer });
       });
     });
     torrent.on("verified", (piece) => {
-      logger.info(`download ${label()} verified piece=${piece}${describePieceTiming(timings.verified(piece, Date.now()))}`);
+      const pieceTiming = timings.verified(piece, Date.now());
+      const startedAt = waitTracePieceStarts.get(piece);
+      if (startedAt !== undefined) {
+        waitTracePieceStarts.delete(piece);
+        const endedAt = performance.now();
+        trace("W8", "end", { piece, startedAt, endedAt, durationMs: endedAt - startedAt,
+          outcome: "verified", asks: pieceTiming?.asks ?? null, peers: pieceTiming?.peers ?? null,
+          askedAgain: pieceTiming?.askedAgain ?? null, slowestBlockMs: pieceTiming?.slowestMs ?? null });
+      }
+      logger.info(`download ${label()} verified piece=${piece}${describePieceTiming(pieceTiming)}`);
     });
 
     // The first connected peer, said once, because the wait for it can BE the

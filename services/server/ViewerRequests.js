@@ -120,7 +120,7 @@ export class ViewerRequests {
     };
     const current = this.#earlyWaits.get(key);
     if (current?.waitId === waitId && current.hasSourceObservation) {
-      const context = this.#setEarlyWait({ consumerId, generation, fileIndex, waitId, features,
+      const context = this.#setEarlyWait({ consumerId, generation, sourceKey, fileIndex, waitId, features,
         revision: current.revision, current, waitElapsedMs });
       const changed = this.#recordEarlyWaitSnapshot(context, context.features);
       if (changed) context.revision += 1;
@@ -136,7 +136,7 @@ export class ViewerRequests {
     }
     const sameWait = current?.waitId === waitId;
     const revision = sameWait ? current.revision : 0;
-    const context = this.#setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current,
+    const context = this.#setEarlyWait({ consumerId, generation, sourceKey, fileIndex, waitId, features, revision, current,
       waitElapsedMs });
     const changed = this.#recordEarlyWaitSnapshot(context, context.features);
     if (sameWait && changed) context.revision += 1;
@@ -186,7 +186,7 @@ export class ViewerRequests {
     const current = this.#earlyWaits.get(key);
     const sameWait = current?.waitId === waitId;
     const revision = sameWait ? current.revision : 0;
-    const context = this.#setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current,
+    const context = this.#setEarlyWait({ consumerId, generation, sourceKey, fileIndex, waitId, features, revision, current,
       sourceObserved: true, waitElapsedMs });
     const featuresChanged = this.#recordEarlyWaitSnapshot(context, context.features);
     const elapsedMs = waitElapsedSince(context, waitElapsedMs);
@@ -231,6 +231,9 @@ export class ViewerRequests {
     logger.info(`early wait forecast ${JSON.stringify({ waitId: context.waitId, consumer: context.consumerId,
       generation: context.generation, features: context.features, elapsedMs, revision: context.revision,
       predicted: { remainingSeconds: seconds, totalSeconds, basis, ...estimate } })}`);
+    this.#host.observeWait?.(context.sourceKey, "process", { process: "P15", phase: "event",
+      waitId: context.waitId, consumerId: context.consumerId, generation: context.generation,
+      elapsedMs, revision: context.revision, remainingSeconds: seconds, totalSeconds, basis, ...estimate });
     context.loggedForecastRevision = context.revision;
   }
 
@@ -258,12 +261,13 @@ export class ViewerRequests {
     early.updatedAt = Date.now();
   }
 
-  #setEarlyWait({ consumerId, generation, fileIndex, waitId, features, revision, current,
+  #setEarlyWait({ consumerId, generation, sourceKey, fileIndex, waitId, features, revision, current,
     sourceObserved = false, waitElapsedMs }) {
     const sameWait = current?.waitId === waitId;
     const context = sameWait ? current : {
       consumerId,
       generation,
+      sourceKey,
       fileIndex,
       waitId,
       snapshots: [],
@@ -279,7 +283,7 @@ export class ViewerRequests {
       ? Math.max(0, measuredAt - context.featuresMeasuredAt)
       : 0;
     const mergedFeatures = mergeWaitFeatures(context.features, features, ageElapsedMs);
-    Object.assign(context, { consumerId, generation, fileIndex, waitId, features: mergedFeatures,
+    Object.assign(context, { consumerId, generation, sourceKey, fileIndex, waitId, features: mergedFeatures,
       featuresMeasuredAt: measuredAt, startedAt, updatedAt: Date.now(), revision,
       hasSourceObservation: context.hasSourceObservation || sourceObserved });
     this.#earlyWaits.set(`${consumerId}:${waitId}`, context);
@@ -1034,6 +1038,11 @@ export class ViewerRequests {
     if (measurement.forecastReason !== forecast.reason || measurement.forecastInputKey !== forecastInputKey) {
       measurement.forecastReason = forecast.reason;
       measurement.forecastInputKey = forecastInputKey;
+      if (forecast.subtitles) this.#host.observeWait?.(session.file.sourceKey, "process", {
+        process: "C3", phase: "event", fileIndex: session.file.fileIndex,
+        trackIndex: forecast.subtitles.trackIndex, ready: forecast.subtitles.ready,
+        reason: forecast.reason, consumerId
+      });
       logger.info(`playback readiness ${session.id} consumer=${consumerId} ${JSON.stringify({
         ...forecast,
         positionSeconds,

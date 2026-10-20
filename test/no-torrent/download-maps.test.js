@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DownloadMaps } from "../../services/viewer/DownloadMaps.js";
+
 import { MediaReadRequests } from "../../services/media/MediaReadRequests.js";
 import { coalescedZones } from "../../services/torrent/map-zones.js";
 
@@ -708,4 +709,24 @@ test("windows a resolver keeps current stand as they are until it states them ag
   }
   assert.deepEqual(sent.at(-1).zones.map(zone => zone.byteStart), [2000], "the windows stated now, not with the ones before");
   assert.equal(packed, 0);
+});
+
+test("playback map resolution reports a paired P4 span on success and failure", async () => {
+  const events = [];
+  const successful = new DownloadMaps({ publish() {}, observeWait: (...args) => events.push(args),
+    resolvePlayback: async map => map.zones });
+  await successful.playback({ sourceKey: "source", fileIndex: 2, durationSeconds: 10,
+    zones: [{ from: 0, to: 1, priority: 0 }] });
+  assert.deepEqual(events.map(([, , fields]) => fields.phase), ["begin", "end"]);
+  assert.equal(events[0][2].process, "P4");
+  assert.equal(events[1][2].outcome, "ok");
+  assert.ok(events[1][2].durationMs >= 0);
+
+  events.length = 0;
+  const failed = new DownloadMaps({ publish() {}, observeWait: (...args) => events.push(args),
+    resolvePlayback: async () => { throw new Error("read failed"); } });
+  await assert.rejects(failed.playback({ sourceKey: "source", fileIndex: 2, durationSeconds: 10,
+    zones: [{ from: 0, to: 1, priority: 0 }] }), /read failed/);
+  assert.deepEqual(events.map(([, , fields]) => fields.phase), ["begin", "end"]);
+  assert.equal(events[1][2].outcome, "error");
 });

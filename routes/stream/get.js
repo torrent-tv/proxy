@@ -229,7 +229,8 @@ function serveWholeFile(req, reply, file, read) {
   }
 }
 
-export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool, noteInputBytes = null, noteInputWaiting = null }) {
+export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool, noteInputBytes = null, noteInputWaiting = null,
+  noteFirstInputBytes = null }) {
   const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
   const fileIndex = Number(fileIndexRaw);
   const { sourceType, source, sourceKey } = getSourceParams(req.query, sourceRegistry);
@@ -386,6 +387,9 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
               reply.raw.write(fragment.bytes, (error) => (error ? reject(error) : resolve()));
             });
             sent += fragment.bytes.length;
+            if (sent === fragment.bytes.length && noteFirstInputBytes && Number.isSafeInteger(runToken)) {
+              noteFirstInputBytes(runToken, fileIndex, fragment.bytes.length);
+            }
           // Say so, if this read belongs to a transcode session. It is the only
           // proof that a session which has produced nothing yet is nevertheless
           // being fed: the encoder's own progress cannot move until its first
@@ -412,9 +416,14 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
       if (continueFrom) {
         fragments.cancel();
         const fromTorrent = sent;
+        let firstWholeInputNoted = false;
         sent += await writeFromWholeFile(reply.raw, continueFrom, start + sent, end, (length) => {
           if (noteInputBytes) {
             noteInputBytes(sessionId, length);
+          }
+          if (!firstWholeInputNoted && noteFirstInputBytes && Number.isSafeInteger(runToken)) {
+            firstWholeInputNoted = true;
+            noteFirstInputBytes(runToken, fileIndex, length);
           }
         });
         logger.info(

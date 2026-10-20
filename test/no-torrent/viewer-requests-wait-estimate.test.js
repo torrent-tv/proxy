@@ -8,10 +8,12 @@ import { ViewerRequests } from "../../services/server/ViewerRequests.js";
 test("early forecasts retain one wait identity, advance revisions, and learn the measured outcome", () => {
   const noted = [];
   const features = [];
+  const processEvents = [];
   const viewer = { linkReading: () => ({ linkMbps: 32 }) };
   const requests = new ViewerRequests({
     viewers: { get: id => id === "viewer" ? viewer : null },
     firstFrameSecondsOf: value => { features.push(value); return 14; },
+    observeWait: (sourceKey, event, fields) => processEvents.push({ sourceKey, event, ...fields }),
     noteFirstFrame: value => noted.push(value)
   });
   const source = {
@@ -32,6 +34,10 @@ test("early forecasts retain one wait identity, advance revisions, and learn the
     stats: { ...source.stats, downloadSpeed: 1_300_000 }, waitElapsedMs: 1_000 });
   assert.equal(changed.revision, first.revision + 1);
   assert.equal(changed.remainingSeconds, 13);
+  assert.deepEqual(processEvents.map(({ sourceKey, event, process, revision }) => ({ sourceKey, event, process, revision })), [
+    { sourceKey: "torrent:hash", event: "process", process: "P15", revision: 0 },
+    { sourceKey: "torrent:hash", event: "process", process: "P15", revision: 1 }
+  ]);
   assert.deepEqual(features[0], {
     extension: "mkv", fileLength: 4_000_000, downloadSpeed: 1_200_000, linkMbps: 24, linkSampleAgeMs: 130,
     preparedOutputBytes: null, fileAvailable: false, headerRemaining: 500,

@@ -2,7 +2,7 @@ import { parseRange } from "../../utils/parse-range.js";
 import { Readable } from "node:stream";
 
 /** FFmpeg reads only original byte ranges already owned by its live run. */
-export async function handleEncodeInputGet(req, reply, { inputOf, refused = () => {} }) {
+export async function handleEncodeInputGet(req, reply, { inputOf, refused = () => {}, noteFirstInputBytes = () => {} }) {
   const address = req.raw?.socket?.remoteAddress;
   if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(address)) return reply.code(403).send();
   const token = Number(req.params.token), fileIndex = Number(req.params.fileIndex);
@@ -53,6 +53,16 @@ export async function handleEncodeInputGet(req, reply, { inputOf, refused = () =
     return reply;
   }
   const body = held.stream ?? (held.chunks ? Readable.from(held.chunks, { objectMode: false }) : held.bytes);
+  if (body && typeof body.once === "function") {
+    let noted = false;
+    body.once("data", chunk => {
+      if (noted) return;
+      noted = true;
+      noteFirstInputBytes(token, fileIndex, chunk?.length ?? 0);
+    });
+  } else {
+    noteFirstInputBytes(token, fileIndex, body?.length ?? 0);
+  }
   // What was handed to the system for this answer before its connection
   // closed, and whether all of it was: an answer runs to the end of its
   // admitted range and FFmpeg closes the connection once it has what it wants,

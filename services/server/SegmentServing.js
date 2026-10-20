@@ -110,7 +110,17 @@ export class SegmentServing {
   async getFileStream(sessionId, fileName, options = {}) {
     const output = this.#host.outputs.get(sessionId);
     if (!output) return { kind: "not-found" };
-    return this.#withMaterialRead(output.outputKey, () => this.#getFileStream(sessionId, fileName, options));
+    const isInit = output.segmentFormat?.initFileName !== null && fileName === output.segmentFormat?.initFileName;
+    const startedAt = performance.now();
+    const answer = await this.#withMaterialRead(output.outputKey, () => this.#getFileStream(sessionId, fileName, options));
+    if (isInit && typeof output.file?.sourceKey === "string") {
+      const process = output.spec?.carries === "audio-only" ? "P13.a" : "P13.v";
+      const fields = { output: output.outputKey, fileName, outcome: answer?.kind ?? "unknown" };
+      this.#host.observeWait?.(output.file.sourceKey, "process", { ...fields, process, phase: "begin", at: startedAt });
+      this.#host.observeWait?.(output.file.sourceKey, "process", { ...fields, process, phase: "end",
+        at: performance.now(), startedAt, endedAt: performance.now() });
+    }
+    return answer;
   }
 
   async #withMaterialRead(key, read) {

@@ -67,6 +67,10 @@ arrive join the coverage in place. The whole remaining film is still planned;
 the answer is unchanged (checked against the previous computation on 500
 varied inputs, none different).
 
+This forecast covers part of the viewer's wait. The whole wait, from the
+viewer's action to the first moving frame, is described process by process,
+with its dependencies and shared resources, in `first-frame-wait-model.md`.
+
 ## Continuity is decided in exact time
 
 The forecast lives in the viewer component (`services/viewer/`), because what

@@ -305,6 +305,16 @@ export class LocalObservations {
    * @returns {number | null}
    */
   firstFrameSeconds(features) {
+    return this.firstFrameEstimate(features)?.seconds ?? null;
+  }
+
+  /**
+   * Return the current stage-median forecast and the measurements that formed it.
+   *
+   * @param {object} features
+   * @returns {{ seconds: number, stagesMs: object, observations: number } | null}
+   */
+  firstFrameEstimate(features) {
     if (!features || typeof features !== "object") return null;
     const stages = ["transportMs", "planMs", "prepareMs", "prebufferMs", "presentationMs"];
     const candidates = [];
@@ -319,7 +329,11 @@ export class LocalObservations {
     const prices = stages.map(stage => median(candidates.map(reading => reading[stage])
       .filter(Number.isFinite)));
     if (prices.some(value => value === null)) return null;
-    return prices.reduce((sum, value) => sum + value, 0) / 1000;
+    return {
+      seconds: prices.reduce((sum, value) => sum + value, 0) / 1000,
+      stagesMs: Object.fromEntries(stages.map((stage, index) => [stage, prices[index]])),
+      observations: candidates.length
+    };
   }
 
   #firstFrameKey() {

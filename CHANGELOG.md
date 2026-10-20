@@ -8,6 +8,7 @@
 
 ## 2.101.43
 
+- **Chore**: Log early wait forecast revisions with their historical stage medians or current first-required estimate (#ttv-185).
 - **Fix**: Restore hardware observation keys without the CPU model, thread count or CPU quota fields added in 2.101.42 (#ttv-185).
 
 ## 2.101.42

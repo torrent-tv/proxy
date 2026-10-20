@@ -395,7 +395,8 @@ logged at the process boundary; "derived" is computed from other values;
 | C6, C7 | B | wait, attempt, media time | `requestVideoFrameCallback` observations | advancing frame and audio-ready point events | R6 | media time, audio state | direct observations with wait identity |
 | P4 | P | source key, file, map revision | `process=P4 phase=begin` at range-resolution pass | `process=P4 phase=end`, with resolved zone count and outcome | R2, R8 | zones | direct resolver span; separate from the aggregate map-pass timing |
 | W1–W2, W5–W6 | torrent worker | source key | `client.add` request; internal `_onListening`, `_startDiscovery`, `_verifyPieces`, `_onStore` begin events | corresponding end events; skipped verification is a point event | — | files, outcome | direct worker-monotonic spans; WebTorrent internal method boundaries pinned to installed 2.8.5 |
-| W3–W4 | torrent worker | source key, peer | first `wire`; `metadata` | peer/metadata arrival events | swarm | peer, file count | direct event observations; not a wait duration |
+| W3 | torrent worker | source key | end of W2 discovery | first `wire` (peer connection/handshake) | swarm | outcome, peer | direct monotonic wait span; `.torrent` and magnet paths are separate; two records per span |
+| W4 | torrent worker | source key | first peer for a magnet | `metadata` from peers | swarm | outcome, file count | direct monotonic wait span; `.torrent` with metadata already present emits a point event; two records per span |
 | W7 | torrent worker | source key, file | priority-map command begins | priority-map command ends, including applied file and duration | worker command queue | windows | direct span |
 | W8 | torrent worker | source key and piece | first accepted block request for the piece | piece verified after hashing and store callback; existing per-piece diagnostics retain request-to-arrival timing and retry counts | R1 | bytes | direct per-piece span; includes the nested W9 storage write, so W8 and W9 durations are not additive; two records per span |
 | W9 | torrent worker | source key, piece and affected file ranges | verified bytes passed to `store.put` | store callback completes; a separate point event records when readable bytes are announced to the main thread | R7 | bytes and ranges | direct per-piece storage span plus availability event; W9 is contained in W8; two records per span |
@@ -512,8 +513,8 @@ did not occur in those captured attempts; it never means zero duration.
 | Encoder parallel output lanes | F2.a | Produce first soundtrack segment | No valid isolated completion span in these logs |
 | Torrent worker: startup | W1 | Add, parse and listen | No matched startup span in fields 04/05; source was already available to the captured wait |
 | Torrent worker: startup | W2 | Start peer discovery | No matched startup span in fields 04/05 |
-| Torrent worker: peer lane | W3 | Connect to peers and complete handshakes | Field 04: peer-arrival point events; not a duration |
-| Torrent worker: metadata lane | W4 | Receive magnet metadata from peers | Not taken for the selected `.torrent` |
+| Torrent worker: peer lane | W3 | Connect to peers and complete handshakes after discovery | Historical Field 04: peer-arrival points only; new traces record begin/end duration |
+| Torrent worker: metadata lane | W4 | Receive magnet metadata from peers | Historical selected `.torrent` did not take this branch; new magnet traces record begin/end duration |
 | Torrent worker: startup | W5 | Verify stored pieces | No matched verification span in fields 04/05 |
 | Torrent worker: startup | W6 | Publish store-ready state | No matched startup span in fields 04/05 |
 | Torrent worker: selection | W7 | Apply priority-map piece selection | Field 04: 1.5 ms median over 8 commands |
@@ -747,11 +748,11 @@ flowchart TB
     W1["W1 add, parse, listen"]
     QMAG{"magnet?"}
     W2m["W2 discovery before metadata"]
-    W3m["W3 peers"]
-    W4["W4 metadata from peers"]
+    W3m["W3 peer wait span"]
+    W4["W4 magnet metadata wait span"]
     W5["W5 verify stored pieces, none when whole"]
     W6["W6 store ready, discovery started for .torrent"]
-    W3t["W3 peers"]
+    W3t["W3 peer wait span"]
     W7["W7 piece selection"]
     W8["W8 piece download"]
     W9["W9 verify, store, notify"]
@@ -981,8 +982,8 @@ flowchart LR
   end
 
   subgraph WORKER["Torrent worker thread"]
-    W1["W1 add, parse, listen"] --> W2["W2 discovery"] --> W3["W3 peer connection"]
-    W3 --> W4["W4 magnet metadata"] --> W5["W5 stored-piece verification"]
+    W1["W1 add, parse, listen"] --> W2["W2 discovery"] --> W3["W3 peer wait span"]
+    W3 --> W4["W4 magnet metadata wait span"] --> W5["W5 stored-piece verification"]
     W1 --> W5
     W5 --> W6["W6 store ready"] --> P1
     W3 --> W8["W8 piece download"]

@@ -27,6 +27,7 @@ import { noteTorrentDestroyed } from "./destroyed-torrents.js";
 import { PieceTimings, describePieceTiming } from "./piece-timing.js";
 import { TailRepeat } from "./worker/tail-repeat.js";
 import { tracePieceStorePut } from "./worker/trace-piece-store-put.js";
+import { beginSwarmLifecycleTrace, noteSwarmDiscovery, noteSwarmMetadata, noteSwarmPeer } from "./worker/trace-swarm-lifecycle.js";
 
 /**
  * The second-peer requests for the last blocks of a piece somebody waits for,
@@ -967,7 +968,8 @@ export class TorrentPool {
   /**
    * When each torrent was added, and when its first peer connected.
    *
-   * @type {WeakMap<import("webtorrent").Torrent, { addedAt: number, firstPeerAt: number | null }>}
+   * @type {WeakMap<import("webtorrent").Torrent, { addedAt: number, addedAtMonotonic: number, firstPeerAt: number | null,
+   *   firstPeerAtMonotonic: number | null, metadataWaitStartedAt: number | null }>}
    */
   #swarmTimingByTorrent = new WeakMap();
   #waitTraceByTorrent = new WeakMap();
@@ -1509,10 +1511,16 @@ export class TorrentPool {
     if (waitTrace?.trace === true && typeof waitTrace.sourceKey === "string") {
       this.#waitTraceByTorrent.set(torrent, waitTrace);
     }
+    const alreadyTracked = this.#swarmTimingByTorrent.has(torrent);
+    if (!alreadyTracked) {
+      this.#swarmTimingByTorrent.set(torrent, { addedAt: Date.now(), addedAtMonotonic: performance.now(),
+        firstPeerAt: null, firstPeerAtMonotonic: null, peerWaitStartedAt: null, metadataWaitStartedAt: null });
+    }
     const trace = (process, phase, fields = {}) => {
       const context = this.#waitTraceByTorrent.get(torrent);
       if (context?.trace === true) context.emitWaitTrace?.(context.sourceKey, process, phase, fields);
     };
+    const pool = this;
     const wrap = (method, process) => {
       const original = torrent[method];
       if (typeof original !== "function") return;
@@ -1521,8 +1529,15 @@ export class TorrentPool {
         trace(process, "begin", { startedAt });
         try {
           const result = original.apply(this, args);
+          const noteDiscoveryEnd = () => {
+            if (process === "W2" && result !== false) {
+              const timing = pool.#swarmTimingByTorrent.get(torrent);
+              if (timing) noteSwarmDiscovery(timing, trace, performance.now());
+            }
+          };
           if (result && typeof result.then === "function") {
             return result.then(value => {
+              noteDiscoveryEnd();
               trace(process, "end", { startedAt, endedAt: performance.now(), outcome: "resolved" });
               return value;
             }, error => {
@@ -1531,6 +1546,7 @@ export class TorrentPool {
               throw error;
             });
           }
+          noteDiscoveryEnd();
           trace(process, "end", { startedAt, endedAt: performance.now(), outcome: "returned" });
           return result;
         } catch (error) {
@@ -1557,8 +1573,17 @@ export class TorrentPool {
           }, ...args);
         };
       }
-      torrent.on("metadata", metadata => trace("W4", "event", { files: metadata?.files?.length ?? null }));
-      torrent.on("wire", wire => trace("W3", "event", { peer: String(wire?.remoteAddress ?? "?") }));
+      const timing = this.#swarmTimingByTorrent.get(torrent);
+      if (timing) beginSwarmLifecycleTrace(timing, trace, Boolean(torrent.metadata));
+      torrent.on("metadata", metadata => {
+        const current = this.#swarmTimingByTorrent.get(torrent);
+        if (current) noteSwarmMetadata(current, trace, metadata?.files?.length ?? null);
+      });
+      torrent.on("wire", wire => {
+        trace("W3", "event", { peer: String(wire?.remoteAddress ?? "?") });
+        const current = this.#swarmTimingByTorrent.get(torrent);
+        if (current) noteSwarmPeer(current, trace, Boolean(torrent.metadata));
+      });
     }
     // Attached ONCE per torrent. WebTorrent answers a duplicate add by handing
     // back the torrent it already has, and this used to run again on it: a
@@ -1569,7 +1594,7 @@ export class TorrentPool {
     // once as a .torrent and once as a magnet is exactly that case, and the
     // roadmap already records it happening. Trace hooks above are installed
     // separately and only for an explicitly traced source.
-    if (this.#swarmTimingByTorrent.has(torrent)) {
+    if (alreadyTracked) {
       return;
     }
     // A torrent nobody has asked for yet does not exist: this is called the
@@ -1590,9 +1615,6 @@ export class TorrentPool {
     // for the whole life of the torrent, which is the same fault as three
     // different hashes with the hash removed.
     const label = () => String(torrent.infoHash ?? "?").slice(0, 8);
-    const addedAt = Date.now();
-    this.#swarmTimingByTorrent.set(torrent, { addedAt, firstPeerAt: null });
-
     torrent.on("download-request-cancelled", ({ piece, offset, length, reason, requestId }) => {
       logger.info(`download request=${requestId ?? `${torrent.infoHash ?? "unknown"}:${piece}:${offset}`} cancel bytes=${length} reason=${reason}`);
     });
@@ -1657,6 +1679,7 @@ export class TorrentPool {
         return;
       }
       timing.firstPeerAt = Date.now();
+      timing.firstPeerAtMonotonic ??= performance.now();
       const waited = secondsToFirstPeer(timing.addedAt, timing.firstPeerAt);
       const byTracker = this.#lastAnnounceByTorrent.get(torrent);
       const offered = bestAnnounce(byTracker ? byTracker.values() : []);

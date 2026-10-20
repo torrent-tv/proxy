@@ -142,7 +142,9 @@ durations.
 | B2 | Net reporter (every 1.5 s, at once on `reportNow`) and session keep-alive started | B1 | session released | start without waiting |
 | B3 | Media playlist wait (`waitForHlsPlaylist`); a synthetic VOD playlist answers at once, otherwise retry with `min(3000, 500 + 250·n)` ms | B1 | playlist with `#EXTINF` | blocking |
 | B4 | Restate a position changed during allocation (`reportSeek` loop) | B3 | position acknowledged | blocking (normally no iteration) |
-| B5 | hls.js: master playlist when variants exist, `MANIFEST_PARSED`, level pinned, `startLoad` | B4 | `startLoad` called | blocking |
+| B5 | hls.js: fetch and parse the master or direct media playlist, then select the level and start loading | B4 | `startLoad` called | blocking |
+| B5.level | When B5 loads a master playlist, fetch and process the selected media playlist | B5 | `LEVEL_LOADED` | blocking only for a master playlist; a direct media playlist skips this request |
+| B5.level | When B5 loads a master playlist, fetch and process the selected media playlist | B5 | `LEVEL_LOADED` | blocking only for a master playlist; a direct media playlist skips this request |
 | B6.v | Main stream init request (fMP4 only: `#EXT-X-MAP`); held by the proxy until P13.v, then P12.v. An MPEG-TS output has no init file (`mpegtsFormat.initFileName` is null, no `#EXT-X-MAP`), so this request does not exist | B5 | init bytes received | per stream |
 | B6.a.p | Separate soundtrack: playlist request. Answered from the base output (`resolveAudioRenditionFile` returns `base.id` for a playlist); it creates no output | B5 | playlist received | per stream |
 | B6.a.i | Separate soundtrack: init request (fMP4 only). The first init or segment request of the soundtrack is what opens P6.a; held until P13.a | B6.a.p | init bytes received | per stream |
@@ -378,8 +380,12 @@ logged at the process boundary; "derived" is computed from other values;
 | P11 | P | output key, segment index | encoder run start | `encode-run … #<index> … named +<ms>, published +<ms>` (`EncodeRuns.onClosed`), relative to that run's start | — | one piece | direct publication observation; `cold-start <id>: first-segment ready +<ms>` is a different event, written when the first segment is **served** (`SegmentServing`) |
 | P13 | P | source key, output key, init filename | init request start | init request answer | read/production wait is within request | bytes | direct request span, proxy monotonic clock |
 | P12 + transfer | P / B | P `requestId`; B path | P route entry (in `fetchMs`) | P `[net-debug] sent … requestId= fetchMs= sendMs= readMs= chanMs= drainMs= loopMax=`; B `[net-debug] dc-load {path, waitMs, transferMs}` | R2, R5.m | bytes | direct on each side; B line carries the path, not the `requestId` |
-| B5 | B | wait, attempt, level | manifest loading / parsed events | `MANIFEST_PARSED` plus level/fragment events | R6 | playlist and level | direct hls.js events; master and media playlist HTTP spans are separate |
-| B8–B10, B12 | B | wait, attempt, stream and segment | hls.js `FRAG_PARSING_INIT_SEGMENT` or `BUFFER_APPENDING` | `BUFFER_CODECS` or `BUFFER_APPENDED` acknowledgement | R6 | segment and track | direct event boundaries; internal decode and native updateend are not exposed |
+| B3 | B / P | wait, attempt, request id | `waitForHlsPlaylist` request | response or close | R5.m | media playlist readiness | direct request span; separate from hls.js playlist loading |
+| B5 | B | wait, attempt | hls.js `MANIFEST_LOADING` | `MANIFEST_LOADED`; `MANIFEST_LOADED` to `MANIFEST_PARSED`; and, for a master playlist, `LEVEL_LOADING` to `LEVEL_LOADED` | R5.m / browser main thread | master and selected media playlist | direct browser-clock spans for request, parse and conditional level playlist |
+| B8.v / B8.a | B | wait, attempt, stream and segment | hls.js `FRAG_PARSING_INIT_SEGMENT` | first `BUFFER_CODECS` for that stream | R6 | segment and track | direct browser-clock span around hls.js parsing/remux; internal substeps are not exposed |
+| B9 | B | wait, attempt, required tracks | last required `BUFFER_CODECS` | `BUFFER_CREATED` | R6 | track list | direct span when hls.js reports every required track; also emits a point event |
+| B10.v / B10.a | B | wait, attempt, stream and init segment | hls.js `BUFFER_APPENDING` for init | matching `BUFFER_APPENDED` | R6 | init bytes | direct span to hls.js append acknowledgement; native `SourceBuffer.updateend` is not exposed separately |
+| B12.v / B12.a | B | wait, attempt, stream and media segment | hls.js `BUFFER_APPENDING` for media | matching `BUFFER_APPENDED` | R6 | segment bytes | direct span to hls.js append acknowledgement; native `SourceBuffer.updateend` is not exposed separately |
 | B11 (`t3`) | B | — | — | `cold-start prepare=` | — | — | direct |
 | C1 (`t4`) | B | — | `t3` | `[evt] prebuffer ready …`; `prebuffer waiting … reason=` on each reason change | — | — | direct |
 | P14 | P | session id, consumer | request | `readiness parts … in all <ms>`; `playback readiness {…}` on a reason or missing-input change; `playback held …` | R2 | — | direct |
@@ -391,8 +397,8 @@ logged at the process boundary; "derived" is computed from other values;
 | W1–W2, W5–W6 | torrent worker | source key | `client.add` request; internal `_onListening`, `_startDiscovery`, `_verifyPieces`, `_onStore` begin events | corresponding end events; skipped verification is a point event | — | files, outcome | direct worker-monotonic spans; WebTorrent internal method boundaries pinned to installed 2.8.5 |
 | W3–W4 | torrent worker | source key, peer | first `wire`; `metadata` | peer/metadata arrival events | swarm | peer, file count | direct event observations; not a wait duration |
 | W7 | torrent worker | source key, file | priority-map command begins | priority-map command ends, including applied file and duration | worker command queue | windows | direct span |
-| W8 | torrent worker | source key and piece | first accepted block request for the piece | piece verified; existing per-piece diagnostics retain request-to-arrival timing and retry counts | R1 | bytes | direct per-piece span; block detail stays in the existing aggregate diagnostic, so trace volume is two records per piece |
-| W9 | torrent worker | source key, piece and affected file ranges | piece verified / storage availability changed | point event when readable; withdrawal is a separate event | R7 | bytes and ranges | direct storage-availability event; no separate write-duration boundary |
+| W8 | torrent worker | source key and piece | first accepted block request for the piece | piece verified after hashing and store callback; existing per-piece diagnostics retain request-to-arrival timing and retry counts | R1 | bytes | direct per-piece span; includes the nested W9 storage write, so W8 and W9 durations are not additive; two records per span |
+| W9 | torrent worker | source key, piece and affected file ranges | verified bytes passed to `store.put` | store callback completes; a separate point event records when readable bytes are announced to the main thread | R7 | bytes and ranges | direct per-piece storage span plus availability event; W9 is contained in W8; two records per span |
 | W10 | torrent worker | source key, file | statistics command begins | statistics/forecast response ends | forecast walk | forecast requested | direct command span; response retains arrival forecast |
 
 The opt-in trace now emits process ids for A0.0–A0.2, P4, and W1–W10 in
@@ -400,7 +406,9 @@ addition to the previously listed browser and proxy operations. Worker events
 use the torrent worker's monotonic clock and are joined to browser events by
 `sourceKey`; clock values from separate processes cannot be subtracted. Remaining
 limits are specific: A2.2 ICE candidate substeps are state events rather than
-separate spans; B9 and C7 are point observations; B8 spans hls.js init-segment
+separate spans; B9 is timed from the last required codec declaration to
+`BUFFER_CREATED` when all track declarations are reported, while C7 is a point
+observation; B8 spans hls.js init-segment
 parsing to codec readiness without splitting internal remux work; B10/B12 end
 at `BUFFER_APPENDED`, not native `SourceBuffer.updateend`; F1 ends at the
 proxy's first input-byte handoff and does not expose FFmpeg's internal packet
@@ -456,15 +464,15 @@ did not occur in those captured attempts; it never means zero duration.
 | Browser background lane | B2 | Send progress report and keep-alive requests | Field 05, attempt 1: 60.4–424.5 ms per observed report |
 | Browser: playlist lane | B3 | Wait for media playlist | Field 05, attempt 1: 81.1–164.7 ms per observed request |
 | Browser: playlist lane | B4 | Restate position changed during allocation | No iteration in captured path |
-| Browser: manifest lane | B5 | Parse manifest and start HLS loading | Field 05, attempt 1: 141.1 ms |
-| Browser: picture stream lane | B6.v | Request picture init segment (fMP4 only) | No separate timed span in captured path |
-| Browser: soundtrack stream lane | B6.a.p | Request soundtrack playlist | No separate timed span in captured path |
-| Browser: soundtrack stream lane | B6.a.i | Request soundtrack init segment (fMP4 only) | No separate timed span in captured path |
-| Browser parallel stream lanes | B7.v | Request first picture fragment | Field 05: fragment-response spans 148.7–512.1 ms; streams are not separated in this log |
-| Browser parallel stream lanes | B7.a | Request first soundtrack fragment | Field 05: fragment-response spans 148.7–512.1 ms; streams are not separated in this log |
+| Browser: manifest lane | B5 | Parse manifest and start HLS loading | Field 05, attempt 1: 141.1 ms for the older coarse interval; the saved log predates request, parse and level spans |
+| Browser: picture stream lane | B6.v | Request picture init segment (fMP4 only) | Not separately timed in the saved field logs; the new trace records each request |
+| Browser: soundtrack stream lane | B6.a.p | Request soundtrack playlist | Not separately timed in the saved field logs; the new trace records each request |
+| Browser: soundtrack stream lane | B6.a.i | Request soundtrack init segment (fMP4 only) | Not separately timed in the saved field logs; the new trace records each request |
+| Browser parallel stream lanes | B7.v | Request first picture fragment | Saved log has 148.7–512.1 ms response spans without stream ids; the new trace records each stream and segment separately |
+| Browser parallel stream lanes | B7.a | Request first soundtrack fragment | Saved log has 148.7–512.1 ms response spans without stream ids; the new trace records each stream and segment separately |
 | Browser parallel stream lanes | B8.v | Remux picture fragment and declare codecs | Field 05, attempt 1: 34.9 ms |
 | Browser parallel stream lanes | B8.a | Remux soundtrack fragment and declare codecs | Point event only; no separate duration |
-| Browser: track join | B9 | Create all expected SourceBuffers | Point event; no span boundary |
+| Browser: track join | B9 | Create all expected SourceBuffers | Saved log has only the point event; the new trace records the codec-ready-to-created interval when every track is reported |
 | Browser parallel append lanes | B10.v | Append picture init segment | Field 05, attempt 1: 35.9 ms |
 | Browser parallel append lanes | B10.a | Append soundtrack init segment | Field 05, attempt 1: 1.7 ms |
 | Browser: metadata gate | B11 | Reach `HAVE_METADATA` | Field 05, attempt 1: 415.2 ms |
@@ -510,7 +518,7 @@ did not occur in those captured attempts; it never means zero duration.
 | Torrent worker: startup | W6 | Publish store-ready state | No matched startup span in fields 04/05 |
 | Torrent worker: selection | W7 | Apply priority-map piece selection | Field 04: 1.5 ms median over 8 commands |
 | Torrent worker: download lane | W8 | Request, receive and verify pieces | Field 04: 2,038.8 ms median over 288 completed piece spans |
-| Torrent worker: storage lane | W9 | Report newly readable piece ranges | Field 04: 288 point events; write duration is not separately measured |
+| Torrent worker: storage lane | W9 | Write verified bytes and report readable ranges | Field 04: 288 availability points only; the new trace records each `store.put` duration |
 | Torrent worker: stats lane | W10 | Return file statistics and arrival forecast | Field 04: 3.4 ms median over 137 commands |
 
 ### 8.2 Parallel actions in the field traces
@@ -992,9 +1000,15 @@ flowchart LR
     P8a --> F1a["F1.a first soundtrack bytes to FFmpeg"] --> F2a["F2.a first soundtrack piece"] --> P11a
     B1["B1 open output"] --> B2["B2 progress and keep-alive"]
     B1 --> B3["B3 playlist wait"] --> B4["B4 position restatement"] --> B5["B5 manifest and startLoad"]
-    B5 --> B6v["B6.v picture init request"] --> B7v["B7.v picture fragment request"] --> B8v["B8.v picture remux/codecs"]
-    B5 --> B6ap["B6.a.p soundtrack playlist"] --> B6ai["B6.a.i soundtrack init request"] --> B7a["B7.a soundtrack fragment request"] --> B8a["B8.a soundtrack remux/codecs"]
+    B5 --> B5l["B5 selected level playlist, when a master exists"]
+    B5 --> B6v["B6.v picture init request, direct media playlist"]
+    B5l --> B6v
+    B6v --> B7v["B7.v picture fragment request"] --> B8v["B8.v picture remux/codecs"]
+    B5 --> B6ap["B6.a.p soundtrack playlist"]
+    B5l --> B6ap
+    B6ap --> B6ai["B6.a.i soundtrack init request"] --> B7a["B7.a soundtrack fragment request"] --> B8a["B8.a soundtrack remux/codecs"]
     B5 --> B7a
+    B5l --> B7a
     B6ai -. first request opens .-> P6a
     B7a -. first request opens .-> P6a
     B8v --> B9["B9 SourceBuffers ready"]

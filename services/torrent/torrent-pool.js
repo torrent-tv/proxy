@@ -26,6 +26,7 @@ import { deriveSourceKey } from "../../utils/torrent-source-key.js";
 import { noteTorrentDestroyed } from "./destroyed-torrents.js";
 import { PieceTimings, describePieceTiming } from "./piece-timing.js";
 import { TailRepeat } from "./worker/tail-repeat.js";
+import { tracePieceStorePut } from "./worker/trace-piece-store-put.js";
 
 /**
  * The second-peer requests for the last blocks of a piece somebody waits for,
@@ -1544,6 +1545,7 @@ export class TorrentPool {
       wrap("_onListening", "W1");
       wrap("_startDiscovery", "W2");
       wrap("_onStore", "W6");
+      tracePieceStorePut(pieceStoreOf(torrent), trace);
       const verify = torrent._verifyPieces;
       if (typeof verify === "function") {
         torrent._verifyPieces = function (callback, ...args) {

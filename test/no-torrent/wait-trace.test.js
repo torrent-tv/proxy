@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SourceWaitTrace } from "../../utils/wait-trace.js";
+import { tracePieceStorePut } from "../../services/torrent/worker/trace-piece-store-put.js";
 
 test("source observations expire and do not claim a request caused shared work", () => {
   let now = 0;
@@ -46,4 +47,26 @@ test("untraced requests produce no events; traced finish is recorded once", asyn
   assert.equal(events.at(-1).operation, "b1");
   assert.equal(events.find(event => event.event === "http-start").process, "A12");
   assert.equal(events.find(event => event.event === "http-end").phase, "end");
+});
+
+test("W9 records the exact piece-store write duration and preserves callback results", () => {
+  let now = 20;
+  const events = [];
+  const originalResult = { accepted: true };
+  const store = { put(index, bytes, callback) {
+    assert.equal(index, 7);
+    assert.equal(bytes.byteLength, 12);
+    this.complete = callback;
+    return originalResult;
+  } };
+  const trace = (process, phase, fields) => events.push({ process, phase, ...fields });
+  assert.equal(tracePieceStorePut(store, trace, () => now), true);
+  const callbackResults = [];
+  assert.equal(store.put(7, new Uint8Array(12), error => callbackResults.push(error)), originalResult);
+  now = 24.5;
+  store.complete(null);
+  assert.deepEqual(callbackResults, [null]);
+  assert.deepEqual(events.map(event => [event.process, event.phase, event.piece, event.durationMs]), [
+    ["W9", "begin", 7, undefined], ["W9", "end", 7, 4.5]
+  ]);
 });

@@ -11,6 +11,9 @@ hls.js 1.7.3 (server `package-lock.json`) and WebTorrent 2.8.5 (proxy
 
 This revision applies the review in torrent-tv/meta#185 (comment
 6285126911); section 11 lists what changed against proxy `7b646fe`.
+Section 13 describes the additional opt-in observations introduced for actual
+startup validation; the historical observability table in section 8 refers to
+the source revisions above.
 
 A process has one owner (host and thread or child process), one start event,
 one end event and one kind of work. A process that runs once per output, per
@@ -100,8 +103,10 @@ durations.
 
 | ID | Process | Starts after | Ends when | Edge to caller |
 |---|---|---|---|---|
-| A0 | Original action (`t0`) | viewer | `FILE_CHOSEN` dispatched | — |
-| A1 | Parse the `.torrent` in the page (`openParsedTorrentDetails`, synchronous) | A0 | parsed | blocking |
+| A0 | Original action (`t0`) | viewer | action accepted | — |
+| A0.1 | Read the selected `.torrent` (`Torrent.#processIncomingFiles`, `File.arrayBuffer`) | A0 | bytes available in the page | blocking for A0.2 |
+| A0.2 | Decode bencode and derive the info hash (`parseTorrentBytes`); the SHA-1 call is asynchronous (`crypto.subtle.digest`) | A0.1 | parsed metadata and hash available; `FILE_DETAILS_READY` dispatched | blocking for A1 |
+| A1 | Store the already parsed source details (`openParsedTorrentDetails`, synchronous), and dispatch `FILE_CHOSEN` when the file is already determined | A0.2 | source details stored | blocking |
 | A2 | Connect (`#acquireTransport` → `ProxySelector.chooseBestProxy`), made of A2.1–A2.3. Joins the connect `#connectEarly` started at page load and costs nothing when that has finished. Limits: 12 s public-only, 5 s on the same network, 30 s overall | A1 | A2.3 ends | blocking |
 | A2.1 | Ask the server which proxy (`POST /api/proxy-clients/choose`) | A2 | answer | blocking |
 | A2.2 | Media connection signalling: WebSocket `/ws/browser-signal`, session, SDP offer, answer relayed by the server, answer applied (`setRemoteDescription`, buffered candidates added) | A2.1 | answer applied | blocking |
@@ -120,7 +125,7 @@ durations.
 | A8 | Warm-up registration (`#warmSourceInBackground`) | A6; again before A12 | registered | start without waiting |
 | A9 | Filename capacity hint (`#preferProxyFromFilename`, `POST /api/proxy-clients/can-serve`; the server asks every proxy over its tunnel) | A6 or A7 | answer | blocking |
 | A9r | Branch: other proxies report capacity → the pool is restricted and the connection closed; the connect at A10 is made within that pool | A9 | connected | blocking |
-| A10 | `t1` after `#acquireTransport`, then `registerSourceOnProxy` (cached unless the proxy changed) | A9 or A9r | mark | — |
+| A10 | Acquire the current transport, record `t1`, then `registerSourceOnProxy` (cached unless the proxy changed) | A9 or A9r | source registered; registration after `t1` belongs to the coarse plan interval | blocking |
 | A11 | Source statistics poll, every 2 s while A12 runs | A10 | A12 ends | start without waiting |
 | A12 | Playback plan (`POST /api/playback-plan`, `waitForReady: true`); answered after P3 | A10 | plan received (`t2`) | blocking |
 | A13 | Fingerprint, container metadata, sidecar soundtrack metadata requests | A12 | answers | start without waiting |
@@ -273,8 +278,8 @@ orchestration. The torrent runs in one worker thread
 
 | Interval | Single-file open | Multi-file choice |
 |---|---|---|
-| `transport = t1 − t0` | A1, A2 (when not finished early), A3/A3r, A4, A6 (waits for P1: W1–W6), A9/A9r | A9/A9r, A10 |
-| `plan = t2 − t1` | A12: P2 (R8 queue, X1 when not sniffed, `needs-ranges` → P4 → W7–W9 → read again), P3 | same |
+| `transport = t1 − t0` | A0.1, A0.2, A1, A2 (when not finished early), A3/A3r, A4, A6 (waits for P1: W1–W6), A9/A9r, A10 transport acquisition | A9/A9r, A10 transport acquisition |
+| `plan = t2 − t1` | A10 source registration after `t1` (no request on a cache hit), then A12: P2 (R8 queue, X1 when not sniffed, `needs-ranges` → P4 → W7–W9 → read again), P3 | same |
 | `prepare = t3 − t2` | A13–A15, B1 (P6.v, P5 for a copy), B2–B5, then per required stream: P6.a (soundtrack, opened by its first init or segment request), P7, P8, F1, F2, P11, P13 and the init transfer (fMP4), P12, the first-fragment transfer on R5.m, B8, B9, B10 | same |
 | `prebuffer = t4 − t3` | gate C1: the continuity forecast to the end of the film (P14, needing P4 inputs for every remaining segment of an incomplete source), further production and delivery, poll and net-report latency, C3 | same |
 | `presentation = tFrame − t4` | C4, C5, C6 | same |
@@ -353,7 +358,7 @@ logged at the process boundary; "derived" is computed from other values;
 | P8 | P | output key, `#from..#to` | first state line | `encode input #a..#b of <key>: ready …; asked <ms> ago over <n> attempt(s): <n> resolution(s) <ms> (… queued <ms>, reading <ms>), held ranges <ms>, budget <ms>` | R8, W9, R4 | bytes, copy ms | direct |
 | F1 | F | run `#from..#to`, output key | spawn (no line) | none | R3 | — | derived only: `opened in <s>` is the time to the first named piece less the processing estimate and the copy wait (`run-open.js`); not a first-packet event |
 | F2 | F | run, output key | — | `… first piece named at <ms>` in the same run-end line | R3 | film seconds | direct but reported at run end |
-| P11 | P | output key, segment index | none | none at publication | — | — | none; `cold-start <id>: first-segment ready +<ms>` is written when the first segment is **served** (`SegmentServing`), not when it is published |
+| P11 | P | output key, segment index | encoder run start | `encode-run … #<index> … named +<ms>, published +<ms>` (`EncodeRuns.onClosed`), relative to that run's start | — | one piece | direct publication observation; `cold-start <id>: first-segment ready +<ms>` is a different event, written when the first segment is **served** (`SegmentServing`) |
 | P13 | P | output key | none | none | — | — | none |
 | P12 + transfer | P / B | P `requestId`; B path | P route entry (in `fetchMs`) | P `[net-debug] sent … requestId= fetchMs= sendMs= readMs= chanMs= drainMs= loopMax=`; B `[net-debug] dc-load {path, waitMs, transferMs}` | R2, R5.m | bytes | direct on each side; B line carries the path, not the `requestId` |
 | B5 | B | — | `[torrent-tv][hls] start-up: manifest requested` | `… manifest parsed` | — | — | direct |
@@ -367,16 +372,17 @@ logged at the process boundary; "derived" is computed from other values;
 | W1–W6 | P | info hash | none | tracker update lines; `ready` not logged with a duration | — | — | partial |
 | W7 | P | file | — | `download: first class …`; per-minute `download map … delivered … applied in the torrent thread …` | — | — | aggregated |
 | P4 | P | file | none per pass | per-minute `download map passes in <s>: … longest <ms>` | R2, R8 | segments | aggregated |
-| W8, W9 | P | piece | none | none | R1 | bytes | none per piece; rates in statistics |
+| W3 | worker wall clock | torrent label | torrent added | `first peer connected after <s>` (`torrent-pool.js`) | swarm | one first connection | existing duration rounded to 0.1 s; not a monotonic span linked to a browser wait |
+| W8, W9 | worker wall clock | torrent label, piece | `wire` piece timings | `download … verified piece=<index>…` (`torrent-pool.js`) | R1 | bytes | existing per-piece diagnostics; not linked to the browser's monotonic clock |
 | W10 | P | file | — | `[stats] … getFileStatsMs=` (stats route); `readiness parts … arrival forecast <ms>` | — | — | direct |
 
 Missing events, by the interval they leave unexplained: A2 start, A2.1 and
 A2.2 durations, the completion of A2.2m and A2.2c each and A2.J; A6 duration;
-P1 alone; X1; P6.a and the request that opened it; P11 publication time; P13;
+P1 alone; X1; P6.a and the request that opened it; a browser-linked monotonic P11 publication time; P13;
 B8–B12 (append and `updateend`); a wait identifier and monotonic time on the
 existing `[evt] … playing` and `[evt] … seeking` lines; the viewer's seek
 input; a frame callback with advancing `mediaTime`; audio ready after
-`tFrame`; W3 first peer, W4, W6 duration; per-pass P4 time and the moment a
+`tFrame`; a browser-linked monotonic W3 first-peer event, W4, W6 duration; per-pass P4 time and the moment a
 missing segment's addresses become known; R8 queue wait outside P8.
 
 ## 9. Seek, soundtrack and quality change
@@ -554,7 +560,7 @@ flowchart TB
     E1["WaitingModel deadline, overlay render"]
   end
 
-  T0 --> A1 --> A21 --> A22
+  T0 --> A01["A0.1 read torrent file"] --> A02["A0.2 bencode and async SHA-1"] --> A1 --> A21 --> A22
   A21 -.- S1
   A22 -.- S2
   A22 --> A22m --> A2J
@@ -812,3 +818,52 @@ Against proxy `aa67015` (the second review in torrent-tv/meta#185):
    cannot place it in time.
 6. P2, P4, P5 and P8 repeat on new bytes, memory or demand; the tables name
    the pass that matters for the first frame.
+
+## 13. Actual execution observations
+
+Add `?waitTrace=1` to the page address before an initial open. This enables
+`[wait-trace]` JSON records without changing the forecast, admission or playback
+permission rules. The default page does not emit these records.
+
+1. Browser `action` records preserve the original input timestamp. Each selected
+   file has a wait identity; retries of that file get increasing attempt
+   numbers without replacing its original timestamp. A multi-file choice
+   starts another wait and excludes time spent choosing.
+2. Browser `begin`/`end` records contain operation identities and direct
+   monotonic boundaries for file read, parse/hash, connection, holder choice,
+   registration, file list, filename capacity, plan, track/page setup, codec
+   support, output/manifest preparation, metadata readiness, prebuffer,
+   `play()` and frame presentation. Grouped intervals remain inclusive: their
+   children must not be added to them again.
+3. Each proxy response carries the browser wait, attempt and operation in
+   diagnostic headers. The proxy records request arrival, handler entry,
+   serialization, send and finish/close on its own monotonic clock. On
+   WebRTC a browser response completes after its body; an HTTP response
+   record explicitly ends at headers (`bodyComplete=false`).
+4. Source observations report torrent-ready/cache/join boundaries, changed
+   held bytes, container queue/read boundaries and missing-range answers, and
+   the first published piece of a run. Shared source work has no claimed
+   request-operation parent: its `operation` is null. Source subscriptions
+   expire after 60 s and are bounded to 64 sources. Fast source-range reads
+   below 10 ms are omitted; the records are not a complete per-segment map
+   account. The existing input and worker diagnostics remain necessary.
+5. hls.js events identify manifest/track loading, codec declarations, buffer
+   creation, appends and buffered fragments. Their dispatch timestamps do not
+   establish exclusive CPU time or the native decoder's internal queue.
+6. The diagnostic observer confirms increasing `mediaTime` and frame count
+   across two callbacks while unpaused. When audio is required it also checks
+   the selected audio ranges and nonzero decoded audio bytes. It reports the
+   first advancing frame separately from the later confirmation and records
+   unsupported audio observation explicitly. This establishes browser media
+   progress with decoded audio, not acoustic output at the physical speaker.
+7. Browser and proxy timestamps are never directly subtracted. Match request
+   identities and use local durations; bound the proxy interval by the browser
+   request interval. Expand retries, cache alternatives and repeated readers
+   into separate operation instances before calculating a completion path.
+   Dashed start edges in section 10 are not completion prerequisites.
+8. Validation compares an independent browser observer with the union of
+   recorded blocking intervals. Uncovered intervals remain explicit; coverage
+   of a whole request is not proof of its internal decomposition. Independently
+   calculated serial, parallel, cache and retry examples check the scheduling
+   and overlap accounting. Case coverage, timing uncertainty and limitations
+   are recorded in the meta research note linked from issue #185.

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Record opt-in, correlated startup request, source-read queue and first-piece publication events for validating actual playback waits (#ttv-185).
+
 ## 2.102.0
 
 - **New**: Read Matroska and supported MP4 chapter declarations from available bytes, preserve source-time sections, and publish versioned snapshots without delaying playback (torrent-tv/meta#110).

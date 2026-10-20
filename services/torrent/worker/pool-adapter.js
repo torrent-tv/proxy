@@ -31,12 +31,14 @@ export class WorkerTorrentPool {
   /** Stand-ins by source key, so repeat calls return the same object. */
   #torrents = new Map();
   #pending = new Map();
+  #observed;
 
   /**
    * @param {{ memoryBytes?: number, stateDir?: string }} [options]
    * @param {object | null} [client] - The worker interface; tests supply a fake.
    */
   constructor(options = {}, client = null) {
+    this.#observed = options.onObserved;
     this.#client = client ?? new TorrentWorkerClient({ ...options, onSourceForgotten: event => {
       this.forget(event.sourceKey);
       options.onSourceForgotten?.(event);
@@ -51,13 +53,16 @@ export class WorkerTorrentPool {
    * @returns {Promise<object>}
    */
   async getTorrent(sourceType, source) {
+    const startedAt = performance.now();
     const sourceKey = await deriveSourceKey(sourceType, source);
+    const observed = outcome => this.#observed?.({ sourceKey, startedAt, endedAt: performance.now(), outcome });
     const existing = this.#torrents.get(sourceKey);
     if (existing) {
+      observed("cached");
       return existing;
     }
     const joined = this.#pending.get(sourceKey);
-    if (joined) return joined;
+    if (joined) return joined.finally(() => observed("joined"));
     const pending = this.#client.getTorrent({ sourceKey, sourceType, source }).then(torrent => {
       if (this.#pending.get(sourceKey) !== pending) {
         const error = new Error("Source was forgotten while its metadata was being read.");
@@ -66,7 +71,10 @@ export class WorkerTorrentPool {
       }
       this.#torrents.set(sourceKey, torrent);
       return torrent;
-    }).finally(() => { if (this.#pending.get(sourceKey) === pending) this.#pending.delete(sourceKey); });
+    }).finally(() => {
+      observed(this.#torrents.has(sourceKey) ? "ready" : "error");
+      if (this.#pending.get(sourceKey) === pending) this.#pending.delete(sourceKey);
+    });
     this.#pending.set(sourceKey, pending);
     return pending;
   }

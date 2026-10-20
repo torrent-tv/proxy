@@ -156,13 +156,17 @@ export class ContainerOrchestrator {
     // table of the whole film it does not use (r38, torrent-tv/meta#178).
     const aside = this.#answersWithoutReading(key, statement);
     const previous = aside ? Promise.resolve() : this.#reads.get(key) ?? Promise.resolve();
-    const askedAt = Date.now();
+    const askedAt = performance.now();
     const reading = previous.catch(() => undefined).then(async () => {
       if (!isCurrent()) return { result: { kind: "terminal", reason: "request-obsolete", requestId: params.requestId } };
-      const startedAt = Date.now();
+      const startedAt = performance.now();
       const revision = params.onReadStart?.(statement);
       const result = await this.#inspectRead({ ...params, isCurrent }, statement);
-      params.onTimed?.(statement, startedAt - askedAt, Date.now() - startedAt);
+      const endedAt = performance.now();
+      params.onTimed?.(statement, startedAt - askedAt, endedAt - startedAt);
+      if (statement !== "source-ranges" || endedAt - askedAt >= 10) params.onObserved?.({ statement, askedAt,
+        startedAt, endedAt, queuedMs: startedAt - askedAt, readMs: endedAt - startedAt, cached: aside,
+        result: result.kind, reason: result.reason, ranges: result.ranges });
       return { result, revision };
     });
     if (!aside) this.#reads.set(key, reading);

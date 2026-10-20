@@ -345,8 +345,10 @@ async function runCommand(command, params, id) {
       // Reusing the same promise for a repeated add also collapses two callers
       // racing to open the same torrent into one.
       let pending = torrentsByKey.get(params.sourceKey);
+      let addStartedAt = null;
       if (!pending) {
-        emitWaitTrace(params.sourceKey, "W1", "event", { moment: "add-request" });
+        addStartedAt = performance.now();
+        emitWaitTrace(params.sourceKey, "W1", "begin", { startedAt: addStartedAt, moment: "add-request" });
         pending = pool.getTorrent(params.sourceType, params.source, {
           sourceKey: params.sourceKey, trace: params.trace === true, emitWaitTrace
         });
@@ -366,7 +368,22 @@ async function runCommand(command, params, id) {
       // empty list, and rebuilding it here would bring it back on every stream
       // and stats request, which all come through this command. Any other
       // destroyed torrent is rebuilt, because its files still need it.
-      const added = await pending;
+      let added;
+      try {
+        added = await pending;
+        if (params.trace === true && addStartedAt !== null) {
+          const endedAt = performance.now();
+          emitWaitTrace(params.sourceKey, "W1", "end", { endedAt, durationMs: endedAt - addStartedAt,
+            outcome: "ready" });
+        }
+      } catch (error) {
+        if (params.trace === true && addStartedAt !== null) {
+          const endedAt = performance.now();
+          emitWaitTrace(params.sourceKey, "W1", "end", { endedAt, durationMs: endedAt - addStartedAt,
+            outcome: "error", error: String(error?.message ?? error) });
+        }
+        throw error;
+      }
       const described = isUsableTorrentHandle(added) ? null : wholeSources.describe(params.sourceKey);
       if (described) {
         announceWholeFiles(params.sourceKey, described);

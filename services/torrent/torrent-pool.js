@@ -1562,7 +1562,6 @@ export class TorrentPool {
     };
     if (waitTrace?.trace === true && !this.#waitTraceHooks.has(torrent)) {
       this.#waitTraceHooks.add(torrent);
-      wrap("_onListening", "W1");
       wrap("_startDiscovery", "W2");
       wrap("_onStore", "W6");
       tracePieceStorePut(pieceStoreOf(torrent), trace);

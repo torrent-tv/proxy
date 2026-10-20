@@ -216,7 +216,7 @@ orchestration. The torrent runs in one worker thread
 
 | ID | Process | Starts after | Ends when | Edge |
 |---|---|---|---|---|
-| W1 | Add, parse, listen (`client.add`, `_onListening`) | P1 | listening | blocking |
+| W1 | Add source and wait until the torrent is ready (`pool.getTorrent`) | ADD_SOURCE begins | ready torrent or error | parent wait for P1; overlaps W2–W6 |
 | W2 | Peer discovery started (`_startDiscovery`: trackers, DHT). Magnet: at listening, before the metadata. `.torrent`: inside `_onStore`, immediately before `ready` | W1 (magnet) or W6 (`.torrent`) | discovery running | blocking for W3 |
 | W3 | Peer connections and handshakes | W2 | a peer serving | blocking for W4, W8 |
 | W4 | Metadata from peers (`ut_metadata`); magnet only | W3 | `metadata` | blocking for W5 |
@@ -394,7 +394,8 @@ logged at the process boundary; "derived" is computed from other values;
 | Seek start (section 9) | B | — | the viewer's input: none; `[evt] <wall time> seeking` for native controls and Media Session | `[evt] seek intent → <s>`; `[wait-start]` at the hold | — | — | input not logged; `seeking` and `seek intent` on wall time, `[wait-start]` monotonic |
 | C6, C7 | B | wait, attempt, media time | `requestVideoFrameCallback` observations | advancing frame and audio-ready point events | R6 | media time, audio state | direct observations with wait identity |
 | P4 | P | source key, file, map revision | `process=P4 phase=begin` at range-resolution pass | `process=P4 phase=end`, with resolved zone count and outcome | R2, R8 | zones | direct resolver span; separate from the aggregate map-pass timing |
-| W1–W2, W5–W6 | torrent worker | source key | `client.add` request; internal `_onListening`, `_startDiscovery`, `_verifyPieces`, `_onStore` begin events | corresponding end events; skipped verification is a point event | — | files, outcome | direct worker-monotonic spans with `durationMs`; WebTorrent internal method boundaries pinned to installed 2.8.5 |
+| W1 | torrent worker | source key | first traced `ADD_SOURCE` starts `pool.getTorrent` | its promise resolves with a ready torrent or fails | worker queue; includes W2–W6 | files, outcome | direct worker-monotonic parent span with `durationMs`; overlaps nested stages and is not additive to them |
+| W2, W5–W6 | torrent worker | source key | internal `_startDiscovery`, `_verifyPieces`, `_onStore` begin events | corresponding end events; skipped verification is a point event | — | files, outcome | direct worker-monotonic spans with `durationMs`; WebTorrent internal method boundaries pinned to installed 2.8.5 |
 | W3 | torrent worker | source key | end of W2 discovery | first `wire` (peer connection/handshake) | swarm | outcome, peer | direct monotonic wait span; `.torrent` and magnet paths are separate; two records per span |
 | W4 | torrent worker | source key | first peer for a magnet | `metadata` from peers | swarm | outcome, file count | direct monotonic wait span; `.torrent` with metadata already present emits a point event; two records per span |
 | W7 | torrent worker | source key, file | priority-map command begins | priority-map command ends, including applied file and duration | worker command queue | windows | direct worker-monotonic span with `durationMs` |
@@ -511,7 +512,7 @@ did not occur in those captured attempts; it never means zero duration.
 | Encoder lane | F1.a | Hand first soundtrack input bytes to FFmpeg | Start recorded; no valid isolated completion span in these logs |
 | Encoder parallel output lanes | F2.v | Produce first picture segment | Field 05, attempt 1: 5,401.1 ms |
 | Encoder parallel output lanes | F2.a | Produce first soundtrack segment | No valid isolated completion span in these logs |
-| Torrent worker: startup | W1 | Add, parse and listen | No matched startup span in fields 04/05; source was already available to the captured wait |
+| Torrent worker: add-to-ready parent | W1 | Add source through ready torrent | Historical Field 04: worker add point only; new traces record the full interval, including nested worker steps |
 | Torrent worker: startup | W2 | Start peer discovery | No matched startup span in fields 04/05 |
 | Torrent worker: peer lane | W3 | Connect to peers and complete handshakes after discovery | Historical Field 04: peer-arrival points only; new traces record begin/end duration |
 | Torrent worker: metadata lane | W4 | Receive magnet metadata from peers | Historical selected `.torrent` did not take this branch; new magnet traces record begin/end duration |
@@ -745,7 +746,7 @@ flowchart TB
   end
 
   subgraph WORKER["Torrent worker thread and swarm"]
-    W1["W1 add, parse, listen"]
+    W1["W1 add through torrent ready"]
     QMAG{"magnet?"}
     W2m["W2 discovery before metadata"]
     W3m["W3 peer wait span"]

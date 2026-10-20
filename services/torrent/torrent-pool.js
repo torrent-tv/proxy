@@ -1570,10 +1570,22 @@ export class TorrentPool {
         torrent._verifyPieces = function (callback, ...args) {
           const startedAt = performance.now();
           trace("W5", "begin", { startedAt });
-          return verify.call(this, (...results) => {
-            trace("W5", "end", { startedAt, endedAt: performance.now(), outcome: "verified" });
-            callback?.(...results);
-          }, ...args);
+          let finished = false;
+          const finish = (outcome, fields = {}) => {
+            if (finished) return;
+            finished = true;
+            const endedAt = performance.now();
+            trace("W5", "end", { startedAt, endedAt, durationMs: endedAt - startedAt, outcome, ...fields });
+          };
+          try {
+            return verify.call(this, (...results) => {
+              finish("verified");
+              callback?.(...results);
+            }, ...args);
+          } catch (error) {
+            finish("error", { error: String(error?.message ?? error) });
+            throw error;
+          }
         };
       }
       const timing = this.#swarmTimingByTorrent.get(torrent);

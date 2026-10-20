@@ -128,7 +128,10 @@ export function configurationKeyOf(fingerprint, encoder) {
   return [
     ...common,
     `device=${device?.model ?? UNKNOWN}`,
-    `driver=${device?.driver ?? UNKNOWN}`
+    `driver=${device?.driver ?? UNKNOWN}`,
+    `cpu=${fingerprint?.cpu ?? UNKNOWN}`,
+    `threads=${fingerprint?.threads ?? UNKNOWN}`,
+    ...(Number.isFinite(fingerprint?.boundCores) ? [`bound=${fingerprint.boundCores}`] : [])
   ].join(";");
 }
 

@@ -101,7 +101,7 @@ test("language and author together, for the field case", () => {
       fileName: "[HorribleSubs] Drifters - 02 [1080p].mka",
       videoName: VIDEO_NAME
     }),
-    { code: "ru", name: "Russian", releaser: null, isForced: false, isHearingImpaired: false, isDefault: false }
+    { code: "ru", name: "Russian", releaser: null, team: null, title: null, isForced: false, isHearingImpaired: false, isDefault: false }
   );
   assert.deepEqual(
     sidecarNaming({
@@ -113,11 +113,26 @@ test("language and author together, for the field case", () => {
       code: null,
       name: null,
       releaser: "Stan WarHammer & Nesitach",
+      team: "Stan WarHammer & Nesitach",
+      title: null,
       isForced: false,
       isHearingImpaired: false,
       isDefault: false
     }
   );
+});
+
+test("track titles are separate from teams, and legacy releaser identity is preserved", () => {
+  for (const title of ["Signs", "Full", "Commentary"]) {
+    const naming = sidecarNaming({ folders: [], fileName: `Film.${title}.rus.ass`, videoName: "Film.mkv" });
+    assert.equal(naming.title, title);
+    assert.equal(naming.team, null);
+    assert.equal(naming.releaser, title);
+  }
+  const naming = sidecarNaming({ folders: ["Subs", "[Anilibria]"], fileName: "Film.rus.ass", videoName: "Film.mkv" });
+  assert.equal(naming.team, "Anilibria");
+  assert.equal(naming.title, null);
+  assert.equal(naming.releaser, "Anilibria");
 });
 
 test("a subtitle file takes its author from the folder the release put it in", () => {

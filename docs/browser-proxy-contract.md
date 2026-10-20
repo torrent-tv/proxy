@@ -128,8 +128,12 @@ it was computed from.
 
 `sidecarSubtitles` lists subtitle files the proxy paired with this video. Each
 entry carries the torrent `fileIndex` and the proxy's filename-derived language
-and release metadata. The browser uses these entries to fetch subtitle files
-and to identify a remembered choice. `sidecarImages` is returned beside it but
+and release metadata. `naming.team` is a distinct bracketed team name when the
+path establishes one; `naming.title` is the remaining track title. The legacy
+`naming.releaser` keeps its existing value for subtitle identity. Older proxies
+may omit `team` and `title`; the browser treats both as unknown. The browser
+uses these entries to fetch subtitle files and to identify a remembered choice.
+`sidecarImages` is returned beside it but
 is not needed for playback. Older proxies and plans made with transcoding
 disabled may omit these fields; the browser treats a missing or non-array list
 as empty.

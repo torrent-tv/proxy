@@ -1,4 +1,4 @@
-## Unreleased
+## 2.102.2
 
 - **Chore**: Include the selected historical stages and current first-required estimate in early forecast logs (#ttv-185).
 

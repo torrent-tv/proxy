@@ -1,3 +1,7 @@
+## Unreleased
+
+- **New**: Read Matroska and supported MP4 chapter declarations from available bytes, preserve source-time sections, and publish versioned snapshots without delaying playback (torrent-tv/meta#110).
+
 ## 2.101.43
 
 - **Fix**: Restore hardware observation keys without the CPU model, thread count or CPU quota fields added in 2.101.42 (#ttv-185).
@@ -927,8 +931,6 @@
 - **Fix**: Admit the final copied interval and verify its output against each track's proven source end. Audio extending beyond the final video sample no longer leaves the last video segment without source ranges (torrent-tv/meta#128).
 
 - **Fix**: Publish all torrent selections before calculating peer requests once, and compile byte windows into piece demand once per map revision. Each peer update still checks live storage availability. Native packet maps no longer repeat the complete map scan for every library selection or peer update and delay source-stat replies during playback opening (torrent-tv/meta#127).
-
-- **New**: Read file chapter metadata using available bytes and expose versioned snapshots separately from playback preparation; distinguish unsupported fragmented chapter tracks from missing chapters (torrent-tv/meta#110).
 
 - **Fix**: Use preserved source cut times for packet demand and encoder input; rounded playlist times no longer reject copied segments as non-keyframes.
 

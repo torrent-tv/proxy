@@ -51,10 +51,17 @@ older proxy means unsupported chapter metadata, not an absence of chapters.
    use the next sibling's start or known duration for navigation;
    `endSource` distinguishes `declared`, `navigation` and `unknown` boundaries.
 6. `type` is `chapter`, `opening`, `ending`, `credits` or `post-credits`.
-   A recognized title has `classification: "title-hint"`; other titles remain
-   `unclassified`. Every entry has `evidence: "file-chapter"` and
+   A recognized title has `classification: "title-hint"` and
+   `confidence: "unconfirmed"`; its purpose is inferred from the name alone.
+   Other titles remain `unclassified` with `confidence: "declared"`, which
+   states only that the file declares a chapter. Every entry has `evidence: "file-chapter"` and
    `automaticSkipAllowed: false`. `tailContent: "unknown"` never proves the
    absence of a later scene. These results cannot authorize automatic skipping.
+7. A version 1 endpoint answer has `capability: "supported"`, including an
+   unsupported container result. An old proxy without this route yields a
+   local browser state of unsupported with `capability: "unsupported"`. A
+   known source that returns `404` uses `code: "SOURCE_NOT_FOUND"` and remains
+   an error, not a capability result.
 
 WebRTC sends `{ type: "chapters-changed", sourceKey, fileIndex, revision }`
 to channels that requested that selected file. The browser obtains a fresh

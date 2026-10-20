@@ -3,8 +3,7 @@
 This document describes the wait between a viewer's action and the first
 presented frame as a set of atomic processes taken from the current code, with
 their dependencies, alternatives, parallelism and shared resources
-(torrent-tv/meta#185, plan step 3.3.4). It describes what the code does; it
-contains no durations and changes no formula. Read from server `2645345`
+(torrent-tv/meta#185, plan step 3.3.4). It describes what the code does. Timing examples are observations, not estimates; this document changes no formula. Read from server `2645345`
 (0.50.32), proxy `2ac8c25` (2.101.43), and the libraries they install:
 hls.js 1.7.3 (server `package-lock.json`) and WebTorrent 2.8.5 (proxy
 `package.json`).
@@ -533,6 +532,52 @@ The worker and proxy main-thread columns are shown as parallel lanes because
 they are separate threads. Their clocks are not aligned, so the table does not
 claim measured wall-time overlap between them. The session files and analysis
 are linked in [the field-check note](https://github.com/torrent-tv/meta/blob/main/research/first-frame-wait-trace-field-check-2026-10-20.md).
+
+### 8.3 Reconcile the field 05 wait with its first-frame time
+
+For wait `f1e0068f-7804-4fb3-983e-4d2dfb84bb3c`, the original browser action
+was at 13,306.9 ms and the first advancing frame with decoded audio was at
+15,164.4 ms on the same browser monotonic clock. The observed wait was
+**1,857.5 ms**. Attempt 1 followed attempt 0; both retain the original action
+time.
+
+The measured browser blocking path accounts for that elapsed time:
+
+| Elapsed part of the path | Time (ms) |
+|---|---:|
+| Original action to B1 output/manifest start; includes earlier setup, plan, retry and concurrent work | 322.5 |
+| B1–B5 output and manifest interval | 483.5 |
+| Gap from B1–B5 end to B11 start | 0.4 |
+| B11 metadata interval | 415.2 |
+| Gap from B11 end to C1 start | 0.1 |
+| C1 prebuffer gate | 500.7 |
+| Gap from C1 release to C5 start | 5.7 |
+| C5 play-to-playing interval | 39.6 |
+| C6 interval after its 2.1 ms overlap with C5 | 89.8 |
+| **Total to first advancing frame** | **1,857.5** |
+
+The arithmetic matches the action-to-frame elapsed time exactly for this trace.
+The action-to-B1 envelope is not a sum of the earlier rows: A5/A6, A11/A12
+and A13–A15 contain parallel work. B1–B5 is an inclusive interval; its B5
+manifest span is already inside it. The prebuffer gate also overlaps progress
+and fragment requests. Adding these child and background spans again would
+double count elapsed time.
+
+As a coverage cross-check, the union of the 112 directly timed browser spans
+before the first frame covers 1,836.3 ms; 21.2 ms lies between recorded spans.
+Those gaps are visible in the total above and are not assigned to a code
+operation. This is an event-path reconciliation for one successful wait, not
+an ETA accuracy result or proof for unobserved branches.
+
+The inventory in 8.1 mixes browser spans, proxy/worker-local durations,
+repeated-operation medians and conditional actions. It is not a list of
+durations to add for one viewer wait. For example, the 5,401.1 ms F2.v encoder
+span is a proxy-clock duration for output work; the table does not establish
+that this whole span lies after this browser action or is a first-frame
+prerequisite. Field 04's W8 median is from a different wait. Proxy and worker
+durations cannot be placed on the browser timeline by subtracting host
+timestamps. The trace details and limits are in the
+[reconciliation note](https://github.com/torrent-tv/meta/blob/main/research/first-frame-event-time-reconciliation-2026-10-20-ttv185.md).
 
 ## 9. Seek, soundtrack and quality change
 

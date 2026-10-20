@@ -72,6 +72,23 @@ test("W9 records the exact piece-store write duration and preserves callback res
   ]);
 });
 
+test("W9 can attach after the store appears, remains single-wrapped, and records failures", () => {
+  let now = 5;
+  const events = [];
+  const trace = (process, phase, fields) => events.push({ process, phase, ...fields });
+  const late = {};
+  assert.equal(tracePieceStorePut(late, trace, () => now), false);
+  late.put = function (_index, _bytes, callback) { this.complete = callback; };
+  assert.equal(tracePieceStorePut(late, trace, () => now), true);
+  assert.equal(tracePieceStorePut(late, trace, () => now), false);
+  late.put(3, new Uint8Array(4), () => {});
+  now = 8;
+  late.complete(new Error("disk write failed"));
+  assert.deepEqual(events.map(event => [event.phase, event.durationMs, event.outcome]), [
+    ["begin", undefined, undefined], ["end", 3, "error"]
+  ]);
+});
+
 test("W3 and W4 measure first-peer and magnet-metadata waits on the worker clock", () => {
   let now = 10;
   const events = [];

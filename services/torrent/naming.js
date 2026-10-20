@@ -608,12 +608,30 @@ export function sidecarNaming({ folders, fileName, videoName = "" }) {
     stripExtension(String(videoName ?? ""))
   );
   const language = fromName.language ?? languageFromFolderNames(folders);
+  const title = titleOf(fromName.title);
+  const team = teamFrom({ folders, fileName, videoName });
   return {
     code: language?.code ?? null,
     name: language?.name ?? null,
-    releaser: titleOf(fromName.title) ?? releaserFrom({ folders, fileName, videoName }),
+    // Keep releaser unchanged: subtitle identity uses this value across episodes.
+    releaser: title ?? releaserFrom({ folders, fileName, videoName }),
+    team,
+    title,
     isForced: fromName.isForced,
     isHearingImpaired: fromName.isHearingImpaired,
     isDefault: fromName.isDefault
   };
+}
+
+/**
+ * A team is only a distinct bracketed name. Generic track titles are not teams.
+ * @param {{ folders: string[], fileName: string, videoName?: string }} params
+ * @returns {string | null}
+ */
+function teamFrom({ folders, fileName, videoName = "" }) {
+  const team = releaserFrom({ folders, fileName, videoName });
+  if (!team || /^(?:full|signs?|commentary)$/iu.test(team.trim())) {
+    return null;
+  }
+  return team;
 }

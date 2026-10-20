@@ -1,3 +1,7 @@
+## Unreleased
+
+- **New**: Return separate sidecar subtitle team and track-title metadata while preserving the existing releaser value (#ttv-118).
+
 ## 2.104.2
 
 - **Fix**: Record explicit duration and error outcomes for W5 piece-verification spans (#ttv-185).

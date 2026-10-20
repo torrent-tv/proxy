@@ -1106,6 +1106,7 @@ export class EncodeRuns {
     // proven, and it is cleared up when the run ends.
     // Told when this run closes its first piece; see the next stretch below.
     let atFirstPiece = null;
+    const observedStart = performance.now();
     const run = new EncodeRun({
       address: session.outputKey ?? session.id,
       encoder: this.#host.videoEncoder,
@@ -1196,6 +1197,10 @@ export class EncodeRuns {
           { code: "ERR_INCOMPLETE_MEDIA" });
         const published = this.#host.segmentFiles.publish(address, name, session.segmentFormat, { mediaRanges, bytes });
         if (!published) throw new Error(`Closed piece #${index} could not be stored.`);
+        if (index === safeIndex) this.#host.observeWait?.(session.file.sourceKey, "first-piece-published", {
+          output: address, segment: index, startedAt: observedStart, endedAt: performance.now(),
+          encoderWrittenAfterMs: Number.isFinite(writtenAt) ? writtenAt - run.startedAt : null,
+          namedAfterMs: Number.isFinite(namedAt) ? namedAt - run.startedAt : null });
         this.#leadingByOutput.get(address)?.delete(index);
         // WHERE A LATE PIECE'S TIME WENT: the encoder writing it, this process
         // getting to its name, or its publication waiting for the file after

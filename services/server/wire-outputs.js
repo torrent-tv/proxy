@@ -177,6 +177,7 @@ function buildHttpBaseUrl(host, port) {
  * @returns {object} The components, and the settings they read.
  */
 export function wireOutputs({
+    observeWait = null,
     enabled,
     ffmpegBin,
     localBindHost,
@@ -363,6 +364,7 @@ export function wireOutputs({
     get segmentDurationSec() { return parts.segmentDurationSec; },
     readsThroughCache: () => parts.inputCacheAvailable === true,
     segmentFiles,
+    observeWait,
     get videoEncoder() { return parts.encoders.current; },
     get encoders() { return parts.encoders; },
     invalidateWaits: (output) => parts.serving.invalidateWaits(output),

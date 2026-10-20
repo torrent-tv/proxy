@@ -12,6 +12,7 @@ import fastifyHelmet from "@fastify/helmet";
 import getPort from "get-port";
 import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
+import { SourceWaitTrace } from "./utils/wait-trace.js";
 import { handleHealthGet } from "./routes/health/get.js";
 import { handleMediaGet } from "./routes/media/get.js";
 import { ProbeRequests } from "./services/media/ProbeRequests.js";
@@ -157,6 +158,8 @@ export async function startProxyServer({
     bodyLimit: 256 * 1024 * 1024 // 256 MB
   });
   const forwardedSessionResponseStarts = new WeakMap();
+  const waitTrace = new SourceWaitTrace({ emit: value => logger.info(`[wait-trace] ${JSON.stringify(value)}`) });
+  waitTrace.install(app);
   const logForwardedSessionResponseStage = (stage, req) => {
     const startedAt = forwardedSessionResponseStarts.get(req);
     const requestId = req.headers["x-ttv-forwarded-request-id"];
@@ -175,7 +178,7 @@ export async function startProxyServer({
   await app.register(fastifyCors, {
     origin: true,
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Range"]
+    allowedHeaders: ["Content-Type", "Range", "X-Ttv-Wait-Trace", "X-Ttv-Wait-Attempt", "X-Ttv-Wait-Operation"]
   });
 
   // Allow browser requests from an HTTPS page to this private-network proxy
@@ -220,6 +223,7 @@ export async function startProxyServer({
   // 10 MB file took 12-23 s against 125 ms to hand it to the channel. The
   // adapter keeps TorrentPool's interface, so nothing downstream changed.
   const torrentPool = new WorkerTorrentPool({
+    onObserved: fields => waitTrace.source(fields.sourceKey, "torrent-ready", fields),
     memoryBytes,
     stateDir,
     heapSnapshots,
@@ -250,6 +254,8 @@ export async function startProxyServer({
     // only once the worker thread is up and a piece has verified, which is long
     // after the declarations below have run.
     onPiecesArrived: ({ sourceKey, fileIndexes, arrived }) => {
+      waitTrace.source(sourceKey, "held-bytes-changed", { fileIndexes, arrived: arrived?.slice?.(0, 32),
+        arrivedCount: arrived?.length });
       for (const fileIndex of fileIndexes) {
         mediaReads.bytesChanged(sourceKey, fileIndex);
         probeReads.bytesChanged(sourceKey, fileIndex);
@@ -871,6 +877,7 @@ export async function startProxyServer({
         } }),
       label: String(file.name ?? ""),
       fileOffset: file.offset,
+      onObserved: fields => waitTrace.source(sourceKey, "container-read", { fileIndex, requestId, ...fields }),
       onTracks: (tracks) => contentsOf(torrent).noteVideo(fileIndex, tracks.some((track) => track.type === "video")),
       onReadStart: () => ({ storage: mediaReads.revision(sourceKey, fileIndex), memory: mediaReads.memoryRevision(), demand: downloadMaps.epoch(sourceKey, fileIndex) }),
       onReadResult: async (statement, result, revision) => {
@@ -918,6 +925,7 @@ export async function startProxyServer({
   });
   let sourcePreparation;
   const outputParts = wireOutputs({
+    observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
     pinnedPreset,
     indexMemory,
     serviceShare,

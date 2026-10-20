@@ -105,7 +105,7 @@ One Node.js event loop runs every route handler, the data-channel forwarding
 (`transport/data-channel-handler.js`, through loopback HTTP), container reads,
 the download map pass, the readiness forecast and encoder orchestration. Only
 the torrent runs in a worker thread (`torrent/worker/client.js`); FFmpeg runs as
-child processes.
+child processes. P9 and P10 are not used: that work is F1–F3 (section 3.5).
 
 | ID | Process | Starts after | Ends when | Edge | Measured now |
 |---|---|---|---|---|---|

@@ -398,6 +398,13 @@ test("first-frame forecast sums per-stage medians instead of selecting a complet
 
   assert.equal(observations.firstFrameSeconds(features), 20,
     "each stage median is calculated independently; no completed-run total or nearest run is used");
+  const estimate = observations.firstFrameEstimate(features);
+  assert.deepEqual(estimate, {
+    seconds: 20,
+    stagesMs: { transportMs: 2000, planMs: 4000, prepareMs: 3000, prebufferMs: 5000, presentationMs: 6000 },
+    observations: 3
+  }, "diagnostic parts are the exact medians used by the unchanged numeric estimate");
+  assert.equal(Object.values(estimate.stagesMs).reduce((sum, value) => sum + value, 0) / 1000, estimate.seconds);
 });
 
 test("first-frame forecast uses this proxy's stage measurements before the container is known", () => {

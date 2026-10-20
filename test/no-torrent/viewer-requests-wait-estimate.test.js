@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { logger } from "../../utils/logger.js";
 import { CutGrid, OutputSpec, VideoOutput } from "../../services/encode/output/index.js";
 import { ViewerRequests } from "../../services/server/ViewerRequests.js";
 
@@ -77,6 +78,50 @@ test("a component forecast replaces the historical total when first-segment work
 
   assert.equal(estimate.remainingSeconds, 2);
   assert.equal(historicalLookupCalled, false);
+});
+
+test("early forecast logs each revision once and distinguishes historical stages from current first-required work", () => {
+  const lines = [];
+  const originalInfo = logger.info;
+  logger.info = message => lines.push(message);
+  try {
+    const requests = new ViewerRequests({
+      viewers: { get: () => null },
+      firstFrameSecondsOf: () => ({ seconds: 20, stagesMs: { transportMs: 1_000, planMs: 2_000,
+        prepareMs: 8_000, prebufferMs: 6_000, presentationMs: 3_000 }, observations: 3 })
+    });
+    const source = { consumerId: "viewer", generation: 4, sourceKey: "source", fileIndex: 2,
+      fileName: "Film.avi", stats: { fileLength: 800, downloadSpeed: 100, numPeers: 2 } };
+    const first = requests.waitEstimateForSource({ ...source, waitElapsedMs: 1_000 });
+    const repeated = requests.waitEstimateForSource({ ...source, waitElapsedMs: 1_000 });
+    const revised = requests.waitEstimateForSource({ ...source, stats: { ...source.stats, downloadSpeed: 200 },
+      waitElapsedMs: 2_000 });
+    const active = requests.waitEstimateForSource({ ...source, stats: { ...source.stats, downloadSpeed: 200 },
+      waitElapsedMs: 3_000, processing: { firstRequiredSegmentsSeconds: 5 } });
+
+    assert.equal(first.remainingSeconds, 19);
+    assert.equal(repeated.remainingSeconds, first.remainingSeconds);
+    assert.equal(revised.remainingSeconds, 18);
+    assert.equal(active.remainingSeconds, 5);
+    assert.equal(lines.length, 3, "the repeated same revision emits no second log line");
+    const forecasts = lines.map(line => JSON.parse(line.slice("early wait forecast ".length)));
+    assert.deepEqual(forecasts.map(item => item.revision), [0, 1, 2]);
+    assert.deepEqual(forecasts.map(item => item.predicted.basis), ["historical-stages", "historical-stages", "first-required"]);
+    assert.equal(forecasts[0].predicted.totalSeconds, 20);
+    assert.deepEqual(forecasts[0].predicted.stagesMs,
+      { transportMs: 1_000, planMs: 2_000, prepareMs: 8_000, prebufferMs: 6_000, presentationMs: 3_000 });
+    assert.equal(forecasts[0].predicted.observations, 3);
+    assert.equal(forecasts[2].predicted.firstRequiredSegmentsSeconds, 5);
+    assert.equal(forecasts[2].predicted.totalSeconds, 8);
+    assert.equal(forecasts[0].elapsedMs, 1_000);
+    assert.equal(forecasts[0].consumer, "viewer");
+    assert.equal(forecasts[0].generation, 4);
+    assert.equal(forecasts[0].waitId, first.waitId);
+    assert.equal(forecasts[0].features.downloadSpeed, 100);
+    assert.equal(forecasts[1].features.downloadSpeed, 200);
+  } finally {
+    logger.info = originalInfo;
+  }
 });
 
 test("progress without mapped source ranges does not relabel the history prior as a component forecast", () => {

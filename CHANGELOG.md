@@ -1,4 +1,4 @@
-## Unreleased
+## 2.104.1
 
 - **Fix**: Record explicit duration fields and error outcomes for W7 priority-map and W10 statistics spans (#ttv-185).
 

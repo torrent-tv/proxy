@@ -1,4 +1,4 @@
-## Unreleased
+## 2.101.43
 
 - **Fix**: Restore hardware observation keys without the CPU model, thread count or CPU quota fields added in 2.101.42 (#ttv-185).
 

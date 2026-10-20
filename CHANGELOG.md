@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Chore**: Include the selected historical stages and current first-required estimate in early forecast logs (#ttv-185).
+
 ## 2.102.1
 
 - **Fix**: Record opt-in, correlated startup request, source-read queue and first-piece publication events for validating actual playback waits (#ttv-185).
@@ -7,8 +11,6 @@
 - **New**: Read Matroska and supported MP4 chapter declarations from available bytes, preserve source-time sections, and publish versioned snapshots without delaying playback (torrent-tv/meta#110).
 
 ## 2.101.43
-
-- **Chore**: Log early wait forecast revisions with their historical stage medians or current first-required estimate (#ttv-185).
 - **Fix**: Restore hardware observation keys without the CPU model, thread count or CPU quota fields added in 2.101.42 (#ttv-185).
 
 ## 2.101.42

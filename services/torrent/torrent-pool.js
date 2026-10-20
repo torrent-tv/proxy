@@ -1538,19 +1538,23 @@ export class TorrentPool {
           if (result && typeof result.then === "function") {
             return result.then(value => {
               noteDiscoveryEnd();
-              trace(process, "end", { startedAt, endedAt: performance.now(), outcome: "resolved" });
+              const endedAt = performance.now();
+              trace(process, "end", { startedAt, endedAt, durationMs: endedAt - startedAt, outcome: "resolved" });
               return value;
             }, error => {
-              trace(process, "end", { startedAt, endedAt: performance.now(), outcome: "error",
+              const endedAt = performance.now();
+              trace(process, "end", { startedAt, endedAt, durationMs: endedAt - startedAt, outcome: "error",
                 error: String(error?.message ?? error) });
               throw error;
             });
           }
           noteDiscoveryEnd();
-          trace(process, "end", { startedAt, endedAt: performance.now(), outcome: "returned" });
+          const endedAt = performance.now();
+          trace(process, "end", { startedAt, endedAt, durationMs: endedAt - startedAt, outcome: "returned" });
           return result;
         } catch (error) {
-          trace(process, "end", { startedAt, endedAt: performance.now(), outcome: "error",
+          const endedAt = performance.now();
+          trace(process, "end", { startedAt, endedAt, durationMs: endedAt - startedAt, outcome: "error",
             error: String(error?.message ?? error) });
           throw error;
         }

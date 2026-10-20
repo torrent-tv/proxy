@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Chore**: Limit opt-in torrent-piece observations to one span per piece (#ttv-185).
+
 ## 2.102.3
 
 - **Chore**: Add opt-in process events for container reads, playback-map resolution, encoder input and output, init delivery, and per-piece torrent-worker spans (#ttv-185).

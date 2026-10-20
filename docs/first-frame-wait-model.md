@@ -104,6 +104,7 @@ durations.
 | ID | Process | Starts after | Ends when | Edge to caller |
 |---|---|---|---|---|
 | A0 | Original action (`t0`) | viewer | action accepted | — |
+| A0.0 | Address containing base64 torrent bytes: decode the address and construct the File (`Torrent.#loadFromUrl`). Local file input skips this step | A0 | File exists | blocking for A0.1 |
 | A0.1 | Read the selected `.torrent` (`Torrent.#processIncomingFiles`, `File.arrayBuffer`) | A0 | bytes available in the page | blocking for A0.2 |
 | A0.2 | Decode bencode and derive the info hash (`parseTorrentBytes`); the SHA-1 call is asynchronous (`crypto.subtle.digest`) | A0.1 | parsed metadata and hash available; `FILE_DETAILS_READY` dispatched | blocking for A1 |
 | A1 | Store the already parsed source details (`openParsedTorrentDetails`, synchronous), and dispatch `FILE_CHOSEN` when the file is already determined | A0.2 | source details stored | blocking |
@@ -427,7 +428,7 @@ is the event-driven read again when new bytes are held.
 flowchart TB
   subgraph BROWSER["Browser main thread"]
     T0(["A0 t0"])
-    A1["A1 parse .torrent"]
+    A1["A1 store parsed source details"]
     A21["A2.1 ask the server which proxy"]
     A22["A2.2 media signalling, answer applied"]
     A22m["A2.2m media ICE, DTLS, SCTP, channel"]
@@ -560,7 +561,10 @@ flowchart TB
     E1["WaitingModel deadline, overlay render"]
   end
 
-  T0 --> A01["A0.1 read torrent file"] --> A02["A0.2 bencode and async SHA-1"] --> A1 --> A21 --> A22
+  T0 --> QURL{"base64 torrent in the address?"}
+  QURL -- yes --> A00["A0.0 decode address"] --> A01["A0.1 read torrent file"]
+  QURL -- local file --> A01
+  A01 --> A02["A0.2 bencode and async SHA-1"] --> A1 --> A21 --> A22
   A21 -.- S1
   A22 -.- S2
   A22 --> A22m --> A2J

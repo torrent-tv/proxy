@@ -38,6 +38,7 @@ export class PieceTimings {
    */
   asked(piece, offset, peer, now) {
     let record = this.#pieces.get(piece);
+    const firstAsk = !record;
     if (!record) {
       record = { firstAskAt: now, asks: 0, peers: new Set(), blocks: new Map(), arrived: new Set(), askedAgain: 0, arrivedTwice: 0,
         slowestMs: 0, slowestPeer: null, lastInFlightMs: 0, lastPeer: null };
@@ -47,6 +48,7 @@ export class PieceTimings {
     record.peers.add(peer);
     if (!record.blocks.has(offset)) record.blocks.set(offset, now);
     else record.askedAgain += 1;
+    return firstAsk;
   }
 
   /**

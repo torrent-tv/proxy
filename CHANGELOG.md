@@ -1,6 +1,6 @@
 ## 2.102.3
 
-- **Chore**: Add opt-in process events for container reads, playback-map resolution, encoder input and output, init delivery, and torrent-worker stages (#ttv-185).
+- **Chore**: Add opt-in process events for container reads, playback-map resolution, encoder input and output, init delivery, and per-piece torrent-worker spans (#ttv-185).
 
 ## 2.102.2
 

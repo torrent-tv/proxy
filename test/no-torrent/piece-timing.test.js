@@ -9,10 +9,10 @@ import { PieceTimings, describePieceTiming } from "../../services/torrent/piece-
 
 test("a piece asked early whose last block was held by a slow peer says so", () => {
   const timings = new PieceTimings();
-  timings.asked(1, 0, "a", 1_000);
-  timings.asked(1, 16_384, "b", 1_000);
+  assert.equal(timings.asked(1, 0, "a", 1_000), true);
+  assert.equal(timings.asked(1, 16_384, "b", 1_000), false);
   timings.arrived(1, 0, "a", 1_400);
-  timings.asked(1, 16_384, "c", 9_000); // the same block asked again of another peer
+  assert.equal(timings.asked(1, 16_384, "c", 9_000), false); // the same block asked again of another peer
   timings.arrived(1, 16_384, "c", 14_000);
   const timing = timings.verified(1, 14_010);
   assert.deepEqual(timing, { askedAgoMs: 13_010, asks: 3, peers: 3, slowestMs: 13_000, slowestPeer: "c", lastInFlightMs: 13_000, lastPeer: "c",

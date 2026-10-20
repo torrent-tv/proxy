@@ -1,6 +1,7 @@
 ## 2.104.1
 
 - **Fix**: Record explicit duration fields and error outcomes for W7 priority-map and W10 statistics spans (#ttv-185).
+- **Fix**: Record explicit duration and error outcomes for W5 piece-verification spans (#ttv-185).
 
 ## 2.104.0
 

@@ -494,43 +494,50 @@ async function runCommand(command, params, id) {
       const statsStartedAt = performance.now();
       emitWaitTrace(params.sourceKey, "W10", "begin", { startedAt: statsStartedAt,
         fileIndex: params.fileIndex, forecast: params.forecast === true });
-      const torrent = await knownTorrent(params.sourceKey);
-      if (!torrent) {
-        const whole = wholeSources.fileOf(params.sourceKey, params.fileIndex);
-        emitWaitTrace(params.sourceKey, "W10", "end", { startedAt: statsStartedAt,
-          endedAt: performance.now(), outcome: whole ? "whole-file" : "pending", fileIndex: params.fileIndex });
-        return whole ? wholeFileStats(whole.length) : { pending: true };
-      }
-      // What this file's own interruptions demand, measured by the reader in
-      // this thread. It travels with the stats because the caller asking for
-      // them is the one that has to decide with them — the browser's smallest
-      // safe buffer, and the speed a quality step must sustain. Null until a
-      // second interruption has been seen: one wait shows no interval, and an
-      // interval invented from one point is exactly what this work removes.
-      const file = Array.isArray(torrent?.files) ? torrent.files[params.fileIndex] : null;
-      const forecastAt = performance.now();
-      const forecast = file && params.forecast === true ? downloadForecastOf(torrent) : null;
-      const forecastMs = params.forecast === true ? performance.now() - forecastAt : 0;
-      const stats = pool.getFileStats(torrent, params.fileIndex);
-      const ranges = [];
-      if (forecast) for (const [piece, availableAt] of forecast.arrivals) {
-        const start = piece * torrent.pieceLength;
-        const end = Math.min(torrent.length, (piece + 1) * torrent.pieceLength);
-        if (end > start) ranges.push({ start, end, availableAt });
-      }
-      emitWaitTrace(params.sourceKey, "W10", "end", { startedAt: statsStartedAt,
-        endedAt: performance.now(), outcome: "ok", fileIndex: params.fileIndex,
-        forecast: params.forecast === true });
-      return {
-        ...stats,
-        ...(params.forecast === true ? { downloadForecast: {
-          measuredAt: forecast?.measuredAt ?? Date.now(), global: true, ranges
-        } } : {}),
-        supply: supplyFiguresFor(torrent?.infoHash, file?.name, params.segmentSeconds ?? 4),
-        // How long this answer waited for the arrival forecast, which the
-        // caller says beside its own time (ViewerRequests, torrent-tv/meta#178).
-        forecastMs
+      const finishStatsTrace = (outcome, fields = {}) => {
+        const endedAt = performance.now();
+        emitWaitTrace(params.sourceKey, "W10", "end", { startedAt: statsStartedAt, endedAt,
+          durationMs: endedAt - statsStartedAt, outcome, fileIndex: params.fileIndex, ...fields });
       };
+      try {
+        const torrent = await knownTorrent(params.sourceKey);
+        if (!torrent) {
+          const whole = wholeSources.fileOf(params.sourceKey, params.fileIndex);
+          finishStatsTrace(whole ? "whole-file" : "pending");
+          return whole ? wholeFileStats(whole.length) : { pending: true };
+        }
+        // What this file's own interruptions demand, measured by the reader in
+        // this thread. It travels with the stats because the caller asking for
+        // them is the one that has to decide with them — the browser's smallest
+        // safe buffer, and the speed a quality step must sustain. Null until a
+        // second interruption has been seen: one wait shows no interval, and an
+        // interval invented from one point is exactly what this work removes.
+        const file = Array.isArray(torrent?.files) ? torrent.files[params.fileIndex] : null;
+        const forecastAt = performance.now();
+        const forecast = file && params.forecast === true ? downloadForecastOf(torrent) : null;
+        const forecastMs = params.forecast === true ? performance.now() - forecastAt : 0;
+        const stats = pool.getFileStats(torrent, params.fileIndex);
+        const ranges = [];
+        if (forecast) for (const [piece, availableAt] of forecast.arrivals) {
+          const start = piece * torrent.pieceLength;
+          const end = Math.min(torrent.length, (piece + 1) * torrent.pieceLength);
+          if (end > start) ranges.push({ start, end, availableAt });
+        }
+        finishStatsTrace("ok", { forecast: params.forecast === true });
+        return {
+          ...stats,
+          ...(params.forecast === true ? { downloadForecast: {
+            measuredAt: forecast?.measuredAt ?? Date.now(), global: true, ranges
+          } } : {}),
+          supply: supplyFiguresFor(torrent?.infoHash, file?.name, params.segmentSeconds ?? 4),
+          // How long this answer waited for the arrival forecast, which the
+          // caller says beside its own time (ViewerRequests, torrent-tv/meta#178).
+          forecastMs
+        };
+      } catch (error) {
+        finishStatsTrace("error", { error: String(error?.message ?? error) });
+        throw error;
+      }
     }
 
     case Command.PRIORITY_MAP: {
@@ -544,18 +551,27 @@ async function runCommand(command, params, id) {
       // Nor may one for a file held whole, which has nothing left to fetch.
       const torrent = await knownTorrent(params.sourceKey);
       if (!torrent) {
+        emitWaitTrace(params.sourceKey, "W7", "event", { outcome: "source-not-ready", fileIndex: params.fileIndex });
         return { appliedMs: null, receivedAt, repliedAt: performance.timeOrigin + performance.now() };
       }
       // What applying a map costs this thread, told to whoever sent it: every
       // zone becomes a window of the register and the swarm is told again
       // (torrent-tv/meta#166).
       const startedAt = performance.now();
-      emitWaitTrace(params.sourceKey, "W7", "begin", { fileIndex: params.fileIndex });
-      ensureArrivalsWired(params.sourceKey, torrent);
-      pool.applyPriorityMap(torrent, params.fileIndex, zones, params.durationSeconds);
-      torrent.emit("priority-map-changed", params.fileIndex);
-      emitWaitTrace(params.sourceKey, "W7", "end", { startedAt, endedAt: performance.now(),
-        fileIndex: params.fileIndex });
+      emitWaitTrace(params.sourceKey, "W7", "begin", { startedAt, fileIndex: params.fileIndex });
+      try {
+        ensureArrivalsWired(params.sourceKey, torrent);
+        pool.applyPriorityMap(torrent, params.fileIndex, zones, params.durationSeconds);
+        torrent.emit("priority-map-changed", params.fileIndex);
+        const endedAt = performance.now();
+        emitWaitTrace(params.sourceKey, "W7", "end", { startedAt, endedAt, durationMs: endedAt - startedAt,
+          outcome: "applied", fileIndex: params.fileIndex });
+      } catch (error) {
+        const endedAt = performance.now();
+        emitWaitTrace(params.sourceKey, "W7", "end", { startedAt, endedAt, durationMs: endedAt - startedAt,
+          outcome: "error", error: String(error?.message ?? error), fileIndex: params.fileIndex });
+        throw error;
+      }
       return { appliedMs: performance.now() - startedAt, receivedAt, repliedAt: performance.timeOrigin + performance.now() };
     }
 

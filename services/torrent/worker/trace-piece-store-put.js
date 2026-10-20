@@ -1,7 +1,9 @@
 /** Record the torrent worker's verified-piece storage write without changing its callback API. */
+const tracedStores = new WeakSet();
+
 export function tracePieceStorePut(store, trace, now = () => performance.now()) {
   const put = store?.put;
-  if (typeof put !== "function") return false;
+  if (!store || tracedStores.has(store) || typeof put !== "function") return false;
 
   store.put = function (index, bytes, callback) {
     const startedAt = now();
@@ -24,5 +26,6 @@ export function tracePieceStorePut(store, trace, now = () => performance.now()) 
       throw error;
     }
   };
+  tracedStores.add(store);
   return true;
 }

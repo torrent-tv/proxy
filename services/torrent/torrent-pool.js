@@ -1520,6 +1520,11 @@ export class TorrentPool {
       const context = this.#waitTraceByTorrent.get(torrent);
       if (context?.trace === true) context.emitWaitTrace?.(context.sourceKey, process, phase, fields);
     };
+    if (waitTrace?.trace === true) {
+      // WebTorrent assigns the store during _onStore, after client.add first
+      // returns. Revisit this hook when its ready callback calls us.
+      tracePieceStorePut(pieceStoreOf(torrent), trace);
+    }
     const pool = this;
     const wrap = (method, process) => {
       const original = torrent[method];
@@ -1564,7 +1569,6 @@ export class TorrentPool {
       this.#waitTraceHooks.add(torrent);
       wrap("_startDiscovery", "W2");
       wrap("_onStore", "W6");
-      tracePieceStorePut(pieceStoreOf(torrent), trace);
       const verify = torrent._verifyPieces;
       if (typeof verify === "function") {
         torrent._verifyPieces = function (callback, ...args) {
@@ -1579,7 +1583,8 @@ export class TorrentPool {
           };
           try {
             return verify.call(this, (...results) => {
-              finish("verified");
+              const error = results[0];
+              finish(error ? "error" : "verified", error ? { error: String(error?.message ?? error) } : {});
               callback?.(...results);
             }, ...args);
           } catch (error) {

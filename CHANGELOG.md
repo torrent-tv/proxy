@@ -1,7 +1,12 @@
+## Unreleased
+
+- **Fix**: Record explicit duration and error outcomes for W5 piece-verification spans (#ttv-185).
+- **Fix**: Include source lookup and source-not-ready outcomes in W7 priority-map durations (#ttv-185).
+- **Fix**: Attach W9 storage timing after the torrent store becomes ready (#ttv-185).
+
 ## 2.104.1
 
 - **Fix**: Record explicit duration fields and error outcomes for W7 priority-map and W10 statistics spans (#ttv-185).
-- **Fix**: Record explicit duration and error outcomes for W5 piece-verification spans (#ttv-185).
 
 ## 2.104.0
 

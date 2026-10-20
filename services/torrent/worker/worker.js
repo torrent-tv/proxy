@@ -541,6 +541,16 @@ async function runCommand(command, params, id) {
     }
 
     case Command.PRIORITY_MAP: {
+      const startedAt = performance.now();
+      emitWaitTrace(params.sourceKey, "W7", "begin", { startedAt, fileIndex: params.fileIndex });
+      let traceFinished = false;
+      const finishPriorityTrace = (outcome, fields = {}) => {
+        if (traceFinished) return;
+        traceFinished = true;
+        const endedAt = performance.now();
+        emitWaitTrace(params.sourceKey, "W7", "end", { startedAt, endedAt,
+          durationMs: endedAt - startedAt, outcome, fileIndex: params.fileIndex, ...fields });
+      };
       // When this handler began, on the clock the main thread posted by: the
       // post to here holds the transfer and this thread's queue together
       // (torrent-tv/meta#177).
@@ -549,27 +559,21 @@ async function runCommand(command, params, id) {
       // only update an existing source, never revive one after its viewer left.
       const zones = Array.isArray(params.zones) ? params.zones : [];
       // Nor may one for a file held whole, which has nothing left to fetch.
-      const torrent = await knownTorrent(params.sourceKey);
-      if (!torrent) {
-        emitWaitTrace(params.sourceKey, "W7", "event", { outcome: "source-not-ready", fileIndex: params.fileIndex });
-        return { appliedMs: null, receivedAt, repliedAt: performance.timeOrigin + performance.now() };
-      }
-      // What applying a map costs this thread, told to whoever sent it: every
-      // zone becomes a window of the register and the swarm is told again
-      // (torrent-tv/meta#166).
-      const startedAt = performance.now();
-      emitWaitTrace(params.sourceKey, "W7", "begin", { startedAt, fileIndex: params.fileIndex });
       try {
+        const torrent = await knownTorrent(params.sourceKey);
+        if (!torrent) {
+          finishPriorityTrace("source-not-ready");
+          return { appliedMs: null, receivedAt, repliedAt: performance.timeOrigin + performance.now() };
+        }
+        // What applying a map costs this thread, told to whoever sent it: every
+        // zone becomes a window of the register and the swarm is told again
+        // (torrent-tv/meta#166).
         ensureArrivalsWired(params.sourceKey, torrent);
         pool.applyPriorityMap(torrent, params.fileIndex, zones, params.durationSeconds);
         torrent.emit("priority-map-changed", params.fileIndex);
-        const endedAt = performance.now();
-        emitWaitTrace(params.sourceKey, "W7", "end", { startedAt, endedAt, durationMs: endedAt - startedAt,
-          outcome: "applied", fileIndex: params.fileIndex });
+        finishPriorityTrace("applied");
       } catch (error) {
-        const endedAt = performance.now();
-        emitWaitTrace(params.sourceKey, "W7", "end", { startedAt, endedAt, durationMs: endedAt - startedAt,
-          outcome: "error", error: String(error?.message ?? error), fileIndex: params.fileIndex });
+        finishPriorityTrace("error", { error: String(error?.message ?? error) });
         throw error;
       }
       return { appliedMs: performance.now() - startedAt, receivedAt, repliedAt: performance.timeOrigin + performance.now() };

@@ -11,11 +11,12 @@ const TOP_LEVEL = new Set([SEEK_HEAD, CHAPTERS, CLUSTER, 0x1549a966, 0x1654ae6b,
 async function header(reader, at, limit) {
   reader.step();
   const vint = async (position, marker) => {
-    const first = (await reader.bytes(position, 1))[0];
+    const firstBytes = await reader.bytes(position, 1);
+    const first = firstBytes[0];
     let n = 1;
     while (n <= 8 && !(first & (0x80 >> (n - 1)))) n++;
     if (n > (marker ? 4 : 8) || position + n > limit) throw new Error("Invalid chapter EBML header");
-    const bytes = await reader.bytes(position, n);
+    const bytes = n === 1 ? firstBytes : Buffer.concat([firstBytes, await reader.bytes(position + 1, n - 1)]);
     const value = readVint(bytes, 0, marker);
     const mask = 2 ** (8 - n) - 1;
     return { ...value, unknown: !marker && (bytes[0] & mask) === mask && bytes.subarray(1).every((byte) => byte === 255) };

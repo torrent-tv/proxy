@@ -30,18 +30,15 @@ durations.
       with `originalOpen: true`.
    2. Multi-file torrent: the file choice. The time spent choosing is not part
       of the wait.
-   3. Seek: the viewer's seek input. The code does not log the input itself;
-      it observes it later. The player's controls raise `media-seek-request`,
-      handled by `#onMediaSeekRequest`, which calls `#moveToPosition` at
-      once. Native controls and Media Session are seen first as the
-      element's `seeking` event (logged `[evt] <wall time> seeking`) and then
-      through a debounce timer of `SEEK_REPORT_DEBOUNCE_MS` = 300 ms, which
-      fires no earlier and may fire later. `#moveToPosition` logs
-      `[evt] seek intent → <s>` and takes the seek hold, which moves the
-      application to `SWITCHING` and makes `waiting.js` record
-      `[wait-start]`. That record is a late observation of `t0`: the time from
-      the input to the hold is part of the wait and is not measured
-      (section 9).
+   3. Seek: player controls are timestamped at `media-seek-request`;
+      `#onMediaSeekRequest` starts trace `S0` and calls `#moveToPosition`.
+      Native controls and Media Session expose no physical-input timestamp:
+      `S0` starts at the first element `seeking` event, then measures the
+      debounce until `#moveToPosition`. `S1` measures the seek command;
+      `S2` measures the readiness hold through its release. All three use
+      the browser monotonic clock and share one wait and attempt identity.
+      The time from a native physical input to its first `seeking` event is
+      unavailable (section 9).
    4. Soundtrack or quality change: the moment the page takes its hold
       (`#holdForAudio`, `#cushionHeld`); its distance from the viewer's click
       is not traced here.
@@ -392,7 +389,9 @@ logged at the process boundary; "derived" is computed from other values;
 | P14 | P | session id, consumer | request | `readiness parts … in all <ms>`; `playback readiness {…}` on a reason or missing-input change; `playback held …` | R2 | — | direct |
 | P15 | P | source key, wait id, consumer, revision | estimate selected for a revision | `process=P15 phase=event` with remaining and total seconds and estimate basis | R2 | seconds | direct point observation; estimate calculation is synchronous |
 | C3–C5 | B / P | wait, attempt, consumer and selected track | C3 readiness-state events; C5 `play` | C3 readiness state, C4 playback-ready, C5 `playing` | C1 gate | track and state | direct point or state observations; C3 is logged when readiness changes |
-| Seek start (section 9) | B | — | the viewer's input: none; `[evt] <wall time> seeking` for native controls and Media Session | `[evt] seek intent → <s>`; `[wait-start]` at the hold | — | — | input not logged; `seeking` and `seek intent` on wall time, `[wait-start]` monotonic |
+| S0 seek input | B | wait, attempt, target, input source | player controls: `media-seek-request`; native/system controls: first `seeking` event | `seek-input`; native path also `S0.seek-debounce` end at settled target | — | target seconds, source | direct monotonic trace; native physical input to `seeking` remains unobservable |
+| S1 seek command | B | wait, attempt, target | `#moveToPosition` command entry | command completion after stop-load, seek report and load restart | S0 | target seconds, outcome | direct span; includes nested browser/control-connection work, do not add those nested spans twice |
+| S2 seek readiness gate | B | wait, attempt, target | `#holdSeekUntilReady` entry | hold release or failure | S1 ends before S2 starts; proxy work proceeds concurrently | target seconds, outcome | direct span includes readiness polls; it overlaps proxy P4/P4.1, W and encoder work and must not be summed with them |
 | C6, C7 | B | wait, attempt, media time | `requestVideoFrameCallback` observations | advancing frame and audio-ready point events | R6 | media time, audio state | direct observations with wait identity |
 | P4 | P | source key, file, map revision | `process=P4 phase=begin` at range-resolution pass | `process=P4 phase=end`, with resolved zone count and outcome | R2, R8 | zones | direct resolver span; separate from the aggregate map-pass timing |
 | P4.1 | P | source key, wait/attempt, file, output key, map pass and segment | one unresolved demanded segment after the pass yields | `process=P4.1 phase=begin/end`; end records track IDs, source interval, resolution method/outcome, joined range count/bytes and monotonic duration | R2, R8 | track IDs, bytes | per-segment local span included in P4; overlaps R8 reads and must not be added to P4 or R8 durations |
@@ -697,18 +696,18 @@ accuracy are incomplete.
 
 ## 9. Seek, soundtrack and quality change
 
-1. The seek starts with the viewer's input, which is not logged. The player's
-   controls raise `media-seek-request`; `#onMediaSeekRequest` calls
-   `#moveToPosition` at once. Native controls and Media Session move the
-   element first: its `seeking` event is logged (`[evt] <wall time>
-   seeking`), `#reportSeekIntent` ignores a move the player made itself, and a
-   debounce timer of at least 300 ms (`SEEK_REPORT_DEBOUNCE_MS`; a timer may
-   fire later) calls `#moveToPosition`. `#moveToPosition` logs `[evt] seek
-   intent → <s>`, resets the waiting model and, while playback is live, takes
-   the seek hold (`#holds.beginSeek`), which raises `SWITCH_REQUESTED`: the
-   state becomes `SWITCHING` and `waiting.js` records `[wait-start]`. The time
-   from the input to the hold belongs to the wait; the issue's `t0` is the
-   input, so `[wait-start]` of a seek starts late by that time.
+1. Player controls provide an observable input event:
+   `media-seek-request` starts `S0` at the original monotonic timestamp.
+   Native controls and Media Session provide no physical-input event to this
+   code; the first observable boundary is the element's `seeking` event.
+   `#reportSeekIntent` filters player-owned moves, starts `S0` for external
+   moves, and records `S0.seek-debounce` through the settled target after at
+   least 300 ms (`SEEK_REPORT_DEBOUNCE_MS`; a timer may fire later).
+   `#moveToPosition` is `S1`: it resets the waiting model, stops the loader,
+   reports the seek, and restarts loading. While playback is live it also takes
+   the seek hold (`#holds.beginSeek`) and starts `S2`, which ends when the
+   readiness gate releases or fails. These spans share the seek wait identity;
+   `[wait-start]` remains a state log and is not the timing boundary.
 2. It then stops the loader, reports the position (`POST
    /api/transcode-sessions/:id/seek` over R5.c → `ViewerRequests.requestSeek`:
    the viewer moves, held requests are woken, `planEncodersSoon`), and
@@ -1211,31 +1210,34 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  IN(["viewer's seek input: not logged"])
+  IN(["player-control input / first observable seeking event"])
   QC{"which control?"}
-  MSR["media-seek-request, #onMediaSeekRequest"]
-  SK["element seeking event, logged on wall time"]
+  MSR["S0: media-seek-request timestamp"]
+  SK["S0: element seeking event; physical input time unavailable"]
   OWN{"a move the player made itself?"}
-  IGN(["not a seek: nothing reported"])
-  DEB["debounce timer, at least 300 ms"]
-  MOVE["#moveToPosition, logged seek intent"]
-  HOLD["seek hold taken while playback is live: SWITCHING, wait-start"]
-  STOP["loader stopped"]
-  REP["seek reported over the control connection"]
-  LOAD["loading restarted at the position"]
-  GATE{{"seek hold gate: same readiness answer as C1"}}
-  REL(["hold released, picture resumes"])
-
+  IGN(["not a viewer seek"])
+  DEB["S0.seek-debounce: >= 300 ms to settled target"]
+  MOVE["S1: #moveToPosition command"]
+  STOP["stop loader"]
+  REP["report seek over control connection"]
+  LOAD["restart loading at target"]
+  GATE{{"S2: seek readiness gate"}}
+  REL(["hold released"])
+  PX["parallel proxy work: P4 / P4.1 / W / encoders"]
+  FRAME["C6/C7: advancing frame and audio-ready"]
   IN --> QC
   QC -- player controls --> MSR --> MOVE
   QC -- native controls or Media Session --> SK --> OWN
   OWN -- yes --> IGN
   OWN -- no --> DEB --> MOVE
-  MOVE --> HOLD --> STOP --> REP --> LOAD --> GATE --> REL
+  MOVE --> STOP --> REP --> LOAD --> GATE --> REL --> FRAME
+  LOAD -. asynchronous request .-> PX
+  PX -. readiness inputs .-> GATE
 ```
 
-The wait of a seek runs from the input; `[wait-start]` is recorded at the hold,
-after every step above it.
+Player-control waits start at the `media-seek-request` timestamp. Native/system
+control waits start at the first `seeking` event because the physical input
+time is not exposed; `[wait-start]` is a separate state record.
 
 ## 11. Changes against earlier revisions
 
@@ -1290,8 +1292,10 @@ Against proxy `aa67015` (the second review in torrent-tv/meta#185):
 4. Soundtrack and quality change holds (section 9, item 5), the magnet open
    path in the page (`#processMagnetPlayback`), the direct-play path (A17) and
    web seeds are described at process level only.
-5. The viewer's seek input is not observed by the code; the model names it but
-   cannot place it in time.
+5. Native controls and Media Session do not expose physical-input time. For
+   those paths, measured `S0` begins at the first `seeking` event; the delay
+   from physical input to that event remains outside the browser's observable
+   boundaries. Player-control requests have a direct `S0` input timestamp.
 6. P2, P4, P5 and P8 repeat on new bytes, memory or demand; the tables name
    the pass that matters for the first frame.
 
@@ -1338,12 +1342,17 @@ The default page does not emit these trace records.
    first advancing frame separately from the later confirmation and records
    unsupported audio observation explicitly. This establishes browser media
    progress with decoded audio, not acoustic output at the physical speaker.
-7. Browser and proxy timestamps are never directly subtracted. Match request
+7. A seek uses the same wait-trace stream with its own wait and attempt:
+   `S0` input (or first observable `seeking` event), `S0.seek-debounce` for
+   native controls, `S1.seek-command`, and `S2.seek-readiness-gate`. Proxy
+   work triggered by `S1` keeps its own process and source spans; it overlaps
+   `S2` and must not be added to that browser duration.
+8. Browser and proxy timestamps are never directly subtracted. Match request
    identities and use local durations; bound the proxy interval by the browser
    request interval. Expand retries, cache alternatives and repeated readers
    into separate operation instances before calculating a completion path.
    Dashed start edges in section 10 are not completion prerequisites.
-8. Validation compares an independent browser observer with the union of
+9. Validation compares an independent browser observer with the union of
    recorded blocking intervals. Uncovered intervals remain explicit; coverage
    of a whole request is not proof of its internal decomposition. Independently
    calculated serial, parallel, cache and retry examples check the scheduling

@@ -647,6 +647,52 @@ was refused at a measured 4.77 Mbit/s against 7.2 Mbit/s required, and the
 the check was stopped. These failed attempts are excluded from the cold-start
 coverage comparison.
 
+### 8.5 Per-stage measurement and calculation audit
+
+The `playback readiness` log now records `firstRequiredStages` for each required
+track. Its stage values are predicted event offsets in seconds from that
+forecast's `measuredAt` time, on one shared clock: source arrival, run
+admission, run opening, production start and completion, delivery completion,
+append allowance, and segment completion. These are event times, not durations
+to add; different tracks can overlap. A `null` means the model has no predicted
+event time for that point. The details are removed before returning the
+readiness response to the browser. The current 8.4 and field28 observations
+predate this diagnostic and therefore have no saved per-stage prediction
+snapshot.
+
+This table separates measured stage time from a stage prediction. The three
+cold-start rows in 8.4 verify the sum of the browser's coarse intervals against
+the independent action-to-frame endpoint. They do not provide an independent
+mathematical prediction for each interval: `LocalObservations.firstFrameSeconds`
+uses historical medians of those same whole intervals, and the saved
+`early wait forecast` record does not include the selected median or a per-stage
+prediction snapshot. A matching sum of measured intervals is evidence of
+measurement coverage for these runs, not evidence that each stage formula is
+accurate.
+
+| Stage | Description | Current formula and coverage | Real measurement | Model prediction in the same run | Decision |
+|---|---|---|---|---|---|
+| `transport` (`t1−t0`) | Browser input, proxy selection/connection, source registration and file-list wait | Historical median of the whole browser interval; no causal per-action ETA | Alien Romulus 341.7 ms; Frankenstein 1,293.4 ms; Below the Surface 749.1 ms | Not logged per stage | Stage time is measured in the three runs; stage accuracy is unverified. Replace the whole-interval fallback with measured action work and waits. |
+| `plan` (`t2−t1`) | Source registration after `t1`, container reads, plan construction and torrent-piece waits | Historical median of the whole interval; `predictPlaybackReadiness` does not forecast this plan phase | 51.1 ms; 5,694.2 ms; 3,682.1 ms | Not logged per stage | Stage time is measured; no stage forecast exists to compare. Add causal inputs/forecast output before claiming accuracy. |
+| `prepare` (`t3−t2`) | Output open, HLS requests, per-track run/input/production/publication and first-piece delivery | Historical median of the whole interval. The segment scheduler separately predicts source, per-track production, link delivery and optional append for selected segments; it does not produce a prediction for the whole `prepare` interval | 1,435.6 ms; 13,433.0 ms; 9,007.4 ms | No `prepare` prediction logged. Field28's first-required segment forecast: 3.675 s remaining at +0.911 s; actual remaining to audio segment arrival was 7.248 s, absolute error 3.573 s, relative error 49.3% | The first-required segment estimate is materially early in field28. Per-track output scheduling and shared proxy load need measurement and model correction. |
+| `prebuffer` (`t4−t3`) | Continuity gate, additional production/delivery, polling, net reports and subtitle gate | Historical median of the whole interval. The segment scheduler computes a continuity constraint, but its `delaySeconds` is not a first-frame ETA | 549.2 ms; 1,053.6 ms; 4,059.5 ms | No `prebuffer` prediction logged | Actual stage varies by 3.51 s across these runs; there is no same-run stage prediction. Do not mark stable. |
+| `presentation` (`tFrame−t4`) | Readiness release through first presented frame callback | Historical median of the whole interval; no browser decode/presentation work formula | 1,326.0 ms; 103.1 ms; 101.2 ms | Not logged per stage | The first run differs from the other two by over 1.2 s. No stage formula or repeated matched forecast establishes stability. |
+| `first moving frame with audio` | Acceptance endpoint: advancing frame with required audio available | No current end-to-end causal formula; current segment value ends at first required segment completion and omits remaining browser/readiness work | Independent elapsed: 3,703.0 ms; 21,568.0 ms; 17,597.9 ms. Client phase sum differs by 0.6, 9.3 and 1.4 ms respectively | No complete same-run forecast snapshot available in 8.4 | Measurement boundary reconciles within the recorded 43.6 ms trace tolerance for these three runs. End-to-end forecast accuracy remains unproved. |
+| Source-piece service | Missing source ranges needed by a segment | `rate.finish(bytes, availableAt)` on one modeled source service, using explicit piece arrivals before a measured rate | Field28: GET for audio segment 115 waited 7,598 ms; send took 21 ms | The forecast's relevant segment arrival was included in the 3.675 s first-required value, but no per-piece completion snapshot was logged | The observable end-to-end source/output wait is measured; source piece arrival and input readiness are not separately joined to this segment. |
+| Encoder admission and production | Start the actual required run, hand it input, produce and publish the segment | Per-track run-start queue and rate curve; no allocation of CPU/encoder capacity across concurrent outputs/sessions | Field28: audio run 115 requested at +5.577 s and started at +5.691 s; audio segment response completed at +8.159 s from seek | The model treated the required segment as completing at +4.586 s from seek | The model omits shared proxy encoder contention and does not expose a same-segment admission/input/publication prediction chain. Correct this before rating the stage stable. |
+| Client-link delivery | Transfer required output bytes to the browser | One `link.finish(sizeBits, time)` queue shared by all modeled jobs | Field28 audio transfer: 21 ms; video segment: 2,217 ms send after 1,730 ms fetch | Link contribution is embedded in `firstRequiredSegmentsSeconds`; not logged separately in the per-stage forecast | Observed spans exist, but per-track forecast contribution is not saved. Link queue assumption and concurrent channel use remain unvalidated. |
+| Browser append, readiness, playback and presentation | Remux, append, metadata, readiness polling/release, `play()`, decoded audio and moving-frame confirmation | `appendSeconds` is optional and not supplied by `ViewerRequests`; B8–C7 are not represented in the numeric segment estimate | Field28: readiness `ready=true` at +10.760 s; `playing` at +11.006 s; advancing `timeupdate` at +11.220 s | No complete predicted completion for these actions | These actions are measured in browser/proxy traces but omitted from the end-to-end formula. Add them as causal dependencies; do not infer their time from segment delivery. |
+
+The atomic inventory in 8.1 remains the row-level description and actual-session
+example for every process ID. It includes many branches that were not taken in
+the three current-release runs. In particular, A2 connection substeps, retries,
+P5/P6.a, most HLS request/append boundaries, torrent startup W2–W6, and
+per-response main-thread queueing lack a matched duration in that sample.
+Those rows are “no matched measurement,” not stable zero-cost stages. The
+current data therefore supports complete coarse-interval coverage for three
+successful initial opens, while atomic coverage and per-stage mathematical
+accuracy are incomplete.
+
 ## 9. Seek, soundtrack and quality change
 
 1. The seek starts with the viewer's input, which is not logged. The player's

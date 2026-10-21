@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.1
 
 - **Fix**: Keep Matroska chapter discovery out of the playback input read queue and reuse bytes across split EBML header reads (#ttv-221).
 

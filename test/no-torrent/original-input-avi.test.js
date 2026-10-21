@@ -5,6 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { Writable } from "node:stream";
 import ffmpegBin from "ffmpeg-static";
 import ffprobe from "@ffprobe-installer/ffprobe";
 import { AviContainer } from "../../services/media/container/AviContainer.js";
@@ -18,6 +19,10 @@ import { buildOriginalCommand } from "../../services/encode/source-command.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { mpegtsFormat } from "../../services/encode/segment-formats/mpegts.js";
+import { directSegmentInput } from "../../services/media/direct-segment-input.js";
+import { admitInput, writeAdmittedInput } from "../../services/encode/AdmittedInput.js";
+import { buildAdmittedCommand } from "../../services/encode/admitted-command.js";
+import { softwareDescriptor } from "../../services/encode/hwaccel.js";
 
 // Generated ordinary media and a loopback HTTP server only; no torrent imports.
 //
@@ -60,6 +65,130 @@ function loudness(file, from, to) {
     sum += samples[index] ** 2; count += 1;
   }
   return count ? Math.sqrt(sum / count) / 32768 : 0;
+}
+
+function audioSamples(file) {
+  const raw = ffmpeg(["-i", file, "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-f", "s16le", "-"]);
+  return new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.length / 2));
+}
+
+async function packetPiece(directory, bytes, container, interval, track, transcodeAudio) {
+  const input = await directSegmentInput(container, { interval, tracks: [track],
+    mode: () => transcodeAudio ? "transcode" : "copy" }, () => {});
+  assert.equal(input.kind, "result", JSON.stringify(input));
+  const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
+    readRanges: async (_source, ranges) => ranges.map(([start, end]) => Buffer.from(bytes.subarray(start, end + 1))) });
+  const chunks = [];
+  await writeAdmittedInput(admitted, new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } }));
+  const command = buildAdmittedCommand({ admittedInput: admitted,
+    timeline: { published: Array.from({ length: 16 }, (_, index) => index * 4), cutGrid: "even" },
+    output: {}, segmentFormat: fmp4Format, transcodeVideo: false, transcodeAudio, audioOnly: true, audioSeparate: false,
+    startIndex: 3, endIndex: 3, videoEncoder: softwareDescriptor(), segmentDurationSec: 4 });
+  const made = spawnSync(ffmpegBin, command.args, { cwd: directory, windowsHide: true, input: Buffer.concat(chunks),
+    encoding: "utf8", stdio: ["pipe", "pipe", "pipe", "pipe"] });
+  assert.equal(made.status, 0, made.stderr);
+  admitted.release();
+  const name = (await fs.readdir(directory)).find(one => one.startsWith("making-"));
+  assert.ok(name, "the run published its piece");
+  return { file: path.join(directory, name), input };
+}
+
+/** Split indexed AVI audio blocks and rebuild idx1 so the demuxer sees the same bytes. */
+function splitAviAudioBlocks(bytes, partBytes) {
+  bytes = Buffer.from(bytes);
+  const children = (start, end) => {
+    const found = [];
+    for (let at = start; at + 8 <= end;) {
+      const id = bytes.toString("ascii", at, at + 4), length = bytes.readUInt32LE(at + 4);
+      const next = at + 8 + length + (length & 1);
+      assert.ok(next <= end, `AVI chunk ${id} stays in its parent`);
+      if (id === "LIST" && bytes.toString("ascii", at + 8, at + 12) === "rec ") found.push(...children(at + 12, at + 8 + length));
+      else found.push({ id, start: at, length, data: bytes.subarray(at + 8, at + 8 + length) });
+      at = next;
+    }
+    return found;
+  };
+  const rootChunks = children(12, bytes.length);
+  const hdrl = rootChunks.find(chunk => chunk.id === "LIST" && bytes.toString("ascii", chunk.start + 8, chunk.start + 12) === "hdrl");
+  assert.ok(hdrl, "AVI has a header list");
+  const streams = children(hdrl.start + 12, hdrl.start + 8 + hdrl.length)
+    .filter(chunk => chunk.id === "LIST" && bytes.toString("ascii", chunk.start + 8, chunk.start + 12) === "strl");
+  const audioHeader = streams.map(chunk => children(chunk.start + 12, chunk.start + 8 + chunk.length))
+    .find(chunks => chunks.some(chunk => chunk.id === "strh" && bytes.toString("ascii", chunk.start + 8, chunk.start + 12) === "auds"));
+  const streamHeader = audioHeader?.find(chunk => chunk.id === "strh");
+  const waveFormat = audioHeader?.find(chunk => chunk.id === "strf");
+  assert.ok(streamHeader && waveFormat?.length >= 16, "AVI declares an audio stream");
+  // State one AC-3 sample as 768 bytes / 1536 samples. Two 384-byte AVI
+  // blocks therefore have the same presentation time and form one AC-3 frame.
+  bytes.writeUInt32LE(1536, streamHeader.start + 8 + 20);
+  bytes.writeUInt32LE(48000, streamHeader.start + 8 + 24);
+  bytes.writeUInt32LE(768, streamHeader.start + 8 + 44);
+  bytes.writeUInt16LE(768, waveFormat.start + 8 + 12);
+  let moviAt = 12;
+  while (moviAt + 12 <= bytes.length && !(bytes.toString("ascii", moviAt, moviAt + 4) === "LIST" &&
+    bytes.toString("ascii", moviAt + 8, moviAt + 12) === "movi")) {
+    const length = bytes.readUInt32LE(moviAt + 4);
+    moviAt += 8 + length + (length & 1);
+  }
+  assert.ok(moviAt + 12 <= bytes.length, "AVI has a movi list");
+  const moviTypeAt = moviAt + 8;
+  const moviEnd = moviAt + 8 + bytes.readUInt32LE(moviAt + 4);
+  const oldChunks = children(moviAt + 12, moviEnd);
+  let indexAt = moviEnd + ((moviEnd - moviAt) & 1);
+  while (indexAt + 8 <= bytes.length && bytes.toString("ascii", indexAt, indexAt + 4) !== "idx1") {
+    const length = bytes.readUInt32LE(indexAt + 4);
+    indexAt += 8 + length + (length & 1);
+  }
+  assert.equal(bytes.toString("ascii", indexAt, indexAt + 4), "idx1", "AVI has a legacy index");
+  const indexLength = bytes.readUInt32LE(indexAt + 4);
+  const oldIndex = bytes.subarray(indexAt + 8, indexAt + 8 + indexLength);
+  assert.equal(indexLength % 16, 0, "idx1 entries are complete");
+  const oldFlags = new Map();
+  for (let at = 0; at < oldIndex.length; at += 16) {
+    const offset = oldIndex.readUInt32LE(at + 8);
+    for (const base of [moviTypeAt, 0, moviTypeAt + 4]) {
+      const header = base + offset;
+      const chunk = oldChunks.find(one => one.start === header);
+      if (chunk) { oldFlags.set(header, oldIndex.readUInt32LE(at + 4)); break; }
+    }
+  }
+  const rewritten = [];
+  const indexEntries = [];
+  let splitBlocks = 0;
+  let cursor = moviTypeAt + 4;
+  for (const chunk of oldChunks) {
+    if (chunk.id.endsWith("wb") && chunk.length > partBytes) splitBlocks++;
+    const parts = chunk.id.endsWith("wb") && chunk.length > partBytes
+      ? Array.from({ length: Math.ceil(chunk.length / partBytes) }, (_, at) => chunk.data.subarray(at * partBytes, (at + 1) * partBytes))
+      : [chunk.data];
+    for (const data of parts) {
+      const head = Buffer.alloc(8);
+      head.write(chunk.id, 0, 4, "ascii");
+      head.writeUInt32LE(data.length, 4);
+      const pad = data.length & 1 ? Buffer.alloc(1) : Buffer.alloc(0);
+      rewritten.push(head, data, pad);
+      const entry = Buffer.alloc(16);
+      entry.write(chunk.id, 0, 4, "ascii");
+      entry.writeUInt32LE(oldFlags.get(chunk.start) ?? 0, 4);
+      entry.writeUInt32LE(cursor - moviTypeAt, 8);
+      entry.writeUInt32LE(data.length, 12);
+      indexEntries.push(entry);
+      cursor += 8 + data.length + pad.length;
+    }
+  }
+  const moviData = Buffer.concat(rewritten);
+  const movi = Buffer.alloc(12);
+  movi.write("LIST", 0, 4, "ascii");
+  movi.writeUInt32LE(4 + moviData.length, 4);
+  movi.write("movi", 8, 4, "ascii");
+  const newIndexData = Buffer.concat(indexEntries);
+  const newIndex = Buffer.alloc(8);
+  newIndex.write("idx1", 0, 4, "ascii");
+  newIndex.writeUInt32LE(newIndexData.length, 4);
+  const result = Buffer.concat([bytes.subarray(0, moviAt), movi, moviData, newIndex, newIndexData,
+    bytes.subarray(indexAt + 8 + indexLength)]);
+  result.writeUInt32LE(result.length - 8, 4);
+  return { bytes: result, splitBlocks };
 }
 
 async function inDirectory(body) {
@@ -196,6 +325,40 @@ for (const [name, video, audio, copyable = false] of [
   ffmpeg(["-f", "lavfi", "-i", `testsrc2=size=320x240:rate=${FPS}`, "-f", "lavfi", "-i", `aevalsrc=${LOUD}:s=48000`,
     "-t", "60", ...video, ...audio, "-f", "avi", file]);
   await checkAvi(directory, file, { duration: 60, audio: true, timeBase: 1 / FPS, copyable });
+}));
+
+test("an indexed AVI with split AC-3 frames plays segment 3 from complete packets", () => inDirectory(async directory => {
+  const file = path.join(directory, "source.avi");
+  ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25", "-f", "lavfi", "-i",
+    "aevalsrc=0.5*sin(2*PI*(300*t+20*t*t)):s=48000", "-t", "60", "-c:v", "mpeg4", "-vtag", "XVID",
+    "-g", "50", "-q:v", "5", "-c:a", "ac3", "-b:a", "192k", "-f", "avi", file]);
+  const { bytes, splitBlocks } = splitAviAudioBlocks(await fs.readFile(file), 384);
+  assert.ok(splitBlocks > 100, `${splitBlocks} AVI audio blocks were split inside AC-3 frames`);
+  let packetBytesRead = 0;
+  const container = new AviContainer({ fileSize: bytes.length, readRange: async (start, end) => {
+    packetBytesRead += end - start + 1;
+    return bytes.subarray(start, end + 1);
+  } });
+  const tracks = await container.readTracks();
+  const audio = tracks.filter(track => track.type === "audio");
+  assert.equal(audio.length, 1);
+  assert.equal(audio[0].codecId, "ac3");
+  const interval = { from: 12, to: 16, trackIds: [audio[0].trackNumber] };
+  const payloadReadsStart = packetBytesRead;
+  const transcoded = await packetPiece(directory, bytes, container, interval, audio[0], true);
+  assert.ok(packetBytesRead - payloadReadsStart < 512 * 1024,
+    `the interval reads ${(packetBytesRead - payloadReadsStart)} bytes, below the 512 KiB limit`);
+  const transcodedSamples = audioSamples(transcoded.file);
+  assert.ok(transcodedSamples.length >= 3.98 * 48000,
+    `AAC output contains ${(transcodedSamples.length / 48000).toFixed(3)} seconds for the four-second interval`);
+  const packetLengths = transcoded.input.tracks[0].packets.map(packet =>
+    packet.ranges.reduce((sum, [start, end]) => sum + end - start + 1, 0));
+  assert.ok(packetLengths.length > 100 && packetLengths.every(length => length === 768),
+    "the interval contains complete 768-byte AC-3 frames assembled from both AVI blocks");
+  const copied = await packetPiece(directory, bytes, container, interval, audio[0], false);
+  const copiedSamples = audioSamples(copied.file);
+  assert.ok(copiedSamples.length >= 3.98 * 48000,
+    `copied AC-3 output contains ${(copiedSamples.length / 48000).toFixed(3)} seconds for the four-second interval`);
 }));
 
 test("a picture-only run holds the sound FFmpeg seeks through when the sound is stored ahead of the picture", () => inDirectory(async directory => {

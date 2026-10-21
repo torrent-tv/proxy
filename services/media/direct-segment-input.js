@@ -33,11 +33,15 @@ export async function directSegmentInput(container, { interval, tracks, mode }, 
   const walked = await container.packetWalkRanges?.(interval);
   if (walked) return walked;
   // The table is begun, or joined, and not waited for.
-  if (container.packetTableWouldWait?.() === true) {
+  if (container.packetTableWouldWait?.(interval) === true) {
     whenBuilt(container.readPacketIndex(interval).then(() => undefined, () => undefined));
     return { kind: "pending" };
   }
   const index = await container.readPacketIndex(interval);
-  await index.prepareAudioDependencies?.(interval, container.readRange);
-  return new SegmentInputs({ index, tracks }).forInterval({ ...interval, mode });
+  try {
+    await index.prepareAudioDependencies?.(interval, container.readRange);
+    return new SegmentInputs({ index, tracks }).forInterval({ ...interval, mode });
+  } finally {
+    if (index.disposeAfterUse === true) index.dispose();
+  }
 }

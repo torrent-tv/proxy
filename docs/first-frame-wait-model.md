@@ -390,7 +390,7 @@ logged at the process boundary; "derived" is computed from other values;
 | P15 | P | source key, wait id, consumer, revision | estimate selected for a revision | `process=P15 phase=event` with remaining and total seconds and estimate basis | R2 | seconds | direct point observation; estimate calculation is synchronous |
 | C3–C5 | B / P | wait, attempt, consumer and selected track | C3 readiness-state events; C5 `play` | C3 readiness state, C4 playback-ready, C5 `playing` | C1 gate | track and state | direct point or state observations; C3 is logged when readiness changes |
 | S0 seek input | B | wait, attempt, target, input source | player controls: `media-seek-request`; native/system controls: first `seeking` event | `seek-input`; native path also `S0.seek-debounce` end at settled target | — | target seconds, source | direct monotonic trace; native physical input to `seeking` remains unobservable |
-| S1 seek command | B | wait, attempt, target | `#moveToPosition` command entry | command completion after stop-load, seek report and load restart | S0 | target seconds, outcome | direct span; includes nested browser/control-connection work, do not add those nested spans twice |
+| S1 seek command | B | wait, attempt, target | entry to `#moveToPosition` | command completion after synchronous setup, stop-load, seek report and load restart | S0 | target seconds, outcome | direct span; includes nested browser/control-connection work, do not add those nested spans twice |
 | S2 seek readiness gate | B | wait, attempt, target | `#holdSeekUntilReady` entry | hold release or failure | S1 ends before S2 starts; proxy work proceeds concurrently | target seconds, outcome | direct span includes readiness polls; it overlaps proxy P4/P4.1, W and encoder work and must not be summed with them |
 | C6, C7 | B | wait, attempt, media time | `requestVideoFrameCallback` observations | advancing frame and audio-ready point events | R6 | media time, audio state | direct observations with wait identity |
 | P4 | P | source key, file, map revision | `process=P4 phase=begin` at range-resolution pass | `process=P4 phase=end`, with resolved zone count and outcome | R2, R8 | zones | direct resolver span; separate from the aggregate map-pass timing |
@@ -703,10 +703,10 @@ accuracy are incomplete.
    `#reportSeekIntent` filters player-owned moves, starts `S0` for external
    moves, and records `S0.seek-debounce` through the settled target after at
    least 300 ms (`SEEK_REPORT_DEBOUNCE_MS`; a timer may fire later).
-   `#moveToPosition` is `S1`: it resets the waiting model, stops the loader,
-   reports the seek, and restarts loading. While playback is live it also takes
-   the seek hold (`#holds.beginSeek`) and starts `S2`, which ends when the
-   readiness gate releases or fails. These spans share the seek wait identity;
+   `#moveToPosition` is `S1` from function entry: it resets the waiting model,
+   stops the loader, reports the seek, and restarts loading. While playback is
+   live it also takes the seek hold (`#holds.beginSeek`) and starts `S2`, which
+   ends when the readiness gate releases or fails. These spans share the seek wait identity;
    `[wait-start]` remains a state log and is not the timing boundary.
 2. It then stops the loader, reports the position (`POST
    /api/transcode-sessions/:id/seek` over R5.c → `ViewerRequests.requestSeek`:

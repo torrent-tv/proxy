@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Assemble complete AC-3 frames across indexed AVI blocks before building audio segments (#ttv-227).
+
 ## 2.105.2
 
 - **Fix**: Start a current wait estimate when a seek changes the viewer generation, so the next playback-readiness response can report the seek's first required work (#ttv-185).

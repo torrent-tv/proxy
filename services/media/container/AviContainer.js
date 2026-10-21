@@ -18,6 +18,7 @@ import { readAviIndex } from "./avi-index.js";
 import { isUnavailable } from "./unavailable.js";
 import { Mpeg4PictureTiming } from "./mpeg4-picture-timing.js";
 import { MpegElementaryIndex } from "./mpeg-elementary-index.js";
+import { ac3Frame } from "./ac3-frame.js";
 import { RetainedReads } from "./RetainedReads.js";
 import { OutsideReadableEdges, edgeReader, emptyWorkTags, text, textList, yearOf } from "./work-tags.js";
 
@@ -208,8 +209,14 @@ export class AviContainer extends Container {
    * ones, and the swarm was asked for the picture's next piece only after it
    * (torrent-tv/meta#178).
    */
-  packetTableWouldWait() {
+  packetTableWouldWait(interval = null) {
     if (!this.#index || this.#packets || this.#scan) return false;
+    if (interval?.trackIds?.length) {
+      const tracks = this.#tracks ?? [];
+      const selected = tracks.filter(track => interval.trackIds.includes(track.trackNumber));
+      if (selected.length === interval.trackIds.length && selected.length === 1 && selected[0].type === "audio" &&
+        selected[0].codecId === "ac3") return false;
+    }
     return this.#soundPacketsRefused === null || this.packetMemory?.fits?.(this.#soundPacketsRefused) !== false;
   }
 
@@ -414,7 +421,16 @@ export class AviContainer extends Container {
   }
 
   async readPacketIndex(interval) {
-    if (this.#packets) return this.#packets;
+    if (this.#packets) {
+      if (this.#index && interval?.trackIds?.length) {
+        const tracks = await this.readTracks();
+        const selected = tracks.filter(track => interval.trackIds.includes(track.trackNumber));
+        if (selected.length === 1 && selected[0].type === "audio" && selected[0].codecId === "ac3") {
+          return this.#indexedAc3PacketsOf(this.#index, selected[0], interval);
+        }
+      }
+      return this.#packets;
+    }
     if (this.#scan) return this.#readUnindexed(interval);
     // A picture of a file with an index is read by FFmpeg from the original
     // bytes (torrent-tv/meta#151). Its SOUND is not: the index states every
@@ -424,6 +440,12 @@ export class AviContainer extends Container {
     // copied 2.3 GB for 0.19 GB of its own (torrent-tv/meta#166).
     const indexed = await this.#readIndex();
     if (indexed) {
+      const tracks = await this.readTracks();
+      const selected = interval?.trackIds?.length
+        ? tracks.filter(track => interval.trackIds.includes(track.trackNumber)) : [];
+      if (selected.length === 1 && selected[0].type === "audio" && selected[0].codecId === "ac3") {
+        return this.#indexedAc3PacketsOf(indexed, selected[0], interval);
+      }
       // A refusal of memory for the table is kept for as long as the memory's
       // owner says the same reservation still would not fit. Not kept, the
       // next reader walked the index, counted the packets and was refused
@@ -461,6 +483,68 @@ export class AviContainer extends Container {
     this.#scan = { index, tracks, clocks, timings: new Map(), at: 0,
       stack: [{ end: this.fileSize, next: this.fileSize }] };
     return this.#readUnindexed(interval);
+  }
+
+  /** Parse only the indexed AC-3 blocks needed for one audio interval. */
+  async #indexedAc3PacketsOf(index, track, interval) {
+    const stream = index.packets[track.trackNumber];
+    if (!stream?.count) throw new Error("Indexed AVI AC-3 track has no packets.");
+    const read = new Map();
+    const bytesAt = async at => {
+      if (read.has(at)) return read.get(at);
+      const length = stream.lengths[at];
+      const bytes = length ? await this.readRange(stream.starts[at], stream.starts[at] + length - 1) : Buffer.alloc(0);
+      read.set(at, bytes);
+      return bytes;
+    };
+    const chainAt = async start => {
+      let bytes = Buffer.alloc(0), cursor = 0, at = start, frames = 0;
+      while (frames < 3 && at < stream.count && bytes.length < 32 * 1024) {
+        bytes = Buffer.concat([bytes, await bytesAt(at++)]);
+        while (bytes.length - cursor >= 7 && frames < 3) {
+          if (bytes[cursor] !== 0x0b || bytes[cursor + 1] !== 0x77) return false;
+          let frame;
+          try { frame = ac3Frame(bytes.subarray(cursor)); }
+          catch { return false; }
+          if (bytes.length - cursor < frame.size) break;
+          cursor += frame.size;
+          frames++;
+        }
+      }
+      return frames === 3;
+    };
+
+    const anchor = stream.atOrBefore(interval.from);
+    let first = -1, scannedBytes = 0;
+    for (let at = anchor; at >= 0 && scannedBytes < 128 * 1024; at--) {
+      const bytes = await bytesAt(at);
+      scannedBytes += bytes.length;
+      if (bytes.length >= 7 && bytes[0] === 0x0b && bytes[1] === 0x77 && await chainAt(at)) {
+        first = at;
+        break;
+      }
+    }
+    if (first < 0) throw new Error("Indexed AVI AC-3 has no complete frame chain near the requested interval.");
+
+    const elementary = new MpegElementaryIndex([track], { packetMemory: this.packetMemory });
+    try {
+      for (let at = first; at < stream.count; at++) {
+        const bytes = await bytesAt(at);
+        if (bytes.length) elementary.push(track.trackNumber, bytes, stream.starts[at], at === first ? { pts: stream.times[first] } : {});
+        const input = elementary.index.inputFor({ trackId: track.trackNumber, from: interval.from, to: interval.to,
+          mode: interval.modes?.[track.trackNumber] ?? "transcode" });
+        if (input.kind === "result") {
+          elementary.index.disposeAfterUse = true;
+          return elementary.index;
+        }
+      }
+      elementary.complete();
+      elementary.index.disposeAfterUse = true;
+      return elementary.index;
+    } catch (error) {
+      elementary.index.dispose();
+      throw error;
+    }
   }
 
   /**

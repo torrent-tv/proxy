@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Start a current wait estimate when a seek changes the viewer generation, so the next playback-readiness response can report the seek's first required work (#ttv-185).
+
 ## 2.105.1
 
 - **Fix**: Keep Matroska chapter discovery out of the playback input read queue and reuse bytes across split EBML header reads (#ttv-221).

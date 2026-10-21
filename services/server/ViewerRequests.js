@@ -575,6 +575,7 @@ export class ViewerRequests {
     // still answered by the output it was made against — see the two deadlines
     // in `Assignments.js`.
     viewer.assignments.statedGeneration(generation);
+    this.#beginSeekWait(named, consumerId, generation);
     this.#host.outputs.touch(named);
     // EVERY REQUEST THIS VIEWER HAS OUTSTANDING WAS MADE FOR WHERE THEY WERE,
     // and hls.js keeps one fragment load outstanding per track: a request held
@@ -599,6 +600,40 @@ export class ViewerRequests {
     }
     this.#host.planEncodersSoon();
     return true;
+  }
+
+  #beginSeekWait(output, consumerId, generation) {
+    const file = output?.file;
+    if (!Number.isSafeInteger(generation) || !file || typeof file.sourceKey !== "string" ||
+        !Number.isSafeInteger(file.fileIndex) || file.fileIndex < 0) return;
+    const waitId = `${file.sourceKey}:${file.fileIndex}:${generation}`;
+    const key = `${consumerId}:${waitId}`;
+    const fileName = file.relativePath ?? file.name ?? "";
+    const extension = typeof fileName === "string" ? fileName.split(".").at(-1)?.toLowerCase() ?? "" : "";
+    const viewer = this.#host.viewers.get(consumerId);
+    const link = linkMeasurementOf(viewer);
+    const features = {
+      extension,
+      fileLength: Number.isFinite(file.length) && file.length > 0 ? file.length : null,
+      downloadSpeed: null,
+      linkMbps: link.mbps,
+      linkSampleAgeMs: link.ageMs,
+      preparedOutputBytes: this.#preparedOutputBytes(file.sourceKey, file.fileIndex),
+      fileAvailable: null,
+      headerRemaining: null,
+      peers: null,
+      videoOperation: null,
+      audioOperation: null,
+      videoSpeedX: null,
+      audioSpeedX: null
+    };
+    // A seek is a new waiting action even when a caller repeats the same
+    // generation. Start its clock at the explicit seek request, before the
+    // next readiness poll can return the first current-work estimate.
+    this.#earlyWaits.delete(key);
+    const context = this.#setEarlyWait({ consumerId, generation, sourceKey: file.sourceKey,
+      fileIndex: file.fileIndex, waitId, features, revision: 0, current: null, waitElapsedMs: 0 });
+    this.#recordEarlyWaitSnapshot(context, features);
   }
 
   /**

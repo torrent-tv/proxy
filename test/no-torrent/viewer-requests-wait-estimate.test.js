@@ -55,6 +55,32 @@ test("early forecasts retain one wait identity, advance revisions, and learn the
   assert.equal(noted.length, 1);
 });
 
+test("a seek starts a new wait identity before the next readiness estimate", () => {
+  const file = { sourceKey: "source", fileIndex: 2, name: "Film.avi", length: 800 };
+  const output = { file };
+  const viewer = {
+    outputs: new Set(),
+    assignments: { statedGeneration: generation => { viewer.generation = generation; } },
+    moveTo: positionSeconds => { viewer.position = positionSeconds; }
+  };
+  const requests = new ViewerRequests({
+    viewers: { get: () => viewer, join: () => viewer },
+    outputs: { get: id => id === "session" ? output : null, touch() {} },
+    invalidateWaits() {},
+    planEncodersSoon() {}
+  });
+
+  assert.equal(requests.requestSeek("session", 120, "viewer", 3), true);
+  const estimate = requests.waitEstimateForSource({ consumerId: "viewer", generation: 3,
+    sourceKey: "source", fileIndex: 2, fileName: "Film.avi",
+    stats: { fileLength: 800, downloadSpeed: 100, fileAvailable: true },
+    processing: { firstRequiredSegmentsSeconds: 9 } });
+
+  assert.equal(estimate.waitId, "source:2:3");
+  assert.equal(estimate.revision, 1);
+  assert.equal(estimate.remainingSeconds, 9);
+});
+
 test("early source measurements include unique prepared output bytes for the selected file", () => {
   const features = [];
   const output = { file: { sourceKey: "source", fileIndex: 2 }, outputKey: "output" };

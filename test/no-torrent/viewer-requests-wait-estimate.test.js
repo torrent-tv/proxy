@@ -128,8 +128,12 @@ test("early forecast logs each revision once and distinguishes historical stages
     const repeated = requests.waitEstimateForSource({ ...source, waitElapsedMs: 1_000 });
     const revised = requests.waitEstimateForSource({ ...source, stats: { ...source.stats, downloadSpeed: 200 },
       waitElapsedMs: 2_000 });
+    const firstRequiredStages = [{ track: "audio", segment: 7, alreadyBuffered: false,
+      sourceArrivalSeconds: 0.4, runAdmissionSeconds: 0.6, runOpenSeconds: 0.2,
+      productionStartSeconds: 0.8, productionCompleteSeconds: 1.4, deliveryCompleteSeconds: 1.5,
+      appendSeconds: 0.05, completionSeconds: 1.55 }];
     const active = requests.waitEstimateForSource({ ...source, stats: { ...source.stats, downloadSpeed: 200 },
-      waitElapsedMs: 3_000, processing: { firstRequiredSegmentsSeconds: 5 } });
+      waitElapsedMs: 3_000, processing: { firstRequiredSegmentsSeconds: 5, firstRequiredStages } });
 
     assert.equal(first.remainingSeconds, 19);
     assert.equal(repeated.remainingSeconds, first.remainingSeconds);
@@ -145,6 +149,8 @@ test("early forecast logs each revision once and distinguishes historical stages
     assert.equal(forecasts[0].predicted.observations, 3);
     assert.equal(forecasts[2].predicted.firstRequiredSegmentsSeconds, 5);
     assert.equal(forecasts[2].predicted.totalSeconds, 8);
+    assert.deepEqual(forecasts[2].predicted.firstRequiredStages, firstRequiredStages,
+      "the forecast log preserves ordered same-run stage timestamps");
     assert.equal(forecasts[0].elapsedMs, 1_000);
     assert.equal(forecasts[0].consumer, "viewer");
     assert.equal(forecasts[0].generation, 4);

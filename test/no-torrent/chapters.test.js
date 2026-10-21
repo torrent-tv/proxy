@@ -57,6 +57,43 @@ test("Matroska chapter times are nanoseconds, UID strings preserve all bits", as
   assert.equal(result.tailContent, "unknown");
 });
 
+test("Matroska chapter header bytes are not read twice", async () => {
+  const bytes = mkv(ebml(0x1043a770, edition(atom(1, 0, "Opening"))));
+  const reads = [];
+  const held = { ranges: [[0, bytes.length - 1]], read: async (start, end) => {
+    reads.push([start, end]);
+    return bytes.subarray(start, end + 1);
+  } };
+  const container = new MatroskaContainer({ fileSize: bytes.length, readRange: async () => null });
+  assert.equal((await container.readChapters(held)).state, "available");
+  const count = new Uint8Array(bytes.length);
+  for (const [start, end] of reads) for (let at = start; at <= end; at++) count[at]++;
+  assert.equal([...count].some((times) => times > 1), false);
+});
+
+test("chapter scans do not delay playback packet preparation for the same file", async () => {
+  let finishChapters;
+  let chapterStarted;
+  const started = new Promise((resolve) => { chapterStarted = resolve; });
+  const delayedChapters = new Promise((resolve) => { finishChapters = resolve; });
+  const container = {
+    readChapters: async () => { chapterStarted(); await delayedChapters; return { state: "absent", complete: true }; },
+    readPacketIndex: async () => ({})
+  };
+  const orchestrator = new ContainerOrchestrator();
+  orchestrator.containerFor = async () => container;
+  const params = { sourceKey: "source", fileIndex: 0 };
+  const chapters = orchestrator.inspect(params, "chapters");
+  await started;
+  let packetsFinished = false;
+  const packets = orchestrator.inspect(params, "packets").then((result) => { packetsFinished = true; return result; });
+  await settle();
+  assert.equal(packetsFinished, true);
+  finishChapters();
+  assert.equal((await packets).kind, "result");
+  assert.equal((await chapters).kind, "result");
+});
+
 test("nested Matroska chapters retain their declared parent identifiers", async () => {
   const bytes = mkv(ebml(0x1043a770, edition(atom(1, 0, "Part", atom(2, 1000000000, "Scene")))));
   const { held, container } = heldFile(bytes, MatroskaContainer);

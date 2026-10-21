@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.6
 
 - **Fix**: Trace per-segment source-range resolution, including track, output, segment, method, outcome and monotonic duration (#ttv-185).
 

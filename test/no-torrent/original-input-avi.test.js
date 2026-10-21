@@ -93,7 +93,7 @@ async function packetPiece(directory, bytes, container, interval, track, transco
   return { file: path.join(directory, name), input };
 }
 
-/** Split indexed AVI audio blocks and rebuild idx1 so the demuxer sees the same bytes. */
+/** Misalign and split indexed AVI audio blocks, then rebuild idx1. */
 function splitAviAudioBlocks(bytes, partBytes) {
   bytes = Buffer.from(bytes);
   const children = (start, end) => {
@@ -118,8 +118,8 @@ function splitAviAudioBlocks(bytes, partBytes) {
   const streamHeader = audioHeader?.find(chunk => chunk.id === "strh");
   const waveFormat = audioHeader?.find(chunk => chunk.id === "strf");
   assert.ok(streamHeader && waveFormat?.length >= 16, "AVI declares an audio stream");
-  // State one AC-3 sample as 768 bytes / 1536 samples. Two 384-byte AVI
-  // blocks therefore have the same presentation time and form one AC-3 frame.
+  // State one AC-3 sample as 768 bytes / 1536 samples. Reindexed blocks may
+  // split its sync header and frame at arbitrary byte offsets.
   bytes.writeUInt32LE(1536, streamHeader.start + 8 + 20);
   bytes.writeUInt32LE(48000, streamHeader.start + 8 + 24);
   bytes.writeUInt32LE(768, streamHeader.start + 8 + 44);
@@ -151,6 +151,16 @@ function splitAviAudioBlocks(bytes, partBytes) {
       const chunk = oldChunks.find(one => one.start === header);
       if (chunk) { oldFlags.set(header, oldIndex.readUInt32LE(at + 4)); break; }
     }
+  }
+  let previousAudio = null;
+  for (const chunk of oldChunks) {
+    if (!chunk.id.endsWith("wb")) continue;
+    chunk.data = Buffer.from(chunk.data);
+    if (previousAudio && chunk.data.length) {
+      previousAudio.data = Buffer.concat([previousAudio.data, chunk.data.subarray(0, 1)]);
+      chunk.data = chunk.data.subarray(1);
+    }
+    previousAudio = chunk;
   }
   const rewritten = [];
   const indexEntries = [];
@@ -332,7 +342,7 @@ test("an indexed AVI with split AC-3 frames plays segment 3 from complete packet
   ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25", "-f", "lavfi", "-i",
     "aevalsrc=0.5*sin(2*PI*(300*t+20*t*t)):s=48000", "-t", "60", "-c:v", "mpeg4", "-vtag", "XVID",
     "-g", "50", "-q:v", "5", "-c:a", "ac3", "-b:a", "192k", "-f", "avi", file]);
-  const { bytes, splitBlocks } = splitAviAudioBlocks(await fs.readFile(file), 384);
+  const { bytes, splitBlocks } = splitAviAudioBlocks(await fs.readFile(file), 400);
   assert.ok(splitBlocks > 100, `${splitBlocks} AVI audio blocks were split inside AC-3 frames`);
   let packetBytesRead = 0;
   const container = new AviContainer({ fileSize: bytes.length, readRange: async (start, end) => {

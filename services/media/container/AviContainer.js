@@ -497,10 +497,11 @@ export class AviContainer extends Container {
       read.set(at, bytes);
       return bytes;
     };
-    const chainAt = async start => {
+    const chainAt = async (start, firstOffset) => {
       let bytes = Buffer.alloc(0), cursor = 0, at = start, frames = 0;
       while (frames < 3 && at < stream.count && bytes.length < 32 * 1024) {
         bytes = Buffer.concat([bytes, await bytesAt(at++)]);
+        if (at === start + 1) cursor = firstOffset;
         while (bytes.length - cursor >= 7 && frames < 3) {
           if (bytes[cursor] !== 0x0b || bytes[cursor + 1] !== 0x77) return false;
           let frame;
@@ -515,14 +516,22 @@ export class AviContainer extends Container {
     };
 
     const anchor = stream.atOrBefore(interval.from);
-    let first = -1, scannedBytes = 0;
+    let first = -1, firstOffset = -1, scannedBytes = 0;
     for (let at = anchor; at >= 0 && scannedBytes < 128 * 1024; at--) {
       const bytes = await bytesAt(at);
       scannedBytes += bytes.length;
-      if (bytes.length >= 7 && bytes[0] === 0x0b && bytes[1] === 0x77 && await chainAt(at)) {
-        first = at;
-        break;
+      for (let offset = 0; offset < bytes.length; offset++) {
+        if (bytes[offset] !== 0x0b) continue;
+        if (offset + 1 < bytes.length) {
+          if (bytes[offset + 1] !== 0x77) continue;
+        } else if (at + 1 >= stream.count || (await bytesAt(at + 1))[0] !== 0x77) continue;
+        if (await chainAt(at, offset)) {
+          first = at;
+          firstOffset = offset;
+          break;
+        }
       }
+      if (first >= 0) break;
     }
     if (first < 0) throw new Error("Indexed AVI AC-3 has no complete frame chain near the requested interval.");
 
@@ -530,7 +539,9 @@ export class AviContainer extends Container {
     try {
       for (let at = first; at < stream.count; at++) {
         const bytes = await bytesAt(at);
-        if (bytes.length) elementary.push(track.trackNumber, bytes, stream.starts[at], at === first ? { pts: stream.times[first] } : {});
+        const offset = at === first ? firstOffset : 0;
+        if (bytes.length > offset) elementary.push(track.trackNumber, bytes.subarray(offset), stream.starts[at] + offset,
+          at === first ? { pts: stream.times[first] } : {});
         const input = elementary.index.inputFor({ trackId: track.trackNumber, from: interval.from, to: interval.to,
           mode: interval.modes?.[track.trackNumber] ?? "transcode" });
         if (input.kind === "result") {

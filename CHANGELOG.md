@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Keep Matroska chapter discovery out of the playback input read queue and reuse bytes across split EBML header reads (#ttv-221).
+
 ## 2.105.0
 
 - **New**: Return separate sidecar subtitle team and track-title metadata while preserving the existing releaser value (#ttv-118).

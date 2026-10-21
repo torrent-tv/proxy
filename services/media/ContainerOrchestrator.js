@@ -155,7 +155,11 @@ export class ContainerOrchestrator {
     // picture's first input of an AVI waited about 4 s behind the sound's
     // table of the whole film it does not use (r38, torrent-tv/meta#178).
     const aside = this.#answersWithoutReading(key, statement);
-    const previous = aside ? Promise.resolve() : this.#reads.get(key) ?? Promise.resolve();
+    // Chapter discovery can walk a whole file when the format has no chapter
+    // index. Keep it serial with other chapter reads, but out of the queue used
+    // to prepare playback inputs for this file.
+    const queueKey = statement === "chapters" ? `${key}:chapters` : key;
+    const previous = aside ? Promise.resolve() : this.#reads.get(queueKey) ?? Promise.resolve();
     const askedAt = performance.now();
     const reading = previous.catch(() => undefined).then(async () => {
       if (!isCurrent()) return { result: { kind: "terminal", reason: "request-obsolete", requestId: params.requestId } };
@@ -168,7 +172,7 @@ export class ContainerOrchestrator {
         readMs: endedAt - startedAt, cached: aside, result: result.kind, reason: result.reason, ranges: result.ranges });
       return { result, revision };
     });
-    if (!aside) this.#reads.set(key, reading);
+    if (!aside) this.#reads.set(queueKey, reading);
     try {
       const { result, revision } = await reading;
       if (!isCurrent()) return { kind: "terminal", reason: "request-obsolete", requestId: params.requestId };
@@ -177,7 +181,7 @@ export class ContainerOrchestrator {
       await params.onReadResult?.(statement, result, revision);
       return result;
     } finally {
-      if (this.#reads.get(key) === reading) this.#reads.delete(key);
+      if (this.#reads.get(queueKey) === reading) this.#reads.delete(queueKey);
     }
   }
 

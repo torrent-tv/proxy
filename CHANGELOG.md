@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.5
 
 - **Fix**: Find complete AC-3 frames when their sync header crosses an indexed AVI block boundary (#ttv-227).
 

@@ -754,84 +754,140 @@ export async function startProxyServer({
         if (!map.isCurrent()) return [];
         await turn();
         if (!map.isCurrent()) return [];
-        const reader = readers.get(zone.outputKey);
-        if (!reader) continue;
+        const resolutionStartedAt = performance.now();
+        const resolution = { outcome: "unresolved", method: null, trackCount: null, rangeCount: null, rangeBytes: null };
+        const resolutionId = `${map.fileIndex}:${zone.outputKey}:${zone.index}:${passStartedAt.toFixed(3)}`;
+        waitTrace.source(map.sourceKey, "process", { process: "P4.1", phase: "begin", resolutionId,
+          sourceId: `${map.sourceKey}:${map.fileIndex}`, fileIndex: map.fileIndex, outputKey: zone.outputKey,
+          segment: zone.index, priority: zone.priority, deadlineAt: zone.deadlineAt });
+        try {
+          const reader = readers.get(zone.outputKey);
+          if (!reader) {
+            resolution.outcome = "reader-missing";
+            continue;
+          }
         // WHAT A SEGMENT READS IS WORKED OUT ONCE (`segmentRecordOf`). Rebuilt
         // for every segment of the film on every map, this pass held the main
         // thread up to 1.5 s at a time on Home Assistant (torrent-tv/meta#178).
-        const record = segmentRecordOf(reader.records, { index: zone.index, tracks: reader.choices }, reader.facts);
-        const reading = record.reading;
-        if (!reading) {
-          projection.setUnreadable(zone.outputKey, zone.index);
-          continue;
-        }
-        const { wanted, modes, interval, rangesKey } = reading;
-        const convert = ranges => {
-          if (record.ranges !== ranges || record.pieceLength !== pieceLength) {
-            record.ranges = ranges;
-            record.pieceLength = pieceLength;
-            record.joined = joinedWithinPieces(ranges, pieceLength);
+          const record = segmentRecordOf(reader.records, { index: zone.index, tracks: reader.choices }, reader.facts);
+          const reading = record.reading;
+          if (!reading) {
+            resolution.outcome = "segment-reading-unavailable";
+            projection.setUnreadable(zone.outputKey, zone.index);
+            continue;
           }
-          const joined = record.joined;
-          // What the segment reads is kept for the forecast in a table of its
-          // own, whatever form the torrent is told it in.
-          if (record.registered !== joined) {
-            segmentInputs.set(map.sourceKey, map.fileIndex, zone.outputKey, zone.index, joined);
-            record.registered = joined;
-          }
-          projection.setRanges(zone.outputKey, zone.index, joined);
-          resolved += 1;
-        };
+          const { wanted, modes, interval, rangesKey } = reading;
+          resolution.trackCount = wanted.length;
+          resolution.trackIds = wanted.map(track => track.trackNumber);
+          resolution.sourceInterval = { from: interval.from, to: interval.to };
+          const convert = (ranges, method) => {
+            if (record.ranges !== ranges || record.pieceLength !== pieceLength) {
+              record.ranges = ranges;
+              record.pieceLength = pieceLength;
+              record.joined = joinedWithinPieces(ranges, pieceLength);
+            }
+            const joined = record.joined;
+            resolution.method = method;
+            resolution.rangeCount = joined.length;
+            resolution.rangeBytes = joined.reduce((total, [start, end]) => total + end - start + 1, 0);
+            // What the segment reads is kept for the forecast in a table of its
+            // own, whatever form the torrent is told it in.
+            if (record.registered !== joined) {
+              segmentInputs.set(map.sourceKey, map.fileIndex, zone.outputKey, zone.index, joined);
+              record.registered = joined;
+            }
+            projection.setRanges(zone.outputKey, zone.index, joined);
+            resolution.outcome = "resolved";
+            resolved += 1;
+          };
         // The bytes one segment needs are a fact of the file and the output, so
         // they are worked out once. A whole film is thousands of segments and
         // the map changes every few seconds; worked out afresh on every change,
         // a pass over a two-hour AVI never finished and the next segment's bytes
         // were never asked for (Home Assistant 2026-10-08, torrent-tv/meta#151).
-        const known = record.ranges ?? segmentSourceRanges.get(rangesKey);
-        if (known) { convert(known); continue; }
-        if (waiting.has(zone.outputKey)) continue;
+          const known = record.ranges ?? segmentSourceRanges.get(rangesKey);
+          if (known) { convert(known, record.ranges ? "segment-record-cache" : "source-range-cache"); continue; }
+          if (waiting.has(zone.outputKey)) {
+            resolution.outcome = "waiting-for-output-input";
+            continue;
+          }
         // What is resolved so far is stated before a lower zone is worked out
         // (DownloadMaps, torrent-tv/meta#178).
-        map.workingOut?.(zone.priority, () => projection.windows());
-        if (direct) {
+          map.workingOut?.(zone.priority, () => projection.windows());
+          if (direct) {
           // Asked per zone too: a soundtrack of an AVI is read from its own
           // packets, which the same index states (torrent-tv/meta#166).
-          let value = null;
-          try {
-            value = await directSegmentInput(direct, { interval, tracks: wanted, mode: track => modes.get(track) },
-              built => refreshWhenBuilt(direct, built, map));
-          } catch { value = null; }
+            let value = null;
+            try {
+              value = await directSegmentInput(direct, { interval, tracks: wanted, mode: track => modes.get(track) },
+                built => refreshWhenBuilt(direct, built, map));
+            } catch { value = null; }
           // A table still being built holds this output's segments, and only
           // this output's: the map is built again when it is.
-          if (value?.kind === "pending") {
-            waiting.add(zone.outputKey);
+            if (value?.kind === "pending") {
+              resolution.method = "direct-source-index";
+              resolution.outcome = "source-index-pending";
+              waiting.add(zone.outputKey);
+              continue;
+            }
+            if (value?.kind === "result") segmentSourceRanges.set(rangesKey, value.ranges);
+            if (value?.kind === "result") {
+              convert(value.ranges, "direct-source-index");
+              continue;
+            }
+          }
+          resolution.method = "container-index-fallback";
+          const intervalParams = await containerOver({ ...map, packetInterval: interval,
+            requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
+            demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
+          if (!map.isCurrent()) {
+            resolution.outcome = "map-replaced";
+            return [];
+          }
+          if (!intervalParams) {
+            resolution.outcome = "source-file-unavailable";
             continue;
           }
-          if (value?.kind === "result") segmentSourceRanges.set(rangesKey, value.ranges);
-          if (value?.kind === "result") {
-            convert(value.ranges);
+          const navigation = await containerOrchestrator.inspect(intervalParams, "source-navigation");
+          if (!map.isCurrent()) {
+            resolution.outcome = "map-replaced";
+            return [];
+          }
+          if (navigation.kind !== "result") {
+            resolution.outcome = `source-navigation-${navigation.kind}`;
+            if (navigation.kind === "needs-ranges" || navigation.kind === "needs-memory") waiting.add(zone.outputKey);
             continue;
           }
+          const originalRanges = navigation.value;
+          const packets = await containerOrchestrator.inspect(intervalParams, originalRanges ? "source-ranges" : "packets");
+          if (!map.isCurrent()) {
+            resolution.outcome = "map-replaced";
+            return [];
+          }
+          if (packets.kind === "needs-memory") waiting.add(zone.outputKey);
+          if (packets.kind !== "result") {
+            resolution.outcome = `source-packets-${packets.kind}`;
+            continue;
+          }
+          const input = originalRanges ? packets.value : new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
+          if (input.kind !== "result") {
+            resolution.outcome = `segment-input-${input.kind}`;
+            continue;
+          }
+          segmentSourceRanges.set(rangesKey, input.ranges);
+          convert(input.ranges, originalRanges ? "container-source-ranges" : "packet-index");
+        } catch (error) {
+          resolution.outcome = "error";
+          resolution.error = error?.message ?? String(error);
+          throw error;
+        } finally {
+          const resolutionEndedAt = performance.now();
+          waitTrace.source(map.sourceKey, "process", { process: "P4.1", phase: "end", resolutionId,
+            sourceId: `${map.sourceKey}:${map.fileIndex}`, fileIndex: map.fileIndex, outputKey: zone.outputKey,
+            segment: zone.index, priority: zone.priority,
+            startedAt: resolutionStartedAt, endedAt: resolutionEndedAt, durationMs: resolutionEndedAt - resolutionStartedAt,
+            ...resolution });
         }
-        const intervalParams = await containerOver({ ...map, packetInterval: interval,
-          requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
-          demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
-        if (!map.isCurrent()) return [];
-        if (!intervalParams) continue;
-        const navigation = await containerOrchestrator.inspect(intervalParams, "source-navigation");
-        if (navigation.kind !== "result") {
-          if (navigation.kind === "needs-ranges" || navigation.kind === "needs-memory") waiting.add(zone.outputKey);
-          continue;
-        }
-        const originalRanges = navigation.value;
-        const packets = await containerOrchestrator.inspect(intervalParams, originalRanges ? "source-ranges" : "packets");
-        if (!map.isCurrent()) return [];
-        if (packets.kind === "needs-memory") waiting.add(zone.outputKey);
-        if (packets.kind !== "result") continue;
-        const input = originalRanges ? packets.value : new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
-        if (input.kind !== "result") continue;
-        segmentSourceRanges.set(rangesKey, input.ranges);
-        convert(input.ranges);
       }
       const result = projection.windows();
       notePass({ whole: reworked.whole, reworked: reworked.segments, resolved, windows: result.length,

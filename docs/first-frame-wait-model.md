@@ -193,6 +193,7 @@ orchestration. The torrent runs in one worker thread
 | P2 | Container declarations (`readDeclarations`, `declaredTracksOf` → `ContainerOrchestrator.inspect`, statements `tracks`, `media-info`). Each read waits in the file's read queue (R8). The container is chosen by sniffing 16 bytes (`ContainerFactory.create`): Matroska, MP4, AVI, MPEG-TS, ASF and MPEG-PS are parsed on this thread; anything else is read by X1. Strict reads: missing bytes return `needs-ranges`, which is stated to the download map; missing index memory returns `needs-memory`. The plan route reads again on every storage change (`getReadyPlan` → `waitForPlan`) | P1 | codecs and duration known | blocking for A12 |
 | P3 | Plan completion: sidecar soundtrack headers (`buildInventory`), subtitle defaults, cache; the offer (`offeredHeights`, `cannotServe`) on the way out | P2 | plan answered | blocking for A12 |
 | P4 | Download map pass (`DownloadMaps.resolvePlayback`, proxy `server.js`): on each change of demand, the source byte ranges of every unresolved segment of every watched output (`directSegmentInput` / `PacketIndex.inputFor`, or reads through R8), recorded in `SegmentInputTable`, the priority map published to the worker; yields between zones | any demand change | pass ends | repeated; feeds W7 and P14 |
+| P4.1 | Resolve one demanded segment's source ranges: select its required track IDs and source interval, use the direct source index or the container/packet-index read path, and register the ranges for the forecast. Repeated for unresolved segments inside P4; its interval is included in P4 | unresolved zone after the pass yields | ranges registered, input unavailable, or resolution fails | sequential substep of P4; R8 reads overlap its measured duration |
 | P5 | Keyframe index (`KeyframeTables`; warmed during P2 by `warmKeyframeIndex`, read through R8 by `getKeyframeIndex`). A missing range is stated to the map like any read (`onReadResult` → `downloadMaps.metadata`); the table is read again when pieces arrive (`readAgainIfUnanswered`). Required only when the video is copied | P2 (warm), B1 | table answered | blocking for P6.v (copy) |
 | P6.v | Picture output open (`OutputOpening.open`): media info from the plan, file length, P5 for a copy, cut grid and timeline, capacity admission (`admitsWatching`), viewer placed; answered before any segment exists | B1 | output returned | blocking for B1 |
 | P6.a | Soundtrack output open (`#resolveAudioRenditionSession`): on the soundtrack's first init request (fMP4) or first segment request (MPEG-TS) through `resolveAudioRenditionFile`; earlier when the `…/a/:track/warm` route (`prepareAudioTrack`) asks for it, which the page uses for a soundtrack change and to restate its soundtrack after a reconnect. A playlist request does not open it | B6.a.i, B7.a or the warm route, whichever comes first | output returned | blocking for that request |
@@ -394,6 +395,7 @@ logged at the process boundary; "derived" is computed from other values;
 | Seek start (section 9) | B | — | the viewer's input: none; `[evt] <wall time> seeking` for native controls and Media Session | `[evt] seek intent → <s>`; `[wait-start]` at the hold | — | — | input not logged; `seeking` and `seek intent` on wall time, `[wait-start]` monotonic |
 | C6, C7 | B | wait, attempt, media time | `requestVideoFrameCallback` observations | advancing frame and audio-ready point events | R6 | media time, audio state | direct observations with wait identity |
 | P4 | P | source key, file, map revision | `process=P4 phase=begin` at range-resolution pass | `process=P4 phase=end`, with resolved zone count and outcome | R2, R8 | zones | direct resolver span; separate from the aggregate map-pass timing |
+| P4.1 | P | source key, wait/attempt, file, output key, map pass and segment | one unresolved demanded segment after the pass yields | `process=P4.1 phase=begin/end`; end records track IDs, source interval, resolution method/outcome, joined range count/bytes and monotonic duration | R2, R8 | track IDs, bytes | per-segment local span included in P4; overlaps R8 reads and must not be added to P4 or R8 durations |
 | W1 | torrent worker | source key | first traced `ADD_SOURCE` starts `pool.getTorrent` | its promise resolves with a ready torrent or fails | worker command scheduling precedes W1; W2–W6 overlap inside it | files, outcome | direct worker-monotonic parent span with `durationMs`; overlaps nested stages and is not additive to them |
 | W2, W5–W6 | torrent worker | source key | internal `_startDiscovery`, `_verifyPieces`, `_onStore` begin events | corresponding end events; skipped verification is a point event | — | files, outcome | direct worker-monotonic spans with `durationMs`; errors close the span; WebTorrent internal method boundaries pinned to installed 2.8.5 |
 | W3 | torrent worker | source key | end of W2 discovery | first `wire` (peer connection/handshake) | swarm | outcome, peer | direct monotonic wait span; `.torrent` and magnet paths are separate; two records per span |
@@ -819,6 +821,7 @@ flowchart TB
     P2["P2 container declarations through the read queue"]
     P3["P3 sidecar headers, subtitles, offer"]
     P4["P4 download map pass"]
+    P41["P4.1 resolve each demanded segment's source ranges"]
     QP5{"video copied?"}
     P5["P5 keyframe index through the read queue"]
     P6v["P6.v picture output open"]
@@ -909,7 +912,7 @@ flowchart TB
   W6 -- .torrent --> W3t
   W3m --> W8
   W3t --> W8
-  P4 --> W7 --> W8 --> W9
+  P4 --> P41 --> W7 --> W8 --> W9
 
   P1 --> QCF
   QCF -- yes --> P2

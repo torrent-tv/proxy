@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Trace per-segment source-range resolution, including track, output, segment, method, outcome and monotonic duration (#ttv-185).
+
 ## 2.105.5
 
 - **Fix**: Find complete AC-3 frames when their sync header crosses an indexed AVI block boundary (#ttv-227).

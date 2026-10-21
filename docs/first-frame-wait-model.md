@@ -1368,3 +1368,17 @@ The proxy log contained 7,239 records for that wait. This verifies trace
 delivery and the observed path through the first frame; it does not show that
 the logged intervals sum to elapsed wait or establish a forecast. Full logs
 and limits are recorded in the [field-check note](https://github.com/torrent-tv/meta/blob/main/research/first-frame-wait-trace-field-check-2026-10-20.md).
+
+The 2026-10-21 Frankenstein 720p MP4 field trace adds an atomic startup and
+seek timing example. On cold startup, the measured intervals sum exactly:
+transport 2361.1 ms + plan 111.8 ms + prepare 12255.0 ms + prebuffer 1251.9 ms +
+presentation 149.8 ms = 16129.6 ms to the first advancing frame with decoded
+audio. On a seek to 1200 s, the first observable `seeking` event to the first
+advancing frame was 4659.1 ms. The timeline was 313.0 ms from S0 to S1 entry,
+S1 310.8 ms, S2 3974.9 ms, C5 play 62.8 ms, and C6 presentation 5.9 ms.
+Those intervals overlap: S1/S2 by 1.8 ms, S2/C5 by 3.7 ms, and C5/C6 by
+2.8 ms. Their union is 4659.1 ms. The older `first-frame-observation` line
+reported 4413.5 ms for that seek, 245.6 ms short because its wait-state clock
+began after the input. The server now uses the trace's original action time for
+that aggregate when tracing is enabled. The full downloaded logs and per-event
+arithmetic are recorded in the [2026-10-21 field note](https://github.com/torrent-tv/meta/blob/main/research/first-frame-seek-atomic-field-check-2026-10-21.md).

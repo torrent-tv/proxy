@@ -147,7 +147,8 @@ export class ViewerRequests {
     const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
     if (!Number.isFinite(seconds) || seconds < 0) return null;
     this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, historical,
-      firstRequiredSegmentsSeconds: context.activeFirstRequiredSegmentsSeconds });
+      firstRequiredSegmentsSeconds: context.activeFirstRequiredSegmentsSeconds,
+      firstRequiredStages: context.activeFirstRequiredStages });
     return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
   }
 
@@ -192,13 +193,19 @@ export class ViewerRequests {
     const elapsedMs = waitElapsedSince(context, waitElapsedMs);
     const measuredWorkSeconds = processing.firstRequiredSegmentsSeconds;
     const hasActiveEstimate = Number.isFinite(measuredWorkSeconds) && measuredWorkSeconds >= 0;
+    const stagesChanged = Array.isArray(processing.firstRequiredStages) &&
+      JSON.stringify(processing.firstRequiredStages) !== JSON.stringify(context.activeFirstRequiredStages);
     const activeTotalSeconds = hasActiveEstimate
       ? elapsedMs / 1000 + measuredWorkSeconds
       : context.activeTotalSeconds;
-    const activeEstimateChanged = hasActiveEstimate && activeTotalSeconds !== context.activeTotalSeconds;
+    const activeEstimateChanged = hasActiveEstimate &&
+      (activeTotalSeconds !== context.activeTotalSeconds || stagesChanged);
     if (hasActiveEstimate) {
       context.activeTotalSeconds = activeTotalSeconds;
       context.activeFirstRequiredSegmentsSeconds = measuredWorkSeconds;
+      if (Array.isArray(processing.firstRequiredStages)) {
+        context.activeFirstRequiredStages = processing.firstRequiredStages;
+      }
     }
     const changed = featuresChanged || activeEstimateChanged;
     if (sameWait && changed) context.revision += 1;
@@ -213,7 +220,8 @@ export class ViewerRequests {
     const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
     if (!Number.isFinite(seconds) || seconds < 0) return null;
     this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, historical,
-      firstRequiredSegmentsSeconds: hasActiveEstimate ? measuredWorkSeconds : context.activeFirstRequiredSegmentsSeconds });
+      firstRequiredSegmentsSeconds: hasActiveEstimate ? measuredWorkSeconds : context.activeFirstRequiredSegmentsSeconds,
+      firstRequiredStages: context.activeFirstRequiredStages });
     return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
   }
 
@@ -222,11 +230,12 @@ export class ViewerRequests {
     return Number.isFinite(estimate) ? { seconds: estimate, stagesMs: null, observations: null } : estimate;
   }
 
-  #logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, historical, firstRequiredSegmentsSeconds }) {
+  #logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, historical, firstRequiredSegmentsSeconds,
+    firstRequiredStages }) {
     if (context.loggedForecastRevision === context.revision) return;
     const basis = Number.isFinite(firstRequiredSegmentsSeconds) ? "first-required" : "historical-stages";
     const estimate = basis === "first-required"
-      ? { firstRequiredSegmentsSeconds }
+      ? { firstRequiredSegmentsSeconds, ...(Array.isArray(firstRequiredStages) ? { firstRequiredStages } : {}) }
       : { stagesMs: historical?.stagesMs ?? null, observations: historical?.observations ?? null };
     logger.info(`early wait forecast ${JSON.stringify({ waitId: context.waitId, consumer: context.consumerId,
       generation: context.generation, features: context.features, elapsedMs, revision: context.revision,
@@ -1062,7 +1071,8 @@ export class ViewerRequests {
           audioOperation: audioOperation?.operation,
           videoSpeedX: videoOperation?.speed,
           audioSpeedX: audioOperation?.speed,
-          firstRequiredSegmentsSeconds: forecast.firstRequiredSegmentsSeconds
+          firstRequiredSegmentsSeconds: forecast.firstRequiredSegmentsSeconds,
+          firstRequiredStages: forecast.firstRequiredStages
         } });
       if (waitEstimate) forecast.waitEstimate = waitEstimate;
     }
@@ -1105,6 +1115,7 @@ export class ViewerRequests {
     const holding = forecast.holdingBy;
     this.#host.noteViewerWaiting?.(consumerId || session.id,
       holding?.kind === "production" ? { address: holding.track, index: holding.segment } : null);
+    delete forecast.firstRequiredStages;
     return forecast;
   }
 

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Log same-run per-track source, run admission, production, delivery and append event times for the first-required-segment forecast (#ttv-185).
+
 ## 2.105.3
 
 - **Fix**: Assemble complete AC-3 frames across indexed AVI blocks before building audio segments (#ttv-227).

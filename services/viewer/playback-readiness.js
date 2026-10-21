@@ -463,23 +463,28 @@ export function predictPlaybackReadiness(input = {}) {
     // Production accepts a complete held segment input. It cannot overlap its
     // own source download; reused input retains its original arrival time.
     const processing = trackState[trackIndex].curve;
-    let admittedAt = Math.max(trackFinish[trackIndex], sourceArrivalAt);
+    let runAdmissionAt = null;
+    let runOpenSeconds = 0;
+    let productionStartAt = Math.max(trackFinish[trackIndex], sourceArrivalAt);
     if (!job.produced && encodeWork > 0) {
       const run = runStarts[trackIndex];
       const live = run.spans.some(span => segment.startSeconds >= span.start && segment.startSeconds < span.end);
       if (!live && (run.admittedAt === null || sourceArrivalAt > run.admittedAt)) {
-        run.admittedAt = admittedAt;
-        admittedAt += run.openSeconds;
+        runAdmissionAt = productionStartAt;
+        run.admittedAt = runAdmissionAt;
+        runOpenSeconds = run.openSeconds;
+        productionStartAt += runOpenSeconds;
       }
     }
-    const producedAt = job.produced || encodeWork === 0 ? 0 : processing.finish(encodeWork, admittedAt);
+    const producedAt = job.produced || encodeWork === 0 ? 0 : processing.finish(encodeWork, productionStartAt);
     trackFinish[trackIndex] = Math.max(trackFinish[trackIndex], producedAt);
     const sourcePlanned = sourceArrivalAt > 0 && plan.finish >= sourceArrivalAt;
     productions.push({ at: producedAt, trackIndex, segment, requiresSource: sourceArrivalAt > 0, sourceArrivalAt,
-      sourcePlanned });
+      sourcePlanned, runAdmissionAt, runOpenSeconds, productionStartAt, encodeWork });
     const deliveryAt = link.finish(sizeBits, Math.max(transferFinish, producedAt));
     transferFinish = deliveryAt;
-    completions.push({ at: deliveryAt + finiteNonNegative(track.appendSeconds), trackIndex, segment, sourceArrivalAt,
+    const appendSeconds = finiteNonNegative(track.appendSeconds);
+    completions.push({ at: deliveryAt + appendSeconds, deliveryAt, appendSeconds, trackIndex, segment, sourceArrivalAt,
       sourcePlanned });
   }
 
@@ -547,13 +552,32 @@ export function predictPlaybackReadiness(input = {}) {
         ...(stop.unavailableSource ? { unavailableSource: stop.unavailableSource } : {}) };
     }
   }
-  const firstRequiredTrackSeconds = trackState.slice(0, requiredTracks).map((state, trackIndex) => {
+  const firstRequiredStages = trackState.slice(0, requiredTracks).map((state, trackIndex) => {
     const first = state.segments.find(segment => segment.endSeconds > position);
-    if (!first) return 0;
-    if (first.ranges.every(range => contains(state.clientRanges, range.start, range.end))) return 0;
+    if (!first) return { track: state.track.id ?? trackIndex, segment: null, alreadyBuffered: true,
+      sourceArrivalSeconds: 0, runAdmissionSeconds: null, runOpenSeconds: 0, productionStartSeconds: 0,
+      productionCompleteSeconds: 0, deliveryCompleteSeconds: 0, appendSeconds: 0, completionSeconds: 0 };
+    if (first.ranges.every(range => contains(state.clientRanges, range.start, range.end))) {
+      return { track: state.track.id ?? trackIndex, segment: first.index, alreadyBuffered: true,
+        sourceArrivalSeconds: 0, runAdmissionSeconds: null, runOpenSeconds: 0, productionStartSeconds: 0,
+        productionCompleteSeconds: 0, deliveryCompleteSeconds: 0, appendSeconds: 0, completionSeconds: 0 };
+    }
     const completion = completions.find(item => item.trackIndex === trackIndex && item.segment.index === first.index);
-    return completion?.at ?? null;
+    if (!completion) return { track: state.track.id ?? trackIndex, segment: first.index, alreadyBuffered: false,
+      sourceArrivalSeconds: null, runAdmissionSeconds: null, runOpenSeconds: null, productionStartSeconds: null,
+      productionCompleteSeconds: null, deliveryCompleteSeconds: null, appendSeconds: null, completionSeconds: null };
+    const production = productions.find(item => item.trackIndex === trackIndex && item.segment.index === first.index);
+    return { track: state.track.id ?? trackIndex, segment: first.index, alreadyBuffered: false,
+      sourceArrivalSeconds: production?.sourceArrivalAt ?? 0,
+      runAdmissionSeconds: production?.runAdmissionAt ?? null,
+      runOpenSeconds: production?.runOpenSeconds ?? 0,
+      productionStartSeconds: production?.productionStartAt ?? null,
+      productionCompleteSeconds: production?.at ?? null,
+      deliveryCompleteSeconds: completion.deliveryAt,
+      appendSeconds: completion.appendSeconds,
+      completionSeconds: completion.at };
   });
+  const firstRequiredTrackSeconds = firstRequiredStages.map(stage => stage.completionSeconds);
   const firstRequiredSegmentsSeconds = firstRequiredTrackSeconds.every(Number.isFinite)
     ? Math.max(0, ...firstRequiredTrackSeconds) : null;
   const delay = Math.max(0, ...constraints);
@@ -564,6 +588,7 @@ export function predictPlaybackReadiness(input = {}) {
       Number.isFinite(delay) ? 'minimum-safe-delay' : 'service-not-advancing', preparedSegments);
   return { ...forecast, measuredAt: now, predictedStartAt: Number.isFinite(delay) ? now + delay * 1000 : null,
     firstRequiredSegmentsSeconds,
+    firstRequiredStages,
     // The piece whose `kind` — its production, or its delivery to the page —
     // comes `atSeconds` from now while the media before it lasts
     // `aheadSeconds`: the difference is the delay.

@@ -62,6 +62,19 @@ test("forecasts the first required segment from source, processing, and client d
   const forecast = predictPlaybackReadiness(input());
 
   assert.equal(forecast.firstRequiredSegmentsSeconds, 1);
+  assert.deepEqual(forecast.firstRequiredStages, [{
+    track: "video",
+    segment: 0,
+    alreadyBuffered: false,
+    sourceArrivalSeconds: 0,
+    runAdmissionSeconds: null,
+    runOpenSeconds: 0,
+    productionStartSeconds: 0,
+    productionCompleteSeconds: 0,
+    deliveryCompleteSeconds: 1,
+    appendSeconds: 0,
+    completionSeconds: 1
+  }]);
 });
 
 test("a delivered first segment does not hide a later delivery gap", () => {

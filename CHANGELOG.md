@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Keep and publish embedded subtitle cues read while the viewer's position moved on, instead of discarding them as obsolete (#ttv-7).
+
 ## 2.105.6
 
 - **Fix**: Trace per-segment source-range resolution, including track, output, segment, method, outcome and monotonic duration (#ttv-185).

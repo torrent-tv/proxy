@@ -76,7 +76,14 @@ export class SubtitleOrchestrator {
             endSeconds: packet.duration > 0 ? packet.pts + packet.duration : null, text };
           pending.push({ identity, cue });
         }
-        if (params.isCurrent?.() === false || this.#packetCues.get(key) !== state) {
+        // A cue read from the file is a fact about the file, not about where
+        // the viewer stood when the read began. A position report moves that
+        // stand every 1.5 s, so a read that crossed one used to throw away the
+        // cues it had read, and those lines never reached the page
+        // (torrent-tv/meta#7). They are kept and published; only a forgotten
+        // source cannot take them.
+        const obsolete = params.isCurrent?.() === false;
+        if (this.#packetCues.get(key) !== state) {
           return { kind: "terminal", reason: "request-obsolete", requestId };
         }
         state.ready = true;
@@ -96,7 +103,7 @@ export class SubtitleOrchestrator {
           }
         }
         const fresh = TextSubtitleTrack.finalizeCues(ordered(), track.codecId).filter(cue => !previous.has(cue.seq));
-        if (fresh.length && params.isCurrent?.() !== false) {
+        if (fresh.length) {
           const cues = fresh;
           this.cues.publish?.({ sourceKey: params.sourceKey, fileIndex: params.fileIndex,
             trackIndex: track.declaredIndex, cues, withdrawn, language: track.language ?? "",
@@ -104,6 +111,7 @@ export class SubtitleOrchestrator {
             cursor: state.cursor, spanStartSeconds: cues[0]?.startSeconds ?? null,
             spanEndSeconds: cues.at(-1)?.endSeconds ?? null, walkedClusters: 0, indexedClusters: 0 });
         }
+        if (obsolete) return { kind: "terminal", reason: "request-obsolete", requestId };
         result = { kind: "result", value: { cues: [...state.packets.values()], track, coveredClusters: 0, indexedClusters: 0 }, requestId };
       }
     } catch (error) {

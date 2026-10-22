@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.7
 
 - **Fix**: Keep and publish embedded subtitle cues read while the viewer's position moved on, instead of discarding them as obsolete (#ttv-7).
 

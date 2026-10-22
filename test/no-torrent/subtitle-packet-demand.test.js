@@ -133,3 +133,21 @@ test("subtitle packet reading declares missing payload and publishes complete te
   assert.equal(pushed.length, 1);
   assert.equal((await subtitles.getCues({}, 0, "source", 3)).cues.length, 2);
 });
+
+test("cues read while the viewer's position moved on are kept and published", async () => {
+  const track = { type: "subtitle", trackNumber: 3, declaredIndex: 0, codecId: "S_TEXT/UTF8", isTextBased: () => true };
+  const index = new PacketIndex();
+  index.declareTrack(3, { type: "subtitle" });
+  index.append(3, { pts: 1, duration: 1, ranges: [[10, 12]] });
+  index.complete(3);
+  const pushed = [];
+  const subtitles = new SubtitleOrchestrator({ containerFor: async () => ({ readTracks: async () => [track],
+    readPacketIndex: async () => index, cueTextOf: MatroskaContainer.cueTextOf }) }, { publish: entry => pushed.push(entry) });
+  let current = true;
+  const result = await subtitles.inspectPackets({ sourceKey: "source", fileIndex: 0, subtitleTrackIndex: 0, fileSize: 30,
+    packetInterval: { from: 0, to: 4, trackIds: [3] }, isCurrent: () => current,
+    readRange: async () => { current = false; return Buffer.from("One"); } });
+  assert.equal(result.reason, "request-obsolete");
+  assert.deepEqual(pushed.map(entry => entry.cues.map(cue => cue.text)), [["One"]]);
+  assert.deepEqual((await subtitles.getCues({}, 0, "source", 3)).cues.map(cue => cue.text), ["One"]);
+});

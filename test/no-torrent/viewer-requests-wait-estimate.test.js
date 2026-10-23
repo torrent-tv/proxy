@@ -3,7 +3,16 @@ import test from "node:test";
 
 import { logger } from "../../utils/logger.js";
 import { CutGrid, OutputSpec, VideoOutput } from "../../services/encode/output/index.js";
-import { ViewerRequests } from "../../services/server/ViewerRequests.js";
+import { sourceFileIndexesForOutput, ViewerRequests } from "../../services/server/ViewerRequests.js";
+
+test("playback operations report every source file and retain the output file as fallback", () => {
+  assert.deepEqual(sourceFileIndexesForOutput({
+    spec: { sourceFileIndexes: [4, 9] }, file: { fileIndex: 4 }
+  }), [4, 9]);
+  assert.deepEqual(sourceFileIndexesForOutput({
+    spec: { sourceFileIndexes: [] }, file: { fileIndex: 4 }
+  }), [4]);
+});
 
 test("early forecasts retain one wait identity, advance revisions, and learn the measured outcome", () => {
   const noted = [];

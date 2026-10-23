@@ -294,7 +294,7 @@ The progress response may include `playbackReadiness`:
 | `ready` | The measured service model meets the remaining presentation deadlines and real client tracks cover the current position. Browser capacity is not an admission condition. |
 | `delaySeconds` | When `ready` is false, the predicted minimum delay from now to a safe start; `null` means the current measurements do not support a finite forecast. |
 | `measuredAt`, `predictedStartAt` | Proxy-clock observation and conditional start time, in milliseconds. The UI counts down using its own elapsed clock, without comparing clocks across machines. |
-| `operations` | Required video/audio operations, their source/output codecs, current speed and processed position. |
+| `operations` | Required video/audio output paths, their source/output codecs, current speed and processed position. `sourceFileIndexes` names the torrent files whose urgent source-byte demand contributes to each operation. |
 | `preparedUntilSeconds` | Continuous proxy media predicted to be available at the forecast start. |
 | `bufferedSeconds` | Client buffer reported to the proxy. |
 | `reserveSeconds` | Maximum interruption reserve across the required video and selected audio outputs, derived from each output's measured supply waits and next segment duration. |

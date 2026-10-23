@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The `transcode … start` log line gives the position the run was asked to begin at, to a tenth of a second, instead of that position rounded to the nearest 10 s. The rounded figure was used only in this line and could name a start past the viewer: a soundtrack asked at 18.853 s was logged `start=20s` (#ttv-104).
+
 ## 2.107.2
 
 - **Fix**: Hold a torrent's swarm for five minutes after its last reader goes, so a viewer who reloads or reopens the page finds its connections still open; a torrent held whole still lets its swarm go at once (#ttv-240).

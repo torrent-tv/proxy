@@ -92,12 +92,17 @@ test("connection closure forgets a viewer still preparing source metadata", asyn
 
 test("the selected source index is recorded before playback metadata is requested", async () => {
   const viewers = new Viewers();
+  const waitEvents = [];
   const reply = { send: value => value };
   await handleApiPlaybackPlanPost({ body: { sourceKey: "source", fileIndex: 7, consumerId: "person" } }, reply,
     { viewers, playbackPlanner: { getPlan: async () => {
       assert.equal(viewers.get("person").source.selectedFileIndex, 7);
       return { pending: true };
-    } } });
+    } }, observeWait: (sourceKey, event, fields) => waitEvents.push({ sourceKey, event, ...fields }) });
+  assert.deepEqual(waitEvents.map(({ process, phase }) => [process, phase]), [["P3", "begin"], ["P3", "end"]]);
+  assert.equal(waitEvents[0].sourceKey, "source");
+  assert.ok(waitEvents[1].durationMs >= 0);
+  assert.equal(waitEvents[1].outcome, "plan-ready");
 });
 
 test("visible files use unique source indices and preserve an explicit selection", () => {

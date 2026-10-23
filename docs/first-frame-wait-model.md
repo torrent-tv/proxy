@@ -152,9 +152,9 @@ measurement gap instead of being presented as an atomic duration.
 | B7.v / B7.a | First fragment request of the stream, held until its piece is published (P11) or answered at once when it already is. For an MPEG-TS soundtrack this is the request that opens P6.a | B6 of the stream (fMP4) or its playlist (MPEG-TS) | fragment bytes received | per stream |
 | B8.v / B8.a | Parse/remux a loaded fragment. fMP4: `MP4Demuxer` + `PassThroughRemuxer`, whose `remux` returns the init only together with a fragment that has samples. MPEG-TS: `TSDemuxer` + `MP4Remuxer`, which builds the track description and init from the first fragment's samples (`generateIS` inside `remux`). The measured span is `FRAG_LOADED` → matching `FRAG_PARSED`; `BUFFER_CODECS` is a separate point event | B6 (fMP4) and B7 of the stream | event raised | per stream |
 | B9 | Create required SourceBuffers; this can overlap B8 parsing, and `BUFFER_CREATED` can precede a later per-track `BUFFER_CODECS` event | first codec declaration for a created track | buffers exist | blocking |
-| B10.v / B10.a | Init append to the stream's SourceBuffer | B9 | `updateend` | per buffer |
+| B10.v / B10.a | Init append to the stream's SourceBuffer | B9 | matching hls.js `BUFFER_APPENDED` acknowledgement (emitted after the append completes) | per buffer |
 | B11 | `t3`: `readyState >= HAVE_METADATA` (`#ensureVideoReady`, no decoded frame required). Under Media Source this follows the init of every SourceBuffer. A progress poll runs every 1 s meanwhile | every present B10 | `loadedmetadata` | blocking |
-| B12.v / B12.a | First fragment append | B10 of the stream | `updateend` | per buffer |
+| B12.v / B12.a | First fragment append | B10 of the stream | matching hls.js `BUFFER_APPENDED` acknowledgement (emitted after the append completes) | per buffer |
 
 Because hls.js produces a stream's buffer description only from its first
 fragment, in fMP4 and in MPEG-TS, `t3` follows the production and delivery of
@@ -400,7 +400,7 @@ logged at the process boundary; "derived" is computed from other values;
 | A11 | B / P | wait, attempt, request id, source key | every stats poll | response or close | worker queue and W10 | file statistics and forecast fields | direct request span; polling runs alongside A12 |
 | A13 / A14 | B / P | wait, attempt, source key, track | each fingerprint, metadata or subtitle request | response or close | shared source reads | track or metadata result | direct request spans; asynchronous work remains outside blocking startup time |
 | A12 / P2–P3 | B / P | wait, attempt, source key and file | structured `http-start`; P2/P5/X1 begin | structured `http-end`; paired P2/P5/X1 ends; `t2` | R8 queued and read times on proxy source events | ranges, bytes | direct for each instrumented read |
-| P3 | P | wait operation, source and file | playback-plan handler entry | handler response or close | P2 and P4 | plan fields | direct route span on proxy clock |
+| P3 | P | wait operation, source and file | `process=P3 phase=begin` around plan construction | matching `process=P3 phase=end`, including error/cancel outcome; endpoint `http-end` is the wider request envelope | P2 and P4 | plan fields | direct proxy-monotonic process span; endpoint span is separate |
 | X1 | P | source key, request id | `process=X1 phase=begin` | `process=X1 phase=end` | R8 | probe request and result | direct, operation elapsed on proxy clock |
 | P5 | P | source key, file index, request id | `process=P5 phase=begin` | `process=P5 phase=end` | R8 | index bytes and read result | direct, operation elapsed on proxy clock |
 | B1 / P6.v | B / P | wait, attempt, request id | browser output-session request / proxy open | browser response / proxy handler return | R4 | open calls and plan wait | separate clocked request spans; proxy logs inner open durations |
@@ -411,9 +411,9 @@ logged at the process boundary; "derived" is computed from other values;
 | P8 | P | source key, output key, run range, input request | `process=P8.v/a phase=begin` | paired end at input admitted or terminal; attempt/wait events for retries | R8, W9, R4 detailed in adjacent input/read records | bytes, queue/read/copy times | direct, proxy monotonic clock |
 | F1.v / F1.a | P | source key, run token, output, file | monotonic timestamp at run spawn | first input bytes handed off by `/encode-input`, `/stream`, or the successful admitted-input `stdin.write` callback | R3 | bytes | direct proxy-monotonic span; endpoint is byte handoff, not FFmpeg's internal packet parser; never subtract wall-clock `run.startedAt` |
 | F2.v / F2.a | P | source key, run token, output, segment | first input bytes delivered | first output piece closed | R3 | segment | direct proxy-monotonic span; P11 separately records publication |
-| P11 | P | output key, segment index | encoder run start | `encode-run … #<index> … named +<ms>, published +<ms>` (`EncodeRuns.onClosed`), relative to that run's start | — | one piece | direct publication observation; `cold-start <id>: first-segment ready +<ms>` is a different event, written when the first segment is **served** (`SegmentServing`) |
+| P11 | P | output key, segment index | `process=P11.v/a phase=begin` immediately before `SegmentStore.publish` | matching `phase=end` with duration/outcome; encoder run-relative named/published times are separate milestones | — | one piece | direct monotonic publication span; first-segment-served is a later event |
 | P13 | P | source key, output key, init filename | init request start | init request answer | read/production wait is within request | bytes | direct request span, proxy monotonic clock |
-| P12 + transfer | P / B | P `requestId`; B path | P route entry (in `fetchMs`) | P `[net-debug] sent … requestId= fetchMs= sendMs= readMs= chanMs= drainMs= loopMax=`; B `[net-debug] dc-load {path, waitMs, transferMs}` | R2, R5.m | bytes | direct on each side; B line carries the path, not the `requestId` |
+| P12 + transfer | P / B | P/B `requestId` | proxy HTTP route entry (`http-start`, endpoint classified as P12) | proxy `http-end`; `[net-debug] sent … requestId= fetchMs= sendMs= readMs= chanMs= drainMs= loopMax=` decomposes route wait and channel delivery; browser `[dc-load]` records the same `requestId`, `waitMs` and `transferMs` | R2, R5.m | bytes | direct proxy endpoint and transfer spans plus browser span; joined by request ID |
 | B3 | B / P | wait, attempt, request id | `waitForHlsPlaylist` request | response or close | R5.m | media playlist readiness | direct request span; separate from hls.js playlist loading |
 | B5 manifest request | B | wait, attempt, operation, URL | custom HLS loader `load()` | response body read, HTTP error body read, transport error or abort | R5.m / browser main thread | manifest bytes and status | direct browser-clock span through complete response body |
 | B5 manifest parse | B | wait, attempt, operation, HLS instance | hls.js `MANIFEST_LOADED` carrying `stats.parsing.start/end` | hls.js `MANIFEST_PARSED` for the same instance | browser main thread | manifest URL | direct browser-clock span from hls.js parser timing; the event pair can be emitted in the same task and does not itself delimit parse work |
@@ -430,7 +430,7 @@ logged at the process boundary; "derived" is computed from other values;
 | C1.2 | B | wait, attempt | readiness update begins | `#waitingModel.update()` returns | — | readiness and buffered seconds | direct operation span |
 | C1.3 | B | wait, attempt | four-second no-growth threshold | `resumeLoadAt(bufferedEnd)` returns | R6 | buffered end seconds | conditional direct operation span |
 | C1.4 | B | wait, attempt | unsuccessful gate iteration ends | 250 ms timer fires or cancellation occurs | browser timer queue | wait duration | direct timer-wait span |
-| P14 | P | session id, consumer | request | `readiness parts … in all <ms>`; `playback readiness {…}` on a reason or missing-input change; `playback held …` | R2 | — | direct |
+| P14 | P | session id, consumer | `process=P14 phase=begin` for readiness calculation | matching `phase=end` with duration; `readiness parts … in all <ms>` remains the breakdown and `http-end` the wider request envelope | R2 | — | direct proxy-monotonic process span |
 | P15 | P | source key, wait id, consumer, revision | estimate selected for a revision | `process=P15 phase=event` with remaining and total seconds and estimate basis | R2 | seconds | direct point observation; estimate calculation is synchronous |
 | C3–C5 | B / P | wait, attempt, consumer and selected track | C3 `subtitle-hold` begin; C5 `play` | C3 release/error/cancel; C4 playback-ready; C5 `playing` | C1 gate | track and state | direct C3 span when held; point or state observations for C4/C5 |
 | S0 seek input | B | wait, attempt, target, input source | player controls: `media-seek-request`; native/system controls: first `seeking` event | `seek-input`; native path also `S0.seek-debounce` end at settled target | — | target seconds, source | direct monotonic trace; native physical input to `seeking` remains unobservable |
@@ -579,7 +579,7 @@ did not occur in those captured attempts; it never means zero duration.
 | Browser: main-thread observation | R6 | Record browser long tasks when supported | Field 05, attempt 1: 128 ms and 65 ms long tasks |
 | Proxy main lane | P1 | Resolve torrent and wait for ready state | Field 05, attempt 1: 8.7 ms median over 138 cached lookups |
 | Proxy main lane | P2 | Read container declarations through per-file queue | Field 05, attempt 1: 0.1 ms median over 1,524 reads |
-| Proxy main lane | P3 | Build plan and select offered outputs | Included in plan response; no separate span |
+| Proxy main lane | P3 | Build plan and select offered outputs | Direct span added in the plan handler; example timing is pending a new field trace |
 | Proxy main lane, repeated pass | P4 | Resolve demanded source ranges and publish priority map | Field 05, attempt 1: 132.7 ms median over 134 passes |
 | Proxy main lane | P5 | Read keyframe index for copied video | Not separately observed in captured path |
 | Proxy output lane | P6.v | Open picture output | Field 05, attempt 1: 55.2 ms median over 3 opens |
@@ -588,13 +588,13 @@ did not occur in those captured attempts; it never means zero duration.
 | Proxy parallel output lanes | P7.a | Plan soundtrack encoder runs | Same interval as P7.v: 254.8 ms, on proxy clock |
 | Proxy parallel output lanes | P8.v | Admit and copy picture run input | Field 05, attempt 1: 331.6 ms median over 2 completed spans |
 | Proxy parallel output lanes | P8.a | Admit and copy soundtrack run input | Field 05, attempt 1: 354.6 ms median over 250 completed spans |
-| Proxy parallel output lanes | P11.v | Publish closed picture piece | Publication event observed; no exclusive duration |
-| Proxy parallel output lanes | P11.a | Publish closed soundtrack piece | Publication event observed; no exclusive duration |
+| Proxy parallel output lanes | P11.v | Publish closed picture piece | Direct span added around SegmentStore.publish; field timing pending |
+| Proxy parallel output lanes | P11.a | Publish closed soundtrack piece | Direct span added around SegmentStore.publish; field timing pending |
 | Proxy parallel output lanes | P13.v | Make picture init segment readable (fMP4) | No separate completed span in captured path |
 | Proxy parallel output lanes | P13.a | Make soundtrack init segment readable (fMP4) | No separate completed span in captured path |
-| Proxy parallel output lanes | P12.v | Serve and transfer picture bytes | Captured in request/network records; no single end-to-end span |
-| Proxy parallel output lanes | P12.a | Serve and transfer soundtrack bytes | Captured in request/network records; no single end-to-end span |
-| Proxy main lane, repeated poll | P14 | Compute playback readiness forecast | Readiness observations recorded; no exclusive end-to-end compute span |
+| Proxy parallel output lanes | P12.v | Serve and transfer picture bytes | Direct proxy endpoint and transfer spans; browser span joins by request ID, field timing pending |
+| Proxy parallel output lanes | P12.a | Serve and transfer soundtrack bytes | Direct proxy endpoint and transfer spans; browser span joins by request ID, field timing pending |
+| Proxy main lane, repeated poll | P14 | Compute playback readiness forecast | Direct span added around readiness assembly; example timing is pending a new field trace |
 | Proxy main lane, observer | P15 | Emit early-estimate revision | Point observations; no duration |
 | Proxy main lane, conditional | X1 | Run ffprobe for unrecognised container | Not taken: container was recognised |
 | Encoder lane | F1.v | Hand first picture input bytes to FFmpeg | Post-release 2026-10-23 trace: positive spans of 209.2–1,081.3 ms for run tokens 32–41 |
@@ -1435,9 +1435,11 @@ Against proxy `aa67015` (the second review in torrent-tv/meta#185):
 
 ## 12. Limits of this model
 
-1. No durations; it is not a forecast. Field magnitudes come from the research
-   notes of torrent-tv/meta#185.
-2. Section 8 lists the remaining boundary and resource-measurement limits; a field run must mark those as unobserved instead of assigning their time to another process.
+1. The table records observed stage durations from named field sessions; these
+   samples describe the process and are not predictions for a future session.
+2. Section 8 lists the remaining boundary and shared-resource limits; a field
+   run must mark those as unobserved instead of assigning their time to another
+   process.
 3. hls.js behaviour is read from its 1.7.3 source, not measured in this player.
 4. Soundtrack and quality change holds (section 9, item 5), the magnet open
    path in the page (`#processMagnetPlayback`), the direct-play path (A17) and

@@ -53,8 +53,9 @@ export class SourceWaitTrace {
         !Number.isSafeInteger(attempt) || attempt < 0) return;
       const context = { wait, attempt, operation, startedAt: this.now() };
       this.requests.set(req, context);
-      const process = typeof statedProcess === "string" && /^[A-Z][0-9]+(?:\.(?:[0-9]+[a-z]?|[va]))?$/.test(statedProcess)
-        ? statedProcess : processForRequest(req.url);
+      const endpointProcess = processForRequest(req.url);
+      const process = endpointProcess ?? (typeof statedProcess === "string" &&
+        /^[A-Z][0-9]+(?:\.(?:[0-9]+[a-z]?|[va]))?$/.test(statedProcess) ? statedProcess : null);
       this.write(context, "http-start", { process, phase: "begin", method: req.method, path: req.url,
         requestId: req.headers["x-ttv-forwarded-request-id"] ?? req.id });
       let finished = false;
@@ -92,11 +93,11 @@ export class SourceWaitTrace {
 }
 
 function processForRequest(path) {
+  if (/^\/api\/transcode-sessions\/[^/?]+\/progress(?:\?|$)/.test(path)) return "P14";
   if (path.startsWith("/api/transcode-sessions")) return "P6.v";
   if (path.startsWith("/api/playback-plan")) return "P3";
   if (/\/transcode\/.*\.m3u8(?:\?|$)/.test(path)) return "P12";
   if (/\/transcode\/.*(?:init|\.mp4)(?:\?|$)/.test(path)) return "P12";
   if (/\/transcode\/.*(?:\.m4s|\.ts)(?:\?|$)/.test(path)) return "P12";
-  if (path.startsWith("/api/session-progress")) return "P14";
   return null;
 }

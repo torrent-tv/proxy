@@ -46,8 +46,13 @@ test("untraced requests produce no events; traced finish is recorded once", asyn
   assert.equal(events.filter(event => event.event === "http-end").length, 1);
   assert.equal(events.at(-1).duration, 90);
   assert.equal(events.at(-1).operation, "b1");
-  assert.equal(events.find(event => event.event === "http-start").process, "A12");
+  assert.equal(events.find(event => event.event === "http-start").process, "P3");
   assert.equal(events.find(event => event.event === "http-end").phase, "end");
+  const progressRequest = { method: "GET", url: "/api/transcode-sessions/session-1/progress?consumer=viewer",
+    headers: { "x-ttv-wait-trace": "a", "x-ttv-wait-attempt": "1", "x-ttv-wait-operation": "b2",
+      "x-ttv-wait-process": "S2.1" } };
+  await hooks.onRequest(progressRequest, reply);
+  assert.equal(events.filter(event => event.event === "http-start").at(-1).process, "P14");
 });
 
 test("W9 records the exact piece-store write duration and preserves callback results", () => {

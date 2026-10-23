@@ -1614,7 +1614,8 @@ export async function startProxyServer({
     handleApiClientLogsPost(req, reply, { clientLogs, viewerRequests: outputParts.viewerRequests })
   );
   app.post("/api/playback-plan", async (req, reply) =>
-    handleApiPlaybackPlanPost(req, reply, { playbackPlanner, viewers: outputParts.viewers })
+    handleApiPlaybackPlanPost(req, reply, { playbackPlanner, viewers: outputParts.viewers,
+      observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields) })
   );
   app.post("/api/playback-plan/audio-tracks", async (req, reply) =>
     handleApiPlaybackPlanAudioTracksPost(req, reply, { playbackPlanner })

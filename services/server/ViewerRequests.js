@@ -865,6 +865,11 @@ export class ViewerRequests {
   }
 
   async #playbackReadinessFor(session, consumerId, progress, outputMbps) {
+    const waitStartedAt = performance.now();
+    const waitFields = { process: "P14", sessionId: session.id, consumerId };
+    this.#host.observeWait?.(session.file.sourceKey, "process", { ...waitFields, phase: "begin", at: waitStartedAt });
+    let waitOutcome = "error";
+    try {
     const now = Date.now();
     // WHERE AN ANSWER'S TIME GOES, said with each answer. On Home Assistant a
     // held viewer's answer took 11.2 s while its forecast took 0.1-0.4 s and
@@ -1116,7 +1121,14 @@ export class ViewerRequests {
     this.#host.noteViewerWaiting?.(consumerId || session.id,
       holding?.kind === "production" ? { address: holding.track, index: holding.segment } : null);
     delete forecast.firstRequiredStages;
+    waitOutcome = "forecast-ready";
     return forecast;
+    } finally {
+      const waitEndedAt = performance.now();
+      this.#host.observeWait?.(session.file.sourceKey, "process", { ...waitFields, phase: "end", at: waitEndedAt,
+        startedAt: waitStartedAt, endedAt: waitEndedAt, durationMs: waitEndedAt - waitStartedAt,
+        outcome: waitOutcome });
+    }
   }
 
   /**

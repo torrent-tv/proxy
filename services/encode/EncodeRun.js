@@ -774,6 +774,14 @@ export class EncodeRun {
     if (this.#process === null || this.#ended) {
       return;
     }
+    // AN EXITED PROCESS IS NOT STOPPED. Its exit is being answered, and the
+    // answer can publish its last piece and ask the plan again, which then
+    // finds nothing left ahead of it. Taken as a stop, its ending took an edge
+    // the table does not have and the stop's age was kept as what a kill costs
+    // (Home Assistant 2026-10-23, torrent-tv/meta#117).
+    if (this.#processExited) {
+      return;
+    }
     // A cut closed before our stop stays complete; the file flushed by the
     // subsequent signal must never be published as that same proof. It is
     // waited for all the same: it says where the next keyframe's leading

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A stop ordered after an encoder's process has exited is ignored. The exit can publish the run's last piece and ask the plan again, which finds nothing left ahead of the run and stops it: the ending then took an edge the run's state table does not have (`STOPPED + EXITED_COMPLETE — no such edge; ignored`), a signal went to a process that was gone, and the stop's age at the exit, about 0 ms, was kept among this host's kill costs, which price a move. Field 2026-10-23, Drifters 04 on 2.107.5: the run on the last piece, #205 (#ttv-117).
+
 ## 2.107.5
 
 - **Fix**: The plan no longer counts a run reading an original input as reaching numbers past its stretch. That run makes nothing after its `to`, but the plan's score had it reaching every later number, so a run starting on the piece right after such a stretch could be stopped as "the film is no worse off without it" and no encoder was placed there again until the stretch ended. Field 2026-10-05, Drifters 04: the viewer stood on #205, the last piece, the run on #205 was stopped 2.1 s after its start in favour of a run ending at #204, and the viewer waited for minutes. A packet input's run still counts as growing past its `to` (#ttv-117).

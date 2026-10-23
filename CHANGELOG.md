@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.2
 
 - **Fix**: Hold a torrent's swarm for five minutes after its last reader goes, so a viewer who reloads or reopens the page finds its connections still open; a torrent held whole still lets its swarm go at once (#ttv-240).
 

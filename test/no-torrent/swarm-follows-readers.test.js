@@ -29,7 +29,9 @@ import assert from "node:assert/strict";
 import {
   isWanted,
   leaveSwarm,
+  noteAfterRejoin,
   rejoinSwarm,
+  rememberSwarmAddresses,
   swarmDecisionFor
 } from "../../services/torrent/torrent-pool.js";
 import { demandFor, forgetTorrent } from "../../services/torrent/download/registry.js";
@@ -201,4 +203,181 @@ test("whatever happens to the swarm, an unwanted torrent is on the idle clock", 
   for (const everWanted of [true, false]) {
     assert.equal(swarmDecisionFor({ wanted: false, everWanted }).onTheClock, true);
   }
+});
+
+/**
+ * A torrent whose peers carry what WebTorrent 2.8.5 gives them — a type, an
+ * address and, once connected, a wire — and which records `addPeer` and a DHT
+ * lookup instead of dialling or querying anybody.
+ *
+ * @param {Array<{ addr: string, type: string, wire?: boolean }>} specs
+ * @param {{ maxConns?: number, dht?: boolean }} [options]
+ * @returns {object}
+ */
+function torrentWithPeers(specs, { maxConns = 55, dht = true } = {}) {
+  const torrent = torrentWith(0);
+  torrent.client = { maxConns };
+  torrent.added = [];
+  torrent.lookups = [];
+  torrent.announced = 0;
+  const place = (spec) => {
+    torrent._peers.set(spec.addr, {
+      type: spec.type,
+      addr: spec.addr,
+      wire: spec.wire ? {} : null,
+      destroy() {
+        torrent._peers.delete(spec.addr);
+      }
+    });
+  };
+  for (const spec of specs) place(spec);
+  torrent.place = place;
+  torrent.addPeer = (addr, source) => {
+    torrent.added.push({ addr, source });
+    if (torrent._peers.has(addr)) return false;
+    place({ addr, type: "tcpOutgoing" });
+    return true;
+  };
+  torrent.discovery = {
+    tracker: { update() { torrent.announced += 1; } },
+    dht: dht ? { lookup(infoHash, callback) { torrent.lookups.push({ infoHash, callback }); } } : null
+  };
+  return torrent;
+}
+
+test("the addresses kept at a departure are the dialled ones, connected first, within the dial limit", () => {
+  const torrent = torrentWithPeers([
+    { addr: "10.0.0.1:6881", type: "tcpOutgoing" },
+    { addr: "10.0.0.2:6881", type: "utpOutgoing", wire: true },
+    { addr: "10.0.0.3:51234", type: "tcpIncoming", wire: true },
+    { addr: "10.0.0.4:6881", type: "tcpOutgoing", wire: true },
+    { addr: "https://seed.example/files/", type: "webSeed" },
+    { addr: "10.0.0.5:6881", type: "utpOutgoing" }
+  ], { maxConns: 3 });
+
+  assert.equal(rememberSwarmAddresses(torrent), 3);
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+
+  // An incoming peer's port is the one its side connected from, and a web seed
+  // is restored by its own URL; neither is an address to dial.
+  assert.deepEqual(torrent.added.map(({ addr }) => addr), ["10.0.0.2:6881", "10.0.0.4:6881", "10.0.0.1:6881"]);
+  assert.ok(torrent.added.every(({ source }) => source === "rejoin"));
+});
+
+test("a rejoin hands every kept address back and keeps them for the next one", () => {
+  const torrent = torrentWithPeers([
+    { addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true },
+    { addr: "10.0.0.2:6881", type: "tcpOutgoing" }
+  ]);
+  leaveSwarm(torrent);
+  assert.equal(torrent._peers.size, 0);
+
+  rejoinSwarm(torrent);
+  assert.deepEqual(torrent.added.map(({ addr }) => addr), ["10.0.0.1:6881", "10.0.0.2:6881"]);
+
+  // Nobody answered, so the library dropped the candidates, and the torrent
+  // left again with no peer at all: the field case of 08:44:19, a departure
+  // 71 ms after the rejoin.
+  for (const peer of [...torrent._peers.values()]) peer.destroy();
+  leaveSwarm(torrent);
+  torrent.added.length = 0;
+  rejoinSwarm(torrent);
+  assert.deepEqual(torrent.added.map(({ addr }) => addr), ["10.0.0.1:6881", "10.0.0.2:6881"],
+    "an empty departure erased the addresses the next reader needed");
+});
+
+test("a later departure puts what is connected now first and keeps the earlier addresses after it", () => {
+  const torrent = torrentWithPeers([{ addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true }], { maxConns: 3 });
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+  for (const peer of [...torrent._peers.values()]) peer.destroy();
+  torrent.place({ addr: "10.0.0.7:6881", type: "tcpOutgoing" });
+  torrent.place({ addr: "10.0.0.8:6881", type: "utpOutgoing", wire: true });
+  torrent.place({ addr: "10.0.0.1:6881", type: "tcpOutgoing" });
+  leaveSwarm(torrent);
+  torrent.added.length = 0;
+  rejoinSwarm(torrent);
+  assert.deepEqual(torrent.added.map(({ addr }) => addr), ["10.0.0.8:6881", "10.0.0.7:6881", "10.0.0.1:6881"]);
+});
+
+test("a rejoin asks the DHT once at a time and leaves the trackers on their own schedule", () => {
+  const torrent = torrentWithPeers([{ addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true }]);
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+  assert.equal(torrent.lookups.length, 1);
+  assert.equal(torrent.lookups[0].infoHash, torrent.infoHash);
+
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+  assert.equal(torrent.lookups.length, 1, "a second lookup was started while the first was running");
+
+  // The answer ends it, a failed one too, and the next rejoin asks again.
+  torrent.lookups[0].callback(new Error("dht is destroyed"));
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+  assert.equal(torrent.lookups.length, 2);
+  torrent.lookups[1].callback(null, 8);
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+  assert.equal(torrent.lookups.length, 3);
+
+  assert.equal(torrent.announced, 0, "a tracker was announced to outside its own interval");
+});
+
+test("a private torrent, with no DHT and no discovery, rejoins on its kept addresses alone", () => {
+  const torrent = torrentWithPeers([{ addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true }], { dht: false });
+  leaveSwarm(torrent);
+  assert.equal(rejoinSwarm(torrent), true);
+  assert.equal(torrent.paused, false);
+  assert.deepEqual(torrent.added.map(({ addr }) => addr), ["10.0.0.1:6881"]);
+
+  const bare = torrentWith(2);
+  leaveSwarm(bare);
+  assert.equal(rejoinSwarm(bare), true, "a torrent without addPeer or discovery could not rejoin");
+  assert.equal(bare.paused, false);
+});
+
+test("a torrent held whole dials nobody and asks the DHT for nobody when a reader rejoins it", () => {
+  const torrent = torrentWithPeers([{ addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true }]);
+  leaveSwarm(torrent);
+  torrent.progress = 1;
+  assert.equal(rejoinSwarm(torrent), true);
+  assert.equal(torrent.paused, false);
+  assert.deepEqual(torrent.added, []);
+  assert.equal(torrent.lookups.length, 0);
+
+  // The addresses are still kept for a rejoin that has something to fetch.
+  torrent.progress = 0.4;
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+  assert.deepEqual(torrent.added.map(({ addr }) => addr), ["10.0.0.1:6881"]);
+});
+
+test("a lookup that throws does not stay marked as running", () => {
+  const torrent = torrentWithPeers([]);
+  let calls = 0;
+  torrent.discovery.dht.lookup = () => {
+    calls += 1;
+    throw new Error("not bound");
+  };
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+  assert.equal(calls, 2);
+});
+
+test("the first peer and the first data after a rejoin are noted once each, and again after the next rejoin", () => {
+  const torrent = torrentWithPeers([]);
+  assert.equal(noteAfterRejoin(torrent, "peer"), false, "a torrent that never rejoined had something noted");
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+  assert.equal(noteAfterRejoin(torrent, "peer"), true);
+  assert.equal(noteAfterRejoin(torrent, "peer"), false);
+  assert.equal(noteAfterRejoin(torrent, "data"), true);
+  assert.equal(noteAfterRejoin(torrent, "data"), false);
+  leaveSwarm(torrent);
+  rejoinSwarm(torrent);
+  assert.equal(noteAfterRejoin(torrent, "data"), true);
 });

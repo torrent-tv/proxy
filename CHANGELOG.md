@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.11
 
 - **Fix**: Keep the addresses a torrent dialled when it leaves its swarm and hand them back, with a DHT lookup, when a reader rejoins it, instead of resuming with no known peer until the next periodic announce (#ttv-238).
 

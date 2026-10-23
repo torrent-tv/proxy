@@ -27,13 +27,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  holdSwarm,
   isWanted,
   leaveSwarm,
   noteAfterRejoin,
   rejoinSwarm,
+  releaseSwarmHold,
   rememberSwarmAddresses,
   swarmDecisionFor
 } from "../../services/torrent/torrent-pool.js";
+import { IDLE_KEEP_MS, SWARM_HOLD_MS } from "../../services/storage/keep.js";
 import { demandFor, forgetTorrent } from "../../services/torrent/download/registry.js";
 import { Urgency } from "../../services/torrent/demand/index.js";
 
@@ -380,4 +383,90 @@ test("the first peer and the first data after a rejoin are noted once each, and 
   leaveSwarm(torrent);
   rejoinSwarm(torrent);
   assert.equal(noteAfterRejoin(torrent, "data"), true);
+});
+
+test("a departure holds the swarm, and lets it go once the hold has passed with nobody back", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const torrent = torrentWithPeers([{ addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true }]);
+  assert.equal(holdSwarm(torrent), true);
+  assert.equal(torrent.paused, false);
+  assert.equal(torrent._peers.size, 1, "a held swarm closed a connection");
+  t.mock.timers.tick(SWARM_HOLD_MS - 1);
+  assert.equal(torrent.paused, false, "the swarm went before its hold had passed");
+  t.mock.timers.tick(1);
+  assert.equal(torrent.paused, true);
+  assert.equal(torrent._peers.size, 0);
+  assert.equal(releaseSwarmHold(torrent), null, "a hold that ran out is still recorded");
+  rejoinSwarm(torrent);
+  assert.deepEqual(torrent.added.map(({ addr }) => addr), ["10.0.0.1:6881"], "the address dialled before the hold was lost");
+});
+
+test("a reader back within the hold finds every connection open and dials nobody", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const torrent = torrentWithPeers([
+    { addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true },
+    { addr: "10.0.0.2:6881", type: "tcpIncoming", wire: true }
+  ]);
+  holdSwarm(torrent);
+  t.mock.timers.tick(60_000);
+  assert.equal(rejoinSwarm(torrent), false, "a held swarm was taken back as if let go");
+  assert.equal(torrent._peers.size, 2);
+  assert.equal(torrent.added.length, 0);
+  assert.equal(torrent.lookups.length, 0);
+  t.mock.timers.tick(SWARM_HOLD_MS);
+  assert.equal(torrent.paused, false, "a cancelled hold still let the swarm go");
+});
+
+test("a second departure while held does not extend the hold", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const torrent = torrentWithPeers([{ addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true }]);
+  assert.equal(holdSwarm(torrent), true);
+  t.mock.timers.tick(SWARM_HOLD_MS - 1000);
+  assert.equal(holdSwarm(torrent), false);
+  t.mock.timers.tick(1000);
+  assert.equal(torrent.paused, true);
+});
+
+test("a torrent held whole lets its swarm go at the departure itself", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const torrent = torrentWithPeers([{ addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true }]);
+  torrent.progress = 1;
+  assert.equal(holdSwarm(torrent), false);
+  assert.equal(torrent.paused, true);
+  assert.equal(torrent._peers.size, 0);
+});
+
+test("a hold that runs out on a torrent wanted again or destroyed does nothing to it", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const wanted = torrentWithPeers([{ addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true }]);
+  const destroyed = torrentWithPeers([{ addr: "10.0.0.2:6881", type: "tcpOutgoing", wire: true }]);
+  try {
+    holdSwarm(wanted);
+    holdSwarm(destroyed);
+    demandFor(wanted).register.state({ claimant: "metadata:head", fileIndex: 0, byteStart: 0, byteEnd: 0, urgency: Urgency.TAIL });
+    destroyed.destroyed = true;
+    t.mock.timers.tick(SWARM_HOLD_MS);
+    assert.equal(wanted.paused, false);
+    assert.equal(wanted._peers.size, 1);
+    assert.equal(destroyed.paused, false);
+    assert.equal(destroyed._peers.size, 1);
+  } finally {
+    forgetTorrent(wanted);
+  }
+});
+
+test("a released hold lets nothing go later", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const torrent = torrentWithPeers([{ addr: "10.0.0.1:6881", type: "tcpOutgoing", wire: true }]);
+  holdSwarm(torrent);
+  assert.equal(typeof releaseSwarmHold(torrent), "number");
+  t.mock.timers.tick(SWARM_HOLD_MS);
+  assert.equal(torrent.paused, false);
+  assert.equal(releaseSwarmHold(torrent), null);
+});
+
+test("the swarm is held for less time than the torrent is kept", () => {
+  // The torrent is removed when the hour runs out; a hold as long would never
+  // let a swarm go before its torrent went.
+  assert.ok(SWARM_HOLD_MS > 0 && SWARM_HOLD_MS < IDLE_KEEP_MS);
 });

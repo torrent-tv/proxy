@@ -8,7 +8,7 @@
  * download.
  */
 
-import { IDLE_KEEP_MS } from "../storage/keep.js";
+import { IDLE_KEEP_MS, SWARM_HOLD_MS } from "../storage/keep.js";
 import dns from "node:dns/promises";
 import os from "node:os";
 import path from "node:path";
@@ -455,6 +455,76 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
 }
 
 /**
+ * Swarms kept for a while after their last reader went: the timer that lets
+ * each go, and when it was set.
+ *
+ * @type {Map<object, { timer: ReturnType<typeof setTimeout>, since: number }>}
+ */
+const swarmHolds = new Map();
+
+/**
+ * Keep the swarm of a torrent whose last reader has just left, for
+ * {@link SWARM_HOLD_MS}, and let it go then if nobody has come back.
+ *
+ * A reader who comes back within it — a reload, a tab opened again — finds every
+ * connection still open, the incoming ones too, which the addresses kept by
+ * `leaveSwarm` cannot give back. While held, the torrent downloads nothing:
+ * it is added with `deselect: true` and nothing is stated for it.
+ *
+ * The clock runs from the first departure, as the idle timer's does
+ * (torrent-tv/meta#95): a second departure while held does not extend it.
+ *
+ * A torrent held whole is let go at once. It has nothing to fetch, and a whole
+ * file with its swarm open is the 596 connections of 2026-09-11.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @param {number} [holdMs]
+ * @returns {boolean} Whether the swarm is held.
+ */
+export function holdSwarm(torrent, holdMs = SWARM_HOLD_MS) {
+  if (!torrent || torrent.destroyed || torrent.paused === true || swarmHolds.has(torrent)) {
+    return false;
+  }
+  if (torrent.progress === 1) {
+    leaveSwarm(torrent);
+    return false;
+  }
+  const timer = setTimeout(() => {
+    swarmHolds.delete(torrent);
+    if (!torrent.destroyed && !isWanted(torrent)) {
+      leaveSwarm(torrent);
+    }
+  }, holdMs);
+  timer.unref?.();
+  swarmHolds.set(torrent, { timer, since: performance.now() });
+  const open = Array.isArray(torrent.wires) ? torrent.wires.length : 0;
+  logger.info(
+    `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] its last reader went — ` +
+    `the swarm is held for ${Math.round(holdMs / 1000)}s, ${open} connection(s) open`
+  );
+  return true;
+}
+
+/**
+ * Stop holding a torrent's swarm, saying nothing: for a torrent that is going.
+ *
+ * Its timer holds the torrent strongly, as the idle timer did when it kept
+ * removed torrents alive (field 2026-10-04).
+ *
+ * @param {object} torrent
+ * @returns {number | null} Milliseconds it was held, or null when it was not.
+ */
+export function releaseSwarmHold(torrent) {
+  const held = swarmHolds.get(torrent);
+  if (!held) {
+    return null;
+  }
+  clearTimeout(held.timer);
+  swarmHolds.delete(torrent);
+  return performance.now() - held.since;
+}
+
+/**
  * Let go of the swarm of a torrent whose last reader has just left.
  *
  * A PROXY THAT NEEDS NOTHING FROM A SWARM SHOULD NOT BE IN THAT SWARM. While a
@@ -480,6 +550,9 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
  * Asked at the moment the last claim is released, leaving cannot happen
  * spontaneously: it is a consequence of a departure, and a torrent nobody has
  * read yet has nothing to depart from.
+ *
+ * It runs when the period {@link holdSwarm} keeps the swarm for has passed with
+ * nobody back, or at the departure itself for a torrent held whole.
  *
  * `paused` is the library's own word for this and the path it already checks,
  * so nothing here fights it. The pause alone does not close what is already
@@ -669,7 +742,21 @@ export function noteAfterRejoin(torrent, kind) {
  * @returns {boolean} Whether it had to be taken back.
  */
 export function rejoinSwarm(torrent) {
-  if (!torrent || torrent.destroyed || torrent.paused !== true) {
+  if (!torrent || torrent.destroyed) {
+    return false;
+  }
+  // Held, not let go: every connection is still open, so there is nothing to
+  // resume and nobody to dial.
+  const heldMs = releaseSwarmHold(torrent);
+  if (heldMs !== null) {
+    const open = Array.isArray(torrent.wires) ? torrent.wires.length : 0;
+    logger.info(
+      `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] a reader came back after ` +
+      `${(heldMs / 1000).toFixed(1)}s — the swarm was held, ${open} connection(s) open`
+    );
+    return false;
+  }
+  if (torrent.paused !== true) {
     return false;
   }
   torrent.resume();
@@ -2200,11 +2287,11 @@ export class TorrentPool {
       this.#lastAccess.set(torrent, Date.now());
       rejoinSwarm(torrent);
     }
-    // A PROXY THAT NEEDS NOTHING FROM A SWARM SHOULD NOT BE IN THAT SWARM. The
-    // data stays on disk; the next thing that wants a byte of it takes the
-    // swarm back.
+    // A PROXY THAT NEEDS NOTHING FROM A SWARM SHOULD NOT BE IN THAT SWARM —
+    // once the viewer has had the time to come back (`holdSwarm`). The data
+    // stays on disk; the next thing that wants a byte of it takes the swarm back.
     if (swarm === "let go") {
-      leaveSwarm(torrent);
+      holdSwarm(torrent);
     }
     if (onTheClock) {
       this.#scheduleIdleRemoval(torrent);
@@ -2335,6 +2422,7 @@ export class TorrentPool {
    */
   #forgetBookkeeping(torrent) {
     this.#cancelIdleRemoval(torrent);
+    releaseSwarmHold(torrent);
     this.#lastAccess.delete(torrent);
     this.#stallSince.delete(torrent);
     this.#stallReportedAt.delete(torrent);
@@ -2510,6 +2598,9 @@ export class TorrentPool {
     }
     this.#idleTimers.clear();
     this.#lastAccess.clear();
+    for (const torrent of this.torrents.values()) {
+      releaseSwarmHold(torrent);
+    }
 
     if (!this.client || this.client.destroyed) {
       return;

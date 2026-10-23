@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Hold a torrent's swarm for five minutes after its last reader goes, so a viewer who reloads or reopens the page finds its connections still open; a torrent held whole still lets its swarm go at once (#ttv-240).
+
 ## 2.105.11
 
 - **Fix**: Keep the addresses a torrent dialled when it leaves its swarm and hand them back, with a DHT lookup, when a reader rejoins it, instead of resuming with no known peer until the next periodic announce (#ttv-238).

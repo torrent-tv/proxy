@@ -46,3 +46,22 @@
  * for reusable torrents, source files, and generated segments.
  */
 export const IDLE_KEEP_MS = 60 * 60 * 1000;
+
+/**
+ * How long a torrent keeps its swarm after its last reader has gone, in
+ * milliseconds.
+ *
+ * THE SAME UNKNOWN AS {@link IDLE_KEEP_MS} — whether the viewer comes back —
+ * so it is stated here, beside it, and not where it is used. A reload, a tab
+ * closed and opened again, or a pause between two transcode sessions is a
+ * return within minutes, and a return that finds its connections still open
+ * dials nobody.
+ *
+ * SHORTER THAN THE HOUR because what it holds costs more than disk. A held
+ * swarm keeps its connections open and accepts new ones: WebTorrent limits only
+ * the peers it dials, and field 2026-09-11 had 249 connected at the start of one
+ * viewing and 596 at the end. Five minutes is the owner's figure for the short
+ * return (torrent-tv/meta#240); nothing measured derives it either, and the
+ * returns recorded by `services/storage/returns.js` are what will.
+ */
+export const SWARM_HOLD_MS = 5 * 60 * 1000;

@@ -170,7 +170,7 @@ with `--segment-format mpegts`.
 |---|---|---|---|---|
 | C1 | Prebuffer gate (`#waitForPrebuffer`): element kept paused, loop every 250 ms, progress asked every 1.5 s or at once after a net report when the buffer grew; releases when `playbackReadiness.version === 1 && ready === true` and C3 is clear (`t4`). A buffer standing still for 4 s restarts the loader at the buffered end. `media-continuity-unavailable` and a failed output end the wait with outcome 6 | B11 | release | gate |
 | C2 | Net report delivered over the control connection: buffered ranges per track, position, link samples | B2, `reportNow` | proxy records the reading | gate input to P14 |
-| C3 | Subtitle hold (`subtitleStartHold`): a ready answer requested before the proxy knew the opening subtitle track is not taken | A14 | proxy states the track read | part of C1 |
+| C3 | Subtitle hold (`subtitleStartHold`): a ready answer requested before the proxy knew the opening subtitle track is not taken; a separate span starts at the first pending gate check and ends when a later answer releases it | A14 | proxy states the track read | part of C1; separate C3 span is nested in the C1 gate |
 | C4 | Application state on `PLAYBACK_READY`: `ADVANCING`, or `PAUSED` when the viewer had stopped (outcome 3) | C1 | state published | blocking |
 | C5 | `video.play()` → `playing`. Branch: autoplay refused → waits for a viewer gesture (outcome 4) | C4 (`ADVANCING`) | `playing` | blocking |
 | C6 | Frame callbacks until `presentedFrames > 0` (`tFrame`) | C5 | callback | blocking |
@@ -388,7 +388,7 @@ logged at the process boundary; "derived" is computed from other values;
 | C1 (`t4`) | B | — | `t3` | `[evt] prebuffer ready …`; `prebuffer waiting … reason=` on each reason change | — | — | direct |
 | P14 | P | session id, consumer | request | `readiness parts … in all <ms>`; `playback readiness {…}` on a reason or missing-input change; `playback held …` | R2 | — | direct |
 | P15 | P | source key, wait id, consumer, revision | estimate selected for a revision | `process=P15 phase=event` with remaining and total seconds and estimate basis | R2 | seconds | direct point observation; estimate calculation is synchronous |
-| C3–C5 | B / P | wait, attempt, consumer and selected track | C3 readiness-state events; C5 `play` | C3 readiness state, C4 playback-ready, C5 `playing` | C1 gate | track and state | direct point or state observations; C3 is logged when readiness changes |
+| C3–C5 | B / P | wait, attempt, consumer and selected track | C3 `subtitle-hold` begin; C5 `play` | C3 release/error/cancel; C4 playback-ready; C5 `playing` | C1 gate | track and state | direct C3 span when held; point or state observations for C4/C5 |
 | S0 seek input | B | wait, attempt, target, input source | player controls: `media-seek-request`; native/system controls: first `seeking` event | `seek-input`; native path also `S0.seek-debounce` end at settled target | — | target seconds, source | direct monotonic trace; native physical input to `seeking` remains unobservable |
 | S1 seek command | B | wait, attempt, target | entry to `#moveToPosition` | command completion after synchronous setup, stop-load, seek report and load restart | S0 | target seconds, outcome | direct span; includes nested browser/control-connection work, do not add those nested spans twice |
 | S2 seek readiness gate | B | wait, attempt, target | `#holdSeekUntilReady` entry | hold release or failure | S1 ends before S2 starts; proxy work proceeds concurrently | target seconds, outcome | direct span includes readiness polls; it overlaps proxy P4/P4.1, W and encoder work and must not be summed with them |
@@ -483,7 +483,7 @@ did not occur in those captured attempts; it never means zero duration.
 | Browser parallel append lanes | B12.a | Append first soundtrack fragment | Field 05, attempt 1: 14.0 ms |
 | Browser: readiness gate | C1 | Wait for continuous-playback readiness | Field 05, attempt 1: 500.7 ms |
 | Browser background lane | C2 | Send buffered ranges, position and link samples | Timed through B2 request spans; no separate C2 work duration |
-| Browser: readiness gate | C3 | Hold readiness until opening subtitle track is known | No separate timed hold in captured path |
+| Browser: readiness gate | C3 | Hold readiness until opening subtitle track is known | No hold branch taken in the captured path; the trace now emits a separate span when it occurs |
 | Browser: playback state | C4 | Publish `PLAYBACK_READY` / `ADVANCING` | Point event; no duration |
 | Browser: playback | C5 | Call `play()` and receive `playing` | Field 05, attempt 1: 39.6 ms |
 | Browser: presentation | C6 | Wait for first presented frame callback | Field 05, attempt 1: 91.9 ms from observer start; 89.8 ms from `playing` |
@@ -1340,7 +1340,9 @@ The default page does not emit these trace records.
    across two callbacks while unpaused. When audio is required it also checks
    the selected audio ranges and nonzero decoded audio bytes. It reports the
    first advancing frame separately from the later confirmation and records
-   unsupported audio observation explicitly. The `outcome` record includes
+   unsupported audio observation explicitly. A C3 span now records a period
+   when a stale ready forecast is held until the opening subtitle report is
+   included. The `outcome` record includes
    `firstAdvancingFrameAt` and `firstAdvancingFrameElapsedMs`, measured from
    the original action to that frame; `elapsed` ends at the later confirming
    callback. This establishes browser media progress with decoded audio, not

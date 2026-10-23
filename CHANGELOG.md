@@ -1,6 +1,9 @@
 ## Unreleased
 
 - **New**: Record direct process spans for playback-plan completion, piece publication and each readiness calculation; classify traced HTTP requests by their proxy endpoint (#ttv-185).
+
+## 2.105.13
+
 - **Fix**: Stop and remove packet captures when their delivery diagnosis clears, while retaining a shared capture until every active diagnosis has cleared (#ttv-79).
 
 ## 2.105.12

@@ -5,7 +5,6 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ffmpegBin from "ffmpeg-static";
-import ffprobe from "@ffprobe-installer/ffprobe";
 import { ContainerFactory } from "../../services/media/container/ContainerFactory.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
 
@@ -72,11 +71,20 @@ for (const [format, video, audio, removeAud = false] of [["mpegts", "libx264", "
         const index = await container.readPacketIndex();
         const startSeconds = (await container.readMediaInfo()).startTimeSeconds ?? 0;
         if (format === "mpegts" && ["libx264", "libx265"].includes(video)) {
-          const checked = spawnSync(process.env.FFPROBE_BIN || ffprobe.path, ["-v", "error", "-select_streams", "v:0",
-            "-show_packets", "-show_entries", "packet=pts_time,dts_time,duration_time,flags", "-of", "json", file],
+          const checked = spawnSync(ffmpegBin, ["-hide_banner", "-copyts", "-debug_ts", "-loglevel", "info", "-i", file,
+            "-map", "0:v:0", "-vf", "showinfo", "-an", "-f", "null", "-"],
             { windowsHide: true, encoding: "utf8" });
-          assert.equal(checked.status, 0, checked.error?.message || checked.stderr || `ffprobe terminated with ${checked.signal}`);
-          const expected = JSON.parse(checked.stdout).packets;
+          assert.equal(checked.status, 0, checked.error?.message || checked.stderr || `ffmpeg terminated with ${checked.signal}`);
+          const keyframesByPts = new Map([...checked.stderr.matchAll(/showinfo[^\n]*?pts_time:([\d.-]+)[^\n]*?iskey:(\d)/g)]
+            .map(([, pts, keyframe]) => [Number(pts), keyframe === "1"]));
+          const expected = [...checked.stderr.matchAll(/demuxer -> ist_index:\d+:\d+ type:video pkt_pts:(\S+) pkt_pts_time:(\S+) pkt_dts:(\S+) pkt_dts_time:(\S+) duration:\S+ duration_time:(\S+)/g)]
+            .map(([, pts, ptsTime, dts, dtsTime, duration]) => ({
+              pts_time: pts === "N/A" ? undefined : Number(ptsTime),
+              dts_time: dts === "N/A" ? undefined : Number(dtsTime),
+              duration_time: Number(duration),
+              keyframe: keyframesByPts.get(Number(ptsTime)),
+            }));
+          assert.ok(expected.length > 0, "FFmpeg reported no MPEG-TS video packets.");
           const picture = tracks.find(track => track.type === "video");
           const bounds = index.boundsOf(picture.trackNumber);
           const actual = index.inputFor({ trackId: picture.trackNumber, from: bounds.start, to: bounds.end });
@@ -86,7 +94,7 @@ for (const [format, video, audio, removeAud = false] of [["mpegts", "libx264", "
             if (expected[position].pts_time !== undefined) assert.ok(Math.abs(packet.pts - Number(expected[position].pts_time)) < 1e-6);
             if (expected[position].dts_time !== undefined) assert.ok(Math.abs(packet.dts - Number(expected[position].dts_time)) < 1e-6);
             assert.ok(Math.abs(packet.duration - Number(expected[position].duration_time)) < 1e-6);
-            assert.equal(packet.keyframe, expected[position].flags.includes("K"));
+            assert.equal(packet.keyframe, expected[position].keyframe);
           });
           if (format === "mpeg") {
             const presented = actual.packets.map(packet => packet.pts).sort((a, b) => a - b);

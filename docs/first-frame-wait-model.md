@@ -773,14 +773,14 @@ accurate.
 | Browser append, readiness, playback and presentation | Remux, append, metadata, readiness polling/release, `play()`, decoded audio and moving-frame confirmation | `appendSeconds` is optional and not supplied by `ViewerRequests`; B8–C7 are not represented in the numeric segment estimate | Field28: readiness `ready=true` at +10.760 s; `playing` at +11.006 s; advancing `timeupdate` at +11.220 s | No complete predicted completion for these actions | These actions are measured in browser/proxy traces but omitted from the end-to-end formula. Add them as causal dependencies; do not infer their time from segment delivery. |
 
 The atomic inventory in 8.1 remains the row-level description and actual-session
-example for every process ID. It includes many branches that were not taken in
-the three current-release runs. In particular, A2 connection substeps, retries,
-P5/P6.a, most HLS request/append boundaries, torrent startup W2–W6, and
-per-response main-thread queueing lack a matched duration in that sample.
-Those rows are “no matched measurement,” not stable zero-cost stages. The
-current data therefore supports complete coarse-interval coverage for three
-successful initial opens, while atomic coverage and per-stage mathematical
-accuracy are incomplete.
+example for every process ID. It includes branches that were not taken in the
+three current-release runs. P5 has a direct Alien Romulus measurement, but A2
+connection substeps, retries, P6.a, most HLS request/append boundaries, torrent
+startup W2–W6, and per-response main-thread queueing still lack a matched
+duration in those runs. Those rows are “no matched measurement,” not stable
+zero-cost stages. The current data therefore supports complete coarse-interval
+coverage for three successful initial opens, while atomic coverage and
+per-stage mathematical accuracy are incomplete.
 
 ## 9. Seek, soundtrack and quality change
 

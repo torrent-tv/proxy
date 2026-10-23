@@ -1,4 +1,4 @@
-## Unreleased
+## 2.106.1
 
 - **Fix**: Keep the selected file's preparation demand until its playback map is applied, preventing the swarm from leaving during opening (#ttv-201).
 

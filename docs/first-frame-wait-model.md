@@ -1428,6 +1428,9 @@ aggregate `first-frame-observation` record is emitted later by a separate
 callback; it is not the endpoint for seek reconciliation. Its 14.5 ms delay is
 an observation/logging delay, not an unlabelled playback stage. The C6 event
 and the confirmation event in `wait-trace` provide the exact frame timestamp.
+For this saved run, the new `firstAdvancingFrameElapsedMs` field would be
+6,006.6 ms (`39,366.0 − 33,359.4`); that value is derived from the 0.62.3 trace,
+not observed from a field run of the new 0.63.0 logger.
 
 This evidence establishes event-time coverage only for the captured successful
 cold open and native seek path. It does not establish complete coverage of all

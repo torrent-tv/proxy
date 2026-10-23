@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Viewers } from "../../services/viewer/Viewers.js";
-import { SourcePreparation } from "../../services/viewer/SourcePreparation.js";
+import { SourcePreparation, preparationInterval } from "../../services/viewer/SourcePreparation.js";
 import { pauseCoefficient } from "../../services/viewer/PriorityMap.js";
 
 test("retired source preparation is withdrawn and a late result cannot restore it", async () => {
@@ -268,4 +268,14 @@ test("selected input precedes related audio and the next episode, which are with
   await preparation.refresh();
   assert.ok(withdrawn.some(work => work.role === "audio"));
   assert.ok(withdrawn.some(work => work.role === "next-episode"));
+});
+
+test("a chosen embedded subtitle is read two segments ahead, so windows planned a segment apart overlap", () => {
+  assert.deepEqual(preparationInterval(undefined, 20, 4), { from: 20, to: 24 });
+  const first = preparationInterval("subtitle-embedded", 21.3, 4);
+  // The next plan comes when the viewer is reported in the next segment, up to
+  // one report (1.5 s) after its start.
+  const next = preparationInterval("subtitle-embedded", 25.5, 4);
+  assert.deepEqual(first, { from: 21.3, to: 29.3 });
+  assert.ok(next.from < first.to);
 });

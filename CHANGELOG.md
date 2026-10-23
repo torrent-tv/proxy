@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.12
 
 - **Fix**: A start forecast that refuses for a hole in the media timeline (`media-continuity-unavailable`) says where: the `playback readiness` line carries `discontinuity` with the track, the piece whose delivery left the hole (or none when the hole is between ranges already held), the end of the media held without a gap from the viewer and the start of the range that did not join it. The refusals of torrent-tv/meta#105 on 2.89.10 and 2.89.15 named none of this, and their cause could not be established afterwards (#ttv-105).
 

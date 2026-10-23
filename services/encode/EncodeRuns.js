@@ -291,8 +291,9 @@ export class EncodeRuns {
     const endedAt = performance.now();
     run.firstWaitTraceInputAt = endedAt;
     const { sourceKey, process } = run.waitTraceInput ?? {};
+    const startedAt = run.waitTraceInput?.startedAt;
     this.#host.observeWait?.(sourceKey, "process", { process, phase: "end", runToken, fileIndex, bytes,
-      startedAt: run.startedAt, endedAt, durationMs: endedAt - run.startedAt });
+      startedAt, endedAt, durationMs: Number.isFinite(startedAt) ? endedAt - startedAt : null });
     const f2Process = process === "F1.a" ? "F2.a" : "F2.v";
     run.waitTraceInput.f2Process = f2Process;
     run.waitTraceInput.f2StartedAt = endedAt;
@@ -1290,9 +1291,10 @@ export class EncodeRuns {
       }
     });
     const f1Process = session.spec.carries === "audio-only" ? "F1.a" : "F1.v";
-    run.waitTraceInput = { sourceKey: session.file.sourceKey, process: f1Process };
+    const f1StartedAt = performance.now();
+    run.waitTraceInput = { sourceKey: session.file.sourceKey, process: f1Process, startedAt: f1StartedAt };
     this.#host.observeWait?.(session.file.sourceKey, "process", { process: f1Process,
-      phase: "begin", runToken: inputToken, startedAt: run.startedAt, output: session.outputKey,
+      phase: "begin", runToken: inputToken, startedAt: f1StartedAt, output: session.outputKey,
       from: run.from, to: run.to });
     if (admittedInput.original) {
       run.originalInput = admittedInput;

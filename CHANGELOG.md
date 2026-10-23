@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Record FFmpeg input-open spans on one monotonic clock instead of subtracting proxy uptime from wall-clock time (#ttv-185).
+
 ## 2.105.8
 
 - **Fix**: Read a chosen embedded subtitle two segments ahead of the viewer, so consecutive reading windows overlap and a cue arrives before it starts (#ttv-7).

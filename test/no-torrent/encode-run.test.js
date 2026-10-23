@@ -409,3 +409,31 @@ test("a run whose pieces take material from the next file still waits for it", (
   process_.stdio[3].emit("data", "making-5-00006.mp4,50.0,60.0\n");
   assert.deepEqual(calls, [["making-5-00005.mp4", "making-5-00006.mp4", false]]);
 });
+
+test("a stop ordered while an exited run publishes its last piece leaves the ending complete", () => {
+  // Field 2026-10-23, Drifters 04 on Home Assistant: the run on #205 exited
+  // with code 0, its last piece was published from the exit, the plan asked
+  // again at once, found nothing left ahead of the run and stopped it. The
+  // ending then took an edge the state table does not have ("STOPPED +
+  // EXITED_COMPLETE — no such edge; ignored"), and the stop's age at the exit
+  // was kept as what a kill costs on this host (torrent-tv/meta#117).
+  const process_ = new FakeProcess();
+  process_.stdio = [null, null, null, new EventEmitter()];
+  const lines = [], ends = [];
+  const run = new EncodeRun({
+    address: "picture", encoder: new SoftwareEncoder(), from: 205, to: 205,
+    buildArgs: () => [], spawn: () => process_,
+    logger: { info: line => lines.push(line), warn: line => lines.push(line) },
+    indexOfName: name => Number(name.match(/(\d+)\.mp4$/)[1]),
+    onClosed: name => name,
+    onProduced: () => run.stop("the film is no worse off without it"),
+    onEnded: ended => ends.push(ended)
+  });
+  process_.stdio[3].emit("data", "making-0-00205.mp4,1409.326,1421.5\n");
+  process_.exitWith(0);
+  assert.equal(ends.length, 1);
+  assert.equal(ends[0].ending, ENCODE_EXIT.COMPLETE);
+  assert.equal(ends[0].dyingMs, null, "a run that exited by itself did not die on command");
+  assert.deepEqual(process_.signals, [], "nothing is signalled after the process exited");
+  assert.ok(!lines.some(line => /no such edge/.test(line)), lines.join("\n"));
+});

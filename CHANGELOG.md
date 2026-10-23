@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.10
 
 - **Fix**: Record the first admitted-input bytes handed to FFmpeg so F1 spans also close for copied audio and video inputs.
 

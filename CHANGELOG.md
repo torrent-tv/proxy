@@ -1,3 +1,7 @@
+## Unreleased
+
+- **New**: Record a direct timing span when a separate soundtrack output is first opened (#ttv-185).
+
 ## 2.106.1
 
 - **Fix**: Keep the selected file's preparation demand until its playback map is applied, preventing the swarm from leaving during opening (#ttv-201).

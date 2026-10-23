@@ -406,7 +406,7 @@ logged at the process boundary; "derived" is computed from other values;
 | B1 / P6.v | B / P | wait, attempt, request id | browser output-session request / proxy open | browser response / proxy handler return | R4 | open calls and plan wait | separate clocked request spans; proxy logs inner open durations |
 | B2 | B | wait, attempt, request id | each net-report request | response or close | control connection R5.c | buffered ranges, position and link sample | direct request span on browser clock |
 | B4 | B | wait, attempt, request id | position-restatement request | response or close | control connection R5.c | position seconds | direct request span on browser clock |
-| P6.a | P | output key | HTTP request that first opens the alternate output | output response; session creation logs open calls, aggregate open time and plan wait | memory / encoder admission | — | request span plus open-duration fields; output-specific event still shares the request process id |
+| P6.a | P | base session, track index, consumer | direct `process=P6.a phase=begin` around first alternate-output creation | matching `phase=end` with duration and outcome; endpoint `http-end` is the wider request envelope | memory / encoder admission | output mode and track | direct proxy-monotonic process span; repeated requests for an existing output are not counted as opens |
 | P7 | P | source key, output key | `process=P7.v/a phase=begin` | `process=P7.v/a phase=end` | R2 event loop | outputs and active sessions | direct, proxy monotonic clock |
 | P8 | P | source key, output key, run range, input request | `process=P8.v/a phase=begin` | paired end at input admitted or terminal; attempt/wait events for retries | R8, W9, R4 detailed in adjacent input/read records | bytes, queue/read/copy times | direct, proxy monotonic clock |
 | F1.v / F1.a | P | source key, run token, output, file | monotonic timestamp at run spawn | first input bytes handed off by `/encode-input`, `/stream`, or the successful admitted-input `stdin.write` callback | R3 | bytes | direct proxy-monotonic span; endpoint is byte handoff, not FFmpeg's internal packet parser; never subtract wall-clock `run.startedAt` |
@@ -536,19 +536,19 @@ did not occur in those captured attempts; it never means zero duration.
 | Browser: playlist lane | B3 | Wait for media playlist | Field 05, attempt 1: 81.1–164.7 ms per observed request |
 | Browser: playlist lane | B4 | Restate position changed during allocation | No iteration in captured path |
 | Browser: manifest lane | B5 | Request and parse manifest, then load selected level playlist | c8 cold start: manifest request 46.7 ms; parser span 5.1 ms; selected-level playlist request 37.6 ms |
-| Browser: picture stream lane | B6.v | Request picture init segment (fMP4 only) | Not separately timed in the saved field logs; the new trace records each request |
-| Browser: soundtrack stream lane | B6.a.p | Request soundtrack playlist | Not separately timed in the saved field logs; the new trace records each request |
-| Browser: soundtrack stream lane | B6.a.i | Request soundtrack init segment (fMP4 only) | Not separately timed in the saved field logs; the new trace records each request |
-| Browser parallel stream lanes | B7.v | Request first picture fragment | Saved log has 148.7–512.1 ms response spans without stream ids; the new trace records each stream and segment separately |
-| Browser parallel stream lanes | B7.a | Request first soundtrack fragment | Saved log has 148.7–512.1 ms response spans without stream ids; the new trace records each stream and segment separately |
+| Browser: picture stream lane | B6.v | Request picture init segment (fMP4 only) | Alien Romulus, segment `initSegment`: 387.9 ms |
+| Browser: soundtrack stream lane | B6.a.p | Request soundtrack playlist | Alien Romulus: 140.6 ms |
+| Browser: soundtrack stream lane | B6.a.i | Request soundtrack init segment (fMP4 only) | Alien Romulus, segment `initSegment`: 902.2 ms |
+| Browser parallel stream lanes | B7.v | Request first picture fragment | Alien Romulus, segment 0: 2,856.4 ms |
+| Browser parallel stream lanes | B7.a | Request first soundtrack fragment | Alien Romulus, segment 0: 2,028.3 ms |
 | Browser parallel stream lanes | B8.v | Parse/remux picture fragment | c8 cold start, fragment 0: 11.8 ms (`FRAG_LOADED` → matching `FRAG_PARSED`) |
 | Browser parallel stream lanes | B8.a | Parse/remux soundtrack fragment | c8 cold start, fragment 0: 847.5 ms (`FRAG_LOADED` → matching `FRAG_PARSED`); later audio fragment: 3.7 ms |
 | Browser: track join | B9 | Create all expected SourceBuffers | c8 cold start: 19.7 ms from first video `BUFFER_CODECS` at 10,040.2 ms to `BUFFER_CREATED` at 10,059.9 ms; audio `BUFFER_CODECS` followed at 10,061.0 ms |
 | Browser parallel append lanes | B10.v | Append picture init segment | Field 05, attempt 1: 35.9 ms |
 | Browser parallel append lanes | B10.a | Append soundtrack init segment | Field 05, attempt 1: 1.7 ms |
 | Browser: metadata gate | B11 | Reach `HAVE_METADATA` | Field 05, attempt 1: 415.2 ms |
-| Browser parallel append lanes | B12.v | Append first picture fragment | Append acknowledgement not separately observed in this capture |
-| Browser parallel append lanes | B12.a | Append first soundtrack fragment | Field 05, attempt 1: 14.0 ms |
+| Browser parallel append lanes | B12.v | Append first picture fragment | Alien Romulus, segment 0 append acknowledgement: 35.4 ms |
+| Browser parallel append lanes | B12.a | Append first soundtrack fragment | Alien Romulus, segment 0 append acknowledgement: 13.0 ms |
 | Browser: readiness envelope | C1 | Wait for continuous-playback readiness | Field 05, attempt 1: 500.7 ms; envelope, not an atomic stage |
 | Browser: prebuffer request | C1.1 | Read proxy readiness for the initial-start gate | Haunted Hotel cold start: 251.8 ms and 152.6 ms (2 polls) |
 | Browser: prebuffer decision | C1.2 | Evaluate readiness from the proxy response, subtitle state and browser buffer | Haunted Hotel cold start: 0.3 ms and 0.2 ms |
@@ -581,19 +581,19 @@ did not occur in those captured attempts; it never means zero duration.
 | Proxy main lane | P2 | Read container declarations through per-file queue | Field 05, attempt 1: 0.1 ms median over 1,524 reads |
 | Proxy main lane | P3 | Build plan and select offered outputs | Alien Romulus, opt-in wait trace: direct span 46.5 ms; enclosing HTTP request 109.5 ms |
 | Proxy main lane, repeated pass | P4 | Resolve demanded source ranges and publish priority map | Field 05, attempt 1: 132.7 ms median over 134 passes |
-| Proxy main lane | P5 | Read keyframe index for copied video | Not separately observed in captured path |
+| Proxy main lane | P5 | Read keyframe index for copied video | Alien Romulus, opt-in wait trace: cache miss; 1.4 ms total (0.03 ms queue, 1.38 ms read) |
 | Proxy output lane | P6.v | Open picture output | Field 05, attempt 1: 55.2 ms median over 3 opens |
-| Proxy output lane | P6.a | Open separate soundtrack output | Not separately timed in captured path |
+| Proxy output lane | P6.a | Open separate soundtrack output | Direct span added after Alien Romulus trace showed the gap; awaiting a post-release field sample |
 | Proxy parallel output lanes | P7.v | Plan picture encoder runs | Field 05: one picture run plan took 254.8 ms |
 | Proxy parallel output lanes | P7.a | Plan soundtrack encoder runs | Same interval as P7.v: 254.8 ms, on proxy clock |
 | Proxy parallel output lanes | P8.v | Admit and copy picture run input | Field 05, attempt 1: 331.6 ms median over 2 completed spans |
 | Proxy parallel output lanes | P8.a | Admit and copy soundtrack run input | Field 05, attempt 1: 354.6 ms median over 250 completed spans |
 | Proxy parallel output lanes | P11.v | Publish closed picture piece | Alien Romulus, opt-in wait trace: 14 direct spans, 1.4–119.5 ms |
 | Proxy parallel output lanes | P11.a | Publish closed soundtrack piece | Alien Romulus, opt-in wait trace: 15 direct spans, 1.3–10.1 ms |
-| Proxy parallel output lanes | P13.v | Make picture init segment readable (fMP4) | No separate completed span in captured path |
-| Proxy parallel output lanes | P13.a | Make soundtrack init segment readable (fMP4) | No separate completed span in captured path |
-| Proxy parallel output lanes | P12.v | Serve and transfer picture bytes | Direct proxy endpoint and transfer spans; browser span joins by request ID, field timing pending |
-| Proxy parallel output lanes | P12.a | Serve and transfer soundtrack bytes | Direct proxy endpoint and transfer spans; browser span joins by request ID, field timing pending |
+| Proxy parallel output lanes | P13.v | Make picture init segment readable (fMP4) | Alien Romulus, opt-in wait trace: 4.9 ms until readable |
+| Proxy parallel output lanes | P13.a | Make soundtrack init segment readable (fMP4) | Alien Romulus, opt-in wait trace: 1.9 ms until readable |
+| Proxy parallel output lanes | P12.v | Serve and transfer picture bytes | Alien Romulus, first picture segment request: 2,435.2 ms total; endpoint and transfer records join by request ID |
+| Proxy parallel output lanes | P12.a | Serve and transfer soundtrack bytes | Alien Romulus, first soundtrack segment request: 1,761.3 ms total; endpoint and transfer records join by request ID |
 | Proxy main lane, repeated poll | P14 | Compute playback readiness forecast | Alien Romulus, opt-in wait trace: 45 direct spans, 14.7–344.2 ms; enclosing HTTP request is a separate wider interval |
 | Proxy main lane, observer | P15 | Emit early-estimate revision | Point observations; no duration |
 | Proxy main lane, conditional | X1 | Run ffprobe for unrecognised container | Not taken: container was recognised |
@@ -2075,6 +2075,18 @@ outside P3's measured body and must not be assigned to plan construction. P14
 was measured repeatedly on the proxy main lane: 14.7–344.2 ms across 45 spans
 in the cold-start and seek trace. The matching progress-request HTTP spans are
 separate envelopes and include request handling around readiness assembly.
+
+The copied-video keyframe index missed cache: P5 took 1.4 ms total, comprising
+0.03 ms in the per-file queue and 1.38 ms reading the index. P13 init readiness
+took 4.9 ms for picture and 1.9 ms for soundtrack. These direct process
+records were present in the same saved trace; the earlier pending table entries
+were stale.
+
+P12's first picture segment request took 2,435.2 ms from proxy route entry to
+response completion; the first soundtrack segment request took 1,761.3 ms.
+Those endpoint spans include waiting for the requested piece and channel
+delivery. They are not transfer-only durations; the matching `[net-debug]`
+records and browser request spans separate those parts by request ID.
 
 P11 publication was measured separately for both output streams. Picture
 publication had 14 spans from 1.4 to 119.5 ms; soundtrack publication had 15

@@ -2219,60 +2219,78 @@ export class Renditions {
       this.#host.outputs.touch(already);
       return already;
     }
-    const rendition = await this.#host.createOrGetSession({
-      sourceKey: base.file.sourceKey,
-      fileIndex: base.file.fileIndex,
-      // No picture at all: the video flag says what to do with a video stream
-      // this output does not carry.
-      transcodeVideo: false,
-      transcodeAudio,
-      fileName: base.file.name,
-      // Opened by nobody in particular, as a step is.
-      consumerId: "",
-      audioTrackIndex: trackIndex,
-      audioOnly: true,
-      // Where the viewer is, so the rendition starts with the picture rather
-      // than at the beginning of the file. Read the same way a quality variant
-      // reads it: the base's own field is only written by a seek or by a
-      // segment IT served, so on a resume-from-position open it is still unset
-      // while the player is asking for segment #537 — and the audio would begin
-      // at zero and never catch up, since nothing treats a far request as a
-      // seek. The accessor falls back to the last segment actually requested.
-      // Where the PICTURE is, not where it has been read to.
-      //
-      // The position this class keeps is written by the segments a session
-      // serves, so it is the READ head, and the viewer's picture sits behind it
-      // by everything the player has buffered. Started at the read head, the
-      // audio run begins AHEAD of the viewer, and every request they then make
-      // is behind a run that only moves forward — field 2026-08-15, placed at
-      // #16 while the player asked for #10, and the audio arrived only after
-      // the encoder was dragged back.
-      //
-      // The distance is measured, not assumed: the browser reports how many
-      // seconds it holds ahead of the picture with every link report, so the
-      // playhead is one subtraction away. A stale report is no use — a viewer
-      // who seeked since then is somewhere else entirely — so an old one is
-      // ignored and the whole look-ahead is subtracted instead, which cannot
-      // leave the run ahead of them.
-      startPositionSeconds: this.#host.audioStartSecondsFor({
-        family: this.#host.outputs.familyOf(base),
-        openedAtSeconds: this.#host.encodeRuns.progressOf(base)?.startPositionSeconds,
-        segmentSeconds: this.#host.segmentDurationSec
-      }),
-      segmentFormatId: base.segmentFormat.id,
-      // Cut where the picture is cut. Two streams meant to be played together
-      // have to be divided at the same times, and the grid is the base's — the
-      // table as it stands now, corrections included. A base on the uniform
-      // grid passes nothing: the rendition computes the same even grid from the
-      // same duration.
-      inheritedGrid: base.timeline.cutGrid === "keyframe"
-        ? {
-            boundaries: base.timeline.boundaries,
-            published: base.timeline.published
-          }
-        : null
-    });
-    return rendition ?? null;
+    const waitStartedAt = performance.now();
+    const waitFields = {
+      process: "P6.a",
+      baseSessionId: base.id,
+      trackIndex,
+      consumerId,
+      audioMode: transcodeAudio ? "transcode" : "copy"
+    };
+    this.#host.observeWait?.(base.file.sourceKey, "process", { ...waitFields, phase: "begin", at: waitStartedAt });
+    let waitOutcome = "error";
+    try {
+      const rendition = await this.#host.createOrGetSession({
+        sourceKey: base.file.sourceKey,
+        fileIndex: base.file.fileIndex,
+        // No picture at all: the video flag says what to do with a video stream
+        // this output does not carry.
+        transcodeVideo: false,
+        transcodeAudio,
+        fileName: base.file.name,
+        // Opened by nobody in particular, as a step is.
+        consumerId: "",
+        audioTrackIndex: trackIndex,
+        audioOnly: true,
+        // Where the viewer is, so the rendition starts with the picture rather
+        // than at the beginning of the file. Read the same way a quality variant
+        // reads it: the base's own field is only written by a seek or by a
+        // segment IT served, so on a resume-from-position open it is still unset
+        // while the player is asking for segment #537 — and the audio would begin
+        // at zero and never catch up, since nothing treats a far request as a
+        // seek. The accessor falls back to the last segment actually requested.
+        // Where the PICTURE is, not where it has been read to.
+        //
+        // The position this class keeps is written by the segments a session
+        // serves, so it is the READ head, and the viewer's picture sits behind it
+        // by everything the player has buffered. Started at the read head, the
+        // audio run begins AHEAD of the viewer, and every request they then make
+        // is behind a run that only moves forward — field 2026-08-15, placed at
+        // #16 while the player asked for #10, and the audio arrived only after
+        // the encoder was dragged back.
+        //
+        // The distance is measured, not assumed: the browser reports how many
+        // seconds it holds ahead of the picture with every link report, so the
+        // playhead is one subtraction away. A stale report is no use — a viewer
+        // who seeked since then is somewhere else entirely — so an old one is
+        // ignored and the whole look-ahead is subtracted instead, which cannot
+        // leave the run ahead of them.
+        startPositionSeconds: this.#host.audioStartSecondsFor({
+          family: this.#host.outputs.familyOf(base),
+          openedAtSeconds: this.#host.encodeRuns.progressOf(base)?.startPositionSeconds,
+          segmentSeconds: this.#host.segmentDurationSec
+        }),
+        segmentFormatId: base.segmentFormat.id,
+        // Cut where the picture is cut. Two streams meant to be played together
+        // have to be divided at the same times, and the grid is the base's — the
+        // table as it stands now, corrections included. A base on the uniform
+        // grid passes nothing: the rendition computes the same even grid from the
+        // same duration.
+        inheritedGrid: base.timeline.cutGrid === "keyframe"
+          ? {
+              boundaries: base.timeline.boundaries,
+              published: base.timeline.published
+            }
+          : null
+      });
+      waitOutcome = rendition ? "opened" : "unavailable";
+      return rendition ?? null;
+    } finally {
+      const waitEndedAt = performance.now();
+      this.#host.observeWait?.(base.file.sourceKey, "process", { ...waitFields, phase: "end",
+        at: waitEndedAt, startedAt: waitStartedAt, endedAt: waitEndedAt,
+        durationMs: waitEndedAt - waitStartedAt, outcome: waitOutcome });
+    }
   }
 
   /**

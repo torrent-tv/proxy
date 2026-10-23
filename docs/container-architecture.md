@@ -24,6 +24,17 @@ retained. Missing bytes and refused memory admission remain pending and retry
 only when their respective resource changes. They never become an empty track
 list, absent index or unsupported format.
 
+An ASF segment's packets are read from a window of the Data Object around its
+interval rather than from a walk of the whole object (torrent-tv/meta#243). Its
+packets have one declared length, so a packet is found by its number; the window
+begins at a packet found by its send time, a preroll and a lead before the
+interval, and ends once every payload presented before the interval's end has
+been read, since packets are stored in send order and nothing is presented
+before it is sent. Whether the window reaches back to a picture keyframe and to
+the sound before the interval is checked on what it read, and a window that
+does not is read again from further back. A file whose packets differ in length,
+and a request without an interval, still walk the whole object.
+
 Playback declarations come from this shared reader. If the header omits usable
 duration, preparation requests indexed packet timing. Opening playback does not
 start an independent ffmpeg URL probe.

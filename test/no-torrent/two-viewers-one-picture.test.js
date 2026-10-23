@@ -426,6 +426,27 @@ function withAStatedAndASilentTrack(manager, { dubRate = null } = {}) {
   return inventory;
 }
 
+test("opening a soundtrack emits its direct P6.a duration through the wired observer", async (t) => {
+  const observations = [];
+  const { manager, base, dirPath } = await pictureWithTwoViewers({
+    observeWait: (sourceKey, event, fields) => observations.push({ sourceKey, event, fields })
+  });
+  t.after(async () => {
+    await manager.lifecycle.disposeAll();
+    await rm(dirPath, { recursive: true, force: true });
+  });
+  withAStatedAndASilentTrack(manager);
+
+  const prepared = await manager.renditions.prepareAudioTrack(BASE_ID, 1, 12, SECOND, true);
+  const p6a = observations.filter(({ fields }) => fields.process === "P6.a");
+
+  assert.ok(prepared?.sessionId);
+  assert.deepEqual(p6a.map(({ fields }) => fields.phase), ["begin", "end"]);
+  assert.equal(p6a[0].sourceKey, base.file.sourceKey);
+  assert.equal(p6a[1].fields.outcome, "opened");
+  assert.equal(p6a[1].fields.durationMs, p6a[1].fields.endedAt - p6a[1].fields.startedAt);
+});
+
 test("a track nothing states a rate for is sent as AAC even to a browser that plays it, and another viewer's copy is left alone", async (t) => {
   const { manager, base, renditions, dirPath } = await pictureWithTwoViewers();
   t.after(async () => {

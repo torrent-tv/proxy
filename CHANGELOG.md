@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Pass the wait observer to soundtrack rendition creation so P6.a opening spans are emitted (#ttv-185).
+
 ## 2.107.0
 
 - **New**: Record a direct timing span when a separate soundtrack output is first opened (#ttv-185).

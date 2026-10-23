@@ -38,6 +38,7 @@ export class SourcePreparation {
   #reprice;
   #inputReady;
   #readyChanged;
+  #playbackAppliedFor;
   #work = new Map();
   #revision = 0;
   #completedRevision = null;
@@ -45,7 +46,8 @@ export class SourcePreparation {
   #candidateAbort = new AbortController();
 
   constructor({ viewers, candidatesFor, relatedFilesFor = () => [], priorityFor = (_viewer, priority) => priority,
-    inputReady = async () => false, readyChanged = () => {}, inspect, withdraw, reprice = () => {}, failed }) {
+    inputReady = async () => false, readyChanged = () => {}, playbackAppliedFor = () => true,
+    inspect, withdraw, reprice = () => {}, failed }) {
     this.#viewers = viewers;
     this.#candidates = candidatesFor;
     this.#related = relatedFilesFor;
@@ -56,6 +58,7 @@ export class SourcePreparation {
     this.#reprice = reprice;
     this.#inputReady = inputReady;
     this.#readyChanged = readyChanged;
+    this.#playbackAppliedFor = playbackAppliedFor;
   }
 
   refresh() {
@@ -80,8 +83,13 @@ export class SourcePreparation {
 
   /** Current owners determine priority; old work never restores a withdrawn read. */
   demandFor(work) {
+    const handoffFileIndex = work.selected || (work.role === "source-rest" && work.ownerFileIndex === work.fileIndex)
+      ? work.fileIndex : null;
+    const opening = Number.isInteger(handoffFileIndex) && this.#viewers.forSource(work.sourceKey).some(viewer =>
+      (work.ownerId === undefined || viewer.id === work.ownerId) && viewer.source.selectedFileIndex === handoffFileIndex &&
+      viewer.outputs.size > 0 && !this.#playbackAppliedFor(work.sourceKey, handoffFileIndex));
     if (work.selected && work.statement === "packets" &&
-      work.positions !== this.#positionsFor(work.sourceKey, work.fileIndex, work.ownerId)) return null;
+      work.positions !== this.#positionsFor(work.sourceKey, work.fileIndex, work.ownerId, opening)) return null;
     if (work.role === "subtitle-embedded" && ["packets", "subtitle-cues"].includes(work.statement) &&
       work.positions !== this.#positionsFor(work.sourceKey, work.fileIndex, work.ownerId, true)) return null;
     const owners = this.#viewers.forSource(work.sourceKey).filter(viewer => {
@@ -90,9 +98,9 @@ export class SourcePreparation {
         viewer.subtitle.trackIndex !== work.trackIndex)) return false;
       const selected = viewer.source.selectedFileIndex;
       if (work.ownerFileIndex !== undefined) return selected === work.ownerFileIndex &&
-        (work.role !== "source-rest" || viewer.outputs.size === 0);
+        (work.role !== "source-rest" || viewer.outputs.size === 0 || opening);
       if (work.statement !== "packets") return selected === null || selected === work.fileIndex;
-      if (selected !== null) return selected === work.fileIndex && viewer.outputs.size === 0 && work.selected;
+      if (selected !== null) return selected === work.fileIndex && (viewer.outputs.size === 0 || opening) && work.selected;
       return !work.selected && viewer.source.visibleFileIndices.includes(work.fileIndex);
     });
     if (!owners.length) return null;

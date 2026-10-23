@@ -162,6 +162,11 @@ export class DownloadMaps {
     return this.#files.get(`${sourceKey}:${fileIndex}`)?.epoch ?? 0;
   }
 
+  hasAppliedPlayback(sourceKey, fileIndex) {
+    const file = this.#files.get(`${sourceKey}:${fileIndex}`);
+    return Boolean(file?.zones.length && file.shape && file.appliedShape === file.shape);
+  }
+
   native({ sourceKey, fileIndex, zones }) {
     const file = this.#file(sourceKey, fileIndex);
     file.nativeZones = zones;
@@ -325,7 +330,12 @@ export class DownloadMaps {
         const answeredAt = this.#clock();
         // A torrent not yet in the thread applies nothing, so this map was not
         // delivered and the next one, however alike, has to be.
-        if (reply?.appliedMs === null && file.shape === shape) file.shape = null;
+        if (reply?.appliedMs === null) {
+          if (file.shape === shape) file.shape = null;
+          if (file.appliedShape === shape) file.appliedShape = null;
+        } else {
+          file.appliedShape = shape;
+        }
         // The window open now, which a report since this map was asked for may have started.
         const stats = this.#statsOf(file);
         stats.sent += 1;
@@ -345,6 +355,7 @@ export class DownloadMaps {
     // sent, and leaves nothing to compare the next one against.
     file.pending = pending.catch(() => {
       if (file.shape === shape) file.shape = null;
+      if (file.appliedShape === shape) file.appliedShape = null;
     });
     return pending;
   }

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Keep the selected file's preparation demand until its playback map is applied, preventing the swarm from leaving during opening (#ttv-201).
+
 ## 2.106.0
 
 - **New**: Record direct process spans for playback-plan completion, piece publication and each readiness calculation; classify traced HTTP requests by their proxy endpoint (#ttv-185).

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.9
 
 - **Fix**: Record FFmpeg input-open spans on one monotonic clock instead of subtracting proxy uptime from wall-clock time (#ttv-185).
 

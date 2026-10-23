@@ -1340,8 +1340,11 @@ The default page does not emit these trace records.
    across two callbacks while unpaused. When audio is required it also checks
    the selected audio ranges and nonzero decoded audio bytes. It reports the
    first advancing frame separately from the later confirmation and records
-   unsupported audio observation explicitly. This establishes browser media
-   progress with decoded audio, not acoustic output at the physical speaker.
+   unsupported audio observation explicitly. The `outcome` record includes
+   `firstAdvancingFrameAt` and `firstAdvancingFrameElapsedMs`, measured from
+   the original action to that frame; `elapsed` ends at the later confirming
+   callback. This establishes browser media progress with decoded audio, not
+   acoustic output at the physical speaker.
 7. A seek uses the same wait-trace stream with its own wait and attempt:
    `S0` input (or first observable `seeking` event), `S0.seek-debounce` for
    native controls, `S1.seek-command`, and `S2.seek-readiness-gate`. Proxy
@@ -1382,3 +1385,57 @@ reported 4413.5 ms for that seek, 245.6 ms short because its wait-state clock
 began after the input. The server now uses the trace's original action time for
 that aggregate when tracing is enabled. The full downloaded logs and per-event
 arithmetic are recorded in the [2026-10-21 field note](https://github.com/torrent-tv/meta/blob/main/research/first-frame-seek-atomic-field-check-2026-10-21.md).
+
+### 13.1 Latest atomic startup and seek capture
+
+The 2026-10-21 Frankenstein 720p MP4 run on server 0.62.3 was captured after
+the action-time correction. The startup phase fields still sum to the logged
+first-frame observation. They are coarse envelopes; the atomic inventory in
+8.1 and 8.2 identifies the child actions and parallel lanes within them.
+
+| Startup envelope | Duration (ms) |
+|---|---:|
+| Transport | 1,383.4 |
+| Plan | 79.3 |
+| Prepare | 11,532.8 |
+| Prebuffer | 956.7 |
+| Presentation to first-frame observation | 495.3 |
+| **Logged first-frame observation** | **14,447.5** |
+
+For the seek to 1,500 s, the measured endpoint is the first C6 frame that is
+confirmed by the next callback to have advanced with decoded required audio.
+The native-control physical input timestamp is not exposed, so the timed path
+starts at the first `seeking` event. Browser spans below share one monotonic
+clock. They are parallel where their intervals overlap and must not be summed
+without subtracting the overlap.
+
+| Parallel lane | Atomic action | Start (browser ms) | End (browser ms) | Duration (ms) | Overlap |
+|---|---|---:|---:|---:|---|
+| Browser input | S0 first observable `seeking` event | 33,359.8 | 33,359.8 | point | — |
+| Browser seek intent | S0 debounce to settled target | 33,359.8 | 33,663.0 | 303.2 | — |
+| Browser command | S1 `#moveToPosition` | 33,663.9 | 33,961.1 | 297.2 | S2 by 1.3 ms |
+| Browser readiness hold | S2 seek readiness gate | 33,959.8 | 39,309.0 | 5,349.2 | S1 by 1.3 ms; C5 by 1.3 ms |
+| Proxy and torrent worker | P4/P4.1, source reads, torrent work and encoder work | separate proxy/worker clocks | separate proxy/worker clocks | recorded locally | Concurrent with S2; cross-clock overlap is not calculated |
+| Browser playback | C5 `play()` through `playing` | 39,307.7 | 39,352.5 | 44.8 | S2 by 1.3 ms; C6 by 3.4 ms |
+| Browser presentation | C6 through first advancing frame | 39,349.1 | 39,366.0 | 16.9 | C5 by 3.4 ms |
+| **First observable seek event → advancing frame** | **Union of blocking browser spans** | **33,359.8** | **39,366.0** | **6,006.2** | **Union arithmetic: 6,006.3 ms at displayed precision** |
+| Original action → advancing frame | A0 action at 33,359.4 to C6 at 39,366.0 | 33,359.4 | 39,366.0 | 6,006.6 | S0 first `seeking` arrives 0.4 ms after A0 |
+| Delayed aggregate log | `first-frame-observation`, elapsed from A0 | — | — | 6,021.1 | 14.5 ms later than C6's first advancing-frame timestamp |
+
+The direct stage union accounts for the first observable seek event through
+the advancing frame within 0.1 ms at the precision printed in the log. The
+aggregate `first-frame-observation` record is emitted later by a separate
+callback; it is not the endpoint for seek reconciliation. Its 14.5 ms delay is
+an observation/logging delay, not an unlabelled playback stage. The C6 event
+and the confirmation event in `wait-trace` provide the exact frame timestamp.
+
+This evidence establishes event-time coverage only for the captured successful
+cold open and native seek path. It does not establish complete coverage of all
+branches. The inventory still marks missing matched spans for connection
+substeps, retries, copied-video keyframe lookup, alternate soundtrack and
+quality changes, magnet and direct-play paths, and detailed per-request main
+thread queueing. Native physical input before `seeking` remains unobservable.
+Intervals between measured operations remain an explicit residual until a
+browser performance capture identifies their cause; they are not assigned to
+the nearest named action. Thus the process map is not yet proven complete for
+all startup and seek paths.

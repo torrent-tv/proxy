@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.5
 
 - **Fix**: The plan no longer counts a run reading an original input as reaching numbers past its stretch. That run makes nothing after its `to`, but the plan's score had it reaching every later number, so a run starting on the piece right after such a stretch could be stopped as "the film is no worse off without it" and no encoder was placed there again until the stretch ended. Field 2026-10-05, Drifters 04: the viewer stood on #205, the last piece, the run on #205 was stopped 2.1 s after its start in favour of a run ending at #204, and the viewer waited for minutes. A packet input's run still counts as growing past its `to` (#ttv-117).
 

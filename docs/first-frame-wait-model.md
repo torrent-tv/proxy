@@ -1850,10 +1850,55 @@ The c11 timelines show that C6 covers each seek-to-frame envelope. A prepared
 seek reaches the first advancing frame while the debounce continues; it does
 not enter S1 or S2. An unprepared seek has an explicit S0→S1→S2 readiness path,
 with C5 near the end. C11 predates the separate C6a event; deriving the interval
-from the logged C5 end and first-frame timestamp gives 5.7 ms after `playing`
-for the forward seek and 16.7 ms for the backward seek. These short intervals
-were covered only by the enclosing C6 span. The logger now emits C6a for this
-seek tail; a post-release field run is still required to verify that event.
-On the cold open, action-to-frame elapsed is 11,956.2 ms, while C6 itself
-measures the 71.2 ms presentation tail after `playing`. The corrected C6
-interval does not include an earlier retry or stop at a paused target frame.
+from the logged `playing` event and first-frame timestamp gives 5.7 ms after
+`playing` for the forward seek and 16.7 ms for the backward seek. These short
+intervals were covered only by the enclosing C6 span. The c12 post-release run
+below verifies the new C6a span on both prepared and unprepared seeks. On the
+c11 cold open, action-to-frame elapsed is 11,956.2 ms, while C6 itself measures
+the 71.2 ms presentation tail after `playing`. The corrected C6 interval does
+not include an earlier retry or stop at a paused target frame.
+
+### 13.9 Post-release C6a field verification, 2026-10-23
+
+The c12 capture used server 0.65.0 and the same HA proxy and torrent. Full
+proxy, client, and droplet logs were copied to
+`research/session-logs-20261023-ttv185-c12/` before analysis. The first seek
+target was already prepared; the second needed new data. The independent browser
+observer measured from the script's action timestamp, while the wait trace
+starts at its own action record, which followed 4.2–6.4 ms later.
+
+| Seek case | Trace action → first advancing frame | C6 envelope | C6a: `playing` → first advancing frame | Independent observer: action → frame |
+|---|---:|---:|---:|---:|
+| Forward to 100 s, prepared | 287.1 ms | 286.9 ms | 10.8 ms | 291.3 ms total; 10.6 ms from `playing` |
+| Forward to 1,500 s, unprepared | 4,777.1 ms | 4,777.0 ms | 63.8 ms | 4,783.5 ms total; 63.8 ms from `playing` |
+
+| Concurrent lane, prepared seek to 100 s | Start from trace action (ms) | End from trace action (ms) | Duration (ms) |
+|---|---:|---:|---:|
+| C6 seek-to-frame envelope | 0.2 | 287.1 | 286.9 |
+| `media-playing` event | — | 276.3 | Point event |
+| C6a frame-presentation tail | 276.3 | 287.1 | 10.8 |
+| First advancing frame | — | 287.1 | — |
+| S0 seek debounce | 0.1 | 300.6 | 300.5 |
+| S1 / S2 | — | — | Not started before the frame |
+
+| Concurrent lane, unprepared seek to 1,500 s | Start from trace action (ms) | End from trace action (ms) | Duration (ms) |
+|---|---:|---:|---:|
+| C6 seek-to-frame envelope | 0.1 | 4,777.1 | 4,777.0 |
+| S0 seek debounce | 0.0 | 312.2 | 312.2 |
+| S1 seek command | 312.2 | 402.9 | 90.7 |
+| S2 readiness gate | 402.7 | 4,702.1 | 4,299.4 |
+| C5 `play()` call → `media-playing` event | 4,701.6 | 4,713.3 | 11.7 |
+| C5 `play()` promise settlement span | 4,701.6 | 4,716.4 | 14.8 |
+| C6a frame-presentation tail | 4,713.3 | 4,777.1 | 63.8 |
+| First advancing frame | — | 4,777.1 | — |
+
+For the prepared seek, C6a is nested inside C6, and S0 continues after the
+frame. For the unprepared seek, S2 ends 75.0 ms before the first advancing
+frame; the C6a span starts at the `media-playing` event and measures the
+remaining presentation wait. Its 63.8 ms duration matches the independent
+observer's 63.8 ms `playing`-to-frame interval. The C5 `play()` promise settles
+3.1 ms after the logged `media-playing` event; the event is the C5 process
+endpoint, and the later promise settlement is not an additional loading stage.
+The full action-to-frame time is represented by the C6 envelope, while C6a
+names and measures the final seek substage. These spans overlap and must not be
+added together.

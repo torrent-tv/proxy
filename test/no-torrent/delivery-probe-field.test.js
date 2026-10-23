@@ -24,6 +24,7 @@ function connection(t, { rttMs = 6 } = {}) {
   t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 0 });
   const lines = [];
   const captures = [];
+  const cancellations = [];
   const probe = createDeliveryProbe({
     log: (line) => lines.push(line),
     readDelivery: () => ({ bytesPerSecond: 3_000_000, rttMs }),
@@ -31,6 +32,10 @@ function connection(t, { rttMs = 6 } = {}) {
     witness: {
       maybeCapture: (trigger) => {
         captures.push({ at: Date.now(), trigger });
+        return true;
+      },
+      cancelCapture: async (captureId) => {
+        cancellations.push(captureId);
         return true;
       }
     }
@@ -75,6 +80,7 @@ function connection(t, { rttMs = 6 } = {}) {
     peer,
     lines,
     captures,
+    cancellations,
     /**
      * Run the clock, echoing every `echoEveryMs` — composed just before the
      * probe of that instant arrives, which is the latest a healthy report can
@@ -135,9 +141,11 @@ test("delivery resuming clears the verdict and arms the next capture", (t) => {
   link.peer.delivering = true;
   link.run(10_000);
   assert.equal(link.verdicts(resumedAt).at(-1).verdict, "flowing");
+  assert.deepEqual(link.cancellations, [link.captures[0].trigger.captureId]);
   link.peer.delivering = false;
   link.run(10_000);
   assert.equal(link.captures.length, 2, "a second wedge is a second capture");
+  assert.notEqual(link.captures[0].trigger.captureId, link.captures[1].trigger.captureId);
 });
 
 test("a hidden tab answering late is read as flowing (field 2026-09-03 loop delays)", (t) => {

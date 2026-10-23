@@ -63,10 +63,10 @@ const loopbackDispatcher = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
  * @property {(message: string) => void} [onLog]
  *   Optional log sink.
  * @property {{ maybeCapture: (trigger: {
- *   sessionId: string, tag: string, label: string,
+ *   sessionId: string, tag: string, captureId: string, label: string,
  *   remote: { address: string, port: number } | null,
  *   queuedBytes: number, stuckForMs: number
- * }) => boolean }} [witness]
+ * }) => boolean, cancelCapture?: (captureId: string) => Promise<boolean> }} [witness]
  *   The packet witness (services/transport/packet-witness.js). When {@link wedgeIsCertain}
  *   says delivery has stopped, the watcher hands it the transport snapshot's
  *   remote endpoint: the ring's history is kept and a tail capture records what
@@ -182,7 +182,7 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
   // closing, delete the survivor's entry. `captureStarted` rides on the same
   // record: both channels of one wedged connection must ask the witness once,
   // not once per channel.
-  /** @type {Map<string, { channels: Map<DataChannel, string>, at: number, previous: object | null, unknown: number, captureStarted: boolean }>} */
+  /** @type {Map<string, { channels: Map<DataChannel, string>, at: number, previous: object | null, unknown: number, captureStarted: boolean, captureId: string | null, captureChannel: DataChannel | null, captureSequence: number }>} */
   const connections = new Map();
 
   /**
@@ -288,6 +288,9 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
         previous: null,
         unknown: 0,
         captureStarted: false,
+        captureId: null,
+        captureChannel: null,
+        captureSequence: 0,
         // The accepted-byte counter and when it last moved, plus the rate it
         // was moving at. `wedgeIsCertain` divides the queue by that rate.
         rateAt: 0,
@@ -324,6 +327,14 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
       }
       stopped = true;
       witness?.releaseRing?.();
+      if (connection.captureChannel === channel) {
+        if (connection.captureId) {
+          void witness?.cancelCapture?.(connection.captureId);
+        }
+        connection.captureStarted = false;
+        connection.captureId = null;
+        connection.captureChannel = null;
+      }
       if (timer) {
         clearInterval(timer);
       }
@@ -454,7 +465,14 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
         // The queue moved, so whatever was called a wedge has cleared. Let a
         // later one be recorded too: one mistaken call must not spend the
         // session's only capture.
-        connection.captureStarted = false;
+        if (connection.captureChannel === channel) {
+          if (connection.captureId) {
+            void witness?.cancelCapture?.(connection.captureId);
+          }
+          connection.captureStarted = false;
+          connection.captureId = null;
+          connection.captureChannel = null;
+        }
         return;
       }
       const now = Date.now();
@@ -535,14 +553,23 @@ function makeSendQueueWatcher({ log, getTransportSnapshot, witness, usrsctpState
         peerStillSending
       ) {
         connection.captureStarted = true;
-        witness.maybeCapture({
+        const captureId = `${sessionId}:send-queue:${++connection.captureSequence}`;
+        connection.captureId = captureId;
+        connection.captureChannel = channel;
+        const started = witness.maybeCapture({
           sessionId,
           tag,
+          captureId,
           label,
           remote: snapshot.remote ?? null,
           queuedBytes: queued,
           stuckForMs: now - stuckSince
         });
+        if (!started) {
+          connection.captureStarted = false;
+          connection.captureId = null;
+          connection.captureChannel = null;
+        }
       }
       if (usrsctpState && verdict.certain && peerStillSending) {
         // Its own single-flight and cooldown, independent of the witness's —

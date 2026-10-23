@@ -97,10 +97,24 @@ export const WITNESS_RING_BASENAME = "packet-witness-ring.pcap";
  * @typedef {Object} WitnessTrigger
  * @property {string} sessionId
  * @property {string} tag       - Session id, first 8 characters.
+ * @property {string} captureId - Identity of the diagnosis that owns this capture.
  * @property {string} label     - Data channel label ("proxy", "proxy-control").
  * @property {WitnessRemoteEndpoint | null} remote
  * @property {number} queuedBytes
  * @property {number} stuckForMs
+ */
+
+/**
+ * @typedef {Object} PacketCapture
+ * @property {string} connection
+ * @property {Set<string>} incidents
+ * @property {boolean} cancelled
+ * @property {import("node:child_process").ChildProcess | null} child
+ * @property {NodeJS.Timeout | null} cancelKill
+ * @property {string} filePrefix
+ * @property {Set<string>} files
+ * @property {Promise<void>} finished
+ * @property {() => void} finish
  */
 
 /**
@@ -356,6 +370,7 @@ let logLine = () => {};
  * @returns {{
  *   dir: string,
  *   maybeCapture: (trigger: WitnessTrigger) => boolean,
+ *   cancelCapture: (captureId: string) => Promise<boolean>,
  *   holdRing: () => void,
  *   releaseRing: () => void
  * }}
@@ -367,16 +382,11 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
   /** @type {{ running: boolean, lastStartedAt: number, availability: "unknown" | "yes" | "no" }} */
   const state = { running: false, lastStartedAt: 0, availability: "unknown" };
 
-  /**
-   * Connections already captured, so one wedge is recorded once.
-   *
-   * A capture of a connection already captured adds nothing: the wedge does not
-   * un-wedge, and the second recording of it is the same silence as the first.
-   * Field 2026-09-06: thirteen captures of ONE wedge over six hours, 74 MB, all
-   * saying what the first one said.
-   *
-   * @type {Set<string>}
-   */
+  /** @type {Map<string, PacketCapture>} */
+  const capturesByConnection = new Map();
+  /** @type {Map<string, PacketCapture>} */
+  const capturesByIncident = new Map();
+  /** @type {Set<string>} */
   const captured = new Set();
 
   /**
@@ -416,9 +426,10 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
    *
    * @param {WitnessTrigger} trigger
    * @param {number} stampSeconds - Shared with the tail, so the pair sorts together.
+   * @param {PacketCapture} capture
    * @returns {Promise<string[]>} Names of the copies that landed.
    */
-  const preserveRing = async (trigger, stampSeconds) => {
+  const preserveRing = async (trigger, stampSeconds, capture) => {
     /** @type {string[]} */
     const kept = [];
     ring.preserving = true;
@@ -431,11 +442,15 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
         return kept;
       }
       for (const name of names) {
+        if (capture.cancelled) {
+          break;
+        }
         const suffix = name.slice(WITNESS_RING_BASENAME.length) || "0";
         const target = `packet-witness.${trigger.tag}.${stampSeconds}.before${suffix}.pcap`;
         try {
           await copyFile(path.join(resolvedDir, name), path.join(resolvedDir, target));
           kept.push(target);
+          capture.files.add(target);
         } catch {
           // silent-ok: nothing to copy, or it vanished under us.
         }
@@ -458,9 +473,10 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
    * @param {WitnessTrigger} trigger
    * @param {string} address - Validated remote IP literal.
    * @param {number} stampSeconds
+   * @param {PacketCapture} capture
    * @returns {Promise<void>}
    */
-  const runCapture = async (trigger, address, stampSeconds) => {
+  const runCapture = async (trigger, address, stampSeconds, capture) => {
     const prefix = path.join(
       resolvedDir,
       `packet-witness.${trigger.tag}.${stampSeconds}.tail.pcap`
@@ -472,6 +488,7 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
       fileMegabytes: WITNESS_TAIL_FILE_MB,
       files: WITNESS_TAIL_FILES
     });
+    capture.filePrefix = path.basename(prefix);
     logLine(
       `packet witness: capturing ${WITNESS_TAIL_SECONDS}s of udp port ${port} ↔ ${address} ` +
       `(session ${trigger.tag}, "${trigger.label}" queue ${trigger.queuedBytes}B wedged ` +
@@ -492,6 +509,7 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
         resolve();
         return;
       }
+      capture.child = child;
       const finish = () => {
         if (killer) {
           clearTimeout(killer);
@@ -500,6 +518,13 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
         if (hardKill) {
           clearTimeout(hardKill);
           hardKill = null;
+        }
+        if (capture.child === child) {
+          capture.child = null;
+        }
+        if (capture.cancelKill) {
+          clearTimeout(capture.cancelKill);
+          capture.cancelKill = null;
         }
         resolve();
       };
@@ -533,6 +558,7 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
         try {
           const info = await stat(path.join(resolvedDir, name));
           mine.push(`${name} ${(info.size / 1024).toFixed(1)} KB`);
+          capture.files.add(name);
         } catch { /* gone between listing and reading */ }
       }
       logLine(`packet witness: wrote ${mine.length} file(s): ${mine.join(", ") || "none"}`);
@@ -553,12 +579,20 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
     if (!address || !Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
       return false;
     }
-    if (!shouldStartCapture(state)) {
+    const connection = `${address}:${portNumber}`;
+    const captureId = typeof trigger?.captureId === "string" && trigger.captureId.length > 0
+      ? trigger.captureId
+      : `${trigger?.sessionId ?? trigger?.tag ?? connection}:${trigger?.label ?? "unknown"}`;
+    const existing = capturesByConnection.get(connection);
+    if (existing && !existing.cancelled) {
+      existing.incidents.add(captureId);
+      capturesByIncident.set(captureId, existing);
+      return true;
+    }
+    if (captured.has(connection)) {
       return false;
     }
-    const connection = `${address}:${portNumber}`;
-    if (captured.has(connection)) {
-      // Not evidence twice.
+    if (!shouldStartCapture(state)) {
       return false;
     }
     // The evidence takes room from the product, so it is asked for. Refused, it
@@ -567,7 +601,21 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
     if (typeof mayKeep === "function" && !mayKeep(expectedBytes)) {
       return false;
     }
-    captured.add(connection);
+    /** @type {PacketCapture} */
+    const capture = {
+      connection,
+      incidents: new Set([captureId]),
+      cancelled: false,
+      child: null,
+      cancelKill: null,
+      filePrefix: "",
+      files: new Set(),
+      finished: Promise.resolve(),
+      finish: () => {}
+    };
+    capture.finished = new Promise((resolve) => { capture.finish = resolve; });
+    capturesByConnection.set(connection, capture);
+    capturesByIncident.set(captureId, capture);
     state.running = true;
     state.lastStartedAt = Date.now();
     const startedAt = state.lastStartedAt;
@@ -575,6 +623,9 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
       try {
         if (state.availability === "unknown") {
           state.availability = (await probeAvailability()) ? "yes" : "no";
+        }
+        if (capture.cancelled) {
+          return;
         }
         if (state.availability === "no") {
           logLine(
@@ -584,27 +635,109 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
           return;
         }
         const stampSeconds = Math.floor(Date.now() / 1000);
-        const before = await preserveRing(trigger, stampSeconds);
+        const before = await preserveRing(trigger, stampSeconds, capture);
+        if (capture.cancelled) {
+          return;
+        }
         logLine(
           before.length > 0
             ? `packet witness: kept ${before.length} ring file(s) from before the wedge: ${before.join(", ")}`
             : "packet witness: no ring history to keep — the ring was not running"
         );
-        await runCapture(trigger, address, stampSeconds);
+        await runCapture(trigger, address, stampSeconds, capture);
+        if (capture.cancelled) {
+          return;
+        }
         // The disk bound has to hold between restarts too: one episode writes
         // up to four ring copies and two tail files, and the cooldown allows
         // six episodes an hour. Pruning only at startup let that accumulate.
         await pruneWitnessCaptures(resolvedDir, chooseRemovals);
+        captured.add(connection);
       } finally {
+        if (capture.cancelled) {
+          await removeCaptureFiles(capture);
+        }
+        if (capturesByConnection.get(connection) === capture) {
+          capturesByConnection.delete(connection);
+        }
+        for (const incident of capture.incidents) {
+          if (capturesByIncident.get(incident) === capture) {
+            capturesByIncident.delete(incident);
+          }
+        }
         state.running = false;
         // Keep the requested spacing honest even when the capture ended early.
         const earliestNext = startedAt + WITNESS_COOLDOWN_MS;
         if (state.lastStartedAt < earliestNext) {
           state.lastStartedAt = earliestNext;
         }
+        capture.finish();
       }
     })();
     return true;
+  };
+
+  /**
+   * Cancel one diagnosis's ownership of a capture. The evidence is removed only
+   * after every diagnosis that shared this connection's capture has cleared.
+   *
+   * @param {string} captureId
+   * @returns {Promise<boolean>} Whether this diagnosis owned a live capture.
+   */
+  const cancelCapture = async (captureId) => {
+    const capture = capturesByIncident.get(captureId);
+    if (!capture) {
+      return false;
+    }
+    capturesByIncident.delete(captureId);
+    capture.incidents.delete(captureId);
+    if (capture.incidents.size > 0) {
+      return true;
+    }
+    capture.cancelled = true;
+    captured.delete(capture.connection);
+    if (capture.child) {
+      capture.cancelKill = setTimeout(() => {
+        try {
+          capture.child?.kill("SIGKILL");
+        } catch {
+          // The child may have exited between the check and the signal.
+        }
+      }, WITNESS_KILL_GRACE_MS);
+      capture.cancelKill.unref?.();
+      try {
+        capture.child.kill("SIGTERM");
+      } catch {
+        // The child may have exited between the check and the signal.
+      }
+    }
+    await capture.finished;
+    return true;
+  };
+
+  /** @param {PacketCapture} capture */
+  const removeCaptureFiles = async (capture) => {
+    if (capture.filePrefix) {
+      try {
+        for (const name of await readdir(resolvedDir)) {
+          if (name.startsWith(capture.filePrefix) && isWitnessCapture(name)) {
+            capture.files.add(name);
+          }
+        }
+      } catch {
+        // No output directory or no files to remove.
+      }
+    }
+    for (const name of capture.files) {
+      try {
+        await rm(path.join(resolvedDir, name), { force: true });
+      } catch {
+        // Best effort; a later pruning pass handles files that could not be removed.
+      }
+    }
+    if (capture.files.size > 0) {
+      logLine(`packet witness: removed ${capture.files.size} capture file(s) after recovery`);
+    }
   };
 
   /**
@@ -803,6 +936,6 @@ export function createPacketWitness({ log, dir = "", port, spawnProcess = spawn,
     await clearRingFiles();
   };
 
-  return { dir: resolvedDir, maybeCapture, holdRing, releaseRing, dispose, ring };
+  return { dir: resolvedDir, maybeCapture, cancelCapture, holdRing, releaseRing, dispose, ring };
 
 }

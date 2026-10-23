@@ -209,11 +209,13 @@ export class OutputOpening {
 
     const normalizedTargetWidth = Number.isInteger(targetWidth) && targetWidth > 0 ? targetWidth : 0;
     const normalizedTargetHeight = Number.isInteger(targetHeight) && targetHeight > 0 ? targetHeight : 0;
-    // Round seek position to the nearest 10 s so that two consumers seeking
-    // to similar positions can share the same ffmpeg session.
-    const normalizedStartPosition =
+    // Where the run is asked to begin, as asked. It names no session: a value
+    // rounded to 10 s here was printed as the start and read as where the run
+    // began, while the run itself began elsewhere (torrent-tv/meta#104: asked at
+    // 18.853 s, logged `start=20s`).
+    const requestedStartPosition =
       Number.isFinite(startPositionSeconds) && startPositionSeconds > 0
-        ? Math.round(startPositionSeconds / 10) * 10
+        ? startPositionSeconds
         : 0;
     const normalizedAudioTrack =
       Number.isInteger(audioTrackIndex) && audioTrackIndex > 0 ? audioTrackIndex : 0;
@@ -728,7 +730,7 @@ export class OutputOpening {
         // was told to produce: measured 2026-08-06, the session began at #0
         // while the player asked for #127 and gave up 45.6 s later. Neither
         // side saying what it meant is why that took three attempts to place.
-        `start=${Math.round(normalizedStartPosition)}s ` +
+        `start=${requestedStartPosition.toFixed(1)}s ` +
         `video=${transcodeVideo ? `${this.#host.videoEncoder.name}${output.softwarePreset ? `/${output.softwarePreset}` : ""}` : "copy"} ` +
         `audio=${audioTranscoded ? "aac" : "copy"} ` +
         // Branch tag for log correlation: A = video re-encode (fixed GOP, grid

@@ -23,6 +23,7 @@ import { trackChoicesOf } from "./services/viewer/segment-demands.js";
 import { PlaybackProjection } from "./services/torrent/PlaybackProjection.js";
 import { SegmentInputTable } from "./services/viewer/segment-input-table.js";
 import { SourcePreparation, preparationInterval } from "./services/viewer/SourcePreparation.js";
+import { publishPlaybackBeforePreparationRefresh } from "./services/server/publish-playback-before-preparation-refresh.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
 import { handleApiLinkProbeGet } from "./routes/api/link-probe/get.js";
@@ -1213,7 +1214,6 @@ export async function startProxyServer({
     setDownloadRate: (bytesPerSecond, because) => torrentPool.setDownloadRate?.(bytesPerSecond, because),
     setSpeculativeHold: (held, because) => torrentPool.setSpeculativeHold?.(held, because),
     setPriorityMap: async ({ sourceKey, fileIndex, durationSeconds, zones }) => {
-      void sourcePreparation?.refresh();
       const record = sourceRegistry.get(sourceKey);
       if (!record) {
         return;
@@ -1224,9 +1224,13 @@ export async function startProxyServer({
           if (!outputParts.viewers.forSource(sourceKey).length) probeReads.forget(sourceKey, fileIndex);
           await downloadMaps.forget(sourceKey, fileIndex, { keepPreparation: true });
           playbackProjections.get(`${sourceKey}:${fileIndex}`)?.clear();
+          void sourcePreparation?.refresh();
           return;
         }
-        await downloadMaps.playback({ sourceKey, fileIndex, durationSeconds, zones });
+        await publishPlaybackBeforePreparationRefresh(
+          () => downloadMaps.playback({ sourceKey, fileIndex, durationSeconds, zones }),
+          () => { void sourcePreparation?.refresh(); }
+        );
         mediaReads.retain(sourceKey, fileIndex, params => !params.requestId?.startsWith("download:") ||
           zones.some(zone => zone.from === params.downloadInterval?.from && zone.to === params.downloadInterval?.to));
       } catch (error) {
@@ -1375,6 +1379,7 @@ export async function startProxyServer({
       const held = await torrentPool.heldRangesOf(torrent, work.fileIndex);
       return work.inputRanges.every(([start, end]) => held.some(([from, to]) => from <= start && to >= end));
     },
+    playbackAppliedFor: (sourceKey, fileIndex) => downloadMaps.hasAppliedPlayback(sourceKey, fileIndex),
     readyChanged: (work, ready) => logger.info(`source urgent request=${work.requestId} viewer=${work.ownerId} ` +
       `source=${work.sourceKey} file=${work.fileIndex} inputReady=${ready}`),
     inspect: async work => {

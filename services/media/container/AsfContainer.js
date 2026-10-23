@@ -1,7 +1,8 @@
 import { Container } from "./Container.js";
 import { VideoTrack } from "../tracks/VideoTrack.js";
 import { AudioTrack } from "../tracks/AudioTrack.js";
-import { readAsfPackets } from "./asf-packets.js";
+import { readAsfData, readAsfPacketTime, readAsfPackets, readAsfWindow, WINDOW_LEAD_SECONDS, WINDOW_SEARCH_SECONDS } from "./asf-packets.js";
+import { BytesUnavailable, isUnavailable } from "./unavailable.js";
 import { RetainedReads } from "./RetainedReads.js";
 
 const HEADER = "3026b2758e66cf11a6d900aa0062ce6c";
@@ -28,6 +29,10 @@ export class AsfContainer extends Container {
   #startRead = false;
   #duration = null;
   #declarations = null;
+  /** The fixed-length data packets, false where packets cannot be found by number, null before the Data Object is read. */
+  #data = null;
+  /** Send times of the packets read by number. @type {Map<number, number>} */
+  #sent = new Map();
 
   get formatName() { return "asf"; }
   packetIndexBytes() {
@@ -197,8 +202,12 @@ export class AsfContainer extends Container {
     const track = this.#tracks.find(track => track.type === "video");
     return track ? { times: index.keyframesOf(track.trackNumber), tolerance: 0 } : null;
   }
-  async readPacketIndex() {
+  async readPacketIndex(interval) {
     await this.#readHeader();
+    if (!this.#packets && Number.isFinite(interval?.from) && Number.isFinite(interval?.to) && interval.to > interval.from) {
+      const window = await this.#readWindow(interval);
+      if (window) return window;
+    }
     if (!this.#packets) {
       const index = await readAsfPackets({ readRange: this.readRange, fileSize: this.fileSize, tracks: this.#tracks,
         info: { ...this.#info, durationSeconds: this.#duration }, state: this.#packetState, packetMemory: this.packetMemory });
@@ -213,5 +222,107 @@ export class AsfContainer extends Container {
       this.#packetState = {};
     }
     return this.#packets;
+  }
+
+  /**
+   * The packets of one interval, from a window of the Data Object around it
+   * (`readAsfWindow`), or null where its packets cannot be found by number.
+   *
+   * A payload is presented no earlier than it is sent, and in the files
+   * measured a preroll after it (FFmpeg's muxer, 2026-10-23): so the window
+   * begins at a packet sent a preroll and `WINDOW_LEAD_SECONDS` before the
+   * interval, or up to `WINDOW_SEARCH_SECONDS` earlier. A window that does
+   * not reach back to a keyframe of the picture, or to the sound before the
+   * interval, is read again from twice as far back, and from the first packet
+   * at the latest; which it reaches is checked on what it read, not assumed.
+   */
+  async #readWindow(interval) {
+    const data = await this.#dataLayout();
+    if (!data) return null;
+    const requested = this.#tracks.filter(track => ["video", "audio"].includes(track.type) &&
+      (!interval.trackIds?.length || interval.trackIds.includes(track.trackNumber)));
+    if (!requested.length) return null;
+    const info = { ...this.#info, durationSeconds: this.#duration };
+    for (let lead = this.#info.prerollSeconds + WINDOW_LEAD_SECONDS; ; lead *= 2) {
+      const sentFrom = interval.from - lead;
+      const first = await this.#packetSentBefore(sentFrom, data, interval.to + WINDOW_LEAD_SECONDS);
+      const window = await readAsfWindow({ readRange: this.readRange, data, tracks: this.#tracks, requested, info, first, interval, sentFrom });
+      if (window.startCovered || first === 0) return window.index;
+    }
+  }
+
+  /**
+   * The Data Object's packets, when each has the length the file declares:
+   * the format requires it (the File Properties state one length as both the
+   * least and the most), and a packet is then found by its number.
+   */
+  async #dataLayout() {
+    if (this.#data === null) {
+      const data = await readAsfData({ readRange: this.readRange, fileSize: this.fileSize, info: this.#info });
+      const length = this.#info.packetLength;
+      const fixed = length > 0 && this.#info.minimumPacketLength === length;
+      const whole = fixed ? Math.floor((data.end - data.start) / length) : 0;
+      const count = data.count > 0 ? Math.min(data.count, whole) : whole;
+      this.#data = count > 0 ? { ...data, count, length } : false;
+    }
+    return this.#data || null;
+  }
+
+  /**
+   * The number of a packet sent at or before `seconds` and no more than
+   * `WINDOW_SEARCH_SECONDS` before it, or of the first packet when that is
+   * sent later. Packets are stored in the order they are sent, so the number
+   * is guessed between the packets already read on either side, by the file's
+   * rate between them, and aimed half that margin early so that a guess near
+   * the mark is the answer: a packet is read only where the search stands.
+   * After three guesses the search halves what is left.
+   *
+   * A guessed packet that is not held is said as missing together with the
+   * bytes the window from it to `until` is estimated to take, so the swarm is
+   * asked for the packet and the window it begins at once.
+   */
+  async #packetSentBefore(seconds, data, until) {
+    let low = 0, high = data.count, lowSent = await this.#sentAt(0, data), highSent = this.#duration;
+    if (lowSent > seconds) return 0;
+    // Past the last packet nothing is sent before the film ends; the last
+    // packet itself is read only when the search needs it.
+    if (!(highSent > seconds)) {
+      high = data.count - 1;
+      highSent = await this.#sentAt(high, data);
+      if (highSent <= seconds) return high;
+    }
+    for (const [number, at] of this.#sent) {
+      if (number <= low || number >= high) continue;
+      if (at <= seconds) { low = number; lowSent = at; }
+      else { high = number; highSent = at; }
+    }
+    for (let guesses = 0; high - low > 1 && seconds - lowSent > WINDOW_SEARCH_SECONDS; guesses++) {
+      const perSecond = (high - low) / (highSent - lowSent);
+      const aim = seconds - WINDOW_SEARCH_SECONDS / 2;
+      const guess = guesses >= 3 || !(perSecond > 0) ? Math.floor((low + high) / 2) : low + Math.floor((aim - lowSent) * perSecond);
+      const probe = Math.min(high - 1, Math.max(low + 1, guess));
+      const window = perSecond > 0 ? Math.ceil((until - aim) * perSecond) : 1;
+      const at = await this.#sentAt(probe, data, Math.max(1, window));
+      if (at <= seconds) { low = probe; lowSent = at; }
+      else { high = probe; highSent = at; }
+    }
+    return low;
+  }
+
+  /**
+   * When packet `number` is sent. A packet that is not held is said as
+   * missing with the `packets` packets from it.
+   */
+  async #sentAt(number, data, packets = 1) {
+    if (!this.#sent.has(number)) {
+      const at = data.start + number * data.length;
+      try {
+        this.#sent.set(number, await readAsfPacketTime({ readRange: this.readRange, at, end: data.end, info: this.#info }));
+      } catch (error) {
+        if (!isUnavailable(error) || packets <= 1) throw error;
+        throw new BytesUnavailable(at, Math.min(data.start + data.count * data.length, at + packets * data.length) - 1, 0);
+      }
+    }
+    return this.#sent.get(number);
   }
 }

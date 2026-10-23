@@ -67,6 +67,7 @@ jobs:
             -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
             install --no-install-recommends -y ffmpeg
           sudo apt-get -o Dir::Cache::archives="$RUNNER_TEMP/apt-archives" autoclean
+          sudo rm -rf "$RUNNER_TEMP/apt-archives/partial" "$RUNNER_TEMP/apt-archives/lock"
       - name: Save packet timing package cache
         uses: actions/cache/save@v6
         with:

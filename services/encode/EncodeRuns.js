@@ -1234,7 +1234,21 @@ export class EncodeRuns {
         if (mediaRanges === false && tentative) return null;
         if (mediaRanges === false) throw Object.assign(new Error(`Closed piece #${index} has incomplete media.`),
           { code: "ERR_INCOMPLETE_MEDIA" });
-        const published = this.#host.segmentFiles.publish(address, name, session.segmentFormat, { mediaRanges, bytes });
+        const publishStartedAt = performance.now();
+        const publishProcess = session.spec?.carries === "audio-only" ? "P11.a" : "P11.v";
+        this.#host.observeWait?.(session.file.sourceKey, "process", { process: publishProcess, phase: "begin",
+          output: address, segment: index, at: publishStartedAt });
+        let published;
+        let publishOutcome = "error";
+        try {
+          published = this.#host.segmentFiles.publish(address, name, session.segmentFormat, { mediaRanges, bytes });
+          publishOutcome = published ? "published" : "not-published";
+        } finally {
+          const publishEndedAt = performance.now();
+          this.#host.observeWait?.(session.file.sourceKey, "process", { process: publishProcess, phase: "end",
+            output: address, segment: index, at: publishEndedAt, startedAt: publishStartedAt, endedAt: publishEndedAt,
+            durationMs: publishEndedAt - publishStartedAt, outcome: publishOutcome });
+        }
         if (!published) throw new Error(`Closed piece #${index} could not be stored.`);
         if (index === safeIndex) this.#host.observeWait?.(session.file.sourceKey, "first-piece-published", {
           output: address, segment: index, startedAt: observedStart, endedAt: performance.now(),

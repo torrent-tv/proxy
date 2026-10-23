@@ -24,7 +24,7 @@ function getPayload(body) {
   return {};
 }
 
-export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner, sourceRegistry, torrentPool, ffmpegBin, localBaseUrl, viewers }) {
+export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner, sourceRegistry, torrentPool, ffmpegBin, localBaseUrl, viewers, observeWait }) {
   const payload = getPayload(req.body);
   const sourceKey = typeof payload.sourceKey === "string" ? payload.sourceKey.trim() : "";
   const fileIndex = Number(payload.fileIndex);
@@ -38,10 +38,13 @@ export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner, s
   if (typeof payload.positionSeconds === "number" && Number.isFinite(payload.positionSeconds) && payload.positionSeconds >= 0) selection.positionSeconds = payload.positionSeconds;
   if (typeof payload.wantsToPlay === "boolean") selection.wantsToPlay = payload.wantsToPlay;
   if (consumerId) viewers?.selectsFile(consumerId, sourceKey, fileIndex, Date.now(), selection);
+  const startedAt = performance.now();
 
   // Interface delegates to PlaybackController (orchestrator + domain). Keeps route thin.
   const { PlaybackController } = await import("../../../services/server/controllers/PlaybackController.js");
   const controller = new PlaybackController({ torrentPool, sourceRegistry, ffmpegBin, localBaseUrl, playbackPlanner });
+  const waitFields = { process: "P3", sourceKey, fileIndex };
+  observeWait?.(sourceKey, "process", { ...waitFields, phase: "begin", at: startedAt });
   const cancellation = new AbortController();
   const aborted = () => cancellation.abort();
   const closed = () => { if (!reply.raw?.writableEnded) aborted(); };
@@ -52,8 +55,14 @@ export async function handleApiPlaybackPlanPost(req, reply, { playbackPlanner, s
     const params = { sourceKey, fileIndex, userAgent };
     const plan = payload.waitForReady === true
       ? await controller.getReadyPlan(params, { signal: cancellation.signal }) : await controller.getPlan(params);
+    const endedAt = performance.now();
+    observeWait?.(sourceKey, "process", { ...waitFields, phase: "end", at: endedAt, startedAt,
+      endedAt, durationMs: endedAt - startedAt, outcome: "plan-ready" });
     return reply.send(plan);
   } catch (error) {
+    const endedAt = performance.now();
+    observeWait?.(sourceKey, "process", { ...waitFields, phase: "end", at: endedAt, startedAt,
+      endedAt, durationMs: endedAt - startedAt, outcome: cancellation.signal.aborted ? "cancelled" : "error" });
     if (cancellation.signal.aborted) return;
     if (error instanceof Error && error.code === "SOURCE_NOT_FOUND") {
       return reply.code(404).send({ error: error.message });

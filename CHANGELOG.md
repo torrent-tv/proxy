@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.4
 
 - **Fix**: Include the source file indexes for each required playback operation so the browser can measure urgent byte demand across the video and selected audio inputs (#ttv-11).
 

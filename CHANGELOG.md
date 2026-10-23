@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.8
 
 - **Fix**: Read a chosen embedded subtitle two segments ahead of the viewer, so consecutive reading windows overlap and a cue arrives before it starts (#ttv-7).
 

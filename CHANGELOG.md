@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.0
 
 - **New**: Record a direct timing span when a separate soundtrack output is first opened (#ttv-185).
 

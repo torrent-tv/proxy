@@ -109,14 +109,19 @@ measurement gap instead of being presented as an atomic duration.
 | A0.1 | Read the selected `.torrent` (`Torrent.#processIncomingFiles`, `File.arrayBuffer`) | A0 | bytes available in the page | blocking for A0.2 |
 | A0.2 | Decode bencode and derive the info hash (`parseTorrentBytes`); the SHA-1 call is asynchronous (`crypto.subtle.digest`) | A0.1 | parsed metadata and hash available; `FILE_DETAILS_READY` dispatched | blocking for A1 |
 | A1 | Store the already parsed source details (`openParsedTorrentDetails`, synchronous), and dispatch `FILE_CHOSEN` when the file is already determined | A0.2 | source details stored | blocking |
-| A2 | Connect (`#acquireTransport` → `ProxySelector.chooseBestProxy`), made of A2.1–A2.3. Joins the connect `#connectEarly` started at page load and costs nothing when that has finished. Limits: 12 s public-only, 5 s on the same network, 30 s overall | A1 | A2.3 ends | blocking |
+| A2 | Connect (`#acquireTransport` → `ProxySelector.chooseBestProxy`), made of A2.1–A2.3. Joins the connect `#connectEarly` started at page load; a finished connection costs no wait. Limits: 12 s public-only, 5 s on the same network, 30 s overall | A1 | A2.3 ends | blocking |
 | A2.1 | Ask the server which proxy (`POST /api/proxy-clients/choose`) | A2 | answer | blocking |
-| A2.2 | Media connection signalling: WebSocket `/ws/browser-signal`, session, SDP offer, answer relayed by the server, answer applied (`setRemoteDescription`, buffered candidates added) | A2.1 | answer applied | blocking |
+| A2.2 | Signalling envelope: WebSocket `/ws/browser-signal`, session, SDP offer, answer relayed by the server, answer and buffered candidates applied | A2.1 | answer applied | blocking; contains A2.2.1–A2.2.4 |
+| A2.2.1 | WebSocket upgrade and proxy-session assignment | A2.1 | `session` message received | blocking |
+| A2.2.2 | Create SDP offer, set local description and send offer | A2.2.1 | offer sent to proxy | overlaps ICE gathering |
+| A2.2.3 | Apply remote SDP answer (`setRemoteDescription`) | answer received | answer applied | blocking before candidate drain |
+| A2.2.4 | Apply each remote ICE candidate, buffered or trickled | A2.2.3 or candidate message | `addIceCandidate` settles | concurrent candidate arrivals; per-candidate spans |
+| A2.2.5 | Gather and send local ICE candidates | peer connection created | ICE gathering complete | overlaps A2.2.2, A2.2.3 and transport setup |
 | A2.2m | Media connection transport: ICE, DTLS, SCTP, media data channel open | A2.2 | media channel open | parallel with A2.2c |
 | A2.2c | Control connection. With `separateControl: 2` in the answer (proxy `webrtc-manager.js`) it is started while the answer is processed (`#openSeparateControl`) and has its own WebSocket signalling, offer/answer, ICE, DTLS and SCTP (`ControlConnection`). Without it, a control channel is opened on the media connection (`#openLegacyControl`) | A2.2 | control channel open | parallel with A2.2m |
 | A2.J | Both ready: `#settleConnected` requires the answer applied, the media channel open and, with a separate control connection, its channel open | A2.2m, A2.2c | `connect()` resolves | blocking |
 | A2.3 | Liveness ping (`proxy.ping()`): waits for the control link, then sends on the control channel (`#controlChannelFor`) | A2.J | pong | blocking |
-| A2.4 | Branch: the public-only attempt fails in A2.2m, A2.2c, A2.J or A2.3 → local-network permission (one viewer click) → A2.1–A2.3 again with private candidates | the failure | second connection ready | blocking; outcome 4 while waiting |
+| A2.4 | Branch: the public-only attempt fails in A2.2m, A2.2c, A2.J or A2.3 → query permission → show explainer and wait for viewer, request permission, or wait for check-again → repeat permission check → A2.1–A2.3 with private candidates | the failure | second connection ready or terminal error | blocking; individual waits and actions are A2.4.1–A2.4.5 |
 | A2.5 | Link probe (`measureLink`) over the media connection, after the connection is adopted | A2.3 | probe answered | start without waiting |
 | A3 | Ask for the proxy that holds this film (`#useProxyThatHoldsTheFilm`, `POST /choose` with the info hash) | A2 | answer | blocking |
 | A3r | Branch: move → close, connect to the named proxy (A2 steps) | A3 | connected | blocking |
@@ -266,7 +271,7 @@ orchestration. The torrent runs in one worker thread
 | ID | Resource | Who takes service from it | What is established | What is not established |
 |---|---|---|---|---|
 | R1 | Download service of one torrent | W8 for every file and output of that torrent | Bytes are fetched once; the priority map orders them | — |
-| R2 | Proxy main event loop | all route handlers, P2–P8, P11–P15, data-channel forwarding | A long synchronous step delays every response; field23: an `onSend`→`finish` gap of 33.875 s overlapped a 33.862 s map pass (research `wait-estimate-2026-10-19-ttv185.md`) | queueing per response, except the loop delay in `[net-debug] sent` |
+| R2 | Proxy main event loop | all route handlers, P2–P8, P11–P15, data-channel forwarding | A long synchronous step delays every response; field23: an `onSend`→`finish` gap of 33.875 s overlapped a 33.862 s map pass (research `wait-estimate-2026-10-19-ttv185.md`) | `[net-debug] sent` records event-loop delay over each response transfer (`loopMean`, `loopP99`, `loopMax`); time queued before the request handler begins is not separately attributed |
 | R3 | Processor cores | F2 of every run, X1, R2, the worker | Measured per-piece speeds include the sharing at the time they were taken | the split between runs at a future moment |
 | R4 | Encoder slots and the memory budget (`MachineBudget`, `EncodeInputs`) | P6 admission, P8 admission, P2/P5 index memory (`needs-memory`) | A wait for memory delays the read or the run | — |
 | R5.m | Media connection (one `RTCPeerConnection`) | segments, init, playlists, `/stream`, `/media`, link probe, subtitles, covers (`isBulkPath`) | The proxy forwards each request on its own (`forwardRequest` per `requestId`) and sends chunks with backpressure; responses can be in flight together | that transfers are serial; the forecast's single link queue (`transferFinish` in `predictPlaybackReadiness`) is an assumption of the calculation |
@@ -391,7 +396,15 @@ logged at the process boundary; "derived" is computed from other values;
 | Process | Clock | Identifier | Start event | End event | Queue | Work, units | Source |
 |---|---|---|---|---|---|---|---|
 | A0.0–A0.2 | B | wait sequence and attempt | `A0.0` address decode; `A0.1` file read; `A0.2` bencode parse and info-hash derivation | each operation has its own `end` event | — | bytes | direct spans; parse and hash remain one operation |
-| A2.2, A2.2m, A2.2c, A2.J, A2.3 | B | signalling session id | `process` begin events for signalling, media/control channel, and join | corresponding end events; ping end | — | — | direct for these coarse boundaries; ICE subphases remain state events |
+| A2.2 | B | connection trace context and signalling session id | connection start | answer and buffered candidate application complete | WebSocket signalling | — | standalone trace context preserves spans when early connection finishes before file selection |
+| A2.2.1 | B | connection trace context, proxy id, session id | WebSocket creation | server `session` message | signalling server | — | direct span; logged before a playback wait exists |
+| A2.2.2 | B | connection trace context, session id | `createOffer` | local description set and offer sent | ICE gathering begins during this span | SDP | direct span |
+| A2.2.3 | B | connection trace context, session id | answer message | `setRemoteDescription` completes | buffered candidates follow as separate spans | SDP | direct span |
+| A2.2.4 | B | connection trace context, session id, candidate disposition | each candidate application begins | `addIceCandidate` resolves or rejects | candidate arrival | one candidate | direct per-candidate span; candidates may be buffered or trickled |
+| A2.2.5 | B | connection trace context, session id | peer connection created | ICE gathering completes | A2.2.2, A2.2.3 and transport setup | local candidates | direct span; individual candidate arrivals are point events |
+| A2.2m, A2.2c, A2.J, A2.3 | B | connection trace context and signalling session id | media/control channel open attempts, join and ping | corresponding channel opens, both-ready join and ping end | media and control transport are parallel | — | direct spans; each event shares the standalone context |
+| A2.4 | B | wait, attempt, connection context | public-only connection failure | private-candidate retry connects or fails | permission prompt and viewer action | proxy id and failure outcome | parent span; contains A2.4.1–A2.4.5 and the repeated A2.1–A2.3 attempt |
+| A2.4.1–A2.4.5 | B | wait, attempt, operation, permission state | permission query, explainer display, viewer click wait, local permission request, or denied-state retry wait | each operation returns, errors or is cancelled | browser permission UI and viewer | permission state and outcome | direct operation spans; separate IDs identify query, display, allow click, local request and check-again wait |
 | A2.5 | B | wait, attempt, operation | `measureLink` starts | probe loop resolves, fails or is aborted | media data channel | probe bytes and transfer durations | direct operation span; each probe also has its own HTTP transfer record |
 | A2.1, A3, A9, A16 | B / P | wait, attempt, operation | structured `http-start` | structured `http-end` | server fanout for capacity checks | one request | direct request spans |
 | A6 | B / P | wait, attempt, operation, source key | structured `http-start` | structured `http-end` | includes P1 if it waits | file-list response | direct request span |
@@ -466,8 +479,8 @@ The opt-in trace now emits process ids for A0.0–A0.2, P4, and W1–W10 in
 addition to the previously listed browser and proxy operations. Worker events
 use the torrent worker's monotonic clock and are joined to browser events by
 `sourceKey`; clock values from separate processes cannot be subtracted. Remaining
-limits are specific: A2.2 ICE candidate substeps are state events rather than
-separate spans; B9 starts at the first observed codec declaration among the
+limits are specific: A2.2.4 logs one span per candidate application, while
+candidate arrival is a separate point event; B9 starts at the first observed codec declaration among the
 tracks later listed by `BUFFER_CREATED`, because field logs show that buffer
 creation can precede another track's `BUFFER_CODECS`; C7 is a point observation;
 B8 spans hls.js fragment parsing from `FRAG_LOADED` to the matching `FRAG_PARSED`
@@ -506,14 +519,24 @@ did not occur in those captured attempts; it never means zero duration.
 | Browser: input | A0.2 | Parse bencode and derive info hash | Field 05, attempt 0: 0.7 ms |
 | Browser: input | A1 | Store parsed source details | Field 05, attempt 0: 1.6 ms |
 | Browser: connection | A2 | Acquire transport, including any unfinished early connection | Field 05, attempt 0: 0.3 ms; early connection was already ready |
-| Browser: connection | A2.1 | Ask server to choose a proxy | Not separately timed in this attempt |
-| Browser: connection | A2.2 | Signal media connection and apply answer | Not separately timed in this attempt |
-| Browser: parallel connection lanes | A2.2m | Open media data channel | Not separately timed in this attempt |
-| Browser: parallel connection lanes | A2.2c | Open separate control channel | Not separately timed in this attempt |
-| Browser: connection join | A2.J | Join media and control readiness | Not separately timed in this attempt |
-| Browser: connection | A2.3 | Ping control connection | Included in coarse A2; no separate span |
-| Browser: retry branch | A2.4 | Ask permission and reconnect with local candidates | Branch not taken |
-| Browser background lane | A2.5 | Probe media-link rate | No completed span retained in this attempt |
+| Browser: connection | A2.1 | Ask server to choose a proxy | Conan, waitTrace capture: 42.8 ms |
+| Browser: connection | A2.2 | Signal media connection and apply answer | Conan: 99.8 ms; overlaps ICE gathering and media setup |
+| Browser: connection | A2.2.1 | Open signalling WebSocket and receive assigned session | Conan: 140.4 ms |
+| Browser: connection | A2.2.2 | Create and send local SDP offer | Conan: 6.0 ms |
+| Browser: connection | A2.2.3 | Apply remote SDP answer | Conan: 1.2 ms |
+| Browser parallel connection lane | A2.2.4 | Apply remote ICE candidates, one span per candidate | Conan: buffered candidate 1.2 ms; trickled candidate 0.7 ms |
+| Browser parallel connection lane | A2.2.5 | Gather and send local ICE candidates | Conan: 101.7 ms, overlapping signalling |
+| Browser: parallel connection lanes | A2.2m | Open media data channel | Conan: 250.9 ms |
+| Browser: parallel connection lanes | A2.2c | Open separate control channel | Conan: 337.1 ms |
+| Browser: connection join | A2.J | Join media and control readiness | Conan: 337.2 ms; overlaps A2.2c |
+| Browser: connection | A2.3 | Ping control connection | Conan: 7.2 ms |
+| Browser: retry branch | A2.4 | Retry after public-only connection failure | Branch not taken; parent and child spans are implemented |
+| Browser: permission query | A2.4.1 | Read browser local-network permission state | No matching field run; direct span and state event are implemented |
+| Browser: permission prompt | A2.4.2 | Show permission explainer | No matching field run; direct span is implemented |
+| Browser: viewer input | A2.4.3 | Wait for viewer to click Allow | No matching field run; direct span is implemented |
+| Browser: permission prompt | A2.4.4 | Request local-network permission from the browser | No matching field run; direct span is implemented |
+| Browser: denied permission | A2.4.5 | Wait for viewer to check permission again | No matching field run; direct span is implemented |
+| Browser background lane | A2.5 | Probe media-link rate | Follow-up connection-only run: 938.8 ms; browser begin/end events are in `research/session-logs-20261023-ttv185-a25-followup/client.log.gz` |
 | Browser: source selection | A3 | Choose proxy holding the source | Field 05, attempt 0: 78.7 ms |
 | Browser: retry branch | A3r | Close and connect to named proxy | Branch not taken |
 | Browser: source setup | A4 | Register source on proxy | Field 05, attempt 0: 67.7 ms browser request; proxy handler 18.0 ms |
@@ -553,7 +576,7 @@ did not occur in those captured attempts; it never means zero duration.
 | Browser: prebuffer request | C1.1 | Read proxy readiness for the initial-start gate | Haunted Hotel cold start: 251.8 ms and 152.6 ms (2 polls) |
 | Browser: prebuffer decision | C1.2 | Evaluate readiness from the proxy response, subtitle state and browser buffer | Haunted Hotel cold start: 0.3 ms and 0.2 ms |
 | Browser: prebuffer state | C1.3 | Update the browser readiness model | Haunted Hotel cold start: 0 ms in both observed iterations |
-| Browser: prebuffer recovery | C1.4 | Resume HLS loading at the buffered end after a four-second stall | Conditional; not taken in Haunted Hotel cold start |
+| Browser: prebuffer recovery | C1.4 | Resume HLS loading at the buffered end after a four-second stall | Conan cold start: 6.5 ms conditional action span |
 | Browser: prebuffer reporting | C1.5 | Publish current download, transcode and readiness measurements | Haunted Hotel cold start: 0.5 ms (1 publication) |
 | Browser: prebuffer timer | C1.6 | Wait for the next gate check | Haunted Hotel cold start: 253.3 ms (1 timer wait) |
 | Browser background lane | C2 | Send buffered ranges, position and link samples | Timed through B2 request spans; no separate C2 work duration |
@@ -600,17 +623,17 @@ did not occur in those captured attempts; it never means zero duration.
 | Encoder lane | F1.v | Hand first picture input bytes to FFmpeg | Post-release 2026-10-23 trace: positive spans of 209.2–1,081.3 ms for run tokens 32–41 |
 | Encoder lane | F1.a | Hand first soundtrack input bytes to FFmpeg | Post-release 2026-10-23 Alien Romulus cold start: 112.5 ms (run token 1), 27.9 ms (run token 3); seek: 29.5 ms (token 37), 36.7 ms (token 39); every admitted-`stdin` span has both events |
 | Encoder parallel output lanes | F2.v | Produce first picture segment | Field 05, attempt 1: 5,401.1 ms |
-| Encoder parallel output lanes | F2.a | Produce first soundtrack segment | No valid isolated completion span in these logs |
-| Torrent worker: add-to-ready parent | W1 | Add source through ready torrent | Historical Field 04: worker add point only; new traces record the full interval, including nested worker steps |
-| Torrent worker: startup | W2 | Start peer discovery | No matched startup span in fields 04/05 |
-| Torrent worker: peer lane | W3 | Connect to peers and complete handshakes after discovery | Historical Field 04: peer-arrival points only; new traces record begin/end duration |
-| Torrent worker: metadata lane | W4 | Receive magnet metadata from peers | Historical selected `.torrent` did not take this branch; new magnet traces record begin/end duration |
-| Torrent worker: startup | W5 | Verify stored pieces | No matched verification span in fields 04/05 |
-| Torrent worker: startup | W6 | Publish store-ready state | No matched startup span in fields 04/05 |
-| Torrent worker: selection | W7 | Apply priority-map piece selection | Field 04: 1.5 ms median over 8 commands |
-| Torrent worker: download lane | W8 | Request, receive and verify pieces | Field 04: 2,038.8 ms median over 288 completed piece spans |
-| Torrent worker: storage lane | W9 | Write verified bytes and report readable ranges | Field 04: 288 availability points only; the new trace records each `store.put` duration |
-| Torrent worker: stats lane | W10 | Return file statistics and arrival forecast | Field 04: 3.4 ms median over 137 commands |
+| Encoder parallel output lanes | F2.a | Produce first soundtrack segment | Alien: Romulus, proxy 2.107.1 cold start: first audio run token 1 took 2,417.0 ms from first input-byte handoff to segment 0 closed; later one-segment runs each emitted their own span |
+| Torrent worker: add-to-ready parent | W1 | Add source through ready torrent | Conan: 992.2 ms, including W2–W6; do not add child spans |
+| Torrent worker: startup | W2 | Start peer discovery | Conan `.torrent`: 78.0 ms |
+| Torrent worker: peer lane | W3 | Connect to peers and complete handshakes after discovery | Conan: 262.7 ms to first connected peer |
+| Torrent worker: metadata lane | W4 | Receive magnet metadata from peers | Not taken: selected input was `.torrent`, which already contains metadata |
+| Torrent worker: startup | W5 | Verify stored pieces | Conan: 859.9 ms |
+| Torrent worker: startup | W6 | Publish store-ready state | Conan: 90.6 ms |
+| Torrent worker: selection | W7 | Apply priority-map piece selection | Conan: 5.7 ms for an observed command |
+| Torrent worker: download lane | W8 | Request, receive and verify pieces | Conan: piece 0 took 4,937.8 ms; the span contains W9 |
+| Torrent worker: storage lane | W9 | Write verified bytes and report readable ranges | Conan: piece 0 store write took 8.5 ms; availability was reported separately |
+| Torrent worker: stats lane | W10 | Return file statistics and arrival forecast | Conan: 17.7 ms for an observed command |
 
 ### 8.2 Parallel actions in the field traces
 
@@ -620,6 +643,7 @@ monotonic clock. Durations are not to be added.
 
 | Concurrent phase | Browser lane | Proxy main-thread lane | Torrent worker / encoder lane | Picture stream lane | Soundtrack stream lane | Measured overlap |
 |---|---|---|---|---|---|---|
+| A2 connection | A2.1 selection 42.8 ms; A2.2.1–A2.2.5 signalling; A2.2m/A2.2c transport; A2.J join; A2.3 ping 7.2 ms | Server relays signalling; proxy handles WebRTC session | — | Media transport 250.9 ms | Control transport 337.1 ms | Browser-clock durations overlap; A2.5 runs as a separate background lane and must not be added to the blocking connection time |
 | Source setup, field 05 attempt 0 | A5 early estimate: 55.9 ms; A6 file-list request: 58.8 ms | A6 handler: 21.4 ms (nested in its request; proxy clock) | — | — | — | Browser A5/A6 intervals overlapped by 55.7 ms |
 | Plan, field 05 attempt 1 | A11 statistics poll: 67.5 ms; A12 plan request: 70.6 ms | P2 reads: 0.1 ms median per read, within plan processing | W10 is sampled on the worker clock; no cross-clock overlap value | — | — | Browser A11/A12 overlapped by 66.4 ms |
 | Plan completion, field 05 attempt 1 | A13 metadata/fingerprint: 2.1–2.3 ms; A14 subtitles: 1.7 ms; A15 codecs: 1.1 ms | P2 repeated reads and P4 map passes | W7/W8/W9 have separate worker-clock records; exact cross-clock overlap is not calculated | — | — | A13, A14 and A15 intervals overlap on the browser clock |
@@ -772,15 +796,15 @@ accurate.
 | Client-link delivery | Transfer required output bytes to the browser | One `link.finish(sizeBits, time)` queue shared by all modeled jobs | Field28 audio transfer: 21 ms; video segment: 2,217 ms send after 1,730 ms fetch | Link contribution is embedded in `firstRequiredSegmentsSeconds`; not logged separately in the per-stage forecast | Observed spans exist, but per-track forecast contribution is not saved. Link queue assumption and concurrent channel use remain unvalidated. |
 | Browser append, readiness, playback and presentation | Remux, append, metadata, readiness polling/release, `play()`, decoded audio and moving-frame confirmation | `appendSeconds` is optional and not supplied by `ViewerRequests`; B8–C7 are not represented in the numeric segment estimate | Field28: readiness `ready=true` at +10.760 s; `playing` at +11.006 s; advancing `timeupdate` at +11.220 s | No complete predicted completion for these actions | These actions are measured in browser/proxy traces but omitted from the end-to-end formula. Add them as causal dependencies; do not infer their time from segment delivery. |
 
-The atomic inventory in 8.1 remains the row-level description and actual-session
-example for every process ID. It includes branches that were not taken in the
-three current-release runs. P5 has a direct Alien Romulus measurement, but A2
-connection substeps, retries, P6.a, most HLS request/append boundaries, torrent
-startup W2–W6, and per-response main-thread queueing still lack a matched
-duration in those runs. Those rows are “no matched measurement,” not stable
-zero-cost stages. The current data therefore supports complete coarse-interval
-coverage for three successful initial opens, while atomic coverage and
-per-stage mathematical accuracy are incomplete.
+The atomic inventory in 8.1 gives the row-level description, logging boundary,
+and a real-session example where one was captured. Later captures now measure
+A2.2 subspans, P5, P6.a, F2.a, W2–W6, C1.4, and per-response event-loop delay.
+Rows marked “no matched measurement” are not zero-cost stages: they are
+conditional branches or boundaries not exercised in the saved field runs.
+Retry paths, C3 subtitle hold, magnet metadata (W4), and the remaining
+request-handler queue intervals still need field examples. The implementation
+logs these separately when those branches occur; the current captures do not
+prove their field timing or coverage under every outcome.
 
 ## 9. Seek, soundtrack and quality change
 
@@ -833,7 +857,12 @@ flowchart TB
     A2J["A2.J both channels open"]
     A23["A2.3 ping on the control channel"]
     QA2{"public-only attempt failed?"}
-    A24["A2.4 viewer permits local network, A2.1-A2.3 again"]
+    A24["A2.4 public-only failure and local retry"]
+    A241["A2.4.1 query permission"]
+    A242["A2.4.2 show explainer"]
+    A243["A2.4.3 wait for allow click"]
+    A244["A2.4.4 request local permission"]
+    A245["A2.4.5 denied: wait for check again"]
     A25["A2.5 link probe"]
     A3["A3 ask for the proxy holding the film"]
     QA3{"move?"}
@@ -1127,12 +1156,21 @@ flowchart LR
   subgraph BROWSER1["Browser: input, connection and source setup"]
     A0(["A0 viewer action, t0"]) --> A00["A0.0 address decode"] --> A01["A0.1 file read"] --> A02["A0.2 parse and hash"] --> A1["A1 store source"]
     A0 --> A01
-    A1 --> A2["A2 acquire transport"] --> A21["A2.1 choose proxy"] --> A22["A2.2 signal media"]
+    A1 --> A2["A2 acquire transport"] --> A21["A2.1 choose proxy"] --> A221["A2.2.1 WebSocket and session"]
+    A221 --> A222["A2.2.2 create and send offer"] --> A223["A2.2.3 apply answer"] --> A22["A2.2 signalling complete"]
+    A221 -. candidate messages .-> A224["A2.2.4 apply remote candidates"]
+    A223 -. buffered candidates .-> A224
+    A221 -. parallel .-> A225["A2.2.5 gather local candidates"]
+    A225 -. can overlap .-> A223
     A22 --> A22m["A2.2m media channel"] --> A2J["A2.J connection join"]
     A22 --> A22c["A2.2c control channel"] --> A2J
     A2J --> A23["A2.3 ping"] --> A3["A3 choose holder"]
     A23 -.-> A25["A2.5 link probe"]
-    A22 -. connection failure .-> A24["A2.4 local-network retry"] --> A21
+    A22 -. connection failure .-> A24 --> A241 --> QA241{"granted or unsupported?"}
+    QA241 -- yes --> A21
+    QA241 -- no --> QAPROMPT{"permission prompt available?"}
+    QAPROMPT -- yes --> A242 --> A243 --> A244 --> A241
+    QAPROMPT -- no --> A245 --> A241
     A3 --> A3r["A3r proxy move"] --> A4["A4 register source"]
     A3 --> A4
     A4 --> A5["A5 early estimate"]
@@ -1586,16 +1624,16 @@ For this saved run, the new `firstAdvancingFrameElapsedMs` field would be
 6,006.6 ms (`39,366.0 − 33,359.4`); that value is derived from the 0.62.3 trace,
 not observed from a field run of the new 0.63.0 logger.
 
-This evidence establishes event-time coverage only for the captured successful
-cold open and native seek path. It does not establish complete coverage of all
-branches. The inventory still marks missing matched spans for connection
-substeps, retries, copied-video keyframe lookup, alternate soundtrack and
-quality changes, magnet and direct-play paths, and detailed per-request main
-thread queueing. Native physical input before `seeking` remains unobservable.
-Intervals between measured operations remain an explicit residual until a
-browser performance capture identifies their cause; they are not assigned to
-the nearest named action. Thus the process map is not yet proven complete for
-all startup and seek paths.
+This evidence establishes event-time coverage for the captured successful cold
+open and native seek path. Later field captures add direct durations for the
+connection substeps, copied-video keyframe lookup, and alternate soundtrack
+opening. Retry paths, subtitle hold, magnet metadata and direct-play branches
+still lack matched field runs. The request-handler queue before proxy route
+entry and native physical input before the browser's `seeking` event remain
+outside the current direct boundaries. Intervals between measured operations
+remain explicit residuals until a browser performance capture identifies their
+cause; they are not assigned to the nearest named action. The saved runs do not
+exercise every startup and seek branch.
 
 ### 13.2 Monotonic-clock validation, 2026-10-23
 
@@ -2105,3 +2143,61 @@ Together with the Haunted Hotel run, this supplies real examples from two
 titles for cold-start and seek paths. Prepared-range seeks were separately
 observed on Haunted Hotel. It does not establish coverage of every conditional
 branch, especially subtitle hold and four-second stall recovery.
+
+### 13.8 Conan cold start and seeks, 2026-10-23
+
+The field run used the deployed server 0.66.3 and the Home Assistant proxy
+0.100.2 with `?waitTrace=1`. The selected file was
+`Conan.The.Barbarian.720p.rus.LostFilm.TV.mp4` (info hash
+`7bb9a34ad3b9e8a8302929ba727c7fd466622a2b`). Full client and proxy logs are
+saved in `research/session-logs-20261023-ttv185-conan-waittrace/`. The file
+started and produced `audioReady=true` at the first presented frame.
+
+| Cold-start interval | Time (ms) |
+|---|---:|
+| Transport | 1,465.9 |
+| Plan | 10,241.7 |
+| Prepare | 33,697.1 |
+| Prebuffer | 9,909.4 |
+| **Cold-start total through prebuffer release** | **55,314.1** |
+| Presentation | 101.8 |
+| **Time to first presented frame with audio ready** | **55,415.9** |
+
+The four blocking intervals sum exactly to `coldStartTotalMs`; adding
+presentation equals `first-frame-observation.elapsedMs`. The cold path also
+recorded C1.4's four-second stall recovery action as 6.5 ms. This is one
+successful run, not a distribution or a forecast comparison.
+
+The same Conan playback supplied two seek cases. An unprepared forward seek to
+300 s produced a first-frame observation after 6,790.9 ms. Later the viewer
+sought backward from about 318.7 s to 315.3 s inside the already buffered
+292.3–359.0 s range; the first-frame observation followed in 1,135.6 ms.
+These waits had `audioReady=true`. The separate browser traces also recorded
+S0–S2 child operations and their repeated readiness polls. Their durations
+overlap at phase boundaries; they are not to be added to output and download
+work on the proxy and worker clocks.
+
+The same opt-in client log measured A2.1–A2.2.5, media/control transport,
+their readiness join and A2.3. For example, A2.1 was 42.8 ms, A2.2.1 was
+140.4 ms, ICE gathering A2.2.5 was 101.7 ms, and media/control transport
+spans were 250.9/337.1 ms in parallel. It did not contain a completed A2.5
+span even though the individual link-probe requests were logged. That missing
+boundary was traced to starting the background measurement with no active wait
+context. The correction and a field check are recorded in section 13.9.
+
+### 13.9 A2.5 field trace after the context fix, 2026-10-23
+
+A separate `?waitTrace=1` connection-only run on server 0.66.4 and proxy
+0.100.2 opened the proxy transport without selecting a torrent. The browser
+trace records A2.5 begin at 2,818.4 ms and end at 3,757.2 ms on the same
+monotonic clock: 938.8 ms total. The full run-specific client log is
+`research/session-logs-20261023-ttv185-a25-followup/client.log.gz`; the complete
+proxy and both server-container logs are saved in the same directory. The
+client log contains the matching `A2.5.link-probe` begin/end events. The
+separate browser trace snapshot is `browser-trace.json`.
+
+This proves the named event is emitted and persisted after adding the A2
+trace context. It is not a cold-start duration: A2.5 is a background probe
+that overlaps later selection and preparation and is excluded from the
+blocking-stage sum. The completed Conan cold start and seeks remain the field
+playback examples in section 13.8.

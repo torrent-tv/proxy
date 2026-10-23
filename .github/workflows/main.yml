@@ -23,12 +23,13 @@ permissions:
 jobs:
   checks:
     name: Checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # A newer push to a pull request makes its older checks pointless; every push to
     # main gets a group of its own, so no check of main is ever replaced.
     concurrency:
       group: ${{ github.event_name == 'pull_request' && format('checks-{0}', github.ref) || format('checks-{0}', github.run_id) }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    # One step per check, so the run shows which check ran and which one failed.
     steps:
       - uses: actions/checkout@v7
         with:
@@ -41,14 +42,28 @@ jobs:
       # Use Ubuntu's ffprobe as the independent packet-timing reference.
       - name: Install the packet timing reference
         run: sudo apt-get update && sudo apt-get install --no-install-recommends -y ffmpeg
-      - uses: torrent-tv/.github/actions/checks@main
-        env:
-          FFPROBE_BIN: /usr/bin/ffprobe
+      - name: Commit messages follow Conventional Commits
+        uses: torrent-tv/.github/actions/check-commits@main
+      - name: Branch name names a task
+        uses: torrent-tv/.github/actions/check-branch@main
+      - name: Shell scripts and Dockerfiles use LF
+        uses: torrent-tv/.github/actions/check-line-endings@main
+      - name: Workflows are valid
+        uses: torrent-tv/.github/actions/check-workflows@main
+      - name: Pending changes have a changelog entry
+        uses: torrent-tv/.github/actions/check-changelog@main
         with:
           changelog: CHANGELOG.md
           version-file: package.json
-          # No check may start a real torrent; this is the static half of that rule.
-          extra-check: node scripts/check-tests-start-no-torrent.mjs
+      - name: Install dependencies
+        run: npm ci
+      # No check may start a real torrent; this is the static half of that rule.
+      - name: Tests start no real torrent
+        run: node scripts/check-tests-start-no-torrent.mjs
+      - name: Lint and tests
+        env:
+          FFPROBE_BIN: /usr/bin/ffprobe
+        run: npm test
 
   # The README offers the Dockerfile as a way to run the proxy; nothing built it,
   # and it stopped working unnoticed. `--help` loads every module of the main
@@ -57,7 +72,7 @@ jobs:
   build:
     name: Image build
     needs: checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - name: Build the image for amd64
@@ -69,7 +84,7 @@ jobs:
     name: Release
     needs: [checks, build]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: production
     # Every release runs, one at a time, in the order the runs reach the queue; the
     # version comparisons below make the order of arrival harmless.
@@ -119,7 +134,7 @@ jobs:
         if: steps.release.outputs.released == 'true'
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           owner: torrent-tv
           repositories: ha-addon

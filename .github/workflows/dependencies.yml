@@ -27,7 +27,43 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+      # The same cached system ffprobe that the main workflow's checks read. The
+      # installer package crashes on MPEG-TS packet inspection.
+      - name: Skip the Azure Ubuntu mirror
+        run: sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
+      - name: Update the Ubuntu package index
+        run: |
+          mkdir -p "$RUNNER_TEMP/apt-archives"
+          sudo timeout --signal=TERM --kill-after=10s 120s apt-get update
+      - name: Resolve packet timing package versions
+        id: packet-timing-packages
+        run: node scripts/packet-timing-reference-cache-key.mjs
+      - name: Restore packet timing package cache
+        id: packet-timing-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/apt-archives
+          key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
+          restore-keys: |
+            ${{ runner.arch }}-ubuntu-26.04-ffmpeg-
+      - name: Install the packet timing reference
+        env:
+          CACHE_HIT: ${{ steps.packet-timing-cache.outputs.cache-hit }}
+        run: |
+          echo "::notice::Packet timing package cache: ${CACHE_HIT:-miss}"
+          sudo timeout --signal=TERM --kill-after=10s 180s apt-get \
+            -o Dir::Cache::archives="$RUNNER_TEMP/apt-archives" \
+            -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            install --no-install-recommends -y ffmpeg
+          sudo apt-get -o Dir::Cache::archives="$RUNNER_TEMP/apt-archives" autoclean
+      - name: Save packet timing package cache
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/apt-archives
+          key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
       - uses: torrent-tv/.github/actions/update-dependencies@main
+        env:
+          FFPROBE_BIN: /usr/bin/ffprobe
         with:
           github-token: ${{ github.token }}
           # npm users install the proxy from the ranges in package.json; the lock file

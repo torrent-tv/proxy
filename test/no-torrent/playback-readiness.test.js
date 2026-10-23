@@ -372,6 +372,32 @@ test("future cuts follow measured track time without inventing a permanent clock
   assert.equal(predictPlaybackReadiness(state).reason, "media-continuity-unavailable");
 });
 
+test("a continuity refusal names the track and both edges of the hole", () => {
+  // torrent-tv/meta#105: the refusal did not say which track stopped where,
+  // so its field occurrences could not be told apart.
+  const delivered = input({ bufferedAheadSeconds: 3.9, reserveSeconds: 0 });
+  delivered.tracks[0].clientRanges = [{ start: 0, end: 3.9 }];
+  delivered.tracks[0].segments[0].mediaRanges = servedMs([0, 3900]);
+  delivered.tracks[0].segments[1].mediaRanges = servedMs([4000, 8000]);
+  delivered.tracks[0].readySegmentIndices = [0, 1];
+  const refused = predictPlaybackReadiness(delivered);
+  assert.equal(refused.reason, "media-continuity-unavailable");
+  // The page's 3.9 s is read as every time it can denote, 3 µs wider.
+  assert.deepEqual(refused.discontinuity,
+    { trackId: "video", segmentIndex: 1, contiguousEndSeconds: 3.900003, rangeStartSeconds: 4 });
+
+  const held = input({ bufferedAheadSeconds: 3, reserveSeconds: 0 });
+  held.tracks[0].clientRanges = [{ start: 0, end: 3 }, { start: 4, end: 8 }];
+  held.tracks[0].segments[0].mediaRanges = servedMs([0, 3000]);
+  held.tracks[0].segments[1].mediaRanges = servedMs([4000, 8000]);
+  held.tracks[0].readySegmentIndices = [0, 1];
+  const stops = predictPlaybackReadiness(held);
+  assert.equal(stops.reason, "media-continuity-unavailable");
+  assert.deepEqual(stops.discontinuity,
+    { trackId: "video", segmentIndex: null, contiguousEndSeconds: 3.000003, rangeStartSeconds: 3.999997,
+      trackEndSeconds: 8 });
+});
+
 test("a held range is compared with served ticks exactly, not through rounded seconds", () => {
   // 1418768 ticks of 16000 is 88.673 s; as a double the page reports the end
   // of the same media as 88.67299999999999. Measured 2026-10-02: the float

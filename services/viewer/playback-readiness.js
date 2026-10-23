@@ -519,17 +519,27 @@ export function predictPlaybackReadiness(input = {}) {
       const ahead = secondsAhead(earliest(before, trackEnd), at);
       constrain(completion.at - ahead, "delivery", trackIndex, completion.segment.index, completion.at, ahead, false,
         completion.sourceArrivalAt, completion.sourcePlanned);
-      if (compare(after, before) <= 0 && completion.segment.ranges.some(({ start }) => compare(start, before) > 0)) {
+      const beyond = completion.segment.ranges.filter(({ start }) => compare(start, before) > 0);
+      if (compare(after, before) <= 0 && beyond.length > 0) {
         // A timestamp hole cannot be repaired by waiting longer. Keep it
         // distinct from an unavailable rate or a slow but finite service.
-        return result(false, null, buffered, reserve, null, 'media-continuity-unavailable', preparedSegments);
+        // Said with the track and both edges: the refusals of
+        // torrent-tv/meta#105 could not be told apart afterwards.
+        return { ...result(false, null, buffered, reserve, null, 'media-continuity-unavailable', preparedSegments),
+          discontinuity: { trackId: state.track.id ?? trackIndex, segmentIndex: completion.segment.index,
+            contiguousEndSeconds: toSeconds(before),
+            rangeStartSeconds: toSeconds(earliest(...beyond.map(({ start }) => start))) } };
       }
     }
     if (compare(after, trackEnd) < 0) {
       // Everything this track still needs has been delivered in the schedule
       // and its media still stops short of the end: a hole between ranges
       // already held, which no arrival crosses.
-      return result(false, null, buffered, reserve, null, 'media-continuity-unavailable', preparedSegments);
+      const next = delivered.find(({ start }) => compare(start, after) > 0);
+      return { ...result(false, null, buffered, reserve, null, 'media-continuity-unavailable', preparedSegments),
+        discontinuity: { trackId: state.track.id ?? trackIndex, segmentIndex: null,
+          contiguousEndSeconds: toSeconds(after), rangeStartSeconds: next ? toSeconds(next.start) : null,
+          trackEndSeconds: toSeconds(trackEnd) } };
     }
     for (const production of productions.filter((item) => item.trackIndex === trackIndex)) {
       const before = contiguousEnd(prepared, at);

@@ -579,7 +579,7 @@ did not occur in those captured attempts; it never means zero duration.
 | Browser: main-thread observation | R6 | Record browser long tasks when supported | Field 05, attempt 1: 128 ms and 65 ms long tasks |
 | Proxy main lane | P1 | Resolve torrent and wait for ready state | Field 05, attempt 1: 8.7 ms median over 138 cached lookups |
 | Proxy main lane | P2 | Read container declarations through per-file queue | Field 05, attempt 1: 0.1 ms median over 1,524 reads |
-| Proxy main lane | P3 | Build plan and select offered outputs | Direct span added in the plan handler; example timing is pending a new field trace |
+| Proxy main lane | P3 | Build plan and select offered outputs | Alien Romulus, opt-in wait trace: direct span 46.5 ms; enclosing HTTP request 109.5 ms |
 | Proxy main lane, repeated pass | P4 | Resolve demanded source ranges and publish priority map | Field 05, attempt 1: 132.7 ms median over 134 passes |
 | Proxy main lane | P5 | Read keyframe index for copied video | Not separately observed in captured path |
 | Proxy output lane | P6.v | Open picture output | Field 05, attempt 1: 55.2 ms median over 3 opens |
@@ -588,13 +588,13 @@ did not occur in those captured attempts; it never means zero duration.
 | Proxy parallel output lanes | P7.a | Plan soundtrack encoder runs | Same interval as P7.v: 254.8 ms, on proxy clock |
 | Proxy parallel output lanes | P8.v | Admit and copy picture run input | Field 05, attempt 1: 331.6 ms median over 2 completed spans |
 | Proxy parallel output lanes | P8.a | Admit and copy soundtrack run input | Field 05, attempt 1: 354.6 ms median over 250 completed spans |
-| Proxy parallel output lanes | P11.v | Publish closed picture piece | Direct span added around SegmentStore.publish; field timing pending |
-| Proxy parallel output lanes | P11.a | Publish closed soundtrack piece | Direct span added around SegmentStore.publish; field timing pending |
+| Proxy parallel output lanes | P11.v | Publish closed picture piece | Alien Romulus, opt-in wait trace: 14 direct spans, 1.4–119.5 ms |
+| Proxy parallel output lanes | P11.a | Publish closed soundtrack piece | Alien Romulus, opt-in wait trace: 15 direct spans, 1.3–10.1 ms |
 | Proxy parallel output lanes | P13.v | Make picture init segment readable (fMP4) | No separate completed span in captured path |
 | Proxy parallel output lanes | P13.a | Make soundtrack init segment readable (fMP4) | No separate completed span in captured path |
 | Proxy parallel output lanes | P12.v | Serve and transfer picture bytes | Direct proxy endpoint and transfer spans; browser span joins by request ID, field timing pending |
 | Proxy parallel output lanes | P12.a | Serve and transfer soundtrack bytes | Direct proxy endpoint and transfer spans; browser span joins by request ID, field timing pending |
-| Proxy main lane, repeated poll | P14 | Compute playback readiness forecast | Direct span added around readiness assembly; example timing is pending a new field trace |
+| Proxy main lane, repeated poll | P14 | Compute playback readiness forecast | Alien Romulus, opt-in wait trace: 45 direct spans, 14.7–344.2 ms; enclosing HTTP request is a separate wider interval |
 | Proxy main lane, observer | P15 | Emit early-estimate revision | Point observations; no duration |
 | Proxy main lane, conditional | X1 | Run ffprobe for unrecognised container | Not taken: container was recognised |
 | Encoder lane | F1.v | Hand first picture input bytes to FFmpeg | Post-release 2026-10-23 trace: positive spans of 209.2–1,081.3 ms for run tokens 32–41 |
@@ -2058,3 +2058,38 @@ The final C6 frame-presentation tails were 21.1 ms, 26.1 ms, 66.8 ms and
 has a measured span. It does not measure the conditional C1.4 recovery branch,
 the subtitle hold C3, or path-specific branches not taken by this title and
 these seeks.
+
+### 13.11 Alien Romulus direct proxy spans, 2026-10-23
+
+The opt-in trace used the Home Assistant proxy and
+`Alien.Romulus.2024.1080p.WEB-DL.DDP5.1.H.264-RU.mkv`. The torrent had already
+been read during the earlier Alien Romulus field run, so this is not an empty
+torrent-cache cold start. It does directly measure playback-plan construction,
+readiness assembly and segment publication in a fresh playback session. The
+complete local log copies are in
+`research/session-logs-2026-10-23-ttv185-post-099-alien-romulus-waittrace/`.
+
+For the first-frame wait, P3's direct plan-construction span was 46.5 ms; its
+enclosing `/api/playback-plan` request was 109.5 ms. The difference is work
+outside P3's measured body and must not be assigned to plan construction. P14
+was measured repeatedly on the proxy main lane: 14.7–344.2 ms across 45 spans
+in the cold-start and seek trace. The matching progress-request HTTP spans are
+separate envelopes and include request handling around readiness assembly.
+
+P11 publication was measured separately for both output streams. Picture
+publication had 14 spans from 1.4 to 119.5 ms; soundtrack publication had 15
+spans from 1.3 to 10.1 ms. These are independent output actions and are kept
+as parallel lanes in the process table and Mermaid map. Their values are not
+summed into one serial interval. The picture and soundtrack encoding, source
+reads and transfers also proceed on their own output lanes; the proxy main
+event loop can delay their callbacks, as described by R2.
+
+The same session exercised a cold playback view and a forward seek to 500 s
+that needed unprepared data. The seek readiness gate lasted 22,037.8 ms; the
+first advancing frame arrived 22,598.2 ms after that seek began. Its final
+frame-presentation tail was 61.8 ms. These are enclosing browser-clock spans;
+they are not the sum of proxy spans, which use a separate monotonic clock.
+Together with the Haunted Hotel run, this supplies real examples from two
+titles for cold-start and seek paths. Prepared-range seeks were separately
+observed on Haunted Hotel. It does not establish coverage of every conditional
+branch, especially subtitle hold and four-second stall recovery.

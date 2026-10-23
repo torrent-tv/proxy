@@ -14,13 +14,14 @@ Section 13 describes the additional opt-in observations introduced for actual
 startup validation; the historical observability table in section 8 refers to
 the source revisions above.
 
-A process has one owner (host and thread or child process), one start event,
-one end event and one kind of work. A process that runs once per output, per
-media stream or per request is written with a suffix: `.v` for the picture
-output and the main HLS stream, `.a` for a soundtrack served as its own output
-and stream. Where the code combines several kinds of work in one call, the call
-is one process and its parts are named; they are not split into invented
-durations.
+A measured stage has one owner (host and thread or child process), one start
+event, one end event and one kind of work. A stage that runs once per output,
+per media stream or per request is written with a suffix: `.v` for the picture
+output and main HLS stream, `.a` for a soundtrack served as its own output and
+stream. A code path that contains several stages is a parent envelope, not an
+atomic stage. Child stages are listed only where the code exposes their own
+boundaries; work with no observable boundary is named as an unresolved
+measurement gap instead of being presented as an atomic duration.
 
 ## 1. Events, clocks and outcomes
 
@@ -92,6 +93,10 @@ durations.
    gate Y, so Y sees it at the next poll.
 6. **Shared resource**: processes that take service from one capacity at the
    same time (section 4). Their service is not additive.
+7. **Atomic stage**: one operation or one wait with one owner, one clock, and
+   directly recorded start and end events. A parent envelope that contains
+   child stages is for end-to-end comparison only; it is not another stage and
+   is never added to its children.
 
 ## 3. Processes
 
@@ -167,14 +172,45 @@ with `--segment-format mpegts`.
 
 | ID | Process | Starts after | Ends when | Edge to caller |
 |---|---|---|---|---|
-| C1 | Prebuffer gate (`#waitForPrebuffer`): element kept paused, loop every 250 ms, progress asked every 1.5 s or at once after a net report when the buffer grew; releases when `playbackReadiness.version === 1 && ready === true` and C3 is clear (`t4`). A buffer standing still for 4 s restarts the loader at the buffered end. `media-continuity-unavailable` and a failed output end the wait with outcome 6 | B11 | release | gate |
+| C1 | Prebuffer-gate envelope (`#waitForPrebuffer`); group duration only, not an atomic stage. Its repeated actions are C1.1–C1.6 below | B11 | release | contains parallel waits and repeated actions |
 | C2 | Net report delivered over the control connection: buffered ranges per track, position, link samples | B2, `reportNow` | proxy records the reading | gate input to P14 |
 | C3 | Subtitle hold (`subtitleStartHold`): a ready answer requested before the proxy knew the opening subtitle track is not taken; a separate span starts at the first pending gate check and ends when a later answer releases it | A14 | proxy states the track read | part of C1; separate C3 span is nested in the C1 gate |
 | C4 | Application state on `PLAYBACK_READY`: `ADVANCING`, or `PAUSED` when the viewer had stopped (outcome 3) | C1 | state published | blocking |
 | C5 | `video.play()` → `playing`. Branch: autoplay refused → waits for a viewer gesture (outcome 4) | C4 (`ADVANCING`) | `playing` | blocking |
-| C6 | Frame callbacks from the first `seeking` event (seek) or `playing` event (initial open) until the first advancing frame (`tFrame`) | S0 seek event / C5 | callback | blocking for picture; may finish before seek debounce or load control |
+| C6 | Presentation envelope from the first `seeking` event (seek) or `playing` event (initial open) until the first advancing frame (`tFrame`); group duration only, not an atomic stage | S0 seek event / C5 | callback | contains frame observation and may finish before seek debounce or load control |
 | C6a | On a seek where `playing` precedes `tFrame`, `playing` → first advancing frame. Nested inside C6; absent when the frame advances before `playing` | C5 | `C6.frame-presentation-tail` span | blocking for the first frame; separately exposes the final presentation delay |
 | C7 | `audioReady` at `tFrame`'s media time (outcome 1 or 2) | C6 | logged | observation |
+
+### 3.7 Browser: atomic seek actions and gate waits
+
+`S1` and `S2` remain parent envelopes for comparison with the action-to-frame
+timeline. They are not atomic stages and must not be added to their child
+durations. Each row below is one browser operation or one explicit wait between
+observable events. `C1` uses the same rule: its loop is an envelope; only its
+measured child actions are stages.
+
+| ID | Atomic action | Starts | Ends | Relation |
+|---|---|---|---|---|
+| S1.1 | Record the requested seek target in loading state | `#moveToPosition` after input validation | target fields recorded | synchronous browser work |
+| S1.2 | Write the requested position to browser history | after S1.1 | `#writeHistory()` returns | synchronous browser work |
+| S1.3 | Reset the browser readiness model for the new position | after S1.2 | `#waitingModel.reset()` returns | synchronous browser work |
+| S1.4 | Acquire the seek hold while playback is live | before changing the HLS position | `#holds.beginSeek()` returns; absent if playback is not live | gate ownership |
+| S1.5 | Stop HLS loading | `SeekPosition.move` calls `stopLoad` | `#hlsPlayer.stopLoad()` returns | precedes B4 and S1.6 |
+| B4 | Send the target position to the proxy | after S1.5 | seek request response or error | separately timed HTTP operation |
+| S1.6 | Restart HLS loading at the target | successful B4 response | `#hlsPlayer.seekTo()` returns | only for the current seek revision |
+| S2.1 | Read proxy readiness | each `#holdSeekUntilReady` poll begins | progress response, error or cancellation | repeated request; overlaps proxy work |
+| S2.2 | Evaluate whether that response can release this seek | after S2.1 | `seekHoldAnswer()` returns | immediate decision; a stale answer starts another poll |
+| S2.3 | Read the current browser buffer and calculate the displayed wait estimate | after a usable S2.1 response | buffer and estimate values are available | synchronous browser work |
+| S2.4 | Update the browser readiness model | after S2.3 | `#waitingModel.update()` returns | synchronous browser work |
+| S2.5 | Publish current transcode readings to the page | after S2.4 | `#publishTranscodeMeasurements()` returns | synchronous browser work |
+| S2.6 | Wait for media arrival or the next readiness poll | after an unread or not-ready response | `seeked`, `canplay`, timeout or cancellation | repeated event/timer wait |
+| S2.7 | Release the seek hold | readiness loop ends | `#holds.releaseSeek()` returns | terminal action for S2 |
+| C1.1 | Read proxy readiness during initial prebuffer | each due progress poll | progress response or error | repeats every 1.5 s, or after buffer growth |
+| C1.2 | Evaluate readiness from the latest proxy response, subtitle state and browser buffer | after C1.1 or on a gate iteration using cached data | readiness input is formed | synchronous browser decision |
+| C1.3 | Update the browser readiness model | after C1.2 | `#waitingModel.update()` returns | synchronous browser work |
+| C1.4 | Resume HLS loading at the buffered end after a four-second stall | stall threshold reached | `resumeLoadAt()` returns | conditional action |
+| C1.5 | Publish the current download, transcode and readiness measurements to the page | after C1.3 | `PROXY_EVENTS.MEASURED` dispatch returns | synchronous browser work |
+| C1.6 | Wait for the next prebuffer-gate check | after an unsuccessful gate iteration | 250 ms timer fires or wait is cancelled | repeated timer wait |
 
 ### 3.4 Proxy main thread
 
@@ -389,13 +425,31 @@ logged at the process boundary; "derived" is computed from other values;
 | B10.v / B10.a | B | wait, attempt, stream and init segment | hls.js `BUFFER_APPENDING` for init | matching `BUFFER_APPENDED` | R6 | init bytes | direct span to hls.js append acknowledgement; native `SourceBuffer.updateend` is not exposed separately |
 | B12.v / B12.a | B | wait, attempt, stream and media segment | hls.js `BUFFER_APPENDING` for media | matching `BUFFER_APPENDED` | R6 | segment bytes | direct span to hls.js append acknowledgement; native `SourceBuffer.updateend` is not exposed separately |
 | B11 (`t3`) | B | — | — | `cold-start prepare=` | — | — | direct |
-| C1 (`t4`) | B | — | `t3` | `[evt] prebuffer ready …`; `prebuffer waiting … reason=` on each reason change | — | — | direct |
+| C1 parent envelope (`t4`) | B | wait, attempt | B11 | prebuffer release or terminal outcome | contains repeated C1.1–C1.4; envelope is not an atomic stage |
+| C1.1 | B | wait, attempt, request id | each due progress request begins | response, error or cancellation | R5.c | readiness response | direct browser request span |
+| C1.2 | B | wait, attempt | readiness update begins | `#waitingModel.update()` returns | — | readiness and buffered seconds | direct operation span |
+| C1.3 | B | wait, attempt | four-second no-growth threshold | `resumeLoadAt(bufferedEnd)` returns | R6 | buffered end seconds | conditional direct operation span |
+| C1.4 | B | wait, attempt | unsuccessful gate iteration ends | 250 ms timer fires or cancellation occurs | browser timer queue | wait duration | direct timer-wait span |
 | P14 | P | session id, consumer | request | `readiness parts … in all <ms>`; `playback readiness {…}` on a reason or missing-input change; `playback held …` | R2 | — | direct |
 | P15 | P | source key, wait id, consumer, revision | estimate selected for a revision | `process=P15 phase=event` with remaining and total seconds and estimate basis | R2 | seconds | direct point observation; estimate calculation is synchronous |
 | C3–C5 | B / P | wait, attempt, consumer and selected track | C3 `subtitle-hold` begin; C5 `play` | C3 release/error/cancel; C4 playback-ready; C5 `playing` | C1 gate | track and state | direct C3 span when held; point or state observations for C4/C5 |
 | S0 seek input | B | wait, attempt, target, input source | player controls: `media-seek-request`; native/system controls: first `seeking` event | `seek-input`; native path also `S0.seek-debounce` end at settled target | — | target seconds, source | direct monotonic trace; native physical input to `seeking` remains unobservable |
-| S1 seek command | B | wait, attempt, target | entry to `#moveToPosition` | command completion after synchronous setup, stop-load, seek report and load restart | S0 | target seconds, outcome | direct span; includes nested browser/control-connection work, do not add those nested spans twice |
-| S2 seek readiness gate | B | wait, attempt, target | `#holdSeekUntilReady` entry | hold release or failure | S1 ends before S2 starts; proxy work proceeds concurrently | target seconds, outcome | direct span includes readiness polls; it overlaps proxy P4/P4.1, W and encoder work and must not be summed with them |
+| S1 parent envelope | B | wait, attempt, target | entry to `#moveToPosition` | command completion | contains S1.1–S1.6 and B4; envelope is not an atomic stage |
+| S1.1 | B | wait, attempt, target | target-state update begins | target fields recorded | — | target seconds | direct operation span |
+| S1.2 | B | wait, attempt, target | history update begins | `#writeHistory()` returns | — | target seconds | direct operation span |
+| S1.3 | B | wait, attempt, target | readiness reset begins | `#waitingModel.reset()` returns | — | — | direct operation span |
+| S1.4 | B | wait, attempt, target | seek-hold acquisition begins | `#holds.beginSeek()` returns | — | target seconds | direct operation span; absent if playback is not live |
+| S1.5 | B | wait, attempt, target | HLS stop-load begins | `#hlsPlayer.stopLoad()` returns | — | target seconds | direct operation span |
+| B4 | B / P | wait, attempt, request id, target | seek HTTP request | browser response or error; proxy logs its handler separately | R5.c and proxy event loop | target seconds | direct browser request span; clocks remain separate |
+| S1.6 | B | wait, attempt, target | HLS restart begins after successful B4 | `#hlsPlayer.seekTo()` returns | — | target seconds | direct operation span; superseded seek revision skips it |
+| S2 parent envelope | B | wait, attempt, target | `#holdSeekUntilReady` entry | seek hold release | contains repeated S2.1–S2.6 and terminal S2.7; envelope is not an atomic stage |
+| S2.1 | B | wait, attempt, request id | each progress request begins | response, error or cancellation | R5.c | readiness response | direct browser request span |
+| S2.2 | B | wait, attempt, target | readiness answer evaluation begins | `seekHoldAnswer()` returns | — | ready/stale/not-ready outcome | direct operation span |
+| S2.3 | B | wait, attempt | browser buffer and wait estimate read begins | values are available | — | buffered seconds and estimate | direct operation span |
+| S2.4 | B | wait, attempt | browser readiness update begins | `#waitingModel.update()` returns | — | readiness and buffered seconds | direct operation span |
+| S2.5 | B | wait, attempt | transcode readings publication begins | `#publishTranscodeMeasurements()` returns | — | current progress fields | direct operation span |
+| S2.6 | B | wait, attempt, target | timer/event wait begins | media event, timer or cancellation | media element event queue | wait reason | direct event/timer wait span |
+| S2.7 | B | wait, attempt, target | terminal release begins | `#holds.releaseSeek()` returns | — | released/cancelled | direct operation span |
 | C6, C7 | B | wait, attempt, media time | `requestVideoFrameCallback` observations; C6 begins on `seeking` for a seek and on `playing` for initial open | advancing frame and audio-ready point events | R6 | media time, audio state | direct observations with wait identity; stale callbacks before the start event are ignored |
 | P4 | P | source key, file, map revision | `process=P4 phase=begin` at range-resolution pass | `process=P4 phase=end`, with resolved zone count and outcome | R2, R8 | zones | direct resolver span; separate from the aggregate map-pass timing |
 | P4.1 | P | source key, wait/attempt, file, output key, map pass and segment | one unresolved demanded segment after the pass yields | `process=P4.1 phase=begin/end`; end records track IDs, source interval, resolution method/outcome, joined range count/bytes and monotonic duration | R2, R8 | track IDs, bytes | per-segment local span included in P4; overlaps R8 reads and must not be added to P4 or R8 durations |
@@ -490,9 +544,29 @@ did not occur in those captured attempts; it never means zero duration.
 | Browser: metadata gate | B11 | Reach `HAVE_METADATA` | Field 05, attempt 1: 415.2 ms |
 | Browser parallel append lanes | B12.v | Append first picture fragment | Append acknowledgement not separately observed in this capture |
 | Browser parallel append lanes | B12.a | Append first soundtrack fragment | Field 05, attempt 1: 14.0 ms |
-| Browser: readiness gate | C1 | Wait for continuous-playback readiness | Field 05, attempt 1: 500.7 ms |
+| Browser: readiness envelope | C1 | Wait for continuous-playback readiness | Field 05, attempt 1: 500.7 ms; envelope, not an atomic stage |
+| Browser: prebuffer request | C1.1 | Read proxy readiness for the initial-start gate | No field sample yet; span added in this revision |
+| Browser: prebuffer decision | C1.2 | Evaluate readiness from the proxy response, subtitle state and browser buffer | No field sample yet; span added in this revision |
+| Browser: prebuffer state | C1.3 | Update the browser readiness model | No field sample yet; span added in this revision |
+| Browser: prebuffer recovery | C1.4 | Resume HLS loading at the buffered end after a four-second stall | Conditional; no field sample yet |
+| Browser: prebuffer reporting | C1.5 | Publish current download, transcode and readiness measurements | No field sample yet; span added in this revision |
+| Browser: prebuffer timer | C1.6 | Wait for the next gate check | No field sample yet; span added in this revision |
 | Browser background lane | C2 | Send buffered ranges, position and link samples | Timed through B2 request spans; no separate C2 work duration |
 | Browser: readiness gate | C3 | Hold readiness until opening subtitle track is known | No hold branch taken in the captured path; the trace now emits a separate span when it occurs |
+| Browser: seek command | S1.1 | Record the requested position in loading state | No field sample yet; span added in this revision |
+| Browser: seek command | S1.2 | Write the requested position to browser history | No field sample yet; span added in this revision |
+| Browser: seek command | S1.3 | Reset the browser readiness model | No field sample yet; span added in this revision |
+| Browser: seek command | S1.4 | Acquire the seek hold during live playback | No field sample yet; span added in this revision |
+| Browser: seek command | S1.5 | Stop HLS loading | No field sample yet; span added in this revision |
+| Browser: seek command | B4 | Send the seek target to the proxy | c11/c12 request span exists; not yet split from the new command spans in a field run |
+| Browser: seek command | S1.6 | Restart HLS loading at the target | No field sample yet; span added in this revision |
+| Browser: seek readiness request | S2.1 | Read proxy readiness | No field sample yet; span added in this revision |
+| Browser: seek readiness decision | S2.2 | Decide whether the response is stale, ready or still waiting | No field sample yet; span added in this revision |
+| Browser: seek readiness state | S2.3 | Read browser buffer and calculate the wait estimate | No field sample yet; span added in this revision |
+| Browser: seek readiness state | S2.4 | Update the browser readiness model | No field sample yet; span added in this revision |
+| Browser: seek readiness reporting | S2.5 | Publish transcode readings to the page | No field sample yet; span added in this revision |
+| Browser: seek readiness timer | S2.6 | Wait for media arrival or the next readiness poll | No field sample yet; span added in this revision |
+| Browser: seek readiness | S2.7 | Release the seek hold | No field sample yet; span added in this revision |
 | Browser: playback state | C4 | Publish `PLAYBACK_READY` / `ADVANCING` | Point event; no duration |
 | Browser: playback | C5 | Call `play()` and receive `playing` | Field 05, attempt 1: 39.6 ms |
 | Browser: presentation | C6 | Wait for first presented frame callback | c8 cold start: 248.9 ms from `t4` to first advancing frame; a seek begins at its `seeking` event, even when the first frame precedes `playing` |
@@ -705,29 +779,30 @@ accuracy are incomplete.
 
 ## 9. Seek, soundtrack and quality change
 
-1. Player controls provide an observable input event:
-   `media-seek-request` starts `S0` at the original monotonic timestamp.
-   Native controls and Media Session provide no physical-input event to this
-   code; the first observable boundary is the element's `seeking` event.
-   `#reportSeekIntent` filters player-owned moves, starts `S0` for external
-   moves, and records `S0.seek-debounce` through the settled target after at
+1. Player controls provide `media-seek-request`, which starts `S0` at the
+   browser monotonic input timestamp. Native controls and Media Session expose
+   no physical-input event; their first observable boundary is the element's
+   `seeking` event. `S0.seek-debounce` ends when the target settles after at
    least 300 ms (`SEEK_REPORT_DEBOUNCE_MS`; a timer may fire later).
-   `#moveToPosition` is `S1` from function entry: it resets the waiting model,
-   stops the loader, reports the seek, and restarts loading. While playback is
-   live it also takes the seek hold (`#holds.beginSeek`) and starts `S2`, which
-   ends when the readiness gate releases or fails. These spans share the seek wait identity;
-   `[wait-start]` remains a state log and is not the timing boundary.
-2. It then stops the loader, reports the position (`POST
-   /api/transcode-sessions/:id/seek` over R5.c → `ViewerRequests.requestSeek`:
-   the viewer moves, held requests are woken, `planEncodersSoon`), and
-   restarts loading at the position.
-3. The proxy repeats P4, P7, P8, F1, F2, P11, P12 for the segments at the new
+2. The `S1` parent interval is an envelope, not a stage. Its individually
+   logged actions are S1.1 target update, S1.2 history update, S1.3 readiness
+   reset, S1.4 hold acquisition, S1.5 stop HLS loading, B4 target report, and
+   S1.6 restart HLS loading at the target. The B4 request has its own browser duration; its
+   proxy work begins on a separate clock and overlaps the readiness and
+   download work.
+3. The `S2` parent interval is also an envelope, not a stage. Each readiness
+   cycle logs S2.1 proxy-readiness request, S2.2 answer decision, S2.3 browser
+   buffer and wait-estimate read, S2.4 readiness-model update, S2.5 publish of
+   transcode readings, and S2.6 wait for media or the next poll. S2.7 releases
+   the hold. A prepared seek can produce a frame before S1.1 or S2 begins; the
+   later seek-command and readiness actions then do not delay that frame.
+4. The proxy repeats P4, P7, P8, F1, F2, P11, P12 for the segments at the new
    position unless they are published (branch 16). B7–B12 repeat for the new
    fragments; B8–B10 do not repeat the init.
-4. `#holdSeekUntilReady` asks for progress every 1.5 s, sooner when the
+5. `#holdSeekUntilReady` asks for progress every 1.5 s, sooner when the
    forecast names a shorter delay or the element reports `seeked`/`canplay`,
    and releases on the same readiness answer as C1.
-5. A soundtrack or quality change opens another output (`prepareAudioTrack`,
+6. A soundtrack or quality change opens another output (`prepareAudioTrack`,
    `prepareQualityVariant`, the `…/warm` routes) through P6–P13 and is held by
    the page (`#holdForAudio`, `#cushionHeld`). These holds are not traced
    further here.
@@ -803,7 +878,7 @@ flowchart TB
     B12a["B12.a soundtrack fragment append"]
     C2["C2 net report"]
     C3["C3 subtitle hold"]
-    C1{{"C1 prebuffer gate"}}
+    C1{{"C1 prebuffer envelope; atomic actions in 10.2"}}
     T4(["t4 release"])
     C4{"C4 viewer had stopped?"}
     C5["C5 play to playing"]
@@ -1149,6 +1224,46 @@ flowchart LR
     P14 --> C1 --> C4["C4 PLAYBACK_READY"] --> C5["C5 play and playing"] --> C6["C6 first presented frame"] --> C7["C7 audio-ready observation"]
     R6["R6 browser long-task observation"]
   end
+```
+
+### 10.2 Atomic seek timeline
+
+This diagram separates browser actions on the seek path. The S1/S2 parent
+envelopes are omitted as stages; the child actions below are the timed stages.
+The proxy work triggered by B4 runs concurrently with the browser gate and
+segment loading. A prepared seek can present a frame before S1.1–S2 starts.
+
+```mermaid
+flowchart LR
+  subgraph INPUT["Browser seek input lane"]
+    S0["S0 seek input"] --> S0D["S0 debounce for native controls"]
+  end
+  subgraph COMMAND["Browser seek command lane"]
+    S11["S1.1 record target"] --> S12["S1.2 write history"]
+    S12 --> S13["S1.3 reset readiness"] --> S14["S1.4 acquire seek hold"]
+    S14 --> S15["S1.5 stop HLS loading"] --> B4["B4 report target to proxy"]
+    B4 --> S16["S1.6 restart HLS at target"]
+  end
+  subgraph READY["Browser readiness lane"]
+    S21["S2.1 read proxy readiness"] --> S22["S2.2 evaluate answer"]
+    S22 -->|stale| S21
+    S22 -->|usable answer| S23["S2.3 read buffer and estimate"] --> S24["S2.4 update readiness"]
+    S24 --> S25["S2.5 publish readings"]
+    S25 -->|not ready| S26["S2.6 wait for media or next poll"] --> S21
+    S25 -->|ready or no forecast| S27["S2.7 release hold"]
+  end
+  subgraph START["Initial-start prebuffer lane"]
+    C11["C1.1 read proxy readiness"] --> C12["C1.2 evaluate readiness"] --> C13["C1.3 update browser readiness"]
+    C13 -->|not ready| C15["C1.5 publish current readings"] --> C16["C1.6 wait 250 ms"] --> C11
+    C13 -->|buffer stalled for four seconds| C14["C1.4 resume loader at buffered end"] --> C15
+    C13 -->|ready and subtitle clear| T4["t4 release"]
+  end
+  B4 -. triggers .-> P4P8["Proxy map, reads, encoding and segment delivery"]
+  P4P8 -. readiness response .-> S21
+  P4P8 -. readiness response .-> C11
+  S14 -. parallel presentation .-> C6["C6 first advancing frame"]
+  S16 -. load at target .-> C6
+  S24 -. release .-> C5["C5 play"] --> C6
 ```
 
 The dot-dashed arrows mark background starts or repeated input, as in section
@@ -1902,3 +2017,9 @@ endpoint, and the later promise settlement is not an additional loading stage.
 The full action-to-frame time is represented by the C6 envelope, while C6a
 names and measures the final seek substage. These spans overlap and must not be
 added together.
+
+The c12 logs predate the atomic C1.1–C1.6 and S1.1–S1.6/S2.1–S2.7 spans added
+after this capture. Their parent envelopes and end-to-end frame times are real
+measurements, but they cannot supply example durations for these new rows.
+Those rows remain explicitly unmeasured until a post-release cold start and
+prepared/unprepared forward and backward seeks produce matching events.

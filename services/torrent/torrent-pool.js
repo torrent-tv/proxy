@@ -483,7 +483,8 @@ export function decideUploadLimit(activeTorrents, opts = {}) {
  *
  * `paused` is the library's own word for this and the path it already checks,
  * so nothing here fights it. The pause alone does not close what is already
- * open, so the peers are let go by hand; the data stays exactly where it is.
+ * open, so the peers are let go by hand; the data stays exactly where it is,
+ * and so do the addresses dialled, for the next rejoin (`rememberSwarmAddresses`).
  *
  * @param {import("webtorrent").Torrent} torrent
  * @returns {number} Connections let go.
@@ -494,6 +495,8 @@ export function leaveSwarm(torrent) {
   }
   torrent.pause();
   const open = Array.isArray(torrent.wires) ? torrent.wires.length : 0;
+  const remembered = rememberSwarmAddresses(torrent);
+  const unanswered = describeUnansweredRejoin(torrent);
   let closed = 0;
   for (const peer of [...(torrent._peers?.values?.() ?? [])]) {
     try {
@@ -505,9 +508,148 @@ export function leaveSwarm(torrent) {
   }
   logger.info(
     `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] left the swarm — its last reader went, ` +
-    `${open} connection(s) open, ${closed} let go; the data stays and the next reader rejoins`
+    `${open} connection(s) open, ${closed} let go, ${remembered} address(es) kept for the next reader` +
+    `${unanswered}; the data stays and the next reader rejoins`
   );
   return closed;
+}
+
+/**
+ * WebTorrent's own `maxConns` when the client states none (webtorrent 2.8.5,
+ * index.js). More remembered addresses than this could not be dialled at once.
+ */
+const WEBTORRENT_DEFAULT_MAX_CONNS = 55;
+
+/**
+ * The addresses a torrent dialled in its swarm, kept for every later rejoin.
+ *
+ * `leaveSwarm` destroys every peer, and a destroyed peer leaves the torrent's
+ * `_peers` and its dial queue with it, so a torrent that rejoined had nobody to
+ * dial: `resume()` only drains that empty queue, and nothing announces again
+ * until the periodic discovery round — fifteen minutes by default, longer when
+ * a tracker says so. Home Assistant 2026-10-23, torrent 507d1fa9: it rejoined
+ * with "0 connected of 0 known", the page got no segment for 73 s, and every
+ * later opening of the same film started with no peer (torrent-tv/meta#238).
+ *
+ * KEPT FOR THE LIFE OF THE TORRENT OBJECT and refreshed at each departure, not
+ * consumed by a rejoin: `addPeer` accepts a candidate, it does not connect one,
+ * and a torrent that leaves again before a candidate answered would otherwise
+ * take an empty snapshot and lose them all.
+ *
+ * @type {WeakMap<object, string[]>}
+ */
+const swarmAddresses = new WeakMap();
+
+/**
+ * Torrents with a DHT lookup started by a rejoin and not yet answered: a
+ * second rejoin meanwhile does not start another.
+ *
+ * @type {WeakSet<object>}
+ */
+const swarmLookups = new WeakSet();
+
+/**
+ * When each torrent last rejoined, on the monotonic clock, and whether a peer
+ * and data have come since — what tells a restored swarm from a rejoin that
+ * dialled addresses nobody answers at any more.
+ *
+ * @type {WeakMap<object, { at: number, firstPeerSeconds: number | null, firstDataSeconds: number | null }>}
+ */
+const swarmRejoins = new WeakMap();
+
+/**
+ * Refresh the addresses kept for a torrent from the peers it has now, before
+ * they are let go. Outgoing peers only: an incoming peer's address carries the
+ * port its side connected FROM, which nobody listens on. Connected ones first,
+ * then the candidates still queued or connecting, then what was kept before;
+ * no address twice, and no more than the client may dial at once. A departure
+ * that finds no outgoing peer keeps the earlier list.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @returns {number} How many addresses are kept.
+ */
+export function rememberSwarmAddresses(torrent) {
+  const limit = Number(torrent?.client?.maxConns) > 0 ? Number(torrent.client.maxConns) : WEBTORRENT_DEFAULT_MAX_CONNS;
+  const outgoing = [...(torrent?._peers?.values?.() ?? [])]
+    .filter((peer) => (peer?.type === "tcpOutgoing" || peer?.type === "utpOutgoing") &&
+      typeof peer.addr === "string" && peer.addr.length > 0);
+  const kept = [];
+  const seen = new Set();
+  for (const addr of [
+    ...outgoing.filter((peer) => peer.wire).map((peer) => peer.addr),
+    ...outgoing.filter((peer) => !peer.wire).map((peer) => peer.addr),
+    ...(swarmAddresses.get(torrent) ?? [])
+  ]) {
+    if (kept.length >= limit) break;
+    if (seen.has(addr)) continue;
+    seen.add(addr);
+    kept.push(addr);
+  }
+  if (kept.length > 0) swarmAddresses.set(torrent, kept);
+  return kept.length;
+}
+
+/**
+ * Said when a torrent leaves its swarm again: what the previous rejoin got.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @returns {string}
+ */
+function describeUnansweredRejoin(torrent) {
+  const rejoin = swarmRejoins.get(torrent);
+  if (!rejoin || rejoin.firstDataSeconds !== null) return "";
+  const seconds = ((performance.now() - rejoin.at) / 1000).toFixed(1);
+  return rejoin.firstPeerSeconds === null
+    ? ` (no peer and no data in the ${seconds}s since it rejoined)`
+    : ` (a peer after ${rejoin.firstPeerSeconds.toFixed(1)}s, no data in the ${seconds}s since it rejoined)`;
+}
+
+/**
+ * Ask the DHT for the torrent's peers again, unless a lookup a rejoin started
+ * is still running. A private torrent has no DHT (WebTorrent passes `dht:
+ * false` to its discovery), and the kept addresses are then all it has.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @param {() => string} label
+ * @returns {string} What was done, for the rejoin line.
+ */
+function lookUpSwarm(torrent, label) {
+  const dht = torrent.discovery?.dht;
+  if (!dht || typeof dht.lookup !== "function" || typeof torrent.infoHash !== "string") return "no DHT";
+  if (swarmLookups.has(torrent)) return "DHT lookup already running";
+  swarmLookups.add(torrent);
+  try {
+    // Found peers arrive through the discovery's own "peer" listener, which
+    // hands them to `addPeer`. The callback only ends the lookup.
+    dht.lookup(torrent.infoHash, (error) => {
+      swarmLookups.delete(torrent);
+      if (error) logger.warn(`torrent-pool: [${label()}] DHT lookup after rejoin failed: ${error?.message ?? error}`);
+    });
+  } catch (error) {
+    swarmLookups.delete(torrent);
+    logger.warn(`torrent-pool: [${label()}] DHT lookup after rejoin failed: ${error?.message ?? error}`);
+    return "DHT lookup failed";
+  }
+  return "DHT lookup started";
+}
+
+/**
+ * Note the first peer, or the first downloaded bytes, since the torrent's last
+ * rejoin, once each.
+ *
+ * @param {import("webtorrent").Torrent} torrent
+ * @param {"peer" | "data"} kind
+ * @returns {boolean} Whether this was the first of its kind since the rejoin.
+ */
+export function noteAfterRejoin(torrent, kind) {
+  const rejoin = swarmRejoins.get(torrent);
+  if (!rejoin) return false;
+  const field = kind === "peer" ? "firstPeerSeconds" : "firstDataSeconds";
+  if (rejoin[field] !== null) return false;
+  rejoin[field] = (performance.now() - rejoin.at) / 1000;
+  logger.info(`torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] after rejoin: first ` +
+    `${kind} after ${rejoin[field].toFixed(1)}s`);
+  return true;
 }
 
 /**
@@ -517,6 +659,12 @@ export function leaveSwarm(torrent) {
  * back. Both are acted on at the moment they happen, and neither is discovered
  * by asking.
  *
+ * `resume()` in WebTorrent 2.8.5 only clears `paused` and dials what is in the
+ * torrent's queue, which `leaveSwarm` emptied; it announces nothing. So the
+ * addresses kept at the departure are handed back, and the DHT is asked again.
+ * The trackers stay on their own schedule: each sets its own interval, and an
+ * announce at every rejoin would not respect it.
+ *
  * @param {import("webtorrent").Torrent} torrent
  * @returns {boolean} Whether it had to be taken back.
  */
@@ -525,15 +673,33 @@ export function rejoinSwarm(torrent) {
     return false;
   }
   torrent.resume();
-  // resume() rediscovers protocol peers but does not recreate HTTP seeds
-  // explicitly closed by leaveSwarm(). Their URLs remain in the metadata.
+  const label = () => String(torrent.infoHash ?? "?").slice(0, 8);
+  // resume() does not recreate HTTP seeds explicitly closed by leaveSwarm().
+  // Their URLs remain in the metadata.
   if (torrent.client?.enableWebSeeds !== false && typeof torrent.addWebSeed === "function") {
     for (const url of torrent.urlList ?? []) {
       if (!torrent._peers?.has(url)) torrent.addWebSeed(url);
     }
   }
+  swarmRejoins.set(torrent, { at: performance.now(), firstPeerSeconds: null, firstDataSeconds: null });
+  // A torrent held whole has nothing to fetch from anybody: dialling its swarm
+  // again would only bring back the connections leaving it was for.
+  const whole = torrent.progress === 1;
+  const addresses = whole ? [] : swarmAddresses.get(torrent) ?? [];
+  let handed = 0;
+  if (typeof torrent.addPeer === "function") {
+    for (const addr of addresses) {
+      try {
+        if (torrent.addPeer(addr, "rejoin")) handed += 1;
+      } catch {
+        // An address the library refuses now: the others are still worth dialling.
+      }
+    }
+  }
+  const lookup = whole ? "held whole, no DHT lookup" : lookUpSwarm(torrent, label);
   logger.info(
-    `torrent-pool: [${String(torrent.infoHash ?? "?").slice(0, 8)}] rejoined the swarm — a reader arrived`
+    `torrent-pool: [${label()}] rejoined the swarm — a reader arrived; ` +
+    `${handed} of ${addresses.length} kept address(es) handed back, ${lookup}`
   );
   return true;
 }
@@ -1711,6 +1877,11 @@ export class TorrentPool {
             : " (no tracker answer had arrived)")
       );
     });
+
+    // What a rejoin restored: its first connection and its first downloaded
+    // bytes, once each per rejoin (torrent-tv/meta#238).
+    torrent.on("wire", () => noteAfterRejoin(torrent, "peer"));
+    torrent.on("download", () => noteAfterRejoin(torrent, "data"));
 
     torrent.on("warning", (warning) => {
       logger.warn(`torrent-pool: [${label()}] warning: ${formatWarning(warning)}`);

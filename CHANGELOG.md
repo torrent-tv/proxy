@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.6
 
 - **Fix**: A stop ordered after an encoder's process has exited is ignored. The exit can publish the run's last piece and ask the plan again, which finds nothing left ahead of the run and stops it: the ending then took an edge the run's state table does not have (`STOPPED + EXITED_COMPLETE — no such edge; ignored`), a signal went to a process that was gone, and the stop's age at the exit, about 0 ms, was kept among this host's kill costs, which price a move. Field 2026-10-23, Drifters 04 on 2.107.5: the run on the last piece, #205 (#ttv-117).
 

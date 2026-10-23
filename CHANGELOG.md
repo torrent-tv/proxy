@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Hold a torrent's swarm for five minutes after its last reader goes, so a viewer who reloads or reopens the page finds its connections still open; a torrent held whole still lets its swarm go at once (#ttv-240).
+
 ## 2.107.1
 
 - **Fix**: Pass the wait observer to soundtrack rendition creation so P6.a opening spans are emitted (#ttv-185).

@@ -109,11 +109,12 @@ export async function admitInput({ sources, reserve, readRanges }) {
  * the download a second time through it (Home Assistant 2026-10-12,
  * torrent-tv/meta#178).
  */
-export async function writeAdmittedInput(input, stdin, { next = null, waiting = null } = {}) {
+export async function writeAdmittedInput(input, stdin, { next = null, waiting = null, onFirstInputBytes = null } = {}) {
   if (input?.kind !== "result") throw new TypeError("Only complete input may be written to an encoder.");
   const originSeconds = input.originSeconds;
   const declarations = JSON.stringify(input.tracks.map(input => matroskaTrackIdentity(input.track)));
   const seen = new Map();
+  let firstInputBytesNoted = false;
   let current = input, includeHeader = true;
   try {
     while (current) {
@@ -132,6 +133,10 @@ export async function writeAdmittedInput(input, stdin, { next = null, waiting = 
         batch = Buffer.allocUnsafe(INPUT_WRITE_BATCH_BYTES);
         used = 0;
         await writeChunk(stdin, chunk);
+        if (!firstInputBytesNoted) {
+          firstInputBytesNoted = true;
+          onFirstInputBytes?.(chunk.length);
+        }
       };
       for await (const chunk of current.stream({ originSeconds, includeHeader, seen })) {
         if (!Buffer.isBuffer(chunk)) throw new TypeError("Admitted input stream yielded a non-buffer chunk.");

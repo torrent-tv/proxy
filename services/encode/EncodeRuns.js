@@ -1341,11 +1341,14 @@ export class EncodeRuns {
       // begun at once (`next-packet-input.js`).
       const following = nextPacketInputs({ take: index => this.#host.encodeInputs.take(session, index, index),
         canAppend, first: nextIndex, last: ordered?.to ?? startIndex });
-      void writeAdmittedInput(admittedInput, run.process.stdin, { next: async () => {
-        const next = following.next(index => { run.to = index; });
-        if (next) run.admittedInputKeys.set(run.to, this.#inputFailures.key(next, inputParameters));
-        return next;
-      } }).catch(error => {
+      void writeAdmittedInput(admittedInput, run.process.stdin, {
+        onFirstInputBytes: bytes => this.noteFirstInputBytes(inputToken, session.file.fileIndex, bytes),
+        next: async () => {
+          const next = following.next(index => { run.to = index; });
+          if (next) run.admittedInputKeys.set(run.to, this.#inputFailures.key(next, inputParameters));
+          return next;
+        }
+      }).catch(error => {
         this.#host.logger.warn(`encode input output=${session.outputKey} segment=${safeIndex} write failed: ${error.message}`);
         run.process?.stdin?.destroy();
       }).finally(() => following.release());

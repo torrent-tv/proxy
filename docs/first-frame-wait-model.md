@@ -509,8 +509,8 @@ did not occur in those captured attempts; it never means zero duration.
 | Proxy main lane, repeated poll | P14 | Compute playback readiness forecast | Readiness observations recorded; no exclusive end-to-end compute span |
 | Proxy main lane, observer | P15 | Emit early-estimate revision | Point observations; no duration |
 | Proxy main lane, conditional | X1 | Run ffprobe for unrecognised container | Not taken: container was recognised |
-| Encoder lane | F1.v | Hand first picture input bytes to FFmpeg | Current 2026-10-23 trace: invalid duration (-1,792,731,391,029 ms) because wall-clock run start was subtracted from proxy-monotonic handoff; corrected in proxy Unreleased |
-| Encoder lane | F1.a | Hand first soundtrack input bytes to FFmpeg | No valid isolated completion span in the captured field paths |
+| Encoder lane | F1.v | Hand first picture input bytes to FFmpeg | Post-release 2026-10-23 trace: positive spans of 209.2–1,081.3 ms for run tokens 32–41 |
+| Encoder lane | F1.a | Hand first soundtrack input bytes to FFmpeg | Pre-fix 2026-10-23 trace has begin events without matching ends for admitted stdin input; callback added under Unreleased, field verification pending |
 | Encoder parallel output lanes | F2.v | Produce first picture segment | Field 05, attempt 1: 5,401.1 ms |
 | Encoder parallel output lanes | F2.a | Produce first soundtrack segment | No valid isolated completion span in these logs |
 | Torrent worker: add-to-ready parent | W1 | Add source through ready torrent | Historical Field 04: worker add point only; new traces record the full interval, including nested worker steps |
@@ -1459,64 +1459,78 @@ The trace exposed an invalid F1.v interval: its begin record carried
 `-1792731391029.4492 ms`. The run's encoder `startedAt` is for wall-clock
 accounting and cannot be subtracted from a proxy-monotonic event. The actual
 monotonic F1.v begin was `3368477.341839`, making the observed span to first
-input bytes 733.2 ms. The proxy now records a separate monotonic start for F1;
-this correction still needs a deployed field trace. Exclude the mixed-clock
-duration from stage reconciliation.
+input bytes 733.2 ms. The proxy now records a separate monotonic start for F1.
+The post-release 2026-10-23 Alien Romulus trace confirms positive F1.v
+durations of 209.2 to 1,081.3 ms. That trace also exposed the admitted-stdin
+F1.a path, whose begin events had no matching end; the new callback for that
+path still needs a post-release field check. Exclude the mixed-clock duration
+from stage reconciliation.
 
 ### 13.3 Alien Romulus cold open and seek, 2026-10-23
 
-The Alien Romulus 1080p LostFilm torrent was opened on the HA proxy. The client
-log records a cold-open phase sum of 8,878.0 ms through the first-frame
-observation:
+The Alien Romulus 1080p LostFilm torrent was opened on the HA proxy after
+proxy 2.105.9 was installed. For this cold open, the browser action began at
+6,181.3 ms on the page clock and the first advancing frame with decoded audio
+was observed at 29,439.0 ms. The client phase values and independent frame
+event reconcile as follows:
 
-| Atomic envelope | Duration (ms) |
-|---|---:|
-| Transport | 1,015.7 |
-| Plan | 95.3 |
-| Prepare | 6,740.5 |
-| Prebuffer | 948.0 |
-| Presentation | 78.5 |
-| **Sum** | **8,878.0** |
-| Client first-frame observation | 8,878.0 |
+| Atomic envelope | Duration (ms) | Measurement |
+|---|---:|---|
+| Transport | 1,280.2 | `t1−t0` |
+| Plan | 9,316.2 | `t2−t1` |
+| Prepare | 11,894.3 | `t3−t2` |
+| Prebuffer | 634.8 | `t4−t3` |
+| **Cold-start phase sum through `t4`** | **23,125.5** | Sum of four phases |
+| Presentation | 135.9 | `tFrame−t4` |
+| **Phase sum through first advancing frame** | **23,261.4** | Cold-start sum + presentation |
+| Independent first advancing frame | 23,257.7 | `29,439.0−6,181.3`; 3.7 ms before aggregate |
+| Client `first-frame-observation` | 23,261.4 | `elapsedSource=action-trace`; 3.7 ms after frame event |
 
-This checks the client phase sum for this opening. An independent frame
-observer was not retained for the cold-open portion, so this is not an
-independent endpoint check. The spans inside `prepare` and `prebuffer` run in
-parallel; their child operation durations are not additive.
+The four startup phases sum exactly to `coldStartTotalMs` (23,125.5 ms), and
+adding presentation gives the client aggregate (23,261.4 ms). The independent
+advancing-frame event differs from that aggregate by 3.7 ms. Child work inside
+`prepare` and `prebuffer` runs in parallel and is not added to these enclosing
+phase durations.
 
 The same source session then sought to 300 s by assigning `video.currentTime`
-in the browser. This exercised the native media-element `seeking` path; the
+in the browser. This exercises the native media-element `seeking` path; the
 timestamp is a programmatic request and does not represent a physical control
-input. A separate browser observer recorded the request, media events and
-advancing frame:
+input. Browser trace records and the media-event observer share the page's
+monotonic clock. Durations below are offsets from the request at 59,129.9 ms:
 
 | Parallel lane | Atomic action | Start from request (ms) | End from request (ms) | Duration (ms) | Measurement |
 |---|---|---:|---:|---:|---|
 | Browser input | S0 programmatic request | 0.0 | 0.0 | point | `video.currentTime = 300` |
-| Browser media state | First `seeking` event | 7.4 | 7.4 | point | `currentTime=300` |
-| Browser readiness gate | S2 seek hold, `minimum-safe-delay` to forecast release | 1,260.7 | 21,676.7 | 20,416.0 | Client log: waiting at 06:13:13.353; release at 06:13:33.769 |
-| Browser media state | `seeked` event | 3,483.4 | 3,483.4 | point | `readyState=4`, paused |
-| Browser playback | C5 `play` to `playing` | 21,689.2 | 21,692.4 | 3.2 | `playing` at 06:13:33.783 |
-| Browser presentation | C6 first advancing frame | 21,744.2 | 21,744.2 | point | Confirmed advancing at 21,794.1 ms |
-| **Original seek request → first advancing frame** | **Independent browser observer** | **0.0** | **21,744.2** | **21,744.2** | **Request at 19,906.5 ms; frame at 41,650.7 ms** |
+| Browser media state | First `seeking` event / S0 start | 5.9 | 5.9 | point | Trace `at=59,135.8` |
+| Browser seek intent | S0 debounce to settled target | 5.9 | 312.2 | 306.3 | `59,135.8–59,442.1` |
+| Browser command | S1 `#moveToPosition` | 312.4 | 1,003.9 | 691.6 | `59,442.3–60,133.9` |
+| Browser readiness gate | S2 seek readiness gate | 1,003.1 | 14,581.2 | 13,578.1 | `60,133.0–73,711.1`; overlaps S1 and C5 by about 0.9 ms each |
+| Browser media state | `seeked` event | 12,431.5 | 12,431.5 | point | `readyState=4`, paused; about 1,152 ms before S2 release |
+| Browser playback | C5 `play()` through `playing` | 14,580.3 | 14,592.2 | 11.9 | `73,710.2–73,722.1`; overlaps S2 and C6 by about 0.9–1.0 ms |
+| Browser presentation | C6 first advancing frame | 14,591.2 | 14,607.3 | 16.1 | Frame at `73,737.2`; confirmation at `73,770.4` |
+| **First `seeking` event → first advancing frame** | **Union of S0, S1, S2, C5 and C6** | **5.9** | **14,607.3** | **14,601.4** | Trace reports 14,601.6 ms from A0 at 59,135.6; timestamp-rounding difference |
+| **Programmatic request → first advancing frame** | **Independent browser observer** | **0.0** | **14,607.3** | **14,607.3** | Request 59,129.9; frame 73,737.2 |
+| Client `first-frame-observation` | Aggregate from original seek action | — | — | 14,603.2 | 1.6 ms after the advancing-frame event |
 
-The S2 hold contains the 18,205.8 ms interval from `seeked` to `play`; that
-time is accounted for by the logged readiness hold, not by an unlisted
-playback stage. The first `seeking` event followed the programmatic request by
-7.4 ms. Browser state events and the hold overlap, so they must not be added as
-serial durations. The proxy log records the matching `POST
-/api/transcode-sessions/e33db35afda7171e/seek` at 06:13:12.472 and its 204
-response at 06:13:12.810. Proxy, worker and browser clocks remain separate;
-the request identity and local durations are used without subtracting their
-timestamps across processes.
+The S2 hold includes the 1,152 ms between `seeked` and `play()`: reaching the
+media element's target does not release the readiness gate. S2 also spans
+concurrent proxy, torrent-worker, encoder and segment-delivery work. The proxy
+forecast predicted about 23.9 s to the first required segment. In the browser
+trace, the required video segment 28 response completed about 12.0 s after the
+request, and S2 released after 14.6 s. The forecast exceeded the measured
+segment response by about 11.9 s in this run. That forecast is not the
+measured S2 duration, and its nested work must not be added to S2. Proxy and
+worker clocks remain separate from the browser clock; compare event identity
+and within-process durations rather than subtracting their timestamps. The
+same trace contains F1.a begin events for admitted stdin input but no matching
+ends. The current change records the first successful stdin write as the F1.a
+end boundary; this needs a post-release field check.
 
-This adds a measured example for S2 and confirms why the seek total can be
-much longer than the media element's `seeked` delay. It does not close the
-other branch gaps listed in 12 and 13.1: the sample does not exercise the
-player-control debounce, proxy retry, soundtrack/quality change, magnet or
-direct-play path, nor the unobserved startup worker branches. The available
-measurements therefore reconcile the sampled cold-open envelope and identify
-the long seek hold, but do not prove complete measurement coverage for every
-conditional process in the full process map. The complete downloaded client
-and proxy logs and browser observer output are in
+The browser action spans reconcile with the advancing-frame timestamp to
+within rounding. The installed monotonic F1 logger reports a positive
+first-frame interval. This run does not close the other branch gaps listed in
+12 and 13.1: it does not exercise player-control debounce, proxy retry,
+soundtrack/quality changes, magnet or direct-play startup, or all worker
+branches. The latest sample verifies coverage for this cold-open and native
+seek path only. The complete downloaded client and proxy logs are in
 `research/session-logs-20261023-ttv185-c3/`.

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Record the first admitted-input bytes handed to FFmpeg so F1 spans also close for copied audio and video inputs.
+
 ## 2.105.9
 
 - **Fix**: Record FFmpeg input-open spans on one monotonic clock instead of subtracting proxy uptime from wall-clock time (#ttv-185).

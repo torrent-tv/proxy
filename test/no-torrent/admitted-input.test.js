@@ -58,6 +58,20 @@ test("a wait for the next input is said as a wait, the writing of an input is no
   assert.ok(events.indexOf("write") < firstWait, "the first input is written before the wait for the next");
 });
 
+test("the first admitted bytes are reported after they are written to the encoder", async () => {
+  const input = await admitInput({ sources: [structuredClone(source)], reserve: () => () => {},
+    readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
+  const events = [];
+  await writeAdmittedInput(input, new Writable({ write(chunk, _encoding, done) { events.push(["write", chunk.length]); done(); } }), {
+    onFirstInputBytes: bytes => events.push(["first-input", bytes])
+  });
+  assert.equal(events.filter(([event]) => event === "first-input").length, 1);
+  const firstWrite = events.findIndex(([event]) => event === "write");
+  const firstInput = events.findIndex(([event]) => event === "first-input");
+  assert.ok(firstWrite >= 0 && firstInput > firstWrite);
+  assert.equal(events[firstInput][1], events[firstWrite][1]);
+});
+
 test("PCM conversion reserves its owned bytes before reading and preserves the source", async () => {
   const original = Buffer.from([0x80, 0, 0x7f]);
   const candidate = { sourceKey: "source", fileIndex: 0, input: { ranges: [[0, 2]], tracks: [{

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Include the source file indexes for each required playback operation so the browser can measure urgent byte demand across the video and selected audio inputs (#ttv-11).
+
 ## 2.107.3
 
 - **Fix**: The `transcode … start` log line gives the position the run was asked to begin at, to a tenth of a second, instead of that position rounded to the nearest 10 s. The rounded figure was used only in this line and could name a start past the viewer: a soundtrack asked at 18.853 s was logged `start=20s` (#ttv-104).

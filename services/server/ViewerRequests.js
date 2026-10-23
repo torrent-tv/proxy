@@ -11,6 +11,13 @@ import { logger } from "../../utils/logger.js";
 import { isOutputName, OutputSpec } from "../encode/output/index.js";
 import { withSubtitleReadiness } from "./subtitle-readiness.js";
 
+/** @param {{ spec: { sourceFileIndexes: number[] }, file: { fileIndex: number } }} output */
+export function sourceFileIndexesForOutput(output) {
+  return output.spec.sourceFileIndexes.length > 0
+    ? [...output.spec.sourceFileIndexes]
+    : [output.file.fileIndex];
+}
+
 /**
  * The segment number an assignment is recorded under for this file, −1 for the
  * init, or null for anything that is neither (a playlist).
@@ -1044,7 +1051,8 @@ export class ViewerRequests {
       subtitle ? this.#host.subtitleReadyFor?.(viewer) !== false : true);
     forecast.operations = outputs.flatMap((output, index) => {
       const common = { speed: this.#host.playbackReadiness.forecastRate(tracks[index].readings, now, 0, "piece"),
-        processedSeconds: tracks[index].processedSeconds };
+        processedSeconds: tracks[index].processedSeconds,
+        sourceFileIndexes: sourceFileIndexesForOutput(output) };
       return [
         ...(output.spec.video ? [{ ...common, track: "video",
           operation: output.spec.transcodesVideo ? "encode" : "copy",

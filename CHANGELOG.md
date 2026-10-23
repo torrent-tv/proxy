@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Read a chosen embedded subtitle two segments ahead of the viewer, so consecutive reading windows overlap and a cue arrives before it starts (#ttv-7).
+
 ## 2.105.7
 
 - **Fix**: Keep and publish embedded subtitle cues read while the viewer's position moved on, instead of discarding them as obsolete (#ttv-7).

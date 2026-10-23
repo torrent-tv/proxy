@@ -22,7 +22,7 @@ import { probePackets } from "./services/media/probe-packets.js";
 import { trackChoicesOf } from "./services/viewer/segment-demands.js";
 import { PlaybackProjection } from "./services/torrent/PlaybackProjection.js";
 import { SegmentInputTable } from "./services/viewer/segment-input-table.js";
-import { SourcePreparation } from "./services/viewer/SourcePreparation.js";
+import { SourcePreparation, preparationInterval } from "./services/viewer/SourcePreparation.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
 import { handleApiLinkProbeGet } from "./routes/api/link-probe/get.js";
@@ -1403,7 +1403,7 @@ export async function startProxyServer({
             (work.ownerId === undefined || viewer.id === work.ownerId))
           .map(viewer => viewer.positionSeconds() ?? 0);
         const from = (positions.length ? Math.min(...positions) : 0) + (Number(info.value?.startTimeSeconds) || 0);
-        params.packetInterval = { from, to: from + outputParts.segmentDurationSec };
+        params.packetInterval = preparationInterval(work.role, from, outputParts.segmentDurationSec);
         if (work.role === "subtitle-embedded") {
           const tracks = await containerOrchestrator.containerFor(params).then(container => container.readTracks());
           const track = tracks.find(track => track.type === "subtitle" && track.declaredIndex === work.trackIndex);

@@ -1,3 +1,31 @@
+/**
+ * How many segments ahead of the viewer a chosen embedded subtitle is read.
+ *
+ * A reading window is taken again only when the viewer is planned again, which
+ * is when their report says they entered the next segment, and it starts where
+ * that report put them. Reports come every 1.5 s, so a window one segment long
+ * ended before the next one began whenever that report came later in its
+ * segment than the one before: a cue between the two was never read, and a
+ * cue just past a window was read only once the viewer had reached it (field
+ * 2026-10-22, Drifters 07: 1 of 27 cues missing, 7 late by 0.2-1.6 s,
+ * torrent-tv/meta#7). Two segments let each window reach past the start of the
+ * next while the viewer is planned at least once a segment.
+ */
+const SUBTITLE_SEGMENTS_AHEAD = 2;
+
+/**
+ * The stretch of film one preparation read covers from where its viewers stand.
+ *
+ * @param {string | undefined} role
+ * @param {number} from - Seconds on the file's own clock.
+ * @param {number} segmentDurationSec
+ * @returns {{ from: number, to: number }}
+ */
+export function preparationInterval(role, from, segmentDurationSec) {
+  const segments = role === "subtitle-embedded" ? SUBTITLE_SEGMENTS_AHEAD : 1;
+  return { from, to: from + segments * segmentDurationSec };
+}
+
 /** Source preparation is derived from viewers before any output exists. */
 export class SourcePreparation {
   #viewers;

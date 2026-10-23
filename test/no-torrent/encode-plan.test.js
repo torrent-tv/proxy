@@ -575,3 +575,51 @@ test("a starting encoder making the film behind the viewers is not stopped as no
       `at ${speedX}x the plan starts what it keeps`);
   }
 });
+
+test("a run whose stretch ends before the viewer's piece is not counted as reaching it", () => {
+  // Field 2026-10-05, Drifters 04: the viewer stood on #205, the last piece. A
+  // run copying #0..#204 at 365x was counted as reaching #205 within a second,
+  // so the run starting on #205 was stopped as "the film is no worse off
+  // without it", none was placed there again, and the viewer waited for minutes
+  // (torrent-tv/meta#117).
+  const windows = [
+    { from: 0, to: 204, priority: 1, withinSeconds: null, urgent: false, behind: true },
+    { from: 205, to: 205, priority: 100, withinSeconds: 0, urgent: true, behind: false }
+  ];
+  const host = { ...HOST, speedX: 365, segmentSeconds: 6.9, firstByteWaitSec: 2, refetchSecPerFilmSecond: 0 };
+  const now = Date.now();
+  const made = () => {
+    const coverage = new CoverageMap({ segmentCount: 206 });
+    for (let index = 0; index < 200; index += 1) coverage.markReady(index);
+    return coverage;
+  };
+  const stretch = run({ from: 0, to: 204, head: 200, speedX: 365, startedAt: now - 3000, fixedEnd: true });
+  const last = run({ from: 205, to: 205, head: 205, speedX: 0, startedAt: now - 1000, fixedEnd: true });
+  const both = made();
+  both.claim(stretch, 200, 204);
+  both.claim(last, 205, 205);
+  const kept = planEncoders({ coverage: both, windows, runs: [stretch, last], ...host, now });
+  assert.equal(kept.some((action) => action.type === "stop"), false,
+    kept.map((action) => `${action.type} ${action.because ?? ""}`).join(", "));
+  const alone = made();
+  alone.claim(stretch, 200, 204);
+  const placed = planEncoders({ coverage: alone, windows, runs: [stretch], ...host, now });
+  assert.deepEqual(placed.filter((action) => action.type === "start").map((action) => [action.from, action.to]),
+    [[205, 205]], "the last piece is given an encoder of its own");
+});
+
+test("a packet run is still counted as growing past its own end", () => {
+  // A packet input's run is given one piece and appends the next while it is
+  // wanted and nobody else holds it, so its `to` is not where it stops.
+  const coverage = new CoverageMap({ segmentCount: 100 });
+  const growing = run({ from: 40, to: 40, head: 40, speedX: 8, startedAt: Date.now() - 30000 });
+  coverage.claim(growing, 40, 40);
+  const actions = planEncoders({
+    coverage,
+    windows: [{ from: 40, to: 45, priority: 100, withinSeconds: 0 }],
+    runs: [growing],
+    ...HOST
+  });
+  assert.deepEqual(actions.filter((action) => action.type !== "keep"), [],
+    "nothing is started in front of a run that will grow there");
+});

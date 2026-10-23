@@ -1312,6 +1312,9 @@ export class EncodeRuns {
       from: run.from, to: run.to });
     if (admittedInput.original) {
       run.originalInput = admittedInput;
+      // Its stretch is all it can make: the plan counts it reaching nothing
+      // past `to` (torrent-tv/meta#117).
+      run.fixedEnd = true;
       // Every number of the stretch answers to its one key, so a failure
       // anywhere inside it is recorded against the stretch that was commanded.
       run.admittedInputKeys = new Map(Array.from({ length: inputEnd - safeIndex + 1 }, (_, offset) => [safeIndex + offset, inputKey]));

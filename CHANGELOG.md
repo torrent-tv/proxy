@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.1
 
 - **Fix**: Pass the wait observer to soundtrack rendition creation so P6.a opening spans are emitted (#ttv-185).
 

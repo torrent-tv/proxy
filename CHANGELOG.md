@@ -1,4 +1,4 @@
-## Unreleased
+## 2.105.13
 
 - **Fix**: Stop and remove packet captures when their delivery diagnosis clears, while retaining a shared capture until every active diagnosis has cleared (#ttv-79).
 

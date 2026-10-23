@@ -583,7 +583,7 @@ did not occur in those captured attempts; it never means zero duration.
 | Proxy main lane, repeated pass | P4 | Resolve demanded source ranges and publish priority map | Field 05, attempt 1: 132.7 ms median over 134 passes |
 | Proxy main lane | P5 | Read keyframe index for copied video | Alien Romulus, opt-in wait trace: cache miss; 1.4 ms total (0.03 ms queue, 1.38 ms read) |
 | Proxy output lane | P6.v | Open picture output | Field 05, attempt 1: 55.2 ms median over 3 opens |
-| Proxy output lane | P6.a | Open separate soundtrack output | First 2.107.0 field attempt created the audio-only output but emitted no P6.a event. Static trace found `wireOutputs` did not pass `observeWait` to `Renditions`; fixed in the pending proxy patch. No direct field duration yet. |
+| Proxy output lane | P6.a | Open separate soundtrack output | Alien: Romulus, proxy 2.107.1, cold start: two overlapping direct spans for the same base session, track 0, consumer and wait: 106.5 ms and 211.3 ms, both `outcome=opened`. The init and first-segment requests raced; these durations overlap and must not be added. The first-frame observation was 26,356.1 ms after the wait began; P6.a is inside `prepare`, not an extra end-to-end interval. |
 | Proxy parallel output lanes | P7.v | Plan picture encoder runs | Field 05: one picture run plan took 254.8 ms |
 | Proxy parallel output lanes | P7.a | Plan soundtrack encoder runs | Same interval as P7.v: 254.8 ms, on proxy clock |
 | Proxy parallel output lanes | P8.v | Admit and copy picture run input | Field 05, attempt 1: 331.6 ms median over 2 completed spans |

@@ -373,7 +373,7 @@ logged at the process boundary; "derived" is computed from other values;
 | P6.a | P | output key | HTTP request that first opens the alternate output | output response; session creation logs open calls, aggregate open time and plan wait | memory / encoder admission | — | request span plus open-duration fields; output-specific event still shares the request process id |
 | P7 | P | source key, output key | `process=P7.v/a phase=begin` | `process=P7.v/a phase=end` | R2 event loop | outputs and active sessions | direct, proxy monotonic clock |
 | P8 | P | source key, output key, run range, input request | `process=P8.v/a phase=begin` | paired end at input admitted or terminal; attempt/wait events for retries | R8, W9, R4 detailed in adjacent input/read records | bytes, queue/read/copy times | direct, proxy monotonic clock |
-| F1.v / F1.a | P | source key, run token, output, file | run spawn | first input bytes delivered by `/encode-input` or `/stream` | R3 | bytes | direct proxy-monotonic span; endpoint is byte handoff, not FFmpeg's internal packet parser |
+| F1.v / F1.a | P | source key, run token, output, file | monotonic timestamp at run spawn | first input bytes delivered by `/encode-input` or `/stream` | R3 | bytes | direct proxy-monotonic span; endpoint is byte handoff, not FFmpeg's internal packet parser; never subtract wall-clock `run.startedAt` |
 | F2.v / F2.a | P | source key, run token, output, segment | first input bytes delivered | first output piece closed | R3 | segment | direct proxy-monotonic span; P11 separately records publication |
 | P11 | P | output key, segment index | encoder run start | `encode-run … #<index> … named +<ms>, published +<ms>` (`EncodeRuns.onClosed`), relative to that run's start | — | one piece | direct publication observation; `cold-start <id>: first-segment ready +<ms>` is a different event, written when the first segment is **served** (`SegmentServing`) |
 | P13 | P | source key, output key, init filename | init request start | init request answer | read/production wait is within request | bytes | direct request span, proxy monotonic clock |
@@ -509,8 +509,8 @@ did not occur in those captured attempts; it never means zero duration.
 | Proxy main lane, repeated poll | P14 | Compute playback readiness forecast | Readiness observations recorded; no exclusive end-to-end compute span |
 | Proxy main lane, observer | P15 | Emit early-estimate revision | Point observations; no duration |
 | Proxy main lane, conditional | X1 | Run ffprobe for unrecognised container | Not taken: container was recognised |
-| Encoder lane | F1.v | Hand first picture input bytes to FFmpeg | Start recorded; no valid isolated completion span in these logs |
-| Encoder lane | F1.a | Hand first soundtrack input bytes to FFmpeg | Start recorded; no valid isolated completion span in these logs |
+| Encoder lane | F1.v | Hand first picture input bytes to FFmpeg | Current 2026-10-23 trace: invalid duration (-1,792,731,391,029 ms) because wall-clock run start was subtracted from proxy-monotonic handoff; corrected in proxy Unreleased |
+| Encoder lane | F1.a | Hand first soundtrack input bytes to FFmpeg | No valid isolated completion span in the captured field paths |
 | Encoder parallel output lanes | F2.v | Produce first picture segment | Field 05, attempt 1: 5,401.1 ms |
 | Encoder parallel output lanes | F2.a | Produce first soundtrack segment | No valid isolated completion span in these logs |
 | Torrent worker: add-to-ready parent | W1 | Add source through ready torrent | Historical Field 04: worker add point only; new traces record the full interval, including nested worker steps |
@@ -1444,3 +1444,79 @@ Intervals between measured operations remain an explicit residual until a
 browser performance capture identifies their cause; they are not assigned to
 the nearest named action. Thus the process map is not yet proven complete for
 all startup and seek paths.
+
+### 13.2 Monotonic-clock validation, 2026-10-23
+
+The Frankenstein 1080p MKV check used server 0.64.0 and the HA proxy. Its
+reopened, already-warm source is not a cold-start sample. The selected file
+opened with subtitles off, so C3 did not run. The complete proxy, server and
+client logs are saved under
+`research/session-logs-20261023-ttv185-c3/` in the task workspace.
+
+The trace exposed an invalid F1.v interval: its begin record carried
+`startedAt=1792734760240` (wall-clock milliseconds), while its end used proxy
+`performance.now()` (`endedAt=3369210.550809`), producing a duration of
+`-1792731391029.4492 ms`. The run's encoder `startedAt` is for wall-clock
+accounting and cannot be subtracted from a proxy-monotonic event. The actual
+monotonic F1.v begin was `3368477.341839`, making the observed span to first
+input bytes 733.2 ms. The proxy now records a separate monotonic start for F1;
+this correction still needs a deployed field trace. Exclude the mixed-clock
+duration from stage reconciliation.
+
+### 13.3 Alien Romulus cold open and seek, 2026-10-23
+
+The Alien Romulus 1080p LostFilm torrent was opened on the HA proxy. The client
+log records a cold-open phase sum of 8,878.0 ms through the first-frame
+observation:
+
+| Atomic envelope | Duration (ms) |
+|---|---:|
+| Transport | 1,015.7 |
+| Plan | 95.3 |
+| Prepare | 6,740.5 |
+| Prebuffer | 948.0 |
+| Presentation | 78.5 |
+| **Sum** | **8,878.0** |
+| Client first-frame observation | 8,878.0 |
+
+This checks the client phase sum for this opening. An independent frame
+observer was not retained for the cold-open portion, so this is not an
+independent endpoint check. The spans inside `prepare` and `prebuffer` run in
+parallel; their child operation durations are not additive.
+
+The same source session then sought to 300 s by assigning `video.currentTime`
+in the browser. This exercised the native media-element `seeking` path; the
+timestamp is a programmatic request and does not represent a physical control
+input. A separate browser observer recorded the request, media events and
+advancing frame:
+
+| Parallel lane | Atomic action | Start from request (ms) | End from request (ms) | Duration (ms) | Measurement |
+|---|---|---:|---:|---:|---|
+| Browser input | S0 programmatic request | 0.0 | 0.0 | point | `video.currentTime = 300` |
+| Browser media state | First `seeking` event | 7.4 | 7.4 | point | `currentTime=300` |
+| Browser readiness gate | S2 seek hold, `minimum-safe-delay` to forecast release | 1,260.7 | 21,676.7 | 20,416.0 | Client log: waiting at 06:13:13.353; release at 06:13:33.769 |
+| Browser media state | `seeked` event | 3,483.4 | 3,483.4 | point | `readyState=4`, paused |
+| Browser playback | C5 `play` to `playing` | 21,689.2 | 21,692.4 | 3.2 | `playing` at 06:13:33.783 |
+| Browser presentation | C6 first advancing frame | 21,744.2 | 21,744.2 | point | Confirmed advancing at 21,794.1 ms |
+| **Original seek request → first advancing frame** | **Independent browser observer** | **0.0** | **21,744.2** | **21,744.2** | **Request at 19,906.5 ms; frame at 41,650.7 ms** |
+
+The S2 hold contains the 18,205.8 ms interval from `seeked` to `play`; that
+time is accounted for by the logged readiness hold, not by an unlisted
+playback stage. The first `seeking` event followed the programmatic request by
+7.4 ms. Browser state events and the hold overlap, so they must not be added as
+serial durations. The proxy log records the matching `POST
+/api/transcode-sessions/e33db35afda7171e/seek` at 06:13:12.472 and its 204
+response at 06:13:12.810. Proxy, worker and browser clocks remain separate;
+the request identity and local durations are used without subtracting their
+timestamps across processes.
+
+This adds a measured example for S2 and confirms why the seek total can be
+much longer than the media element's `seeked` delay. It does not close the
+other branch gaps listed in 12 and 13.1: the sample does not exercise the
+player-control debounce, proxy retry, soundtrack/quality change, magnet or
+direct-play path, nor the unobserved startup worker branches. The available
+measurements therefore reconcile the sampled cold-open envelope and identify
+the long seek hold, but do not prove complete measurement coverage for every
+conditional process in the full process map. The complete downloaded client
+and proxy logs and browser observer output are in
+`research/session-logs-20261023-ttv185-c3/`.

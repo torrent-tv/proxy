@@ -27,38 +27,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      # The same cached system ffprobe that the main workflow's checks read. The
-      # installer package crashes on MPEG-TS packet inspection.
-      - name: Update the Ubuntu package index
-        run: sudo timeout --signal=TERM --kill-after=10s 120s apt-get update
-      - name: Resolve packet timing package versions
-        id: packet-timing-packages
-        run: node scripts/packet-timing-reference-cache-key.mjs
-      - name: Restore packet timing package cache
-        id: packet-timing-cache
-        uses: actions/cache/restore@v6
-        with:
-          path: /var/cache/apt/archives
-          key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
-          restore-keys: |
-            ${{ runner.arch }}-ubuntu-26.04-ffmpeg-
-      - name: Install the packet timing reference
-        env:
-          CACHE_HIT: ${{ steps.packet-timing-cache.outputs.cache-hit }}
-        run: |
-          echo "::notice::Packet timing package cache: ${CACHE_HIT:-miss}"
-          sudo timeout --signal=TERM --kill-after=10s 180s apt-get \
-            -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-            install --no-install-recommends -y ffmpeg
-          sudo apt-get autoclean
-      - name: Save packet timing package cache
-        uses: actions/cache/save@v6
-        with:
-          path: /var/cache/apt/archives
-          key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
       - uses: torrent-tv/.github/actions/update-dependencies@main
-        env:
-          FFPROBE_BIN: /usr/bin/ffprobe
         with:
           github-token: ${{ github.token }}
           # npm users install the proxy from the ranges in package.json; the lock file

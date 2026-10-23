@@ -70,7 +70,29 @@
  *   (`EncodeRun.speedX`), with input waits and stops taken out. Zero or less
  *   means nothing has measured it yet, and then no comparison involving its
  *   speed can be made.
+ * @property {boolean} [fixedEnd] - Whether `to` is where its process ends. An
+ *   original input is one copied stretch and its run makes nothing past it; a
+ *   packet input's run grows past `to` one piece at a time, so its `to` bounds
+ *   nothing yet (`EncodeRuns`).
  */
+
+/**
+ * The last number a live run can make where it stands: its `to` when that is
+ * where its process ends, otherwise no bound.
+ *
+ * Counted as reaching every number after it instead, a run whose stretch ended
+ * at #204 was the plan's answer for #205: the run starting on #205 was stopped
+ * as "the film is no worse off without it", none was placed there again, and
+ * the viewer on the last piece of Drifters 04 waited for minutes (field
+ * 2026-10-05, torrent-tv/meta#117).
+ *
+ * @param {LiveRun} run
+ * @returns {number}
+ */
+function roadEndOf(run) {
+  const to = Number(run.to);
+  return run.fixedEnd === true && to >= Number(run.from) ? to : Number.POSITIVE_INFINITY;
+}
 
 /**
  * What a viewer is waiting for. Which viewer is deliberately absent.
@@ -267,7 +289,8 @@ export function planEncoders({
   // outside.
   const priced = (encoders) => {
     const perPiece = pieceAt(encoders.length);
-    return encoders.map((encoder) => ({ at: encoder.at, delaySec: encoder.owes(perPiece) }));
+    return encoders.map((encoder) => ({ at: encoder.at, delaySec: encoder.owes(perPiece),
+      through: encoder.through ?? Number.POSITIVE_INFINITY }));
   };
 
 
@@ -442,7 +465,8 @@ export function planEncoders({
         at: positions[index],
         owes: head === positions[index]
           ? (piece) => finishesItsPieceIn(filler, piece)
-          : (piece) => moveSec + piece
+          : (piece) => moveSec + piece,
+        through: head === positions[index] ? roadEndOf(filler) : Number.POSITIVE_INFINITY
       });
     }
     // Bodies nobody was given a position for go on working where they stand,
@@ -465,7 +489,8 @@ export function planEncoders({
         at: head,
         owes: cutInFront
           ? (piece) => moveSec + piece
-          : (piece) => finishesItsPieceIn(run, piece)
+          : (piece) => finishesItsPieceIn(run, piece),
+        through: roadEndOf(run)
       });
     }
     const scored = latenessOf(priced(encoders), coverage, wanted, untilNeeded, rate / contentionPenaltyFor(Math.max(0, encoders.length - 1)), refetchPerSegment, segmentSeconds, neverSec);
@@ -506,7 +531,8 @@ export function planEncoders({
         at,
         owes: at === head
           ? (piece) => finishesItsPieceIn(run, piece)
-          : (piece) => moveSec + piece
+          : (piece) => moveSec + piece,
+        through: at === head ? roadEndOf(run) : Number.POSITIVE_INFINITY
       });
     }
     for (let index = 0; index < positions.length; index += 1) {
@@ -867,7 +893,8 @@ function latenessOf(encoders, coverage, wanted, untilNeeded, rate, refetchSecPer
     let byWhom = null;
     for (let at = 0; at < encoders.length; at += 1) {
       const encoder = encoders[at];
-      if (encoder.at > index) {
+      // Behind it, or standing on a road that ends before it.
+      if (encoder.at > index || index > encoder.through) {
         continue;
       }
       // WHEN THIS BODY REACHES THIS NUMBER. `delaySec` is when it finishes the
@@ -1160,15 +1187,8 @@ function gapFinderFor(coverage, surviving, rate, refetchSecPerSegment = 0) {
     const head = Number(/** @type {{ head?: number }} */ (run).head);
     placed.push({
       at: Number.isFinite(head) ? head : Number(/** @type {{ from: number }} */ (run).from),
-      // A live run's road, so that placing inside it can be priced. A run given
-      // no end drives to the end of the film, which is what makes the price real.
-      // A run given no end drives to the end of the film, which is what makes
-      // the price of cutting in front of it real. Written out rather than
-      // imported: this file depends on nothing, and that is what lets it be
-      // exercised with plain values alone.
-      to: Number(/** @type {{ to: number }} */ (run).to) < Number(/** @type {{ from: number }} */ (run).from)
-        ? Number.POSITIVE_INFINITY
-        : Number(/** @type {{ to: number }} */ (run).to)
+      // A live run's road: nothing past its end is reached by it.
+      to: roadEndOf(/** @type {LiveRun} */ (run))
     });
   }
   return (at, bound, deadlineAt, alsoPlaced) => {
@@ -1192,6 +1212,7 @@ function gapFinderFor(coverage, surviving, rate, refetchSecPerSegment = 0) {
     // millions of steps, and the plan held the proxy's thread for most of every
     // second (Home Assistant 2026-10-08, torrent-tv/meta#151).
     const standing = [...placed.map((live) => live.at), ...(alsoPlaced ?? [])];
+    const roadEnds = [...placed.map((live) => live.to), ...(alsoPlaced ?? []).map(() => Number.POSITIVE_INFINITY)];
     const passed = standing.map((a) => coverage.madeBetween(a, start - 1));
     for (let index = start; index <= last; index += 1) {
       const readyHere = coverage.isReady(index);
@@ -1217,8 +1238,9 @@ function gapFinderFor(coverage, surviving, rate, refetchSecPerSegment = 0) {
       let soonest = Number.POSITIVE_INFINITY;
       for (let which = 0; which < standing.length; which += 1) {
         const a = standing[which];
-        if (a > index) {
-          // Standing past it. Encoders only move forward, so it never will.
+        if (a > index || index > roadEnds[which]) {
+          // Standing past it, or on a road that ends before it. Encoders only
+          // move forward, so it never will.
           continue;
         }
         if (a === index) {

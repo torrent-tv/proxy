@@ -488,7 +488,12 @@ field 04, wait `6a2e02ac-13ff-4f7b-b386-c0dbc7222297`; field 05, wait
 `f1e0068f-7804-4fb3-983e-4d2dfb84bb3c`; and the post-release Alien Romulus
 captures on 2026-10-23, including c7 wait `ab68b107-d8bd-426e-9a29-c28d8f9037b4`
 and c8 cold-start wait `7d5ad538-fbb3-4e3a-ade0-8974853674b6` plus seek wait
-`b5441b78-f32d-4485-b5ef-43e25afef268`. Browser durations use the browser clock;
+`b5441b78-f32d-4485-b5ef-43e25afef268`; and the traced Haunted Hotel session
+on 2026-10-23, cold-start wait `281b2380-f52f-4756-8af9-d62cb9832e6a` and
+seek waits `6f7fd9db-57b8-4f48-a0e0-0824a3053de2`,
+`880f8577-1b34-42e8-8306-444a899b7f6d`,
+`2e21f423-95e6-48fe-8cc1-311926a549b9`, and
+`45721373-4726-4d35-9baf-98eb070cb507`. Browser durations use the browser clock;
 proxy and worker durations use their own clocks. These are observed spans, not
 additive estimates. `not observed` means the branch or independent boundary
 did not occur in those captured attempts; it never means zero duration.
@@ -545,28 +550,28 @@ did not occur in those captured attempts; it never means zero duration.
 | Browser parallel append lanes | B12.v | Append first picture fragment | Append acknowledgement not separately observed in this capture |
 | Browser parallel append lanes | B12.a | Append first soundtrack fragment | Field 05, attempt 1: 14.0 ms |
 | Browser: readiness envelope | C1 | Wait for continuous-playback readiness | Field 05, attempt 1: 500.7 ms; envelope, not an atomic stage |
-| Browser: prebuffer request | C1.1 | Read proxy readiness for the initial-start gate | No field sample yet; span added in this revision |
-| Browser: prebuffer decision | C1.2 | Evaluate readiness from the proxy response, subtitle state and browser buffer | No field sample yet; span added in this revision |
-| Browser: prebuffer state | C1.3 | Update the browser readiness model | No field sample yet; span added in this revision |
-| Browser: prebuffer recovery | C1.4 | Resume HLS loading at the buffered end after a four-second stall | Conditional; no field sample yet |
-| Browser: prebuffer reporting | C1.5 | Publish current download, transcode and readiness measurements | No field sample yet; span added in this revision |
-| Browser: prebuffer timer | C1.6 | Wait for the next gate check | No field sample yet; span added in this revision |
+| Browser: prebuffer request | C1.1 | Read proxy readiness for the initial-start gate | Haunted Hotel cold start: 251.8 ms and 152.6 ms (2 polls) |
+| Browser: prebuffer decision | C1.2 | Evaluate readiness from the proxy response, subtitle state and browser buffer | Haunted Hotel cold start: 0.3 ms and 0.2 ms |
+| Browser: prebuffer state | C1.3 | Update the browser readiness model | Haunted Hotel cold start: 0 ms in both observed iterations |
+| Browser: prebuffer recovery | C1.4 | Resume HLS loading at the buffered end after a four-second stall | Conditional; not taken in Haunted Hotel cold start |
+| Browser: prebuffer reporting | C1.5 | Publish current download, transcode and readiness measurements | Haunted Hotel cold start: 0.5 ms (1 publication) |
+| Browser: prebuffer timer | C1.6 | Wait for the next gate check | Haunted Hotel cold start: 253.3 ms (1 timer wait) |
 | Browser background lane | C2 | Send buffered ranges, position and link samples | Timed through B2 request spans; no separate C2 work duration |
 | Browser: readiness gate | C3 | Hold readiness until opening subtitle track is known | No hold branch taken in the captured path; the trace now emits a separate span when it occurs |
-| Browser: seek command | S1.1 | Record the requested position in loading state | No field sample yet; span added in this revision |
-| Browser: seek command | S1.2 | Write the requested position to browser history | No field sample yet; span added in this revision |
-| Browser: seek command | S1.3 | Reset the browser readiness model | No field sample yet; span added in this revision |
-| Browser: seek command | S1.4 | Acquire the seek hold during live playback | No field sample yet; span added in this revision |
-| Browser: seek command | S1.5 | Stop HLS loading | No field sample yet; span added in this revision |
-| Browser: seek command | B4 | Send the seek target to the proxy | c11/c12 request span exists; not yet split from the new command spans in a field run |
-| Browser: seek command | S1.6 | Restart HLS loading at the target | No field sample yet; span added in this revision |
-| Browser: seek readiness request | S2.1 | Read proxy readiness | No field sample yet; span added in this revision |
-| Browser: seek readiness decision | S2.2 | Decide whether the response is stale, ready or still waiting | No field sample yet; span added in this revision |
-| Browser: seek readiness state | S2.3 | Read browser buffer and calculate the wait estimate | No field sample yet; span added in this revision |
-| Browser: seek readiness state | S2.4 | Update the browser readiness model | No field sample yet; span added in this revision |
-| Browser: seek readiness reporting | S2.5 | Publish transcode readings to the page | No field sample yet; span added in this revision |
-| Browser: seek readiness timer | S2.6 | Wait for media arrival or the next readiness poll | No field sample yet; span added in this revision |
-| Browser: seek readiness | S2.7 | Release the seek hold | No field sample yet; span added in this revision |
+| Browser: seek command | S1.1 | Record the requested position in loading state | Haunted Hotel, 8 recorded actions: 0–0.1 ms each |
+| Browser: seek command | S1.2 | Write the requested position to browser history | Haunted Hotel, 8 actions: median 1.0 ms, range 0.5–1.2 ms |
+| Browser: seek command | S1.3 | Reset the browser readiness model | Haunted Hotel, 8 actions: 0–0.1 ms each |
+| Browser: seek command | S1.4 | Acquire the seek hold during live playback | Haunted Hotel, 8 actions: median 1.5 ms, range 1.0–3.8 ms |
+| Browser: seek command | S1.5 | Stop HLS loading | Haunted Hotel, 8 actions: median 1.2 ms, range 0.6–2.7 ms |
+| Browser: seek command | B4 | Send the seek target to the proxy | Haunted Hotel: 8 position-restatement spans, median 1,196.6 ms, maximum 2,871.1 ms |
+| Browser: seek command | S1.6 | Restart HLS loading at the target | Haunted Hotel, 8 actions: median 3.1 ms, range 2.7–5.1 ms |
+| Browser: seek readiness request | S2.1 | Read proxy readiness | Haunted Hotel: 23 polls, median 819.4 ms, range 116.4–2,757.7 ms |
+| Browser: seek readiness decision | S2.2 | Decide whether the response is stale, ready or still waiting | Haunted Hotel: 19 decisions, median 0 ms, maximum 0.4 ms |
+| Browser: seek readiness state | S2.3 | Read browser buffer and calculate the wait estimate | Haunted Hotel: 19 readings, median 0.1 ms, maximum 0.2 ms |
+| Browser: seek readiness state | S2.4 | Update the browser readiness model | Haunted Hotel: 19 updates, median 0.1 ms, maximum 0.1 ms |
+| Browser: seek readiness reporting | S2.5 | Publish transcode readings to the page | Haunted Hotel: 19 publications, median 0.9 ms, range 0.2–1.4 ms |
+| Browser: seek readiness timer | S2.6 | Wait for media arrival or the next readiness poll | Haunted Hotel: 15 waits, median 1,503.2 ms, range 283.4–1,515.8 ms |
+| Browser: seek readiness | S2.7 | Release the seek hold | Haunted Hotel: 8 releases, median 1.6 ms, maximum 3.8 ms |
 | Browser: playback state | C4 | Publish `PLAYBACK_READY` / `ADVANCING` | Point event; no duration |
 | Browser: playback | C5 | Call `play()` and receive `playing` | Field 05, attempt 1: 39.6 ms |
 | Browser: presentation | C6 | Wait for first presented frame callback | c8 cold start: 248.9 ms from `t4` to first advancing frame; a seek begins at its `seeking` event, even when the first frame precedes `playing` |
@@ -2018,8 +2023,36 @@ The full action-to-frame time is represented by the C6 envelope, while C6a
 names and measures the final seek substage. These spans overlap and must not be
 added together.
 
-The c12 logs predate the atomic C1.1–C1.6 and S1.1–S1.6/S2.1–S2.7 spans added
-after this capture. Their parent envelopes and end-to-end frame times are real
-measurements, but they cannot supply example durations for these new rows.
-Those rows remain explicitly unmeasured until a post-release cold start and
-prepared/unprepared forward and backward seeks produce matching events.
+The c12 logs predate the atomic C1.1–C1.6 and S1.1–S1.6/S2.1–S2.7 spans. The
+Haunted Hotel c13 capture below supplies those measurements for the paths it
+exercised. C1.4 remains unobserved because its four-second-stall branch did not
+occur; this is a conditional branch, not a missing log event in that run.
+
+### 13.10 Haunted Hotel atomic-stage field run, 2026-10-23
+
+The c13 field run used the Home Assistant proxy with
+`Haunted.Hotel.S02E01.1080p.rus.LostFilm.TV.mkv`. It recorded the initial cold
+start and four seeks: an unprepared seek near 30 s, unprepared forward to 300 s,
+unprepared backward to 150 s, and a seek to 160 s inside the range prepared by
+the preceding seek. The complete local copies are in
+`research/session-logs-2026-10-23-ttv185-haunted-hotel/`.
+
+The cold-start total to prebuffer release was 27,400 ms. Its enclosing
+intervals were transport 2,390 ms, plan 5,104 ms, prepare 19,245 ms and
+prebuffer 660 ms (sum 27,400 ms; values are rounded). The first advancing frame
+arrived at 27,472.5 ms from the original action, 72.8 ms after that total
+endpoint. The atomic prebuffer rows in section 8.1 were emitted in this same
+wait. They are child actions inside C1; their durations are not added to the
+enclosing interval a second time.
+
+The action-to-frame envelope for the four seeks measured 15,367 ms, 19,568 ms,
+15,038 ms and 1,540 ms respectively. The seek to 160 s was the prepared-range
+case. The other three required new data at the target. For each seek, S1 and S2
+are command/readiness envelopes containing the child rows in section 8.1;
+S2.1 and S2.6 repeat, and their durations overlap proxy work and the end-to-end
+C6 frame envelope. Do not sum these poll spans to estimate the seek duration.
+The final C6 frame-presentation tails were 21.1 ms, 26.1 ms, 66.8 ms and
+51.4 ms. This run establishes that every observed C1 and S1/S2 atomic action
+has a measured span. It does not measure the conditional C1.4 recovery branch,
+the subtitle hold C3, or path-specific branches not taken by this title and
+these seeks.

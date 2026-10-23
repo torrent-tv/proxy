@@ -246,7 +246,9 @@ export function probeWedgeIsCertain({
  * @property {number | null} peerBytesAtTick - The same, as it stood at the previous tick.
  * @property {number | null} peerLoopLagMs - The far end's own event-loop delay, as last reported.
  * @property {string | null} peerVisibility - Whether the far end's tab is visible or hidden, as last reported.
- * @property {boolean} probeCaptureStarted - One evidence-gathering attempt per wedge; reset once `seen` advances again.
+ * @property {boolean} probeCaptureStarted - One evidence-gathering attempt per wedge; reset once the verdict clears.
+ * @property {number} probeCaptureSequence
+ * @property {string | null} probeCaptureId
  * @property {ReturnType<typeof setInterval> | null} timer
  */
 
@@ -409,7 +411,7 @@ export function readProbeState(state) {
  * @param {(sessionId: string) => object | null} [options.getTransportSnapshot]
  *   Needed only to hand the witness a remote endpoint when this probe is the
  *   one declaring a wedge.
- * @param {{ maybeCapture: (trigger: object) => boolean }} [options.witness]
+ * @param {{ maybeCapture: (trigger: object) => boolean, cancelCapture?: (captureId: string) => Promise<boolean> }} [options.witness]
  * @param {{ maybeRead: (reasonText: string) => boolean }} [options.usrsctpState]
  * @returns {{
  *   attach: (sessionId: string, tag: string, label: string, channel: import('node-datachannel').DataChannel) => void,
@@ -599,6 +601,8 @@ export function createDeliveryProbe({
       });
       if (isCertain && !connection.probeCaptureStarted) {
         connection.probeCaptureStarted = true;
+        const captureId = `${connection.id}:probe:${++connection.probeCaptureSequence}`;
+        connection.probeCaptureId = captureId;
         const reasonText =
           `probe seen-counter unmoved ${Math.round(stuckForMs / 1000)}s against the ` +
           `${(needMs / 1000).toFixed(1)}s this connection's own history says is legitimate`;
@@ -607,6 +611,7 @@ export function createDeliveryProbe({
           const started = witness.maybeCapture({
             sessionId: connection.id,
             tag: connection.tag,
+            captureId,
             label: "probe",
             remote: snapshot?.remote ?? null,
             queuedBytes: 0,
@@ -614,16 +619,27 @@ export function createDeliveryProbe({
           });
           if (!started) {
             connection.probeCaptureStarted = false;
+            connection.probeCaptureId = null;
           }
         }
         if (usrsctpState) {
           usrsctpState.maybeRead(reasonText);
+        }
+      } else if (!isCertain) {
+        connection.probeCaptureStarted = false;
+        if (connection.probeCaptureId) {
+          void witness?.cancelCapture?.(connection.probeCaptureId);
+          connection.probeCaptureId = null;
         }
       }
     } else {
       // Not association-stopped any more: whatever was flagged has cleared,
       // and a later wedge on the same connection deserves its own attempt.
       connection.probeCaptureStarted = false;
+      if (connection.probeCaptureId) {
+        void witness?.cancelCapture?.(connection.probeCaptureId);
+        connection.probeCaptureId = null;
+      }
     }
   }
 
@@ -672,6 +688,8 @@ export function createDeliveryProbe({
           longestHealthySeenGapMs: 0,
           sentAtBySeq: new Map(),
           probeCaptureStarted: false,
+          probeCaptureSequence: 0,
+          probeCaptureId: null,
           timer: null
         };
         connections.set(sessionId, connection);
@@ -701,6 +719,10 @@ export function createDeliveryProbe({
         if (connections.get(sessionId) === connection) {
           connections.delete(sessionId);
         }
+        if (connection.probeCaptureId) {
+          void witness?.cancelCapture?.(connection.probeCaptureId);
+          connection.probeCaptureId = null;
+        }
       }
     },
 
@@ -720,6 +742,10 @@ export function createDeliveryProbe({
       }
       connection.channels.clear();
       connections.delete(sessionId);
+      if (connection.probeCaptureId) {
+        void witness?.cancelCapture?.(connection.probeCaptureId);
+        connection.probeCaptureId = null;
+      }
     },
 
     noteEcho(sessionId, echo) {

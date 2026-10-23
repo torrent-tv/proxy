@@ -205,6 +205,68 @@ test("a wedge keeps the ring's history, and the ring keeps recording afterwards"
   });
 });
 
+test("recovery before tcpdump availability resolves prevents the capture from starting", async () => {
+  await withDir(async (dir) => {
+    const spawn = makeSpawn();
+    const witness = createPacketWitness({ log: () => {}, dir, port: 9090, spawnProcess: spawn.spawnProcess });
+    const trigger = {
+      sessionId: "session-start-race",
+      tag: "start-race",
+      captureId: "session-start-race:probe:1",
+      label: "probe",
+      remote: { address: "2001:db8::1", port: 61649 },
+      queuedBytes: 0,
+      stuckForMs: 4000
+    };
+
+    assert.equal(witness.maybeCapture(trigger), true);
+    assert.equal(await witness.cancelCapture(trigger.captureId), true);
+    await settle();
+
+    assert.equal(spawn.rings.length, 0, "a disproved diagnosis must not start a tail capture");
+    assert.deepEqual(await readdir(dir), []);
+    await witness.dispose();
+  });
+});
+
+test("a capture stays until every incident clears, then removes only its evidence", async () => {
+  await withDir(async (dir) => {
+    const spawn = makeSpawn();
+    const witness = createPacketWitness({ log: () => {}, dir, port: 9090, spawnProcess: spawn.spawnProcess });
+    witness.holdRing();
+    await waitFor(() => spawn.rings.length === 1, "the ring to start");
+    await writeFile(path.join(dir, `${WITNESS_RING_BASENAME}0`), "before-the-freeze");
+    const first = {
+      sessionId: "shared-session",
+      tag: "shared01",
+      captureId: "shared-session:probe:1",
+      label: "probe",
+      remote: { address: "2001:db8::1", port: 61649 },
+      queuedBytes: 0,
+      stuckForMs: 4000
+    };
+    const second = { ...first, captureId: "shared-session:send-queue:1", label: "proxy" };
+
+    assert.equal(witness.maybeCapture(first), true);
+    await waitFor(async () => (await readdir(dir)).some((name) => name.includes(".before")), "ring history to copy");
+    assert.equal(witness.maybeCapture(second), true, "the same connection shares one active recording");
+    await waitFor(() => spawn.rings.some((child) => child.args.some((arg) => arg.includes(".tail.pcap"))), "tail capture to start");
+    const tail = spawn.rings.find((child) => child.args.some((arg) => arg.includes(".tail.pcap")));
+    const history = (await readdir(dir)).filter((name) => name.includes(".before"));
+    assert.equal(history.length, 1);
+
+    assert.equal(await witness.cancelCapture(first.captureId), true);
+    assert.equal(tail.killed, false, "one active diagnosis still owns the capture");
+    assert.equal((await readdir(dir)).some((name) => history.includes(name)), true);
+
+    await witness.cancelCapture(second.captureId);
+    await waitFor(() => tail.killed, "the tail capture to stop after the last diagnosis clears");
+    await waitFor(async () => (await readdir(dir)).every((name) => name.startsWith(WITNESS_RING_BASENAME)), "only the live ring files to remain");
+    assert.ok(spawn.rings.filter((child) => child.args.some((arg) => arg.includes(WITNESS_RING_BASENAME))).some((child) => !child.killed));
+    await witness.dispose();
+  });
+});
+
 test("dispose stops the ring and clears its files", async () => {
   await withDir(async (dir) => {
     const spawn = makeSpawn();

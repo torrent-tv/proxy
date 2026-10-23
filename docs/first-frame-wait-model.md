@@ -139,9 +139,8 @@ durations.
 | B2 | Net reporter (every 1.5 s, at once on `reportNow`) and session keep-alive started | B1 | session released | start without waiting |
 | B3 | Media playlist wait (`waitForHlsPlaylist`); a synthetic VOD playlist answers at once, otherwise retry with `min(3000, 500 + 250·n)` ms | B1 | playlist with `#EXTINF` | blocking |
 | B4 | Restate a position changed during allocation (`reportSeek` loop) | B3 | position acknowledged | blocking (normally no iteration) |
-| B5 | hls.js: fetch and parse the master or direct media playlist, then select the level and start loading | B4 | `startLoad` called | blocking |
-| B5.level | When B5 loads a master playlist, fetch and process the selected media playlist | B5 | `LEVEL_LOADED` | blocking only for a master playlist; a direct media playlist skips this request |
-| B5.level | When B5 loads a master playlist, fetch and process the selected media playlist | B5 | `LEVEL_LOADED` | blocking only for a master playlist; a direct media playlist skips this request |
+| B5 | hls.js: request and read the master or direct media playlist, parse it, then select the level and start loading. The request, parse, and optional selected-level playlist now have separate measured spans | B4 | `startLoad` called | blocking |
+| B5.level | When B5 loads a master playlist, request and process the selected media playlist | B5 | `LEVEL_LOADED` | blocking only for a master playlist; a direct media playlist skips this request |
 | B6.v | Main stream init request (fMP4 only: `#EXT-X-MAP`); held by the proxy until P13.v, then P12.v. An MPEG-TS output has no init file (`mpegtsFormat.initFileName` is null, no `#EXT-X-MAP`), so this request does not exist | B5 | init bytes received | per stream |
 | B6.a.p | Separate soundtrack: playlist request. Answered from the base output (`resolveAudioRenditionFile` returns `base.id` for a playlist); it creates no output | B5 | playlist received | per stream |
 | B6.a.i | Separate soundtrack: init request (fMP4 only). The first init or segment request of the soundtrack is what opens P6.a; held until P13.a | B6.a.p | init bytes received | per stream |
@@ -207,7 +206,7 @@ orchestration. The torrent runs in one worker thread
 | ID | Process | Starts after | Ends when | Edge |
 |---|---|---|---|---|
 | X1 | ffprobe (`probe-packets.js`) for a container the sniff does not recognise (`FfprobeContainer`): reads the file over loopback `/media`, which serves held bytes only; a missing byte aborts the probe as `needs-ranges` | P2 | streams or packets listed | blocking for P2 |
-| F1.v / F1.a | FFmpeg spawn and open of the run's input over loopback HTTP (`/encode-input/:token/:fileIndex` or `/stream`) | P8 of the output | first source bytes handed to FFmpeg by the proxy | blocking for F2 |
+| F1.v / F1.a | Deliver the run's first input bytes to FFmpeg, by loopback HTTP (`/encode-input/:token/:fileIndex` or `/stream`) or admitted input on `stdin` | P8 of the output | first input bytes successfully handed to FFmpeg by the proxy | blocking for F2 |
 | F2.v / F2.a | Encode or copy the first piece up to its cut | F1 of the output | first output piece closed | blocking for P11 |
 
 ### 3.6 Torrent worker thread and swarm (WebTorrent 2.8.5)
@@ -373,15 +372,19 @@ logged at the process boundary; "derived" is computed from other values;
 | P6.a | P | output key | HTTP request that first opens the alternate output | output response; session creation logs open calls, aggregate open time and plan wait | memory / encoder admission | — | request span plus open-duration fields; output-specific event still shares the request process id |
 | P7 | P | source key, output key | `process=P7.v/a phase=begin` | `process=P7.v/a phase=end` | R2 event loop | outputs and active sessions | direct, proxy monotonic clock |
 | P8 | P | source key, output key, run range, input request | `process=P8.v/a phase=begin` | paired end at input admitted or terminal; attempt/wait events for retries | R8, W9, R4 detailed in adjacent input/read records | bytes, queue/read/copy times | direct, proxy monotonic clock |
-| F1.v / F1.a | P | source key, run token, output, file | monotonic timestamp at run spawn | first input bytes delivered by `/encode-input` or `/stream` | R3 | bytes | direct proxy-monotonic span; endpoint is byte handoff, not FFmpeg's internal packet parser; never subtract wall-clock `run.startedAt` |
+| F1.v / F1.a | P | source key, run token, output, file | monotonic timestamp at run spawn | first input bytes handed off by `/encode-input`, `/stream`, or the successful admitted-input `stdin.write` callback | R3 | bytes | direct proxy-monotonic span; endpoint is byte handoff, not FFmpeg's internal packet parser; never subtract wall-clock `run.startedAt` |
 | F2.v / F2.a | P | source key, run token, output, segment | first input bytes delivered | first output piece closed | R3 | segment | direct proxy-monotonic span; P11 separately records publication |
 | P11 | P | output key, segment index | encoder run start | `encode-run … #<index> … named +<ms>, published +<ms>` (`EncodeRuns.onClosed`), relative to that run's start | — | one piece | direct publication observation; `cold-start <id>: first-segment ready +<ms>` is a different event, written when the first segment is **served** (`SegmentServing`) |
 | P13 | P | source key, output key, init filename | init request start | init request answer | read/production wait is within request | bytes | direct request span, proxy monotonic clock |
 | P12 + transfer | P / B | P `requestId`; B path | P route entry (in `fetchMs`) | P `[net-debug] sent … requestId= fetchMs= sendMs= readMs= chanMs= drainMs= loopMax=`; B `[net-debug] dc-load {path, waitMs, transferMs}` | R2, R5.m | bytes | direct on each side; B line carries the path, not the `requestId` |
 | B3 | B / P | wait, attempt, request id | `waitForHlsPlaylist` request | response or close | R5.m | media playlist readiness | direct request span; separate from hls.js playlist loading |
-| B5 | B | wait, attempt | hls.js `MANIFEST_LOADING` | `MANIFEST_LOADED`; `MANIFEST_LOADED` to `MANIFEST_PARSED`; and, for a master playlist, `LEVEL_LOADING` to `LEVEL_LOADED` | R5.m / browser main thread | master and selected media playlist | direct browser-clock spans for request, parse and conditional level playlist |
-| B8.v / B8.a | B | wait, attempt, stream and segment | hls.js `FRAG_PARSING_INIT_SEGMENT` | first `BUFFER_CODECS` for that stream | R6 | segment and track | direct browser-clock span around hls.js parsing/remux; internal substeps are not exposed |
-| B9 | B | wait, attempt, required tracks | last required `BUFFER_CODECS` | `BUFFER_CREATED` | R6 | track list | direct span when hls.js reports every required track; also emits a point event |
+| B5 manifest request | B | wait, attempt, operation, URL | custom HLS loader `load()` | response body read, HTTP error body read, transport error or abort | R5.m / browser main thread | manifest bytes and status | direct browser-clock span through complete response body |
+| B5 manifest parse | B | wait, attempt, operation | hls.js `MANIFEST_LOADED` | `MANIFEST_PARSED` | browser main thread | manifest URL | direct browser-clock span; starts after the manifest request |
+| B5 selected-level playlist | B | wait, attempt, operation, URL | custom HLS loader `load()` for a `level` context | response body read, error or abort | R5.m / browser main thread | selected playlist bytes and status | direct browser-clock span; exists only when a master playlist selected a level |
+| B6.v / B6.a.i / B6.a.p requests | B | wait, attempt, operation, stream, segment or URL | custom HLS loader `load()` | response body read, error or abort | R5.m / browser main thread | init bytes or soundtrack playlist | direct per-request browser-clock spans; `.v` and `.a` are parallel streams |
+| B7.v / B7.a requests | B | wait, attempt, operation, stream, segment | custom HLS loader `load()` | response body read, error or abort | R5.m / browser main thread | fragment bytes | direct per-request browser-clock spans; picture and soundtrack requests can overlap |
+| B8.v / B8.a | B | wait, attempt, HLS instance, stream id and segment | hls.js `FRAG_PARSING_INIT_SEGMENT` (`id`) | matching `FRAG_PARSED` fragment | R6 | segment and track | direct browser-clock span around hls.js parsing/remux; `BUFFER_CODECS` is a separate readiness event and may precede the parsing event |
+| B9 | B | wait, attempt, required tracks | matching `BUFFER_CODECS` track keys | `BUFFER_CREATED` | R6 | track list | direct span when hls.js reports every required track; also emits a point event |
 | B10.v / B10.a | B | wait, attempt, stream and init segment | hls.js `BUFFER_APPENDING` for init | matching `BUFFER_APPENDED` | R6 | init bytes | direct span to hls.js append acknowledgement; native `SourceBuffer.updateend` is not exposed separately |
 | B12.v / B12.a | B | wait, attempt, stream and media segment | hls.js `BUFFER_APPENDING` for media | matching `BUFFER_APPENDED` | R6 | segment bytes | direct span to hls.js append acknowledgement; native `SourceBuffer.updateend` is not exposed separately |
 | B11 (`t3`) | B | — | — | `cold-start prepare=` | — | — | direct |
@@ -411,8 +414,9 @@ use the torrent worker's monotonic clock and are joined to browser events by
 limits are specific: A2.2 ICE candidate substeps are state events rather than
 separate spans; B9 is timed from the last required codec declaration to
 `BUFFER_CREATED` when all track declarations are reported, while C7 is a point
-observation; B8 spans hls.js init-segment
-parsing to codec readiness without splitting internal remux work; B10/B12 end
+observation; B8 spans hls.js fragment parsing from `FRAG_PARSING_INIT_SEGMENT`
+to the matching `FRAG_PARSED` event without splitting internal remux work;
+B10/B12 end
 at `BUFFER_APPENDED`, not native `SourceBuffer.updateend`; F1 ends at the
 proxy's first input-byte handoff and does not expose FFmpeg's internal packet
 parser boundary. R2/R3/R5/R6/R7 are shared resources, and
@@ -424,8 +428,9 @@ when comparing traced intervals with the browser's first advancing frame.
 This table lists every process id in sections 3–5, including conditional and
 per-output actions. Detailed implementation boundaries are in those sections.
 Examples come from the saved Home Assistant field sessions on 2026-10-20:
-field 04, wait `6a2e02ac-13ff-4f7b-b386-c0dbc7222297`; and field 05, wait
-`f1e0068f-7804-4fb3-983e-4d2dfb84bb3c`. Browser durations use the browser clock;
+field 04, wait `6a2e02ac-13ff-4f7b-b386-c0dbc7222297`; field 05, wait
+`f1e0068f-7804-4fb3-983e-4d2dfb84bb3c`; and the post-release Alien Romulus
+run on 2026-10-23, wait `bfc733e7-33c6-4d5a-b1fd-c011ab0d6111`. Browser durations use the browser clock;
 proxy and worker durations use their own clocks. These are observed spans, not
 additive estimates. `not observed` means the branch or independent boundary
 did not occur in those captured attempts; it never means zero duration.
@@ -473,8 +478,8 @@ did not occur in those captured attempts; it never means zero duration.
 | Browser: soundtrack stream lane | B6.a.i | Request soundtrack init segment (fMP4 only) | Not separately timed in the saved field logs; the new trace records each request |
 | Browser parallel stream lanes | B7.v | Request first picture fragment | Saved log has 148.7–512.1 ms response spans without stream ids; the new trace records each stream and segment separately |
 | Browser parallel stream lanes | B7.a | Request first soundtrack fragment | Saved log has 148.7–512.1 ms response spans without stream ids; the new trace records each stream and segment separately |
-| Browser parallel stream lanes | B8.v | Remux picture fragment and declare codecs | Field 05, attempt 1: 34.9 ms |
-| Browser parallel stream lanes | B8.a | Remux soundtrack fragment and declare codecs | Point event only; no separate duration |
+| Browser parallel stream lanes | B8.v | Parse/remux picture fragment | Prior duration invalid: `BUFFER_CODECS` can precede the start; corrected endpoint is `FRAG_PARSED`, field recheck pending |
+| Browser parallel stream lanes | B8.a | Parse/remux soundtrack fragment | Prior trace left this span open across seek; corrected endpoint is `FRAG_PARSED`, field recheck pending |
 | Browser: track join | B9 | Create all expected SourceBuffers | Saved log has only the point event; the new trace records the codec-ready-to-created interval when every track is reported |
 | Browser parallel append lanes | B10.v | Append picture init segment | Field 05, attempt 1: 35.9 ms |
 | Browser parallel append lanes | B10.a | Append soundtrack init segment | Field 05, attempt 1: 1.7 ms |
@@ -510,7 +515,7 @@ did not occur in those captured attempts; it never means zero duration.
 | Proxy main lane, observer | P15 | Emit early-estimate revision | Point observations; no duration |
 | Proxy main lane, conditional | X1 | Run ffprobe for unrecognised container | Not taken: container was recognised |
 | Encoder lane | F1.v | Hand first picture input bytes to FFmpeg | Post-release 2026-10-23 trace: positive spans of 209.2–1,081.3 ms for run tokens 32–41 |
-| Encoder lane | F1.a | Hand first soundtrack input bytes to FFmpeg | Pre-fix 2026-10-23 trace has begin events without matching ends for admitted stdin input; callback added under Unreleased, field verification pending |
+| Encoder lane | F1.a | Hand first soundtrack input bytes to FFmpeg | Post-release 2026-10-23 Alien Romulus cold start: 112.5 ms (run token 1), 27.9 ms (run token 3); seek: 29.5 ms (token 37), 36.7 ms (token 39); every admitted-`stdin` span has both events |
 | Encoder parallel output lanes | F2.v | Produce first picture segment | Field 05, attempt 1: 5,401.1 ms |
 | Encoder parallel output lanes | F2.a | Produce first soundtrack segment | No valid isolated completion span in these logs |
 | Torrent worker: add-to-ready parent | W1 | Add source through ready torrent | Historical Field 04: worker add point only; new traces record the full interval, including nested worker steps |
@@ -773,16 +778,18 @@ flowchart TB
     B2["B2 net reporter"]
     B3["B3 media playlist wait"]
     B4["B4 restate a moved position"]
-    B5["B5 manifest parsed, startLoad"]
+    B5req["B5 manifest request, body complete"]
+    B5parse["B5 manifest parse"]
+    B5["B5 startLoad"]
     QSEP{"soundtrack served separately?"}
     QFMT{"segment format of the output"}
     B6v["B6.v main init request"]
     B7v["B7.v first main fragment request"]
-    B8v["B8.v remux, BUFFER_CODECS"]
+    B8v["B8.v fragment parse/remux"]
     B6ap["B6.a.p soundtrack playlist, answered from the base output"]
     B6ai["B6.a.i soundtrack init request"]
     B7a["B7.a first soundtrack fragment request"]
-    B8a["B8.a remux, BUFFER_CODECS"]
+    B8a["B8.a fragment parse/remux"]
     BW["soundtrack warm request: change or reconnect"]
     B9["B9 SourceBuffers created"]
     B10v["B10.v main init append"]
@@ -845,9 +852,9 @@ flowchart TB
 
   subgraph CHILD["Child processes"]
     X1["X1 ffprobe over /media"]
-    F1v["F1.v FFmpeg open"]
+    F1v["F1.v first picture input bytes"]
     F2v["F2.v first picture piece"]
-    F1a["F1.a FFmpeg open"]
+    F1a["F1.a first soundtrack input bytes"]
     F2a["F2.a first soundtrack piece"]
   end
 
@@ -937,7 +944,7 @@ flowchart TB
   QB1 -- yes: open again on another proxy --> A9
   QB1 -- no --> B3
   QB1 -. no .-> B2
-  B3 --> B4 --> B5 --> QSEP
+  B3 --> B4 --> B5req --> B5parse --> B5 --> QSEP
   P6v -. viewer placed .-> P4
   P6v --> P7v
 
@@ -1107,14 +1114,15 @@ flowchart LR
     P8v --> F1v["F1.v first picture bytes to FFmpeg"] --> F2v["F2.v first picture piece"] --> P11v
     P8a --> F1a["F1.a first soundtrack bytes to FFmpeg"] --> F2a["F2.a first soundtrack piece"] --> P11a
     B1["B1 open output"] --> B2["B2 progress and keep-alive"]
-    B1 --> B3["B3 playlist wait"] --> B4["B4 position restatement"] --> B5["B5 manifest and startLoad"]
-    B5 --> B5l["B5 selected level playlist, when a master exists"]
+    B1 --> B3["B3 playlist wait"] --> B4["B4 position restatement"] --> B5req["B5 manifest request through body completion"]
+    B5req --> B5parse["B5 manifest parse"] --> B5["B5 startLoad"]
+    B5 --> B5l["B5 selected level playlist request through body completion"]
     B5 --> B6v["B6.v picture init request, direct media playlist"]
     B5l --> B6v
-    B6v --> B7v["B7.v picture fragment request"] --> B8v["B8.v picture remux/codecs"]
+    B6v --> B7v["B7.v picture fragment request"] --> B8v["B8.v picture fragment parse/remux"]
     B5 --> B6ap["B6.a.p soundtrack playlist"]
     B5l --> B6ap
-    B6ap --> B6ai["B6.a.i soundtrack init request"] --> B7a["B7.a soundtrack fragment request"] --> B8a["B8.a soundtrack remux/codecs"]
+    B6ap --> B6ai["B6.a.i soundtrack init request"] --> B7a["B7.a soundtrack fragment request"] --> B8a["B8.a soundtrack fragment parse/remux"]
     B5 --> B7a
     B5l --> B7a
     B6ai -. first request opens .-> P6a
@@ -1461,10 +1469,10 @@ accounting and cannot be subtracted from a proxy-monotonic event. The actual
 monotonic F1.v begin was `3368477.341839`, making the observed span to first
 input bytes 733.2 ms. The proxy now records a separate monotonic start for F1.
 The post-release 2026-10-23 Alien Romulus trace confirms positive F1.v
-durations of 209.2 to 1,081.3 ms. That trace also exposed the admitted-stdin
-F1.a path, whose begin events had no matching end; the new callback for that
-path still needs a post-release field check. Exclude the mixed-clock duration
-from stage reconciliation.
+durations of 209.2 to 1,081.3 ms. The same trace exposed the admitted-stdin
+F1.a path, whose begin events had no matching end. Section 13.4 records the
+post-release fix and field verification. Exclude the mixed-clock duration from
+stage reconciliation.
 
 ### 13.3 Alien Romulus cold open and seek, 2026-10-23
 
@@ -1522,9 +1530,8 @@ segment response by about 11.9 s in this run. That forecast is not the
 measured S2 duration, and its nested work must not be added to S2. Proxy and
 worker clocks remain separate from the browser clock; compare event identity
 and within-process durations rather than subtracting their timestamps. The
-same trace contains F1.a begin events for admitted stdin input but no matching
-ends. The current change records the first successful stdin write as the F1.a
-end boundary; this needs a post-release field check.
+same pre-fix trace contains F1.a begin events for admitted stdin input but no
+matching ends. Section 13.4 verifies the corrected boundary after release.
 
 The browser action spans reconcile with the advancing-frame timestamp to
 within rounding. The installed monotonic F1 logger reports a positive
@@ -1534,3 +1541,124 @@ soundtrack/quality changes, magnet or direct-play startup, or all worker
 branches. The latest sample verifies coverage for this cold-open and native
 seek path only. The complete downloaded client and proxy logs are in
 `research/session-logs-20261023-ttv185-c3/`.
+
+### 13.4 Post-release F1.a verification and cold open, 2026-10-23
+
+The first post-upgrade attempt overlapped the HA add-on restart. Its browser
+trace ended at the proxy-selection step with `No video source is available
+right now`; the local copy of the complete proxy log records `SIGTERM` and the
+tunnel closing at that time. There is no client session log for that attempt,
+so it is excluded. After HA reported add-on 0.98.11 and proxy 2.105.10, the
+Alien Romulus LostFilm torrent was opened again. Browser wait
+`bfc733e7-33c6-4d5a-b1fd-c011ab0d6111`, attempt 1, reached its first advancing
+frame with decoded audio.
+
+| Atomic envelope | Duration (ms) | Measurement |
+|---|---:|---|
+| Transport | 3,143.3 | `t1−t0` |
+| Plan | 7,682.5 | `t2−t1` |
+| Prepare | 11,087.0 | `t3−t2` |
+| Prebuffer | 3,931.6 | `t4−t3` |
+| **Cold-start phase sum through `t4`** | **25,844.4** | Sum of four phases; equals `coldStartTotalMs` |
+| Presentation | 83.8 | `tFrame−t4` |
+| **Phase sum through first advancing frame** | **25,928.2** | Cold-start sum + presentation; client observation |
+| Independent first advancing frame | 25,925.2 | `firstAdvancingFrameElapsedMs`; 3.0 ms before phase sum |
+| Client wait outcome | 25,977.1 | Includes confirmation of a second advancing frame and log emission; not the frame time |
+
+F1.a now records both boundaries for the admitted `stdin` input path before
+the first frame: run token 1 lasted 112.5 ms and run token 3 lasted 27.9 ms.
+This verifies that this previously unmatched action is measurable on the
+released proxy. The phase sum and frame event differ by 3.0 ms, within trace
+timestamp precision and asynchronous observation ordering. The independent
+frame observer was attached after playback had started and is not used as an
+independent action-to-frame total for this run; the action-to-frame value comes
+from the wait trace's `firstAdvancingFrameElapsedMs`.
+
+The same playback was then sought to 300 s. The browser observer started at
+35,047.6 ms; the application's seek action was registered at 35,053.7 ms.
+The independent observer saw the first advancing frame at 58,089.9 ms. The
+internal seek spans reconcile to that frame:
+
+| Parallel lane | Atomic action | Start from app seek action (ms) | End from app seek action (ms) | Duration (ms) |
+|---|---|---:|---:|---:|
+| Browser seek intent | S0 debounce | 0.2 | 303.5 | 303.3 |
+| Browser seek command | S1 command | 304.1 | 983.2 | 679.1 |
+| Browser readiness gate | S2 hold | 982.9 | 22,965.0 | 21,982.1 |
+| Browser playback | C5 `play()` through `playing` | 22,964.1 | 22,981.2 | 17.1 |
+| Browser presentation | C6 to first advancing frame | 22,980.2 | 23,036.2 | 56.0 |
+| **Phase-span sum** | **S0 + S1 + S2 + C5 + C6** | — | — | **23,037.6** |
+| **First advancing frame from app seek action** | **Wait trace** | **0.0** | **23,036.2** | **23,036.2** |
+| **First advancing frame from external request** | **Independent browser observer** | **0.0** | **23,042.3** | **23,042.3** |
+
+The 1.4 ms difference between summed spans and the frame timestamp comes from
+overlapping boundaries and sub-millisecond trace rounding. `seeked` arrived
+15,113.9 ms after the application's seek action; S2 continued for another
+7,849.3 ms before release. The external request preceded the application's
+seek action by 6.1 ms, outside the application's S0–C6 total. The proxy log
+records paired F1.a events on this seek: 29.5 ms for run token 37 and 36.7 ms
+for run token 39. These occur on the concurrent encoder lane and are not added
+to S2.
+
+The failed attempt during restart is not a process-model gap. For this
+successful cold-open path, the browser phase envelope reaches the first
+advancing frame within 3.0 ms, and F1.a has matched begin/end records. The full
+proxy and client logs are saved in
+`research/session-logs-20261023-ttv185-c4/`.
+
+### 13.5 Alien Romulus follow-up, 2026-10-23
+
+The follow-up capture is saved in
+`research/session-logs-20261023-ttv185-c5/`. Its cold-open wait is
+`46131cc9-75dd-47ee-8ba6-36b4703661b7`; the seek wait is
+`ac1ce9a5-c173-473f-bff4-83bdc83c1a0b`. The cold-start phase envelope and the
+first advancing-frame event differ by 1.9 ms:
+
+| Atomic envelope | Duration (ms) | Measurement |
+|---|---:|---|
+| Transport | 822.3 | `t1−t0` |
+| Plan | 84.5 | `t2−t1` |
+| Prepare | 1,522.7 | `t3−t2` |
+| Prebuffer | 17,850.8 | `t4−t3` |
+| **Cold-start phase sum through `t4`** | **20,280.3** | `coldStartTotalMs` |
+| Presentation | 85.1 | `tFrame−t4` |
+| **Phase sum through first advancing frame** | **20,365.4** | Envelope sum |
+| First advancing frame from action | 20,363.5 | `firstAdvancingFrameElapsedMs` |
+| Wait outcome | 20,415.1 | Confirms a later advancing frame; not the first-frame endpoint |
+
+The seek target was 300 s. The application's action begins at 105,181.5 ms;
+the independent observer began at 105,176.3 ms, 5.2 ms earlier. The first
+advancing frame was at 112,364.4 ms, giving 7,182.9 ms from the application
+action and 7,188.1 ms from the independent observer's start.
+
+| Parallel lane | Atomic action | Start from app action (ms) | End from app action (ms) | Duration (ms) |
+|---|---|---:|---:|---:|
+| Browser seek intent | S0 debounce | 0.3 | 301.9 | 301.6 |
+| Browser seek command | S1 command | 302.2 | 894.2 | 592.0 |
+| Browser readiness gate | S2 hold | 893.8 | 7,121.2 | 6,227.4 |
+| Browser playback | C5 `play()` through `playing` | 7,120.5 | 7,141.4 | 20.9 |
+| Browser presentation | C6 to first advancing frame | 7,140.1 | 7,182.9 | 42.8 |
+| **Sum of measured spans** | **S0 + S1 + S2 + C5 + C6** | — | — | **7,184.7** |
+| **Application action to first advancing frame** | **Wait trace** | **0.0** | **7,182.9** | **7,182.9** |
+| **Independent observer start to first advancing frame** | **External browser observer** | **0.0** | **7,188.1** | **7,188.1** |
+
+The measured seek spans overlap at S1/S2, S2/C5 and C5/C6; their arithmetic
+sum is 1.8 ms longer than the app action-to-frame interval. This is an
+overlap-boundary effect, not an extra process. The proxy log has paired F1.a
+spans for run tokens 37 and 39: 29.5 ms and 36.7 ms. Those run on the encoder
+lane concurrently with S2 and are not added to the browser total.
+
+This capture also disproves the old B8 endpoint. On cold startup, each
+`BUFFER_CODECS` event arrived before its `FRAG_PARSING_INIT_SEGMENT` event; the
+logger therefore kept B8 open until a later seek delivered another codec
+event, recording false 35.8–38.8 s spans. The seek's B8 spans were still open
+at the first advancing frame. B8 now ends on the matching `FRAG_PARSED`
+fragment event, keyed by HLS instance, stream and fragment. The corrected code
+has passed local tests but has not yet been released or verified in a field
+run. Until that check, B8 durations in this capture are invalid and excluded
+from the stage table.
+
+The same capture had a false 19.1 s B5 manifest-parse duration: a `MANIFEST_PARSED`
+event from one HLS instance arrived before `MANIFEST_LOADED` from another, and
+the shared pending list paired them across instances. The logger now keeps
+manifest parse spans per HLS instance. The duration in this capture is invalid;
+field verification of both HLS event pairings remains pending.

@@ -41,6 +41,34 @@ function sameInputs(left, right) {
   return left.every((input, index) => input.sourceId === right[index].sourceId && input.ranges === right[index].ranges);
 }
 
+function forecastInputState(tracks, identity) {
+  if (!identity) return null;
+  const track = tracks.find(candidate => candidate.id === identity.trackId);
+  const segment = track?.segments.find(candidate => candidate.index === identity.segmentIndex);
+  const sourceInput = segment?.sourceInputs?.find(candidate => candidate.sourceId === identity.sourceId);
+  return {
+    sourceId: identity.sourceId,
+    trackId: identity.trackId,
+    segmentIndex: identity.segmentIndex,
+    phase: identity.phase,
+    rangesKnown: Array.isArray(sourceInput?.ranges),
+    rangeCount: Array.isArray(sourceInput?.ranges) ? sourceInput.ranges.length : null
+  };
+}
+
+function forecastInputIdentity(state) {
+  return state && JSON.stringify([state.sourceId, state.trackId, state.segmentIndex, state.phase]);
+}
+
+function observeForecastInput(observeWait, sourceKey, state, event) {
+  if (!state) return;
+  observeWait?.(sourceKey, "process", {
+    process: "P4.2", phase: event, at: performance.now(),
+    sourceId: state.sourceId, outputKey: state.trackId, segment: state.segmentIndex,
+    forecastPhase: state.phase, rangesKnown: state.rangesKnown, rangeCount: state.rangeCount
+  });
+}
+
 function segmentAddressOf(output, fileName) {
   const format = output.segmentFormat;
   if (!format) {
@@ -1090,6 +1118,16 @@ export class ViewerRequests {
       if (waitEstimate) forecast.waitEstimate = waitEstimate;
     }
     const unavailableInput = forecast.unavailableSource;
+    const previousInputState = measurement.forecastInputState ?? null;
+    const currentInputState = forecastInputState(tracks, unavailableInput);
+    if (previousInputState && forecastInputIdentity(previousInputState) !== forecastInputIdentity(currentInputState)) {
+      observeForecastInput(this.#host.observeWait, session.file.sourceKey, previousInputState,
+        currentInputState ? "forecast-blocker-replaced" : "forecast-blocker-cleared");
+    }
+    if (currentInputState && JSON.stringify(previousInputState) !== JSON.stringify(currentInputState)) {
+      observeForecastInput(this.#host.observeWait, session.file.sourceKey, currentInputState, "forecast-blocked");
+    }
+    measurement.forecastInputState = currentInputState;
     const forecastInputKey = unavailableInput ? JSON.stringify([
       unavailableInput.sourceId, unavailableInput.trackId, unavailableInput.segmentIndex, unavailableInput.phase
     ]) : null;

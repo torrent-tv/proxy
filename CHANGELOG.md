@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Chore**: Record when the source ranges for a blocking playback segment become available, with its source, output and segment identity (#ttv-185).
+
 ## 2.107.14
 
 - **Fix**: Do not run a full source-rest packet index while a viewer is using a transcoded output; its serialized file reads delayed the active segment input.

@@ -85,7 +85,8 @@ export class SourcePreparation {
 
   /** Current owners determine priority; old work never restores a withdrawn read. */
   demandFor(work) {
-    if (work.role === "source-rest" && !this.#sourceRestNeededFor(work.sourceKey, work.fileIndex)) return null;
+    if (work.role === "source-rest" && (!this.#playbackAppliedFor(work.sourceKey, work.fileIndex) ||
+      !this.#sourceRestNeededFor(work.sourceKey, work.fileIndex))) return null;
     const handoffFileIndex = work.selected || (work.role === "source-rest" && work.ownerFileIndex === work.fileIndex)
       ? work.fileIndex : null;
     const opening = Number.isInteger(handoffFileIndex) && this.#viewers.forSource(work.sourceKey).some(viewer =>

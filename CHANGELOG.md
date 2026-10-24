@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.11
 
 - **Fix**: Do not scan every ASF packet to warm a keyframe table for WMV video. WMV is re-encoded for browser playback, so its output keyframes are placed by the encoder; the unnecessary full-file scan could hold the per-file read queue and keep upcoming segment bytes unavailable (#ttv-245).
 

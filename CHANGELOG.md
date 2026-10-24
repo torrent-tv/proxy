@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.15
 
 - **Chore**: Record when the source ranges for a blocking playback segment become available, with its source, output and segment identity (#ttv-185).
 

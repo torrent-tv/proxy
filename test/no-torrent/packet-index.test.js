@@ -91,7 +91,7 @@ test("copy input excludes the next keyframe and audio preroll", () => {
   assert.deepEqual(index.inputFor({ trackId: 2, from: 1, to: 2, mode: "copy" }).ranges, [[110, 119]]);
 });
 
-test("AAC decoding includes exactly one preceding packet independently of its duration", () => {
+test("AAC transcoding includes decoder packets on both sides of the requested interval", () => {
   for (const codecId of ["aac", "aac_latm", "mp4a", "A_AAC", "A_AAC/MPEG4/LC"]) {
     const index = new PacketIndex();
     index.declareTrack(1, { type: "audio", codecId });
@@ -99,10 +99,23 @@ test("AAC decoding includes exactly one preceding packet independently of its du
       index.append(1, { pts, duration, ranges: [[address, address + 9]] });
     }
     index.complete(1);
-    assert.deepEqual(index.inputFor({ trackId: 1, from: 0.4, to: 0.6 }).ranges, [[10, 29]], codecId);
+    assert.deepEqual(index.inputFor({ trackId: 1, from: 0.4, to: 0.6 }).ranges, [[10, 39]], codecId);
     assert.deepEqual(index.inputFor({ trackId: 1, from: 0.4, to: 0.6, mode: "copy" }).ranges, [[20, 29]], codecId);
-    assert.deepEqual(index.inputFor({ trackId: 1, from: 0.45, to: 0.6 }).ranges, [[10, 29]], codecId);
+    assert.deepEqual(index.inputFor({ trackId: 1, from: 0.45, to: 0.6 }).ranges, [[10, 39]], codecId);
   }
+});
+
+test("audio transcoding includes one packet after the cut to flush the final decoded samples", () => {
+  const index = new PacketIndex();
+  index.declareTrack(1, { type: "audio" });
+  for (let pts = 0; pts < 4; pts++) index.append(1, {
+    pts, duration: 1, ranges: [[pts * 10, pts * 10 + 9]]
+  });
+  index.complete(1);
+  assert.deepEqual(index.inputFor({ trackId: 1, from: 1, to: 2, mode: "transcode" }).packets.map(packet => packet.pts),
+    [1, 2], "the following packet is available to the decoder, then the output filter trims it at the cut");
+  assert.deepEqual(index.inputFor({ trackId: 1, from: 1, to: 2, mode: "copy" }).packets.map(packet => packet.pts),
+    [1], "copied audio does not need decoder lookahead");
 });
 
 test("audio decoder preroll is included and adjacent byte ranges are merged", () => {

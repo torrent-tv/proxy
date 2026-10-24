@@ -228,8 +228,14 @@ export class PacketIndex {
         return { kind: "terminal", reason: "video-copy-cut-is-not-a-keyframe" };
       }
     }
-    // Coverage is established by the parser after its codec-required lookahead;
-    // packets outside the interval are inspected but are not appended to input.
+    // A transcoder needs the first audio packet at or after the cut to flush
+    // samples decoded from the packet before it. The output filter still trims
+    // that lookahead to the requested interval. Video and copied audio do not
+    // need a packet beyond the cut.
+    if (track.type === "audio" && mode === "transcode" && ordered) {
+      const trailing = packets.firstAtOrAfter(to);
+      if (trailing < packets.length) last = Math.max(last, trailing);
+    }
     if (!track.complete && track.coveredThrough < to) {
       return { kind: "needs-index", trackId, from: startAt, to };
     }

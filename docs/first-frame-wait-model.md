@@ -3,7 +3,7 @@
 This document describes the wait between a viewer's action and the first
 presented frame as a set of atomic processes taken from the current code, with
 their dependencies, alternatives, parallelism and shared resources
-(torrent-tv/meta#185, plan step 3.3.4). It describes what the code does. Timing examples are observations, not estimates; this document changes no formula. Read from server `2645345`
+(torrent-tv/meta#185, plan step 3.3.4). It describes what the code does. Timing examples are observations, not estimates; this document changes no formula. The original process review read server `2645345`
 (0.50.32), proxy `2ac8c25` (2.101.43), and the libraries they install:
 hls.js 1.7.3 (server `package-lock.json`) and WebTorrent 2.8.5 (proxy
 `package.json`).
@@ -13,6 +13,15 @@ This revision applies the review in torrent-tv/meta#185 (comment
 Section 13 describes the additional opt-in observations introduced for actual
 startup validation; the historical observability table in section 8 refers to
 the source revisions above.
+
+The 2026-10-24 mathematical coverage audit checked proxy `230cdb3` (2.107.6)
+and server `2a62d48` (0.66.6). Its
+[complete atomic matrix and Luna High plan](https://github.com/torrent-tv/meta/blob/main/research/forecast-atomic-audit-2026-10-24-ttv185.md)
+include all 121 section 8.1 records, supplementary boundaries and shared
+resources. Section 8.6 summarizes that audit. The owner has ordered removal
+of the early estimate learned from completed waits; this is a planned code
+change. Existing instrumentation, older field evidence and current forecast
+coverage must not be treated as the same result.
 
 A measured stage has one owner (host and thread or child process), one start
 event, one end event and one kind of work. A stage that runs once per output,
@@ -56,11 +65,17 @@ measurement gap instead of being presented as an atomic duration.
    that media time (`loading.js` `#onFirstPresentedFrame`, logged
    `[first-frame-observation] … audioReady=`). When it is `false` nothing
    continues to observe until the sound is ready.
-5. `tPlay` as torrent-tv/meta#185 defines it — the first presented *moving*
-   frame with the required audio — is **not** produced by the code: no event
-   confirms that `mediaTime` advanced between frames, and a frame without its
-   required audio ends the observation. `tFrame` with `audioReady=true` is the
-   nearest logged event; it is not proof of `tPlay`.
+5. With `?waitTrace=1`, the separate `observeVideoWait` observer confirms
+   increasing `mediaTime` and frame count while unpaused, required audio
+   buffered at both observations, and nonzero decoded audio bytes when audio
+   is required. It logs `firstAdvancingFrameAt` from the original action and
+   `confirmedAt` separately. Cold startup records the earlier confirmed frame;
+   a seek records the advancing callback to exclude the seek's initial still
+   frame. This is the canonical measured endpoint for startup/seek comparison
+   in the current traces. It establishes browser progress with decoded audio,
+   not acoustic output. Unsupported audio observation is an explicit outcome.
+   The single `[first-frame]` callback and its listener remain different event
+   boundaries; they must not replace the canonical endpoint.
 6. Outcomes of a wait, each distinct:
    1. frame observed with `audioReady=true`;
    2. frame observed with `audioReady=false`;
@@ -336,13 +351,18 @@ orchestration. The torrent runs in one worker thread
    records these values for the stage medians (`routes/api/client-logs/post.js`
    → `noteFirstFrameObservation`). Durations from such a wait are not
    comparable until the cold-start `t0` keeps the original action.
-4. The intervals end at `tFrame`, not at `tPlay` (section 1, item 5).
+4. The original coarse intervals end at the single-frame event `tFrame`.
+   Current validation reconciles them against the independent trace endpoint
+   in section 1, item 5, retaining the measured callback difference rather
+   than assuming those timestamps are equal.
 
 ## 7. What the current calculations cover
 
-1. `LocalObservations.firstFrameSeconds` sums five medians of the intervals in
+1. `LocalObservations.firstFrameSeconds` / `firstFrameEstimate` sum five medians of the intervals in
    section 6 from earlier waits on the same proxy configuration. Overlap and
    resource sharing inside an interval are whatever they were in those waits.
+   The owner has ordered this early calculation removed. Until its removal,
+   it remains a separate current numeric path, not an atomic work calculation.
 2. `predictPlaybackReadiness` schedules, per remaining segment in media order:
    source bytes on the torrent's one service (R1; planned piece arrivals from
    W10 first, then the measured rate); the start of a new run and its open
@@ -805,6 +825,59 @@ Retry paths, C3 subtitle hold, magnet metadata (W4), and the remaining
 request-handler queue intervals still need field examples. The implementation
 logs these separately when those branches occur; the current captures do not
 prove their field timing or coverage under every outcome.
+
+### 8.6 Atomic mathematical coverage audit, 2026-10-24
+
+The [full audit](https://github.com/torrent-tv/meta/blob/main/research/forecast-atomic-audit-2026-10-24-ttv185.md)
+preserves every lane and example in section 8.1 and adds a calculation/missing
+term and required correction for each record. Unlike the coarse historical
+comparison in section 8.5, it maps every atomic inventory record. Parent
+envelopes and instantaneous/background events are explicitly identified;
+their elapsed times are not additional serial work.
+
+The active numeric `waitEstimate` uses `firstRequiredSegmentsSeconds`, while
+the full-film continuity delay is only a readiness condition. Init/manifest,
+browser remux/append, current gate observation, required subtitles and final
+presentation are not all numerical predecessors of that endpoint. The caller
+does not supply the optional `appendSeconds`, which therefore becomes zero.
+
+Four pure replays reproduce specific discrepancies in the audited code:
+
+1. An already held first segment gives numeric remaining time zero while
+   continuity still requires 5.999997 seconds and `ready=false`.
+2. One unstarted run with input arriving at 2 seconds, one five-second open
+   and one second of production completes production at 11 seconds instead of
+   eight under those stated dependencies.
+3. One media second produced at 1x and nine at 3x yield an unweighted harmonic
+   aggregate of 1.5x; total work divided by working time is 2.5x.
+4. A ready soundtrack waits behind a future video transfer reservation; both
+   finish at 12 seconds instead of 11 on the declared work-conserving link.
+
+Below E01's saved first displayed value was 24.65 seconds when 19.5536 seconds
+remained to the canonical frame, an error of +5.0964 seconds (26.06%). This is
+one diagnostic sample. Its 349 closed browser operation pairs establish
+recorded span closure, not the accuracy of the mathematical model. The saved
+logs cannot supply a genuine prior prediction for every atomic operation;
+missing prediction evidence is identified in the full matrix.
+
+```mermaid
+flowchart TD
+  History["Historical stage medians: remove"] --> Early["Early numeric wait"]
+  Source["Source arrival and per-output production"] --> Link["Modeled shared link"]
+  Link --> First["First required segment completion"]
+  First --> Active["Active numeric waitEstimate"]
+  Link --> Safe["Full-film continuity constraint"]
+  Safe --> Gate["Readiness observation"]
+  Subtitles["Required subtitle readiness"] --> Gate
+  Gate --> Frame["Actual audio-ready advancing frame"]
+  Browser["Init, parse, append, release and play"] --> Frame
+```
+
+The target is one completion calculation with all real prerequisites and
+shared-service constraints. Removing the historical early calculation is the
+first execution step. Before sufficient facts exist, the retained calculation
+must report the missing fact; it must not substitute another historical wait.
+See the audit for the target Mermaid graph and step-by-step Luna High plan.
 
 ## 9. Seek, soundtrack and quality change
 

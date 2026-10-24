@@ -1383,6 +1383,9 @@ export async function startProxyServer({
       const held = await torrentPool.heldRangesOf(torrent, work.fileIndex);
       return work.inputRanges.every(([start, end]) => held.some(([from, to]) => from <= start && to >= end));
     },
+    sourceRestNeededFor: (sourceKey, fileIndex) => ![...outputParts.outputs.values()].some(output =>
+      output.file?.sourceKey === sourceKey && output.file?.fileIndex === fileIndex &&
+      outputParts.viewers.forOutput(output).size > 0),
     playbackAppliedFor: (sourceKey, fileIndex) => downloadMaps.hasAppliedPlayback(sourceKey, fileIndex),
     readyChanged: (work, ready) => logger.info(`source urgent request=${work.requestId} viewer=${work.ownerId} ` +
       `source=${work.sourceKey} file=${work.fileIndex} inputReady=${ready}`),

@@ -37,6 +37,7 @@ export class SourcePreparation {
   #failed;
   #reprice;
   #inputReady;
+  #sourceRestNeededFor;
   #readyChanged;
   #playbackAppliedFor;
   #work = new Map();
@@ -47,7 +48,7 @@ export class SourcePreparation {
 
   constructor({ viewers, candidatesFor, relatedFilesFor = () => [], priorityFor = (_viewer, priority) => priority,
     inputReady = async () => false, readyChanged = () => {}, playbackAppliedFor = () => true,
-    inspect, withdraw, reprice = () => {}, failed }) {
+    sourceRestNeededFor = () => true, inspect, withdraw, reprice = () => {}, failed }) {
     this.#viewers = viewers;
     this.#candidates = candidatesFor;
     this.#related = relatedFilesFor;
@@ -57,6 +58,7 @@ export class SourcePreparation {
     this.#failed = failed;
     this.#reprice = reprice;
     this.#inputReady = inputReady;
+    this.#sourceRestNeededFor = sourceRestNeededFor;
     this.#readyChanged = readyChanged;
     this.#playbackAppliedFor = playbackAppliedFor;
   }
@@ -83,6 +85,7 @@ export class SourcePreparation {
 
   /** Current owners determine priority; old work never restores a withdrawn read. */
   demandFor(work) {
+    if (work.role === "source-rest" && !this.#sourceRestNeededFor(work.sourceKey, work.fileIndex)) return null;
     const handoffFileIndex = work.selected || (work.role === "source-rest" && work.ownerFileIndex === work.fileIndex)
       ? work.fileIndex : null;
     const opening = Number.isInteger(handoffFileIndex) && this.#viewers.forSource(work.sourceKey).some(viewer =>

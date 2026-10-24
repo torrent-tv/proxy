@@ -170,6 +170,20 @@ test("source-only viewers retain the full source at the lowest priority until an
   assert.ok(withdrawn.includes(work));
 });
 
+test("an active transcode does not prepare a full source-rest packet index", async () => {
+  const viewers = new Viewers();
+  const viewer = viewers.selectsFile("person", "source", 0);
+  viewers.of({ id: "hls" }, "person");
+  const reads = [];
+  const preparation = new SourcePreparation({ viewers, candidatesFor: async () => [0],
+    relatedFilesFor: () => [{ fileIndex: 0, role: "source-rest" }],
+    sourceRestNeededFor: () => false,
+    inspect: async work => { reads.push(work); return { kind: "result" }; }, withdraw: () => {} });
+  await preparation.refresh();
+  assert.equal(reads.some(work => work.role === "source-rest" && work.statement === "packets"), false);
+  assert.equal(viewer.outputs.size, 1);
+});
+
 test("a seek before an output exists withdraws old input and prepares the new position", async () => {
   const viewers = new Viewers();
   viewers.selectsFile("person", "source", 0, 1000, { positionSeconds: 8 });

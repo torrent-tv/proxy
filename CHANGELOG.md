@@ -1,10 +1,13 @@
+## Unreleased
+
+- **Fix**: Wait for the playback map before starting a full source-rest packet scan. On WMV, the scan could request the whole file before its transcoded output was registered, delaying the first segment.
+
 ## 2.107.15
 
 - **Chore**: Record when the source ranges for a blocking playback segment become available, with its source, output and segment identity (#ttv-185).
 
 ## 2.107.14
 
-- **Fix**: Wait for the playback map before starting a full source-rest packet scan. On WMV, the scan could request the whole file before its transcoded output was registered, delaying the first segment.
 - **Fix**: Do not run a full source-rest packet index while a viewer is using a transcoded output; its serialized file reads delayed the active segment input.
 
 ## 2.107.13

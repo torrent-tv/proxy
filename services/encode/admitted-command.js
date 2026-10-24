@@ -41,8 +41,11 @@ export function buildAdmittedCommand({ admittedInput, timeline, output, segmentF
     }
     else video.push("-vf", trim);
   }
+  const audioTrack = admittedInput.tracks?.find(input => input.track.type === "audio")?.track;
+  const audioSampleRate = [audioTrack?.samplingFrequency, audioTrack?.codecParameters?.sampleRate]
+    .find(sampleRate => Number.isSafeInteger(sampleRate) && sampleRate > 0) ?? 48000;
   const audio = transcodeAudio ? ["-c:a", "aac", "-ac", "2", "-b:a", `${AUDIO_TRANSCODE_KBPS}k`,
-    "-af", `atrim=start=${ffmpegSeconds(relativeStart)}:end=${ffmpegSeconds(relativeEnd)}`] : ["-c:a", "copy"];
+    "-af", `atrim=start=${ffmpegSeconds(relativeStart)}:end=${ffmpegSeconds(relativeEnd)},aresample=async=1:first_pts=${Math.round(relativeStart * audioSampleRate)}`] : ["-c:a", "copy"];
   if (audioOnly) args.push("-vn", "-map", "0:a:0", ...audio);
   else if (audioSeparate) args.push("-an", "-map", "0:v:0", ...video);
   else args.push("-map", "0:v:0", "-map", "0:a:0?", ...video, ...audio);

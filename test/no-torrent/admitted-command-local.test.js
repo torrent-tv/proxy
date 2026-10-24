@@ -58,6 +58,57 @@ test(`audio-only ${codec} cuts at ${origin}s with ${delay}s delay cover each dec
 });
 }
 
+test("transcoded audio fills a codec-frame gap at the published interval start", () => {
+  const command = buildAdmittedCommand({
+    admittedInput: { originSeconds: 11.776, fingerprint: "a".repeat(64),
+      tracks: [{ track: { type: "audio", samplingFrequency: 48000 } }] },
+    timeline: { published: [12, 16] }, output: {}, segmentFormat: fmp4Format,
+    transcodeVideo: false, transcodeAudio: true, audioOnly: true, audioSeparate: false,
+    startIndex: 0, endIndex: 0, videoEncoder: softwareDescriptor(), segmentDurationSec: 4
+  });
+  const filter = command.args[command.args.indexOf("-af") + 1];
+  assert.equal(filter, "atrim=start=0.224:end=4.224,aresample=async=1:first_pts=10752");
+});
+
+test("transcoded audio publishes a complete interval after a source timestamp gap", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv-audio-gap-"));
+  try {
+    const file = path.join(directory, "source.mkv");
+    const made = spawnSync(ffmpegBin, ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+      "sine=sample_rate=48000:duration=5", "-af", "aselect=not(between(t\\,0.2\\,0.3))", "-c:a", "pcm_s16le", file],
+    { windowsHide: true, encoding: "utf8" });
+    assert.equal(made.status, 0, made.stderr);
+    const bytes = await fs.readFile(file);
+    const container = await ContainerFactory.create({ fileSize: bytes.length,
+      readRange: async (start, end) => bytes.subarray(start, end + 1) });
+    const tracks = await container.readTracks();
+    tracks[0].seekPrerollSeconds = 0.5;
+    const index = await container.readPacketIndex();
+    const grid = [0.224, 4.224];
+    const input = new SegmentInputs({ tracks, index }).forInterval({ from: grid[0], to: grid[1], mode: "transcode" });
+    assert.equal(input.kind, "result");
+    const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
+      readRanges: async (_source, ranges) => ranges.map(([start, end]) => Buffer.from(bytes.subarray(start, end + 1))) });
+    const chunks = [];
+    await writeAdmittedInput(admitted, new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } }));
+    const command = buildAdmittedCommand({ admittedInput: admitted, timeline: { published: grid }, output: {},
+      segmentFormat: fmp4Format, transcodeVideo: false, transcodeAudio: true, audioOnly: true, audioSeparate: false,
+      startIndex: 0, endIndex: 0, videoEncoder: softwareDescriptor(), segmentDurationSec: 4 });
+    const encoded = spawnSync(ffmpegBin, command.args, { cwd: directory, windowsHide: true, input: Buffer.concat(chunks),
+      encoding: "utf8", stdio: ["pipe", "pipe", "pipe", "pipe"] });
+    assert.equal(encoded.status, 0, encoded.stderr);
+    const name = (await fs.readdir(directory)).find(candidate => candidate.startsWith("making-"));
+    assert.ok(name);
+    const ranges = fmp4Format.readMediaRanges(await fs.readFile(path.join(directory, name)));
+    const judged = judgePiece(fmp4Format, ranges, undefined, { from: grid[0], to: grid[1], requiredKinds: ["soun"] });
+    assert.equal(judged.whole, true, JSON.stringify({ judged, ranges }, (_key, value) => typeof value === "bigint" ? String(value) : value));
+  } finally {
+    assert.equal(path.dirname(path.resolve(directory)), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(directory).startsWith("ttv-audio-gap-"));
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 for (const transcode of [false, true]) {
   for (const preset of transcode ? ["ultrafast", "veryfast"] : ["ultrafast"]) {
   for (const startIndex of [0, 2]) {

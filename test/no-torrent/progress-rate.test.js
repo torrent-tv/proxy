@@ -28,3 +28,11 @@ test("a seek resets the progress rate before measuring the new target", () => {
   assert.equal(measured.count, 1);
   assert.equal(measured.lastValue, 4);
 });
+
+test("an adjacent encoding run continues the progress rate across a segment boundary", () => {
+  const rate = new ProgressRate(120, 4);
+  rate.note(1_000, 0, 0);
+  const measured = rate.note(4_000, 4, 4);
+  assert.equal(measured.count, 1);
+  assert.equal(measured.lastValue, 4 / 3);
+});

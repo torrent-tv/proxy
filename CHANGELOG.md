@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Continue measuring a separate soundtrack's playback progress across adjacent encoding runs. A segment boundary no longer clears the rate needed by readiness; a seek to a distant interval still resets it (#ttv-245).
+
 ## 2.107.8
 
 - **Fix**: Keep playback readiness measurable for a separate soundtrack when its codec has no calibration and no completed segment can produce an encoder-speed reading. The forecast now measures actual media progress over elapsed time, including source waits, rather than remaining at `encode-rate-unavailable` (#ttv-245).

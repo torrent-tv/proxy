@@ -1280,7 +1280,10 @@ export class ViewerRequests {
     if (output?.spec?.carries === "audio-only") {
       let trend = measurement.trackProgress.get(output);
       if (!trend) {
-        trend = new this.#host.playbackReadiness.ProgressRate(this.#host.lookaheadSeconds);
+        trend = new this.#host.playbackReadiness.ProgressRate(
+          this.#host.lookaheadSeconds,
+          this.#host.segmentDurationSec
+        );
         measurement.trackProgress.set(output, trend);
       }
       return trend.note(now, progress?.processedSeconds, progress?.startPositionSeconds);

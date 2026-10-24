@@ -116,17 +116,23 @@ export class RateTrend {
 export class ProgressRate {
   #trend;
   #horizonSeconds;
+  #adjacentRunSeconds;
   #previous = null;
 
-  constructor(horizonSeconds) {
+  constructor(horizonSeconds, adjacentRunSeconds = 4) {
     this.#horizonSeconds = horizonSeconds;
+    this.#adjacentRunSeconds = Number.isFinite(adjacentRunSeconds) && adjacentRunSeconds > 0
+      ? adjacentRunSeconds
+      : 4;
     this.#trend = new RateTrend(horizonSeconds);
   }
 
   note(at, processedSeconds, startPositionSeconds) {
     if (!Number.isFinite(at) || !Number.isFinite(processedSeconds)) return this.#trend.snapshot();
     const start = Number.isFinite(startPositionSeconds) ? startPositionSeconds : 0;
-    if (!this.#previous || this.#previous.start !== start || processedSeconds < this.#previous.processedSeconds) {
+    const discontinuousStart = this.#previous && start !== this.#previous.start &&
+      (start < this.#previous.start || start > this.#previous.processedSeconds + this.#adjacentRunSeconds);
+    if (!this.#previous || discontinuousStart || processedSeconds < this.#previous.processedSeconds) {
       this.#previous = { at, processedSeconds, start };
       this.#trend = new RateTrend(this.#horizonSeconds);
       return this.#trend.snapshot();

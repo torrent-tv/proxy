@@ -316,6 +316,28 @@ test("missing packet addresses cannot be replaced by file-average density even w
   });
 });
 
+test("unresolved source ranges identify the known cold-open, URL, and seek targets", () => {
+  const cases = [
+    { name: "cold open", positionSeconds: 0, segmentIndex: 0, readySegmentIndices: [] },
+    { name: "URL time", positionSeconds: 4, segmentIndex: 1, readySegmentIndices: [0] },
+    { name: "seek target", positionSeconds: 10, segmentIndex: 2, readySegmentIndices: [0, 1] }
+  ];
+
+  for (const scenario of cases) {
+    const state = input({ positionSeconds: scenario.positionSeconds, durationSeconds: 12 });
+    state.sources[0].complete = false;
+    state.tracks[0].segments.push({ index: 2, startSeconds: 8, endSeconds: 12,
+      sourceInputs: [{ sourceId: "source", ranges: [{ start: 8, end: 12 }] }] });
+    state.tracks[0].readySegmentIndices = scenario.readySegmentIndices;
+    delete state.tracks[0].segments[scenario.segmentIndex].sourceInputs;
+
+    const forecast = predictPlaybackReadiness(state);
+    assert.equal(forecast.reason, "source-input-ranges-unavailable", scenario.name);
+    assert.equal(forecast.unavailableSource.segmentIndex, scenario.segmentIndex, scenario.name);
+    assert.equal(forecast.unavailableSource.phase, "near", scenario.name);
+  }
+});
+
 test("an unmapped tail segment identifies the dependency preventing startup even when its bytes are held", () => {
   const state = input({ lookaheadSeconds: 4, reserveSeconds: 0, bufferedAheadSeconds: 4 });
   state.tracks[0].clientRanges = [{ start: 0, end: 4 }];

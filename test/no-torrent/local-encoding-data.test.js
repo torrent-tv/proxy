@@ -180,6 +180,50 @@ test("a mode whose segments do not decode is not used at all", async () => {
   assert.equal(modes.length, encoder.selectableRungs.length - 1);
 });
 
+test("a failed calibration input leaves encoder capacity unmeasured instead of refusing every output", async () => {
+  const encoder = new SoftwareEncoder();
+  const result = await calibrateEncoder({
+    ffmpegBin: "never-run",
+    encoder,
+    measure: {
+      check: async () => ({ ok: true, reason: "", segmentKbps: null }),
+      rawFrames: async () => null,
+      speed: async () => assert.fail("throughput cannot be measured without raw frames"),
+      release: () => {}
+    }
+  });
+
+  assert.equal(result.assessmentComplete, false);
+  assert.deepEqual(result.modes, []);
+  const calibration = new HostCalibration({ byKind: {}, fingerprint: FINGERPRINT });
+  assert.equal(calibration.modesFor("software"), null);
+  assert.deepEqual(canSustainOutput({
+    benchmark: calibration.modesFor("software"),
+    outputPixelsPerSec: 856 * 480 * 30
+  }), { speed: null, sustainable: true });
+});
+
+test("an encoder with no mode that passes the segment check remains a measured refusal", async () => {
+  const encoder = new SoftwareEncoder();
+  const result = await calibrateEncoder({
+    ffmpegBin: "never-run",
+    encoder,
+    measure: {
+      check: async () => ({ ok: false, reason: "invalid segments", segmentKbps: null }),
+      rawFrames: async () => assert.fail("no encoder passed the correctness check"),
+      speed: async () => assert.fail("no encoder passed the correctness check"),
+      release: () => {}
+    }
+  });
+
+  assert.equal(result.assessmentComplete, true);
+  assert.deepEqual(result.modes, []);
+  assert.equal(canSustainOutput({
+    benchmark: result.modes,
+    outputPixelsPerSec: 856 * 480 * 30
+  }).sustainable, false);
+});
+
 test("each preset is read through its own realtime limit, while larger sizes stop when the fastest falls behind", async () => {
   const encoder = new SoftwareEncoder();
   const speeds = {

@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **Chore**: Record whether source ranges for a blocking playback segment are available when its forecast blocker clears (#ttv-185).
 - **Fix**: Wait for the playback map before starting a full source-rest packet scan. On WMV, the scan could request the whole file before its transcoded output was registered, delaying the first segment.
 
 ## 2.107.15

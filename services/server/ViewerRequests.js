@@ -41,7 +41,7 @@ function sameInputs(left, right) {
   return left.every((input, index) => input.sourceId === right[index].sourceId && input.ranges === right[index].ranges);
 }
 
-function forecastInputState(tracks, identity) {
+export function forecastInputState(tracks, identity) {
   if (!identity) return null;
   const track = tracks.find(candidate => candidate.id === identity.trackId);
   const segment = track?.segments.find(candidate => candidate.index === identity.segmentIndex);
@@ -51,6 +51,9 @@ function forecastInputState(tracks, identity) {
     trackId: identity.trackId,
     segmentIndex: identity.segmentIndex,
     phase: identity.phase,
+    trackFound: Boolean(track),
+    segmentFound: Boolean(segment),
+    sourceInputFound: Boolean(sourceInput),
     rangesKnown: Array.isArray(sourceInput?.ranges),
     rangeCount: Array.isArray(sourceInput?.ranges) ? sourceInput.ranges.length : null
   };
@@ -1121,7 +1124,8 @@ export class ViewerRequests {
     const previousInputState = measurement.forecastInputState ?? null;
     const currentInputState = forecastInputState(tracks, unavailableInput);
     if (previousInputState && forecastInputIdentity(previousInputState) !== forecastInputIdentity(currentInputState)) {
-      observeForecastInput(this.#host.observeWait, session.file.sourceKey, previousInputState,
+      const resolvedInputState = forecastInputState(tracks, previousInputState) ?? previousInputState;
+      observeForecastInput(this.#host.observeWait, session.file.sourceKey, resolvedInputState,
         currentInputState ? "forecast-blocker-replaced" : "forecast-blocker-cleared");
     }
     if (currentInputState && JSON.stringify(previousInputState) !== JSON.stringify(currentInputState)) {

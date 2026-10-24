@@ -170,18 +170,39 @@ test("source-only viewers retain the full source at the lowest priority until an
   assert.ok(withdrawn.includes(work));
 });
 
-test("an active transcode does not prepare a full source-rest packet index", async () => {
+test("source-rest waits for the playback map before deciding whether to scan", async () => {
   const viewers = new Viewers();
   const viewer = viewers.selectsFile("person", "source", 0);
   viewers.of({ id: "hls" }, "person");
   const reads = [];
+  let playbackApplied = false;
+  let sourceRestNeeded = true;
   const preparation = new SourcePreparation({ viewers, candidatesFor: async () => [0],
     relatedFilesFor: () => [{ fileIndex: 0, role: "source-rest" }],
-    sourceRestNeededFor: () => false,
+    playbackAppliedFor: () => playbackApplied,
+    sourceRestNeededFor: () => sourceRestNeeded,
     inspect: async work => { reads.push(work); return { kind: "result" }; }, withdraw: () => {} });
   await preparation.refresh();
   assert.equal(reads.some(work => work.role === "source-rest" && work.statement === "packets"), false);
+
+  playbackApplied = true;
+  sourceRestNeeded = false;
+  await preparation.refresh();
+  assert.equal(reads.some(work => work.role === "source-rest" && work.statement === "packets"), false);
   assert.equal(viewer.outputs.size, 1);
+});
+
+test("a direct playback map still prepares its full source-rest packet index", async () => {
+  const viewers = new Viewers();
+  viewers.selectsFile("person", "source", 0);
+  const reads = [];
+  const preparation = new SourcePreparation({ viewers, candidatesFor: async () => [0],
+    relatedFilesFor: () => [{ fileIndex: 0, role: "source-rest" }],
+    playbackAppliedFor: () => true,
+    sourceRestNeededFor: () => true,
+    inspect: async work => { reads.push(work); return { kind: "result" }; }, withdraw: () => {} });
+  await preparation.refresh();
+  assert.ok(reads.some(work => work.role === "source-rest" && work.statement === "packets"));
 });
 
 test("a seek before an output exists withdraws old input and prepares the new position", async () => {

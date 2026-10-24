@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.14
 
 - **Fix**: Do not run a full source-rest packet index while a viewer is using a transcoded output; its serialized file reads delayed the active segment input.
 

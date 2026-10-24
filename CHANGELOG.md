@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.17
 
 - **Chore**: Record whether source ranges for a blocking playback segment are available when its forecast blocker clears (#ttv-185).
 

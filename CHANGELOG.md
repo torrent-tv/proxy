@@ -1,6 +1,9 @@
-## 2.107.13
+## Unreleased
 
 - **Fix**: Do not run a full source-rest packet index while a viewer is using a transcoded output; its serialized file reads delayed the active segment input.
+
+## 2.107.13
+
 - **Fix**: Include one audio packet after a transcoded segment boundary so decoders can flush the final samples before the output is trimmed. On a WMV field run, FFmpeg exited successfully but its separate AAC segment ended 64 ms before the requested boundary and was rejected as incomplete (#ttv-245).
 
 ## 2.107.12

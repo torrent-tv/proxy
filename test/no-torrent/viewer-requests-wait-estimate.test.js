@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { logger } from "../../utils/logger.js";
 import { CutGrid, OutputSpec, VideoOutput } from "../../services/encode/output/index.js";
-import { sourceFileIndexesForOutput, ViewerRequests } from "../../services/server/ViewerRequests.js";
+import { forecastInputState, sourceFileIndexesForOutput, ViewerRequests } from "../../services/server/ViewerRequests.js";
 
 test("playback operations report every source file and retain the output file as fallback", () => {
   assert.deepEqual(sourceFileIndexesForOutput({
@@ -12,6 +12,22 @@ test("playback operations report every source file and retain the output file as
   assert.deepEqual(sourceFileIndexesForOutput({
     spec: { sourceFileIndexes: [] }, file: { fileIndex: 4 }
   }), [4]);
+});
+
+test("forecast input diagnostics re-read the exact source ranges when a blocker clears", () => {
+  const identity = { sourceId: "source", trackId: "audio", segmentIndex: 197, phase: "tail" };
+  const blockedTracks = [{ id: "audio", segments: [{ index: 197, sourceInputs: [] }] }];
+  const resolvedTracks = [{ id: "audio", segments: [{ index: 197,
+    sourceInputs: [{ sourceId: "source", ranges: [{ start: 400, end: 500 }] }] }] }];
+
+  assert.deepEqual(forecastInputState(blockedTracks, identity), {
+    ...identity, trackFound: true, segmentFound: true, sourceInputFound: false,
+    rangesKnown: false, rangeCount: null
+  });
+  assert.deepEqual(forecastInputState(resolvedTracks, identity), {
+    ...identity, trackFound: true, segmentFound: true, sourceInputFound: true,
+    rangesKnown: true, rangeCount: 1
+  });
 });
 
 test("early forecasts retain one wait identity, advance revisions, and learn the measured outcome", () => {

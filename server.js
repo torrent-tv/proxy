@@ -332,16 +332,20 @@ export async function startProxyServer({
   /** @type {Record<string, object[]>} */
   const calibratedModes = {};
   if (videoEncoder) {
-    calibratedModes[videoEncoder.kind] =
-      (await calibrateEncoder({ ffmpegBin, encoder: videoEncoder, logger, processorCores })).modes;
+    const selectedCalibration = await calibrateEncoder({ ffmpegBin, encoder: videoEncoder, logger, processorCores });
+    if (selectedCalibration.assessmentComplete) {
+      calibratedModes[videoEncoder.kind] = selectedCalibration.modes;
+    }
     if (videoEncoder.kind !== "software") {
-      calibratedModes.software =
-        (await calibrateEncoder({ ffmpegBin, encoder: softwareDescriptor(), logger, processorCores })).modes;
+      const softwareCalibration = await calibrateEncoder({ ffmpegBin, encoder: softwareDescriptor(), logger, processorCores });
+      if (softwareCalibration.assessmentComplete) {
+        calibratedModes.software = softwareCalibration.modes;
+      }
       // A device that passed detection's own test and then none of whose modes
       // passed the product's is not used: detection encodes a synthetic pattern
       // with arguments of its own, and it is the product's arguments a viewer
       // is served with.
-      if (calibratedModes[videoEncoder.kind].length === 0) {
+      if (Array.isArray(calibratedModes[videoEncoder.kind]) && calibratedModes[videoEncoder.kind].length === 0) {
         logger.warn(
           `calibration: ${videoEncoder.name} passed detection but none of its modes produced correct segments ` +
           "through the product's own arguments; encoding in software instead"

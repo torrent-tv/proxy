@@ -190,7 +190,7 @@ async function checkModeProducesCorrectSegments({ ffmpegBin, encoder, rung, segm
  * @param {object} [params.measure] - Replaces the three readings, for a check
  *   that must not run ffmpeg: `check`, `rawFrames`, `speed`. `speed` answers a
  *   number, or `{ speed, freeShare }` as `measureEncodeSlope` does.
- * @returns {Promise<{ modes: CalibratedMode[], refused: Array<{ preset: string, reason: string }> }>}
+ * @returns {Promise<{ modes: CalibratedMode[], refused: Array<{ preset: string, reason: string }>, assessmentComplete: boolean }>}
  */
 export async function calibrateEncoder({
   ffmpegBin,
@@ -227,6 +227,11 @@ export async function calibrateEncoder({
     }
   }
   const qualified = rungs.filter((rung) => checked.get(rung)?.ok === true);
+  // A mode that failed the correctness check is a proven refusal. Otherwise,
+  // the host must produce at least one throughput reading before an empty
+  // mode list can mean that no output is sustainable. A missing/unfinished
+  // calibration input is not evidence that the host cannot encode.
+  let assessmentComplete = qualified.length === 0;
 
   /** @type {Map<string | null, SizeReading[]>} */
   const readings = new Map(qualified.map((rung) => [rung, []]));
@@ -264,6 +269,7 @@ export async function calibrateEncoder({
           activeRungs.delete(rung);
           continue;
         }
+        assessmentComplete = true;
         readings.get(rung).push({
           width: frame.width,
           height: frame.height,
@@ -319,7 +325,9 @@ export async function calibrateEncoder({
     );
   }
   log.info(
-    `calibration: ${encoder.name} ${modes.length} of ${rungs.length} mode(s) usable ` +
+    `calibration: ${encoder.name} ${assessmentComplete
+      ? `${modes.length} of ${rungs.length} mode(s) usable`
+      : "performance was not measured"} ` +
     `(${((Date.now() - startedAt) / 1000).toFixed(1)}s)` +
     (freeShares.length > 0
       ? `; other work took ${Math.round((1 - Math.max(...freeShares)) * 100)}-${Math.round((1 - Math.min(...freeShares)) * 100)}% ` +
@@ -327,7 +335,7 @@ export async function calibrateEncoder({
       : encoder.kind === "software" ? "; the machine's load during the readings was not readable, so the figures are as read" : "") +
     (refused.length > 0 ? `; not usable: ${refused.map((one) => `${one.preset} (${one.reason})`).join(", ")}` : "")
   );
-  return { modes, refused };
+  return { modes, refused, assessmentComplete };
 }
 
 /**

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Fill a short gap before a transcoded audio interval with silence so the first encoded audio sample begins at the published boundary. A WMA Pro stream began 52.7 ms after the boundary, beyond the 21.3 ms one-frame tolerance, so its first segment was rejected and playback stopped at 12 s (#ttv-245).
+
 ## 2.107.9
 
 - **Fix**: Continue measuring a separate soundtrack's playback progress across adjacent encoding runs. A segment boundary no longer clears the rate needed by readiness; a seek to a distant interval still resets it (#ttv-245).

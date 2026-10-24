@@ -72,7 +72,7 @@ import { ViewerRequests } from "./ViewerRequests.js";
 import { OutputLifecycle } from "./OutputLifecycle.js";
 import { SegmentServing } from "./SegmentServing.js";
 import { audioStartSecondsFor } from "../viewer/audio-start.js";
-import { forecastRate, rateSummaryOf, predictPlaybackReadiness, RateTrend } from "../viewer/playback-readiness.js";
+import { forecastRate, rateSummaryOf, predictPlaybackReadiness, ProgressRate, RateTrend } from "../viewer/playback-readiness.js";
 import { audioRenditionName } from "../media/audio-inventory.js";
 import { Renditions } from "../encode/Renditions.js";
 import { CushionReport, LOOKAHEAD_PAUSE_SECONDS } from "../encode/CushionReport.js";
@@ -640,7 +640,7 @@ export function wireOutputs({
     get encodeRuns() { return parts.encodeRuns; },
     // When this viewer's playback can start and run to the end: the viewer
     // component's forecast, which models the viewer's browser.
-    playbackReadiness: { predict: predictPlaybackReadiness, forecastRate, rateSummaryOf, RateTrend },
+    playbackReadiness: { predict: predictPlaybackReadiness, forecastRate, rateSummaryOf, RateTrend, ProgressRate },
     // Whether the subtitle a viewer chose has been read where they stand — the
     // source preparation's answer, set on these parts by the assembly.
     subtitleReadyFor: (viewer) => parts.subtitleReadyFor?.(viewer) ?? true,

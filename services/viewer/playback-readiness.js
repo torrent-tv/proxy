@@ -109,6 +109,38 @@ export class RateTrend {
 }
 
 /**
+ * Rates the media an output actually produced between progress reports.
+ * Unchanged progress keeps its original time, so a source wait is included
+ * instead of being mistaken for encoder throughput.
+ */
+export class ProgressRate {
+  #trend;
+  #horizonSeconds;
+  #previous = null;
+
+  constructor(horizonSeconds) {
+    this.#horizonSeconds = horizonSeconds;
+    this.#trend = new RateTrend(horizonSeconds);
+  }
+
+  note(at, processedSeconds, startPositionSeconds) {
+    if (!Number.isFinite(at) || !Number.isFinite(processedSeconds)) return this.#trend.snapshot();
+    const start = Number.isFinite(startPositionSeconds) ? startPositionSeconds : 0;
+    if (!this.#previous || this.#previous.start !== start || processedSeconds < this.#previous.processedSeconds) {
+      this.#previous = { at, processedSeconds, start };
+      this.#trend = new RateTrend(this.#horizonSeconds);
+      return this.#trend.snapshot();
+    }
+    const elapsedMs = at - this.#previous.at;
+    if (processedSeconds > this.#previous.processedSeconds && elapsedMs > 0) {
+      this.#trend.add(at, (processedSeconds - this.#previous.processedSeconds) * 1000 / elapsedMs);
+      this.#previous = { at, processedSeconds, start };
+    }
+    return this.#trend.snapshot();
+  }
+}
+
+/**
  * @param {object} input
  * @param {number} input.positionSeconds
  * @param {number} input.durationSeconds

@@ -14,6 +14,7 @@ const LANGUAGES = "7c4346a9efe0fc4bb229393ede415c85";
 const AUDIO = "409e69f84d5bcf11a8fd00805f5c442b";
 const VIDEO = "c0ef19bc4d5bcf11a8fd00805f5c442b";
 const ENCRYPTION = new Set(["fbb3112223bdd211b4b700a0c955fc6e", "14e68a292226174cb935dae07e9e28c9"]);
+const VIDEO_CODECS_WITHOUT_COPYABLE_BROWSER_OUTPUT = new Set(["WMV1", "WMV2", "WMV3", "WMVA", "WMVP", "WVC1"]);
 const AUDIO_CODECS = new Map([[1, "pcm_s16le"], [0x55, "mp3"], [0xff, "aac"],
   [0x160, "wmav1"], [0x161, "wmav2"], [0x162, "wmapro"], [0x163, "wmalossless"], [0x2000, "ac3"]]);
 
@@ -198,9 +199,18 @@ export class AsfContainer extends Container {
     return this.#info;
   }
   async parseKeyframeIndex() {
-    const index = await this.readPacketIndex();
+    await this.#readHeader();
     const track = this.#tracks.find(track => track.type === "video");
-    return track ? { times: index.keyframesOf(track.trackNumber), tolerance: 0 } : null;
+    if (!track) return null;
+    // These ASF picture codecs require re-encoding for browser playback. A
+    // packet walk cannot help that output, and retaining every packet until the
+    // whole file has been scanned competes with the bounded reads that produce
+    // its first segments. The output path already places its own keyframes.
+    if (VIDEO_CODECS_WITHOUT_COPYABLE_BROWSER_OUTPUT.has(track.codecId.toUpperCase())) {
+      return { times: [], tolerance: 0, copyable: false };
+    }
+    const index = await this.readPacketIndex();
+    return { times: index.keyframesOf(track.trackNumber), tolerance: 0 };
   }
   async readPacketIndex(interval) {
     await this.#readHeader();

@@ -118,6 +118,23 @@ test("a seek in an ASF film asks for its window, not for the film before it", as
   assert.ok(asked <= 4, `answered after ${asked} rounds of missing bytes`);
 });
 
+test("WMV keyframe warm-up does not walk packet data that the re-encoded output cannot copy", async () => {
+  const bytes = await wmv();
+  const dataOffset = Number(bytes.readBigUInt64LE(16));
+  const packetReads = [];
+  const container = new AsfContainer({ fileSize: bytes.length,
+    readRange: async (start, end) => {
+      if (start >= dataOffset) packetReads.push([start, end]);
+      return bytes.subarray(start, end + 1);
+    } });
+
+  const index = await container.parseKeyframeIndex();
+
+  assert.deepEqual(index.times, []);
+  assert.equal(index.copyable, false);
+  assert.deepEqual(packetReads, []);
+});
+
 test("ASF packets of different lengths are still read by the whole walk", async () => {
   const bytes = await wmv();
   const container = new AsfContainer({ fileSize: bytes.length, readRange: async (start, end) => bytes.subarray(start, end + 1) });

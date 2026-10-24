@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A segment of a WMV (ASF) film no longer waits for the whole file to be downloaded. Every request for one segment's packets walked the whole Data Object from its first packet, so no segment, the first included, had input bytes until the whole file was downloaded, and each missing byte stopped the walk with one more request for bytes. Field 2026-10-23, proxy 2.105.10: a WMV whose picture is re-encoded stood on `source-input-ranges-unavailable` for 81.5 s until the viewer left, and its encoder never ran. A segment's packets are now read from a window of the file's fixed-length packets around it: the first packet is found by its send time, the window ends once every payload presented before the interval's end has been read, and the swarm is asked for the window at once. The answer is the same as the whole walk's; a file whose packets are not all of one length is still walked whole (#ttv-243).
+
 ## 2.107.6
 
 - **Fix**: A stop ordered after an encoder's process has exited is ignored. The exit can publish the run's last piece and ask the plan again, which finds nothing left ahead of the run and stops it: the ending then took an edge the run's state table does not have (`STOPPED + EXITED_COMPLETE — no such edge; ignored`), a signal went to a process that was gone, and the stop's age at the exit, about 0 ms, was kept among this host's kill costs, which price a move. Field 2026-10-23, Drifters 04 on 2.107.5: the run on the last piece, #205 (#ttv-117).

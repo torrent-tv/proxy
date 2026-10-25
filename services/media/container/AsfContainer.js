@@ -42,11 +42,11 @@ export class AsfContainer extends Container {
   }
   static detect(head) { return head.length >= 16 && head.subarray(0, 16).toString("hex") === HEADER; }
 
-  async #readHeader() {
+  async #readHeader(readRange = this.readRange) {
     if (this.#info) return;
     this.#declarations ??= new RetainedReads(this.packetMemory);
     if (!this.#header) {
-      const bytes = await this.readRange(0, 29);
+      const bytes = await readRange(0, 29);
       if (!AsfContainer.detect(bytes) || bytes[28] !== 1 || bytes[29] !== 2) throw new Error("ASF header is invalid.");
       const size = Number(bytes.readBigUInt64LE(16));
       const count = bytes.readUInt32LE(24);
@@ -56,7 +56,7 @@ export class AsfContainer extends Container {
       this.#header = { size, count };
     }
     while (this.#objects.length < this.#header.count) {
-      const head = await this.readRange(this.#offset, this.#offset + 23);
+      const head = await readRange(this.#offset, this.#offset + 23);
       const size = Number(head.readBigUInt64LE(16));
       if (!Number.isSafeInteger(size) || size < 24 || this.#offset + size > this.#header.size) {
         throw new Error("ASF child object exceeds its header.");
@@ -64,7 +64,7 @@ export class AsfContainer extends Container {
       const guid = head.subarray(0, 16).toString("hex");
       if (ENCRYPTION.has(guid)) throw new Error("ASF media is encrypted.");
       const bytes = [FILE, STREAM, EXTENSION, EXTENDED_STREAM, LANGUAGES].includes(guid)
-        ? await this.#declarations.read(this.#offset + 24, this.#offset + size - 1, this.readRange) : null;
+        ? await this.#declarations.read(this.#offset + 24, this.#offset + size - 1, readRange) : null;
       this.#objects.push({ guid, bytes });
       this.#offset += size;
     }
@@ -212,18 +212,19 @@ export class AsfContainer extends Container {
     const index = await this.readPacketIndex();
     return { times: index.keyframesOf(track.trackNumber), tolerance: 0 };
   }
-  async readPacketIndex(interval, { isCurrent } = {}) {
+  async readPacketIndex(interval, { isCurrent, signal } = {}) {
+    const readRange = signal ? (start, end) => this.readRange(start, end, { signal }) : this.readRange;
     if (isCurrent?.() === false) return null;
-    await this.#readHeader();
+    await this.#readHeader(readRange);
     if (isCurrent?.() === false) return null;
     if (!this.#packets && Number.isFinite(interval?.from) && Number.isFinite(interval?.to) && interval.to > interval.from) {
-      const window = await this.#readWindow(interval, isCurrent);
+      const window = await this.#readWindow(interval, isCurrent, readRange);
       if (isCurrent?.() === false) return null;
       if (window) return window;
     }
     if (isCurrent?.() === false) return null;
     if (!this.#packets) {
-      const index = await readAsfPackets({ readRange: this.readRange, fileSize: this.fileSize, tracks: this.#tracks,
+      const index = await readAsfPackets({ readRange, fileSize: this.fileSize, tracks: this.#tracks,
         info: { ...this.#info, durationSeconds: this.#duration }, state: this.#packetState, packetMemory: this.packetMemory, isCurrent });
       if (index === null) return null;
       const timeline = this.#tracks.find(track => track.type === "video") ?? this.#tracks.find(track => track.type === "audio");
@@ -251,8 +252,8 @@ export class AsfContainer extends Container {
    * interval, is read again from twice as far back, and from the first packet
    * at the latest; which it reaches is checked on what it read, not assumed.
    */
-  async #readWindow(interval, isCurrent) {
-    const data = await this.#dataLayout();
+  async #readWindow(interval, isCurrent, readRange = this.readRange) {
+    const data = await this.#dataLayout(readRange);
     if (isCurrent?.() === false) return null;
     if (!data) return null;
     const requested = this.#tracks.filter(track => ["video", "audio"].includes(track.type) &&
@@ -262,9 +263,9 @@ export class AsfContainer extends Container {
     for (let lead = this.#info.prerollSeconds + WINDOW_LEAD_SECONDS; ; lead *= 2) {
       if (isCurrent?.() === false) return null;
       const sentFrom = interval.from - lead;
-      const first = await this.#packetSentBefore(sentFrom, data, interval.to + WINDOW_LEAD_SECONDS, isCurrent);
+      const first = await this.#packetSentBefore(sentFrom, data, interval.to + WINDOW_LEAD_SECONDS, isCurrent, readRange);
       if (isCurrent?.() === false) return null;
-      const window = await readAsfWindow({ readRange: this.readRange, data, tracks: this.#tracks, requested, info, first, interval, sentFrom, isCurrent });
+      const window = await readAsfWindow({ readRange, data, tracks: this.#tracks, requested, info, first, interval, sentFrom, isCurrent });
       if (isCurrent?.() === false) return null;
       if (window.startCovered || first === 0) return window.index;
     }
@@ -275,9 +276,9 @@ export class AsfContainer extends Container {
    * the format requires it (the File Properties state one length as both the
    * least and the most), and a packet is then found by its number.
    */
-  async #dataLayout() {
+  async #dataLayout(readRange = this.readRange) {
     if (this.#data === null) {
-      const data = await readAsfData({ readRange: this.readRange, fileSize: this.fileSize, info: this.#info });
+      const data = await readAsfData({ readRange, fileSize: this.fileSize, info: this.#info });
       const length = this.#info.packetLength;
       const fixed = length > 0 && this.#info.minimumPacketLength === length;
       const whole = fixed ? Math.floor((data.end - data.start) / length) : 0;
@@ -300,16 +301,16 @@ export class AsfContainer extends Container {
    * bytes the window from it to `until` is estimated to take, so the swarm is
    * asked for the packet and the window it begins at once.
    */
-  async #packetSentBefore(seconds, data, until, isCurrent) {
+  async #packetSentBefore(seconds, data, until, isCurrent, readRange = this.readRange) {
     if (isCurrent?.() === false) return null;
-    let low = 0, high = data.count, lowSent = await this.#sentAt(0, data, 1, isCurrent), highSent = this.#duration;
+    let low = 0, high = data.count, lowSent = await this.#sentAt(0, data, 1, isCurrent, readRange), highSent = this.#duration;
     if (isCurrent?.() === false) return null;
     if (lowSent > seconds) return 0;
     // Past the last packet nothing is sent before the film ends; the last
     // packet itself is read only when the search needs it.
     if (!(highSent > seconds)) {
       high = data.count - 1;
-      highSent = await this.#sentAt(high, data, 1, isCurrent);
+      highSent = await this.#sentAt(high, data, 1, isCurrent, readRange);
       if (highSent <= seconds) return high;
     }
     for (const [number, at] of this.#sent) {
@@ -324,7 +325,7 @@ export class AsfContainer extends Container {
       const guess = guesses >= 3 || !(perSecond > 0) ? Math.floor((low + high) / 2) : low + Math.floor((aim - lowSent) * perSecond);
       const probe = Math.min(high - 1, Math.max(low + 1, guess));
       const window = perSecond > 0 ? Math.ceil((until - aim) * perSecond) : 1;
-      const at = await this.#sentAt(probe, data, Math.max(1, window), isCurrent);
+      const at = await this.#sentAt(probe, data, Math.max(1, window), isCurrent, readRange);
       if (isCurrent?.() === false) return null;
       if (at <= seconds) { low = probe; lowSent = at; }
       else { high = probe; highSent = at; }
@@ -336,12 +337,12 @@ export class AsfContainer extends Container {
    * When packet `number` is sent. A packet that is not held is said as
    * missing with the `packets` packets from it.
    */
-  async #sentAt(number, data, packets = 1, isCurrent) {
+  async #sentAt(number, data, packets = 1, isCurrent, readRange = this.readRange) {
     if (isCurrent?.() === false) return null;
     if (!this.#sent.has(number)) {
       const at = data.start + number * data.length;
       try {
-        this.#sent.set(number, await readAsfPacketTime({ readRange: this.readRange, at, end: data.end, info: this.#info }));
+        this.#sent.set(number, await readAsfPacketTime({ readRange, at, end: data.end, info: this.#info }));
       } catch (error) {
         if (!isUnavailable(error) || packets <= 1) throw error;
         throw new BytesUnavailable(at, Math.min(data.start + data.count * data.length, at + packets * data.length) - 1, 0);

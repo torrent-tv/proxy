@@ -54,7 +54,7 @@ export class Container {
    * the medium — a torrent's piece length. Absent, an element is read in one go.
    *
    * @param {object} params
-   * @param {(start:number,end:number)=>Promise<Buffer|null>} [params.readRange]
+   * @param {(start:number,end:number,options?:{signal?:AbortSignal})=>Promise<Buffer|null>} [params.readRange]
    * @param {number} [params.fileSize]
    * @param {string} [params.label]
    * @param {number} [params.portionBytes]

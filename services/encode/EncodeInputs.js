@@ -115,10 +115,10 @@ export class EncodeInputs {
   }
 
   /** The container's statement of an interval, its time added to the request's account. */
-  async #resolveTimed(timing, output, from, to, isCurrent = null) {
+  async #resolveTimed(timing, output, from, to, isCurrent = null, signal = null) {
     const startedAt = this.#now();
     try {
-      return await this.#resolve(output, from, to, timing, isCurrent);
+      return await this.#resolve(output, from, to, timing, isCurrent, signal);
     } finally {
       timing.resolutions += 1;
       timing.resolveMs += this.#now() - startedAt;
@@ -208,6 +208,7 @@ export class EncodeInputs {
         : "withdrawn: no wanted window covers it");
       this.#requests.delete(key);
       this.#wanted.delete(key);
+      request.controller?.abort();
       request.result?.release?.();
     }
     this.#retryMemory();
@@ -233,6 +234,7 @@ export class EncodeInputs {
       this.#note(request, "withdrawn: the plan places no run there");
       this.#requests.delete(key);
       this.#wanted.delete(key);
+      request.controller?.abort();
       // A copy already answered may still be copying its stretch; released,
       // the stretch is dropped when its read returns.
       request.result?.release?.();
@@ -335,6 +337,7 @@ export class EncodeInputs {
       if (request.output !== output) continue;
       this.#requests.delete(key);
       this.#wanted.delete(key);
+      request.controller?.abort();
       request.result?.release?.();
     }
     this.#shared.forget(output);
@@ -404,6 +407,7 @@ export class EncodeInputs {
   }
 
   #prepare(request) {
+    request.controller ??= new AbortController();
     request.pending = true;
     request.revision = this.#revision;
     request.memoryRevision = this.#memoryRevision;
@@ -421,7 +425,7 @@ export class EncodeInputs {
       // packet walk, left to run, held the file's reads and the piece the
       // viewer had seeked to waited 16.9 s behind it (r59, torrent-tv/meta#178).
       const resolved = await this.#resolveTimed(request.timing, request.output, request.from, request.from,
-        () => this.#requests.get(request.key) === request);
+        () => this.#requests.get(request.key) === request && !request.controller.signal.aborted, request.controller.signal);
       if (resolved.kind === "result") this.#original.set(request.output, resolved.sources?.every(source => source.input.original === true) === true);
       if (this.#requests.get(request.key) !== request) return;
       let result;

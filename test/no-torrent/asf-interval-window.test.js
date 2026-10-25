@@ -138,6 +138,40 @@ test("an obsolete ASF interval stops reading its packet window", async () => {
   assert.ok(packetReads.length < 20, `read ${packetReads.length} packet ranges after the request was withdrawn`);
 });
 
+test("cancelling a blocked ASF range releases the file read queue for a newer interval", async () => {
+  const bytes = await wmv();
+  const dataOffset = Number(bytes.readBigUInt64LE(16));
+  let blocked = false, signal, release;
+  let started;
+  const readStarted = new Promise(resolve => { started = resolve; });
+  const blockedRead = new Promise(resolve => { release = resolve; });
+  const params = { sourceKey: "generated", fileIndex: 0, fileSize: bytes.length,
+    readRange: async (start, end, options) => {
+      if (start >= dataOffset && options?.signal && !blocked) {
+        blocked = true;
+        signal = options?.signal;
+        started();
+        return blockedRead;
+      }
+      return bytes.subarray(start, end + 1);
+    } };
+  const orchestrator = new ContainerOrchestrator();
+  const tracks = await orchestrator.inspect(params, "tracks");
+  const info = await orchestrator.inspect(params, "media-info");
+  const interval = { from: info.value.startTimeSeconds + 10, to: info.value.startTimeSeconds + 12 };
+  const oldRequest = new AbortController();
+  const stale = orchestrator.inspect({ ...params, signal: oldRequest.signal, packetInterval: interval }, "packets");
+  await readStarted;
+  assert.equal(signal, oldRequest.signal);
+  oldRequest.abort();
+  assert.deepEqual(await stale, { kind: "terminal", reason: "request-obsolete", requestId: "generated:0:packets" });
+
+  release(bytes.subarray(dataOffset, dataOffset + 50_000));
+  const current = await orchestrator.inspect({ ...params, packetInterval: interval }, "packets");
+  assert.equal(current.kind, "result");
+  assert.equal(new SegmentInputs({ index: current.value, tracks: tracks.value }).forInterval(interval).kind, "result");
+});
+
 test("WMV keyframe warm-up does not walk packet data that the re-encoded output cannot copy", async () => {
   const bytes = await wmv();
   const dataOffset = Number(bytes.readBigUInt64LE(16));

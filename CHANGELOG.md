@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Abort an obsolete ASF range read while it waits for bytes, so a seek can start its own read without waiting for the old request.
+
 ## 2.107.28
 
 - **Fix**: Stop obsolete ASF packet-window reads when the viewer changes time, so old interval reads cannot delay the current input.

@@ -146,7 +146,7 @@ export class ContainerOrchestrator {
     const key = `${params.sourceKey}:${params.fileIndex}`;
     let lifetime = this.#lifetimes.get(key);
     if (!lifetime) this.#lifetimes.set(key, lifetime = {});
-    const isCurrent = () => this.#lifetimes.get(key) === lifetime && params.isCurrent?.() !== false;
+    const isCurrent = () => this.#lifetimes.get(key) === lifetime && params.isCurrent?.() !== false && params.signal?.aborted !== true;
     // Reads of one file run one after another, so an answer can wait for every
     // read asked before it. Told to whoever asked, apart from the read itself,
     // because the two call for different remedies (torrent-tv/meta#166).
@@ -237,9 +237,10 @@ export class ContainerOrchestrator {
         value = await container.readSourceRanges(params.packetInterval);
         if (value.kind !== "result") return { ...value, requestId };
       } else if (statement === "packets") {
-        value = await container.readPacketIndex(params.packetInterval, { isCurrent: params.isCurrent, account: params.walkAccount });
+        value = await container.readPacketIndex(params.packetInterval, { isCurrent, signal: params.signal, account: params.walkAccount });
         if (value === null) return { kind: "terminal", reason: "request-obsolete", requestId };
-        await value?.prepareAudioDependencies?.(params.packetInterval, container.readRange);
+        const readRange = (start, end) => container.readRange(start, end, { signal: params.signal });
+        await value?.prepareAudioDependencies?.(params.packetInterval, readRange);
       } else if (statement === "chapters") {
         value = await container.readChapters({ read: params.readHeld ?? params.readRange,
           isCurrent: params.isCurrent,
@@ -252,7 +253,7 @@ export class ContainerOrchestrator {
       }
       return { kind: "result", value, requestId };
     } catch (error) {
-      if (statement === "chapters" && params.isCurrent?.() === false) return { kind: "terminal", reason: "request-obsolete", requestId };
+      if (!isCurrent()) return { kind: "terminal", reason: "request-obsolete", requestId };
       if (error instanceof ChapterUnsupported) return { kind: "terminal", reason: "chapter-not-supported", chapterReason: error.message, requestId };
       if (error instanceof IndexMemoryUnavailable) {
         const result = { kind: "needs-memory", bytes: error.bytes, requestId };

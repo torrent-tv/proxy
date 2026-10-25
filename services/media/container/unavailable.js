@@ -56,17 +56,37 @@ export function isUnavailable(error) {
  * the clamped range is a read that did not finish: a stream that ended early,
  * a piece that is not downloaded, a store that could not serve it.
  *
- * @param {(start: number, end: number) => Promise<Buffer | null>} read
+ * @param {(start: number, end: number, options?: { signal?: AbortSignal }) => Promise<Buffer | null>} read
  * @param {number} fileSize
- * @returns {(start: number, end: number) => Promise<Buffer>}
+ * @returns {(start: number, end: number, options?: { signal?: AbortSignal }) => Promise<Buffer>}
  */
 export function strictReader(read, fileSize) {
-  return async (start, end) => {
+  return async (start, end, { signal } = {}) => {
     const last = Math.min(end, fileSize - 1);
     if (!(start >= 0) || last < start) {
       return Buffer.alloc(0);
     }
-    const bytes = await read(start, last);
+    let bytes;
+    if (!signal) {
+      bytes = await read(start, last);
+    } else {
+      const abort = () => {
+        const error = new Error("Read cancelled.");
+        error.name = "AbortError";
+        return error;
+      };
+      if (signal.aborted) throw abort();
+      let onAbort;
+      const cancelled = new Promise((_, reject) => {
+        onAbort = () => reject(abort());
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      try {
+        bytes = await Promise.race([read(start, last, { signal }), cancelled]);
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+    }
     const wanted = last - start + 1;
     const received = bytes ? bytes.length : 0;
     if (received < wanted) {

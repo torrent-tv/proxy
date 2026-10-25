@@ -110,6 +110,25 @@ test("withdrawing an output during a read releases the late result without annou
   assert.equal(changed, 0);
 });
 
+test("withdrawing a pending input aborts its resolver", async () => {
+  let signal, finished;
+  const inputs = new EncodeInputs({
+    resolve: (_output, _from, _to, _timing, _isCurrent, requestSignal) => {
+      signal = requestSignal;
+      return new Promise(resolve => { finished = resolve; });
+    },
+    readRanges: async () => [Buffer.from("ab")], reviseBudget: async () => {},
+    changed: () => {}, failed: (_output, error) => { throw error; }
+  });
+  inputs.take(output, 0, 0);
+  await setImmediate();
+  assert.equal(signal.aborted, false);
+  inputs.retain(output, []);
+  assert.equal(signal.aborted, true);
+  finished({ kind: "terminal", reason: "request-obsolete" });
+  await setImmediate();
+});
+
 test("an availability event during an unsuccessful read is not lost", async () => {
   let settle, reads = 0;
   const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),

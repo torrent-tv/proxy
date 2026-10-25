@@ -1023,7 +1023,7 @@ export async function startProxyServer({
     },
     // `timing`, when given, is told how long each read of a file waited behind
     // the reads asked before it and how long it took (torrent-tv/meta#166).
-    resolveEncodeInput: async (output, fromIndex, toIndex, timing = null, isCurrent = null) => {
+    resolveEncodeInput: async (output, fromIndex, toIndex, timing = null, isCurrent = null, signal = null) => {
       const grid = output.timeline?.published ?? output.timeline?.boundaries;
       const from = grid?.[fromIndex], to = grid?.[toIndex + 1];
       if (!Number.isFinite(from) || !(to > from)) return { kind: "terminal", reason: "output-interval-not-declared" };
@@ -1043,6 +1043,8 @@ export async function startProxyServer({
       for (const [fileIndex, choices] of selected) {
         const params = await containerOver({ sourceKey: output.file.sourceKey, fileIndex });
         if (!params) return { kind: "needs-source" };
+        if (isCurrent) params.isCurrent = isCurrent;
+        if (signal) params.signal = signal;
         if (timing) {
           params.walkAccount = timing.walk ??= { lockMs: 0, reads: 0, bytes: 0 };
           params.onTimed = (statement, waitedMs, readMs) => {
@@ -1073,7 +1075,6 @@ export async function startProxyServer({
         if (media.kind !== "result") return media;
         const timeShiftSeconds = Number(media.value?.startTimeSeconds) || 0;
         const sourceInterval = output.timeline.sourceInterval(fromIndex, toIndex, timeShiftSeconds);
-        if (isCurrent) params.isCurrent = isCurrent;
         params.packetInterval = { ...sourceInterval,
           trackIds: wanted.map(track => track.trackNumber),
           modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };

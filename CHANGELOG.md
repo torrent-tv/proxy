@@ -1,5 +1,8 @@
-## 2.107.20
+## Unreleased
 
+- **Fix**: Measure encoder speed from active work when a run contains one segment, and keep source waits out of the playback estimate. A one-segment audio run had no measured encoder rate, so readiness used end-to-end media progress and counted the same source waits again; this projected thousands of seconds before playback.
+
+## 2.107.20
 - **Fix**: Forecast unresolved source work from measured aggregate file density and replace per-segment tail scans with a duration-level continuity estimate.
 
 ## 2.107.19

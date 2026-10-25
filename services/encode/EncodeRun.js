@@ -589,6 +589,12 @@ export class EncodeRun {
         producedSeconds: Math.max(0, this.progress.processedSeconds - this.progress.startPositionSeconds),
         workingMs: this.clock.workingMs(at)
       };
+      // A run can be admitted for exactly one segment. Establish its baseline
+      // on the first media progress report so closing that segment yields a
+      // processing rate without counting the preceding input wait.
+      if (this.#pieceSample === null && this.#workSample.producedSeconds > 0) {
+        this.#pieceSample = this.#workSample;
+      }
     }
     this.onProgress(this.progress.snapshot());
   }
@@ -739,11 +745,10 @@ export class EncodeRun {
 
   /**
    * A closed piece is the moment this run's speed is read: what it made since
-   * the last reading, over its own working time. Measured from the first
-   * closed piece rather than from the spawn, so the process start and the wait
-   * for its first input bytes, which are charged once as startup, are not
-   * counted as processing. A stretch with no progress keeps the earlier sample,
-   * and the next reading spans both.
+   * the last reading, over its own working time. The first baseline is the
+   * first positive progress report, so a one-piece run can be measured without
+   * charging the wait for its first input bytes as processing. A stretch with
+   * no progress keeps the earlier sample, and the next reading spans both.
    */
   #measureSpeed() {
     const sample = this.#workSample;
@@ -751,7 +756,7 @@ export class EncodeRun {
       return;
     }
     if (this.#pieceSample === null) {
-      this.#pieceSample = sample;
+      if (sample.producedSeconds > 0) this.#pieceSample = sample;
       return;
     }
     const speed = speedFromWork(this.#pieceSample, sample);

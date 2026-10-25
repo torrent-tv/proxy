@@ -210,8 +210,8 @@ export class ContainerOrchestrator {
     let queue = this.#reads.get(key);
     if (!queue) this.#reads.set(key, queue = { active: false, pending: [] });
     return new Promise((resolve, reject) => {
-      const entry = { params, isCurrent, perform, resolve, reject, sequence: this.#readSequence++, started: false,
-        abort: null };
+      const entry = { params, isCurrent, perform, resolve, reject, readPriority: params.readPriority,
+        sequence: this.#readSequence++, started: false, abort: null };
       const cancel = () => {
         if (entry.started) return;
         const index = queue.pending.indexOf(entry);

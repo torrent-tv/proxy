@@ -115,10 +115,10 @@ export class EncodeInputs {
   }
 
   /** The container's statement of an interval, its time added to the request's account. */
-  async #resolveTimed(timing, output, from, to, isCurrent = null, signal = null) {
+  async #resolveTimed(timing, output, from, to, isCurrent = null, signal = null, readPriority = null) {
     const startedAt = this.#now();
     try {
-      return await this.#resolve(output, from, to, timing, isCurrent, signal);
+      return await this.#resolve(output, from, to, timing, isCurrent, signal, readPriority);
     } finally {
       timing.resolutions += 1;
       timing.resolveMs += this.#now() - startedAt;
@@ -425,7 +425,8 @@ export class EncodeInputs {
       // packet walk, left to run, held the file's reads and the piece the
       // viewer had seeked to waited 16.9 s behind it (r59, torrent-tv/meta#178).
       const resolved = await this.#resolveTimed(request.timing, request.output, request.from, request.from,
-        () => this.#requests.get(request.key) === request && !request.controller.signal.aborted, request.controller.signal);
+        () => this.#requests.get(request.key) === request && !request.controller.signal.aborted, request.controller.signal,
+        this.#readPriority(request, request.from, request.from));
       if (resolved.kind === "result") this.#original.set(request.output, resolved.sources?.every(source => source.input.original === true) === true);
       if (this.#requests.get(request.key) !== request) return;
       let result;
@@ -490,6 +491,22 @@ export class EncodeInputs {
       if (this.#requests.get(request.key) === request && changed &&
         request.result?.kind !== "result" && request.result?.kind !== "terminal") this.#prepare(request);
     });
+  }
+
+  /**
+   * The media reads that prepare one input keep the output map's urgency and
+   * the segment they serve, so a container can run an exact nearby interval
+   * before a speculative attempt to extend that input.
+   *
+   * @param {object} request
+   * @param {number} from
+   * @param {number} to
+   * @returns {{ rank: number, serves: number, from: number, to: number }}
+   */
+  #readPriority(request, from, to) {
+    const serves = request.serves ?? request.from;
+    const rank = this.#rankAt(request.output, serves);
+    return { rank: Number.isFinite(rank?.rank) ? rank.rank : 0, serves, from, to };
   }
 
   /**
@@ -563,7 +580,9 @@ export class EncodeInputs {
       if (!stretches.has(end)) {
         // A longer stretch that cannot be stated is not one to copy; the
         // shorter one already stated still runs.
-        const resolved = await this.#resolveTimed(request.timing, output, from, end).catch(() => null);
+        const current = () => this.#requests.get(request.key) === request && !request.controller.signal.aborted;
+        const resolved = await this.#resolveTimed(request.timing, output, from, end, current, request.controller.signal,
+          this.#readPriority(request, from, end)).catch(() => null);
         stretches.set(end, resolved?.kind === "result" && resolved.sources?.every(source => source.input.original === true)
           ? { sources: resolved.sources, bytes: originalInputBytes(resolved.sources) } : null);
       }

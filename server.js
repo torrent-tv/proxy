@@ -917,7 +917,7 @@ export async function startProxyServer({
     reviseBudget: () => { void outputParts.machineBudget.revise("memory", "media metadata").catch(error => logger.warn(`packet index budget: ${error.message}`)); },
     changed: () => { mediaReads.memoryChanged(); probeReads.memoryChanged(); outputParts.encodeInputs?.memoryChanged(); }
   });
-  const containerOver = async ({ sourceKey, fileIndex, requestId, packetInterval, demand }) => {
+  const containerOver = async ({ sourceKey, fileIndex, requestId, packetInterval, demand, readPriority }) => {
     const record = sourceRegistry.get(sourceKey);
     if (!record) {
       return null;
@@ -932,6 +932,7 @@ export async function startProxyServer({
       fileIndex,
       requestId,
       packetInterval,
+      readPriority,
       packetMemory: indexMemory.forFile(sourceKey, fileIndex),
       downloadInterval: demand ? { from: demand.from, to: demand.to } : null,
       readRange: (start, end) =>
@@ -1023,7 +1024,7 @@ export async function startProxyServer({
     },
     // `timing`, when given, is told how long each read of a file waited behind
     // the reads asked before it and how long it took (torrent-tv/meta#166).
-    resolveEncodeInput: async (output, fromIndex, toIndex, timing = null, isCurrent = null, signal = null) => {
+    resolveEncodeInput: async (output, fromIndex, toIndex, timing = null, isCurrent = null, signal = null, readPriority = null) => {
       const grid = output.timeline?.published ?? output.timeline?.boundaries;
       const from = grid?.[fromIndex], to = grid?.[toIndex + 1];
       if (!Number.isFinite(from) || !(to > from)) return { kind: "terminal", reason: "output-interval-not-declared" };
@@ -1041,7 +1042,7 @@ export async function startProxyServer({
       // reassembled packets otherwise.
       const files = [];
       for (const [fileIndex, choices] of selected) {
-        const params = await containerOver({ sourceKey: output.file.sourceKey, fileIndex });
+        const params = await containerOver({ sourceKey: output.file.sourceKey, fileIndex, readPriority });
         if (!params) return { kind: "needs-source" };
         if (isCurrent) params.isCurrent = isCurrent;
         if (signal) params.signal = signal;

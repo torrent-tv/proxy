@@ -1,5 +1,17 @@
 # Playback start forecast
 
+## Product requirement and calculation scope
+
+The goal is playback through the film without buffering interruptions. It does
+not require scheduling every remaining segment before playback can start.
+Precise calculation may be limited to upcoming playback, with a cheap
+aggregate estimate of later work when useful. The horizon and detail must be
+justified by measured playback reliability and computation cost. Resolving
+exact distant source ranges or downloading the whole file is not a startup
+requirement. The full-film scheduling described below records the audited
+implementation, not a required architecture (owner clarification, 2026-10-25,
+torrent-tv/meta#245).
+
 ## Audit scope and the calculation to retain
 
 The implementation described here was checked at proxy `230cdb3` (2.107.6)

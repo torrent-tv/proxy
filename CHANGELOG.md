@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.19
 
 - **Fix**: Stop playback readiness checks at an unmapped source range beyond the visible buffer and reserve.
 

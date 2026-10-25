@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.27
 
 - **Fix**: Exclude unfinished outputs the proxy cannot keep producing before reusing them for a viewer.
 

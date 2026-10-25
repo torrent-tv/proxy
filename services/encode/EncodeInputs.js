@@ -100,7 +100,8 @@ export class EncodeInputs {
     if (request.noted === state) return;
     request.noted = state;
     const serves = request.serves ?? request.from;
-    const rank = this.#rankAt(request.output, serves);
+    const rank = request.readPriority?.serves === serves
+      ? request.readPriority : this.#rankAt(request.output, serves);
     this.#log(`encode input #${request.from}..#${request.to} of ${request.output.outputKey ?? request.output.id}: ${state}` +
       ` (held ${this.held()} of ${this.#allowed} allowed; for #${serves}` +
       `${rank ? `, rank ${rank.rank} of ${rank.topRank}` : ""})${detail}`);
@@ -409,6 +410,7 @@ export class EncodeInputs {
   #prepare(request) {
     request.controller ??= new AbortController();
     request.pending = true;
+    request.readPriority = this.#readPriority(request, request.from, request.from);
     request.revision = this.#revision;
     request.memoryRevision = this.#memoryRevision;
     request.arrivedMeanwhile = null;
@@ -426,7 +428,7 @@ export class EncodeInputs {
       // viewer had seeked to waited 16.9 s behind it (r59, torrent-tv/meta#178).
       const resolved = await this.#resolveTimed(request.timing, request.output, request.from, request.from,
         () => this.#requests.get(request.key) === request && !request.controller.signal.aborted, request.controller.signal,
-        this.#readPriority(request, request.from, request.from));
+        request.readPriority);
       if (resolved.kind === "result") this.#original.set(request.output, resolved.sources?.every(source => source.input.original === true) === true);
       if (this.#requests.get(request.key) !== request) return;
       let result;
@@ -506,7 +508,8 @@ export class EncodeInputs {
   #readPriority(request, from, to) {
     const serves = request.serves ?? request.from;
     const rank = this.#rankAt(request.output, serves);
-    return { rank: Number.isFinite(rank?.rank) ? rank.rank : 0, serves, from, to };
+    return { rank: Number.isFinite(rank?.rank) ? rank.rank : 0, topRank: Number.isFinite(rank?.topRank) ? rank.topRank : 0,
+      serves, from, to };
   }
 
   /**

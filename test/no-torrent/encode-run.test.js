@@ -193,19 +193,44 @@ test("its speed is film made over its own working time, including for a one-piec
   assert.equal(run.speedX, 0, "nothing measured yet");
   const report = (seconds) => process_.stdout.emit("data", `out_time_ms=${seconds * 1_000_000}\n`);
   const closed = (name) => process_.stdio[3].emit("data", `${name}\n`);
-  report(0);
-  closed("early"); // The filename can arrive before the next progress report.
   // The input waits for the swarm for 30 s; that is not the run's work.
   run.inputWaitBegins();
   clock.at += 30_000;
-  run.inputWaitEnds();
   report(0.5);
+  run.inputWaitEnds();
   clock.at += 1000;
   report(4);
   closed("a");
   assert.equal(run.speedX, 3.5, "3.5 s of film over 1 s of work, excluding the input wait");
-  assert.deepEqual(closedPairs, [["early", null], ["a", null]], "completed pieces are published on their own");
+  assert.deepEqual(closedPairs, [["a", null]], "a completed piece is published on its own");
   assert.deepEqual(readings, [{ speed: 3.5, at: 32_000 }], "told once, with when");
+});
+
+test("one positive progress report measures a one-piece run after its input wait", () => {
+  const clock = { at: 1000 };
+  const process_ = new FakeProcess();
+  process_.stdout = new EventEmitter();
+  process_.stdio = [null, process_.stdout, null, new EventEmitter()];
+  const readings = [];
+  const closed = [];
+  const run = new EncodeRun({
+    address: "torrent:abc:fmt=fmp4:grid=kf@0:audio-only:a=0/aac",
+    encoder: new SoftwareEncoder(), from: 0, to: 0,
+    buildArgs: () => [], spawn: () => process_, logger: { info() {}, warn() {} },
+    now: () => clock.at, publishesAlone: true,
+    onSpeedMeasured: reading => readings.push(reading),
+    onClosed: name => { closed.push(name); return name; }
+  });
+  const report = seconds => process_.stdout.emit("data", `out_time_ms=${seconds * 1_000_000}\n`);
+  run.inputWaitBegins();
+  clock.at += 30_000;
+  process_.stdio[3].emit("data", "segment-00000.mp4\n");
+  run.inputWaitEnds();
+  clock.at += 2000;
+  report(4);
+  assert.equal(run.speedX, 2, "4 s of film over 2 s of active encoder work");
+  assert.deepEqual(closed, ["segment-00000.mp4"]);
+  assert.deepEqual(readings, [{ speed: 2, at: 33_000 }]);
 });
 
 test("a segment number behind its own start is not its to claim", () => {

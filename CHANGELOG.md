@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Measure encoder speed for one-segment runs from active work even when FFmpeg emits only one positive progress report, and keep source waits out of the playback estimate. Previously, that sole positive report became the baseline and left no interval to measure, so readiness remained blocked on an unavailable audio rate.
+
 ## 2.107.21
 
 - **Fix**: Measure encoder speed from active work when a run contains one segment, and keep source waits out of the playback estimate. A one-segment audio run had no measured encoder rate, so readiness used end-to-end media progress and counted the same source waits again; this projected thousands of seconds before playback.

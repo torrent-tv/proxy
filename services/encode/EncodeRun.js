@@ -187,8 +187,11 @@ export class EncodeRun {
   /** The film made and the run's own working time, as of the last progress report. */
   #workSample = null;
 
-  /** The work sample taken when this run last measured its speed. */
+  /** Baseline work sample for this run's next speed reading. */
   #pieceSample = null;
+
+  /** A closed, published piece is waiting for a usable progress sample. */
+  #speedMeasurementPending = false;
 
   /** @type {{ speed: number, at: number } | null} */
   #speedReading = null;
@@ -302,6 +305,7 @@ export class EncodeRun {
     this.progress = new RunProgress({ startSeconds, totalSeconds, now: this.now });
     /** Where this run's time went: its own work, or waiting, or stopped. */
     this.clock = new RunClock({ now: this.now });
+    this.#pieceSample = { at: this.now(), producedSeconds: 0, workingMs: 0 };
     this.onEnded = typeof onEnded === "function" ? onEnded : () => {};
     this.onProgress = typeof onProgress === "function" ? onProgress : () => {};
     this.onProduced = typeof onProduced === "function" ? onProduced : () => {};
@@ -338,9 +342,9 @@ export class EncodeRun {
   }
 
   /**
-   * This run's processing speed: film made over its own working time between
-   * two closed pieces, with the time its input waited and the time it was
-   * stopped taken out (`RunClock`). Zero until two pieces have closed.
+   * This run's processing speed: film made over its own working time since the
+   * last baseline, with the time its input waited and the time it was stopped
+   * taken out (`RunClock`). Zero until a closed piece has enough progress data.
    *
    * @returns {number}
    */
@@ -349,8 +353,8 @@ export class EncodeRun {
   }
 
   /**
-   * The same speed with the moment it was measured, or null before a second
-   * piece has closed.
+   * The same speed with the moment it was measured, or null before a closed
+   * piece has enough progress data.
    *
    * @returns {{ speed: number, at: number } | null}
    */
@@ -452,6 +456,16 @@ export class EncodeRun {
   /** An input read of this run has its bytes. */
   inputWaitEnds() {
     this.clock.inputWaitEnds();
+    if (this.#speedReading === null && this.#workSample !== null) {
+      // Progress made while an input read was waiting belongs to the wait, not
+      // to the encoder's rate. Start the first measurement from the latest
+      // progress known when the input resumes.
+      this.#pieceSample = {
+        ...this.#workSample,
+        at: this.now(),
+        workingMs: this.clock.workingMs()
+      };
+    }
   }
 
   /** @returns {boolean} Whether an input read of this run is waiting for bytes now. */
@@ -589,12 +603,7 @@ export class EncodeRun {
         producedSeconds: Math.max(0, this.progress.processedSeconds - this.progress.startPositionSeconds),
         workingMs: this.clock.workingMs(at)
       };
-      // A run can be admitted for exactly one segment. Establish its baseline
-      // on the first media progress report so closing that segment yields a
-      // processing rate without counting the preceding input wait.
-      if (this.#pieceSample === null && this.#workSample.producedSeconds > 0) {
-        this.#pieceSample = this.#workSample;
-      }
+      if (this.#speedMeasurementPending) this.#measureSpeed();
     }
     this.onProgress(this.progress.snapshot());
   }
@@ -688,7 +697,6 @@ export class EncodeRun {
   }
 
   #publishClosed(name, following = null, { quiet = false, tentative = false } = {}) {
-      if (!tentative) this.#measureSpeed();
       // ITS SERVED NAME, which is what whoever owns the disk gives it in answer.
       // ffmpeg writes a piece under a working name and reports that; the piece
       // becomes servable by being renamed, and everything below works in the
@@ -724,7 +732,8 @@ export class EncodeRun {
       }
 
       if (!served) return false;
-      if (tentative) this.#measureSpeed();
+      this.#speedMeasurementPending = true;
+      this.#measureSpeed();
       if (!this.#stopping) {
         this.#provenName = served;
       }
@@ -744,25 +753,22 @@ export class EncodeRun {
   }
 
   /**
-   * A closed piece is the moment this run's speed is read: what it made since
-   * the last reading, over its own working time. The first baseline is the
-   * first positive progress report, so a one-piece run can be measured without
-   * charging the wait for its first input bytes as processing. A stretch with
-   * no progress keeps the earlier sample, and the next reading spans both.
+   * A published piece is measured against this run's last baseline over its
+   * own working time. The initial baseline is the run start, advanced to the
+   * latest known progress when input resumes, so a one-piece run can be
+   * measured even when FFmpeg reports progress only once. Input waits remain
+   * excluded by RunClock.
    */
   #measureSpeed() {
     const sample = this.#workSample;
     if (sample === null) {
       return;
     }
-    if (this.#pieceSample === null) {
-      if (sample.producedSeconds > 0) this.#pieceSample = sample;
-      return;
-    }
     const speed = speedFromWork(this.#pieceSample, sample);
     if (speed !== null) {
       this.#speedReading = { speed, at: sample.at };
       this.#pieceSample = sample;
+      this.#speedMeasurementPending = false;
       this.onSpeedMeasured(this.speedReading);
     }
   }

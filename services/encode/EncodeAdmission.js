@@ -194,9 +194,10 @@ export class EncodeAdmission {
   }
 
   /**
-   * Whether a not-yet-opened format can take a place on the whole machine.
-   * The output choice calls this for each candidate rung; the final claim uses
-   * `admitsWatching` with the same arithmetic after registering the output.
+   * Whether an output candidate can take a place on the whole machine. A
+   * partial output already in the catalogue uses its measured cost; a
+   * not-yet-opened output uses the same candidate estimate as before. The final
+   * claim uses `admitsWatching` after registering the output.
    *
    * @param {object} spec
    * @param {object} file
@@ -216,7 +217,13 @@ export class EncodeAdmission {
     if (this.#heldWithoutRun().has(address)) {
       return { admitted: true, reason: "it already holds a place for another viewer", speedX: null };
     }
-    const load = this.#host.loadForCandidate?.(spec, file) ?? null;
+    // A partial output already in the catalogue has its measured rate. Use it
+    // before the candidate estimate; completed outputs took the return above.
+    const existing = this.#host.loadOf(address);
+    const hasMeasuredExistingCost = Number.isFinite(existing?.costSec) && existing.costSec > 0;
+    const load = hasMeasuredExistingCost
+      ? existing
+      : this.#host.loadForCandidate?.(spec, file) ?? existing;
     return this.#assessCandidate(address, load);
   }
 

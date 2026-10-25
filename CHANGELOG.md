@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.28
 
 - **Fix**: Stop obsolete ASF packet-window reads when the viewer changes time, so old interval reads cannot delay the current input.
 

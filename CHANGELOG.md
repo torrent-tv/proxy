@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.31
 
 - **Fix**: base playback readiness on the near viewer window instead of forecasting the remaining film.
 

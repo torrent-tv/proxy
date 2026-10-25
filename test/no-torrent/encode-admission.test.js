@@ -138,6 +138,13 @@ test("an output with no measured cost is not admitted", () => {
   assert.match(answer.reason, /no measured encoding cost/);
 });
 
+test("a reuse candidate uses the measured cost of its existing output", () => {
+  const { admission } = machine({ costs: { existing: PICTURE_1080 } });
+  const answer = admission.previewCandidate({ toKey: () => "existing" }, {});
+
+  assert.equal(answer.admitted, true);
+});
+
 test("an output already finished on disk remains reusable without a new encoder", () => {
   const { admission } = machine({ costs: {}, finished: ["complete"] });
   const answer = admission.previewCandidate({ toKey: () => "complete" }, {});

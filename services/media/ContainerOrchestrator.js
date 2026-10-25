@@ -32,6 +32,28 @@ import { logger } from "../../utils/logger.js";
  */
 export const CONTAINER_HEAD_BYTES = 256 * 1024;
 
+/** Higher urgency, earlier served time, then the smaller source interval. */
+function compareReadPriority(left, right) {
+  const leftRanked = Number.isFinite(left.readPriority?.rank) && left.readPriority.rank > 0;
+  const rightRanked = Number.isFinite(right.readPriority?.rank) && right.readPriority.rank > 0;
+  if (leftRanked !== rightRanked) return rightRanked - leftRanked;
+  if (!leftRanked) return left.sequence - right.sequence;
+  const leftRank = left.readPriority.rank;
+  const rightRank = right.readPriority.rank;
+  if (leftRank !== rightRank) return rightRank - leftRank;
+  const leftServes = Number.isFinite(left.readPriority?.serves) ? left.readPriority.serves : Number.POSITIVE_INFINITY;
+  const rightServes = Number.isFinite(right.readPriority?.serves) ? right.readPriority.serves : Number.POSITIVE_INFINITY;
+  if (leftServes !== rightServes) return leftServes - rightServes;
+  const leftSpan = Number.isFinite(left.readPriority?.from) && Number.isFinite(left.readPriority?.to)
+    ? Math.max(0, left.readPriority.to - left.readPriority.from) : Number.POSITIVE_INFINITY;
+  const rightSpan = Number.isFinite(right.readPriority?.from) && Number.isFinite(right.readPriority?.to)
+    ? Math.max(0, right.readPriority.to - right.readPriority.from) : Number.POSITIVE_INFINITY;
+  if (leftSpan !== rightSpan) return leftSpan - rightSpan;
+  const leftFrom = Number.isFinite(left.readPriority?.from) ? left.readPriority.from : Number.POSITIVE_INFINITY;
+  const rightFrom = Number.isFinite(right.readPriority?.from) ? right.readPriority.from : Number.POSITIVE_INFINITY;
+  return leftFrom - rightFrom || left.sequence - right.sequence;
+}
+
 /**
  * The size of the file and its OpenSubtitles hash, from the two edges. Nothing
  * partial is kept: an edge that has not arrived is named instead.
@@ -101,6 +123,7 @@ export class ContainerOrchestrator {
   #lifetimes = new Map();
   #activityEpoch = 0;
   #activeReads = 0;
+  #readSequence = 0;
 
   activity() { return { epoch: this.#activityEpoch, active: this.#activeReads > 0 }; }
   constructor() {
@@ -147,9 +170,11 @@ export class ContainerOrchestrator {
     let lifetime = this.#lifetimes.get(key);
     if (!lifetime) this.#lifetimes.set(key, lifetime = {});
     const isCurrent = () => this.#lifetimes.get(key) === lifetime && params.isCurrent?.() !== false && params.signal?.aborted !== true;
-    // Reads of one file run one after another, so an answer can wait for every
-    // read asked before it. Told to whoever asked, apart from the read itself,
-    // because the two call for different remedies (torrent-tv/meta#166).
+    // Reads of one file run one after another, ordered by playback-map urgency
+    // and then by interval size, so speculative extensions cannot sit ahead of
+    // an exact interval the viewer needs. Told to whoever asked, apart from
+    // the read itself, because the two call for different remedies
+    // (torrent-tv/meta#166, #ttv-245).
     // A statement answered from what was already read reads and parses
     // nothing, so it is answered beside the queue and holds nobody up: the
     // picture's first input of an AVI waited about 4 s behind the sound's
@@ -159,9 +184,8 @@ export class ContainerOrchestrator {
     // index. Keep it serial with other chapter reads, but out of the queue used
     // to prepare playback inputs for this file.
     const queueKey = statement === "chapters" ? `${key}:chapters` : key;
-    const previous = aside ? Promise.resolve() : this.#reads.get(queueKey) ?? Promise.resolve();
     const askedAt = performance.now();
-    const reading = previous.catch(() => undefined).then(async () => {
+    const perform = async () => {
       if (!isCurrent()) return { result: { kind: "terminal", reason: "request-obsolete", requestId: params.requestId } };
       const startedAt = performance.now();
       const revision = params.onReadStart?.(statement);
@@ -171,18 +195,70 @@ export class ContainerOrchestrator {
       params.onObserved?.({ statement, askedAt, startedAt, endedAt, queuedMs: startedAt - askedAt,
         readMs: endedAt - startedAt, cached: aside, result: result.kind, reason: result.reason, ranges: result.ranges });
       return { result, revision };
+    };
+    const reading = aside ? Promise.resolve().then(perform) : this.#queueRead(queueKey, { params, isCurrent, perform });
+    const { result, revision } = await reading;
+    if (!isCurrent()) return { kind: "terminal", reason: "request-obsolete", requestId: params.requestId };
+    if (result.kind === "needs-ranges") params.onNeedsRanges?.(result);
+    if (statement === "tracks" && result.kind === "result") params.onTracks?.(result.value);
+    await params.onReadResult?.(statement, result, revision);
+    return result;
+  }
+
+  /** Run one media read at a time per file, in the map's order of urgency. */
+  #queueRead(key, { params, isCurrent, perform }) {
+    let queue = this.#reads.get(key);
+    if (!queue) this.#reads.set(key, queue = { active: false, pending: [] });
+    return new Promise((resolve, reject) => {
+      const entry = { params, isCurrent, perform, resolve, reject, sequence: this.#readSequence++, started: false,
+        abort: null };
+      const cancel = () => {
+        if (entry.started) return;
+        const index = queue.pending.indexOf(entry);
+        if (index < 0) return;
+        queue.pending.splice(index, 1);
+        params.signal?.removeEventListener("abort", entry.abort);
+        resolve({ result: { kind: "terminal", reason: "request-obsolete", requestId: params.requestId } });
+        this.#drainReadQueue(key, queue);
+      };
+      entry.abort = cancel;
+      queue.pending.push(entry);
+      queue.pending.sort(compareReadPriority);
+      if (params.signal?.aborted) cancel();
+      else params.signal?.addEventListener("abort", cancel, { once: true });
+      this.#drainReadQueue(key, queue);
     });
-    if (!aside) this.#reads.set(queueKey, reading);
-    try {
-      const { result, revision } = await reading;
-      if (!isCurrent()) return { kind: "terminal", reason: "request-obsolete", requestId: params.requestId };
-      if (result.kind === "needs-ranges") params.onNeedsRanges?.(result);
-      if (statement === "tracks" && result.kind === "result") params.onTracks?.(result.value);
-      await params.onReadResult?.(statement, result, revision);
-      return result;
-    } finally {
-      if (this.#reads.get(queueKey) === reading) this.#reads.delete(queueKey);
+  }
+
+  #drainReadQueue(key, queue) {
+    if (queue.active) return;
+    while (queue.pending.length > 0) {
+      const entry = queue.pending.shift();
+      entry.params.signal?.removeEventListener("abort", entry.abort);
+      if (!entry.isCurrent()) {
+        entry.resolve({ result: { kind: "terminal", reason: "request-obsolete", requestId: entry.params.requestId } });
+        continue;
+      }
+      entry.started = true;
+      queue.active = true;
+      Promise.resolve().then(entry.perform).then(entry.resolve, entry.reject).finally(() => {
+        queue.active = false;
+        if (queue.pending.length === 0 && this.#reads.get(key) === queue) this.#reads.delete(key);
+        else this.#drainReadQueue(key, queue);
+      });
+      return;
     }
+    if (this.#reads.get(key) === queue) this.#reads.delete(key);
+  }
+
+  #cancelQueuedReads(key) {
+    const queue = this.#reads.get(key);
+    if (!queue) return;
+    for (const entry of queue.pending.splice(0)) {
+      entry.params.signal?.removeEventListener("abort", entry.abort);
+      entry.resolve({ result: { kind: "terminal", reason: "request-obsolete", requestId: entry.params.requestId } });
+    }
+    if (this.#reads.get(key) === queue) this.#reads.delete(key);
   }
 
   /** Whether a statement of this file is answered from what was already read: its track table kept here, or the container's word. */
@@ -380,7 +456,8 @@ export class ContainerOrchestrator {
     for (const key of this.#lifetimes.keys()) {
       if (fileIndex === undefined ? key.startsWith(prefix) : key === `${sourceKey}:${fileIndex}`) {
         this.#lifetimes.delete(key);
-        this.#reads.delete(key);
+        this.#cancelQueuedReads(key);
+        this.#cancelQueuedReads(`${key}:chapters`);
       }
     }
     if (fileIndex === undefined) {

@@ -1,5 +1,6 @@
 ## 2.107.29
 
+- **Fix**: prioritize exact playback input reads over speculative input extensions in the per-file media read queue.
 - **Fix**: Abort an obsolete ASF range read while it waits for bytes, so a seek can start its own read without waiting for the old request.
 
 ## 2.107.28

@@ -55,6 +55,72 @@ test("a track table already kept is answered beside the queue too", async () => 
   await sound;
 });
 
+test("an exact playback input runs before a speculative extension at the same urgency", async () => {
+  let releaseActive;
+  let activeStarted;
+  const activeGate = new Promise(resolve => { releaseActive = resolve; });
+  const started = new Promise(resolve => { activeStarted = resolve; });
+  const order = [];
+  const container = {
+    readPacketIndex: async interval => {
+      order.push(interval.name);
+      if (interval.name === "active") {
+        activeStarted();
+        await activeGate;
+      }
+      return { prepareAudioDependencies: async () => {} };
+    }
+  };
+  const orchestrator = new ContainerOrchestrator();
+  orchestrator.cache.set("film:0", container);
+  const active = orchestrator.inspect({ ...params, packetInterval: { from: 0, to: 0, name: "active" } }, "packets");
+  await started;
+  const extension = orchestrator.inspect({ ...params, packetInterval: { from: 10, to: 20, name: "extension" },
+    readPriority: { rank: 100, serves: 10, from: 10, to: 20 } }, "packets");
+  const exact = orchestrator.inspect({ ...params, packetInterval: { from: 10, to: 10, name: "exact" },
+    readPriority: { rank: 100, serves: 10, from: 10, to: 10 } }, "packets");
+  const lowerRank = orchestrator.inspect({ ...params, packetInterval: { from: 5, to: 5, name: "lower-rank" },
+    readPriority: { rank: 99, serves: 5, from: 5, to: 5 } }, "packets");
+  releaseActive();
+  await Promise.all([active, extension, exact, lowerRank]);
+  assert.deepEqual(order, ["active", "exact", "extension", "lower-rank"]);
+});
+
+test("a withdrawn queued media read is removed before the next urgent read", async () => {
+  let releaseActive;
+  let activeStarted;
+  const activeGate = new Promise(resolve => { releaseActive = resolve; });
+  const started = new Promise(resolve => { activeStarted = resolve; });
+  const order = [];
+  const container = {
+    readPacketIndex: async interval => {
+      order.push(interval.name);
+      if (interval.name === "active") {
+        activeStarted();
+        await activeGate;
+      }
+      return { prepareAudioDependencies: async () => {} };
+    }
+  };
+  const orchestrator = new ContainerOrchestrator();
+  orchestrator.cache.set("film:0", container);
+  const active = orchestrator.inspect({ ...params, packetInterval: { from: 0, to: 0, name: "active" } }, "packets");
+  await started;
+  const controller = new AbortController();
+  const withdrawn = orchestrator.inspect({ ...params, signal: controller.signal,
+    packetInterval: { from: 1, to: 2, name: "withdrawn" },
+    readPriority: { rank: 100, serves: 1, from: 1, to: 2 } }, "packets");
+  controller.abort();
+  const urgent = orchestrator.inspect({ ...params, packetInterval: { from: 3, to: 3, name: "urgent" },
+    readPriority: { rank: 100, serves: 3, from: 3, to: 3 } }, "packets");
+  releaseActive();
+  const [activeResult, withdrawnResult, urgentResult] = await Promise.all([active, withdrawn, urgent]);
+  assert.equal(activeResult.kind, "result");
+  assert.equal(withdrawnResult.reason, "request-obsolete");
+  assert.equal(urgentResult.kind, "result");
+  assert.deepEqual(order, ["active", "urgent"]);
+});
+
 /** A short AVI, written to a file: its sizes are filled in only when the muxer can seek back. */
 function avi() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ttv178-aside-"));

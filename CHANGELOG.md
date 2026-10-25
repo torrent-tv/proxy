@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Stop playback readiness checks at an unmapped source range beyond the visible buffer and reserve.
+
 ## 2.107.18
 
 - **Fix**: Allow playback readiness to finish at the exact mapped near window when later source ranges have not been requested yet.

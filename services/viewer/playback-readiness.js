@@ -301,7 +301,7 @@ export function predictPlaybackReadiness(input = {}) {
     return result(false, null, buffered, reserve, null, "link-rate-unavailable", 0);
   }
 
-  const preparedSegments = trackState.reduce((sum, { ready, segments, tail }) =>
+  let preparedSegments = trackState.reduce((sum, { ready, segments, tail }) =>
     sum + segments.filter((segment) => ready.has(segment.index)).length +
     tail.filter((segment) => ready.has(segment.index)).length, 0);
   const jobs = [];
@@ -309,6 +309,7 @@ export function predictPlaybackReadiness(input = {}) {
   for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
     const state = trackState[trackIndex];
     const { track, segments } = state;
+    const safeThrough = position + finiteNonNegative(input.bufferedAheadSeconds) + reserve;
     const processingCoverage = numericCoverage((Array.isArray(track.processingRanges) ? track.processingRanges : [])
       .filter(range => Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.end > range.start));
     const measuredBitsPerMediaSecond = state.bitsPerMediaSecond;
@@ -344,6 +345,7 @@ export function predictPlaybackReadiness(input = {}) {
       const encodeWork = produced ? 0 : remainingProcessing.reduce((sum, part) => sum + part.end - part.start, 0);
 
       let sourceByteIntervals = NO_SOURCE_BYTES;
+      let deferredAtBoundary = false;
       if (!produced && encodeWork > 0) {
         // Each source the piece reads, in order and once: the track's own, then
         // those its inputs name. Gathered with loops and no copies, because
@@ -362,6 +364,15 @@ export function predictPlaybackReadiness(input = {}) {
           } else if (source.source.complete !== true) {
             const ranges = exactInputs ? inputRangesOf(exactInputs, sourceId) : null;
             if (ranges === null) {
+              if (segment.startSeconds + state.clockSeconds > safeThrough) {
+                // Its source ranges lie beyond the browser's held buffer and
+                // reserve. The playback map will request them as the viewer
+                // advances; continuing to demand them here prevents startup.
+                state.segments = state.segments.slice(0, state.segments.indexOf(segment));
+                state.tail = [];
+                deferredAtBoundary = true;
+                break;
+              }
               if (unknownReason === null) {
                 unknownReason = "source-input-ranges-unavailable";
                 unavailableSource = { sourceId, trackId: track.id, segmentIndex: segment.index, phase: "near" };
@@ -373,6 +384,7 @@ export function predictPlaybackReadiness(input = {}) {
           }
         }
       }
+      if (deferredAtBoundary) break;
       if (!produced && encodeWork > 0 && !state.curve) {
         unknownReason ??= "encode-rate-unavailable";
       }
@@ -388,6 +400,10 @@ export function predictPlaybackReadiness(input = {}) {
       });
     }
   }
+
+  preparedSegments = trackState.reduce((sum, { ready, segments, tail }) =>
+    sum + segments.filter((segment) => ready.has(segment.index)).length +
+    tail.filter((segment) => ready.has(segment.index)).length, 0);
 
   if (unknownReason) {
     return { ...result(false, null, buffered, reserve, null, unknownReason, preparedSegments),

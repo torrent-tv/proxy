@@ -12,9 +12,6 @@ function randomFrom(seed) {
   };
 }
 
-/** A torrent piece's length: the near window waits for whole pieces, the tail counts bytes. */
-const PIECE_BYTES = 262_144;
-
 function summaryOf(value, now) {
   const trend = new RateTrend();
   trend.add(now - 2000, value);
@@ -75,7 +72,7 @@ function film(random, { lookaheadSeconds = 120, tracks: trackCount = 1 + Math.fl
   };
 }
 
-test("a piece far ahead with no planned arrival is supplied at the measured rate, not left unknown", () => {
+test("near input without a planned arrival uses measured source service", () => {
   const { input } = film(randomFrom(7), { tracks: 1 });
   input.sources[0].residence = [];
   const answer = predictPlaybackReadiness(input);
@@ -86,65 +83,4 @@ test("a piece far ahead with no planned arrival is supplied at the measured rate
   assert.equal(stopped.reason, "service-not-advancing");
   assert.equal(stopped.delaySeconds, null);
   assert.ok(stopped.unavailableSource, "the answer names the source it waits for");
-});
-
-test("the aggregate suffix uses measured source service without tracing its segments", () => {
-  const now = 1_000_000;
-  const piece = 6, count = 800, duration = piece * count, position = 0;
-  const bytesPerSecond = 4_700_000;
-  const byteAt = (seconds) => Math.round(seconds * bytesPerSecond);
-  const answer = predictPlaybackReadiness({
-    now, positionSeconds: position, durationSeconds: duration, bufferedAheadSeconds: 0, reserveSeconds: 0,
-    lookaheadSeconds: 120,
-    sources: [{ id: "source", complete: false, fileOffset: 0, fileLength: byteAt(duration), pieceLength: PIECE_BYTES,
-      residence: [], downloadForecast: { ranges: [] }, downloadRateReadings: summaryOf(bytesPerSecond * 0.99, now) }],
-    tracks: [{
-      id: "video", sourceIds: ["source"], processedSeconds: 0, startupRemainingSeconds: 0, openSeconds: 0,
-      bitsPerMediaSecond: 8_000_000, readings: summaryOf(92, now),
-      segments: Array.from({ length: count }, (_, place) => ({
-        index: place, startSeconds: place * piece, endSeconds: (place + 1) * piece,
-        sourceInputs: [{ sourceId: "source", ranges: [{ start: byteAt(place * piece), end: byteAt((place + 1) * piece) }] }]
-      })),
-      readySegmentIndices: [], segmentSizesBytes: new Map()
-    }],
-    linkReadings: summaryOf(1_000_000_000, now)
-  });
-  assert.equal(answer.reason, "minimum-safe-delay");
-  assert.ok(answer.delaySeconds > 0, `${answer.delaySeconds} seconds`);
-  assert.ok(answer.delaySeconds < duration, `${answer.delaySeconds} against ${duration}`);
-});
-
-test("an exact queue arrival beyond the near window does not replace the aggregate estimate", () => {
-  const now = 1_000_000;
-  const piece = 6, count = 100, duration = piece * count;
-  const bytesPerSecond = 1_000_000;
-  const byteAt = (seconds) => Math.round(seconds * bytesPerSecond);
-  const input = (ranges, rate) => ({
-    now, positionSeconds: 0, durationSeconds: duration, bufferedAheadSeconds: 0, reserveSeconds: 0,
-    lookaheadSeconds: 120,
-    sources: [{ id: "source", complete: false, fileOffset: 0, fileLength: byteAt(duration), pieceLength: PIECE_BYTES,
-      residence: [], downloadForecast: { ranges }, downloadRateReadings: summaryOf(rate, now) }],
-    tracks: [{
-      id: "video", sourceIds: ["source"], processedSeconds: 0, startupRemainingSeconds: 0, openSeconds: 0,
-      bitsPerMediaSecond: 8_000_000, readings: summaryOf(50, now),
-      segments: Array.from({ length: count }, (_, place) => ({
-        index: place, startSeconds: place * piece, endSeconds: (place + 1) * piece,
-        sourceInputs: [{ sourceId: "source", ranges: [{ start: byteAt(place * piece), end: byteAt((place + 1) * piece) }] }]
-      })),
-      readySegmentIndices: [], segmentSizesBytes: new Map()
-    }],
-    linkReadings: summaryOf(1_000_000_000, now)
-  });
-  // The piece at 300 s is beyond the exact near window. Its individual queue
-  // arrival is not used as the suffix estimate.
-  const queued = predictPlaybackReadiness(input([{ start: byteAt(300), end: byteAt(306), availableAt: now + 5_000_000 }],
-    bytesPerSecond * 4));
-  assert.ok(queued.delaySeconds < 5000, `${queued.delaySeconds} seconds`);
-  assert.notEqual(queued.holdingBy?.segment, 50);
-  assert.notEqual(queued.holdingBy?.sourcePlanned, true);
-  // A slower aggregate rate still increases the estimated delay.
-  const measured = predictPlaybackReadiness(input([], bytesPerSecond / 2));
-  assert.ok(Number.isFinite(measured.delaySeconds));
-  assert.ok(measured.delaySeconds > queued.delaySeconds,
-    `${measured.delaySeconds} against ${queued.delaySeconds}`);
 });

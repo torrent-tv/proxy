@@ -157,16 +157,17 @@ export function predictPlaybackReadiness(input = {}) {
   // starts), the read piece nearest before them (what an unread piece is placed
   // by) and read pieces inside what the page reports holding (their frames).
   //
-  // THE NEAR WINDOW AND THE SUFFIX. The look-ahead is scheduled with exact
-  // segment times and source ranges when known. Missing range metadata is priced
-  // from aggregate file density and measured download service without claiming
-  // an address or byte. Beyond the look-ahead, {@link scheduleTail} estimates
-  // remaining source, encoder and delivery work without visiting every segment.
+  // THE NEAR WINDOW. The look-ahead is scheduled with exact segment times and
+  // source ranges when known. Missing range metadata is priced from aggregate
+  // file density and measured download service without claiming an address or
+  // byte. This forecast decides whether playback can start from work near the
+  // viewer; it does not make the first frame wait on an aggregate estimate of
+  // the whole remaining film. Each later poll advances this same window.
   const lookahead = finiteNonNegative(input.lookaheadSeconds);
   const horizonEnd = lookahead > 0 ? finiteNonNegative(input.positionSeconds) + lookahead : Number.POSITIVE_INFINITY;
   const tracks = (Array.isArray(input.tracks) ? input.tracks : []).map((track) =>
-    Array.isArray(track.segments) ? { ...track, segmentCount: track.segmentCount ?? track.segments.length,
-      segments: piecesThatMatter(track, finiteNonNegative(input.positionSeconds), horizonEnd) } : track);
+    Array.isArray(track.segments)
+      ? { ...track, segments: piecesThatMatter(track, finiteNonNegative(input.positionSeconds), horizonEnd) } : track);
   const duration = finiteNonNegative(input.durationSeconds);
   // Each track's served ticks are placed on the clock the page reports by the
   // offset its player applied (`timestampOffset`).
@@ -237,25 +238,11 @@ export function predictPlaybackReadiness(input = {}) {
       .filter((segment) => isPiece(segment) &&
         segment.endSeconds >= position - PLAYER_SEEK_TOLERANCE_SECONDS && segment.startSeconds < horizonEnd)
       .sort((left, right) => left.startSeconds - right.startSeconds || left.index - right.index),
-    // The pieces after the near window, as the playlist cuts them, and the
-    // offset the page's player placed them by.
-    tail: [],
-    tailStartSeconds: horizonEnd,
     durationSeconds: Number.isFinite(track.durationSeconds) ? track.durationSeconds : duration,
-    segmentCount: Number.isSafeInteger(track.segmentCount) ? track.segmentCount
-      : Math.max(0, ...track.segments.map(segment => segment.index + 1)),
     clockSeconds: Number.isFinite(track.clockOffsetSeconds) ? track.clockOffsetSeconds : 0
   }));
   for (const state of trackState) {
-    state.tailEndSeconds = Number.isFinite(horizonEnd) && horizonEnd < duration
-      ? Math.min(duration, state.durationSeconds + state.clockSeconds) : null;
-    const endIndex = state.segments.reduce((last, segment) => segment.startSeconds < horizonEnd
-      ? Math.max(last, segment.index) : last, -1);
-    state.tailSegmentCount = Math.max(0, state.segmentCount - endIndex - 1);
-    const readyTail = [...state.ready].reduce((count, index) => count + Number(index > endIndex), 0);
-    state.tailWorkFraction = state.tailSegmentCount > 0
-      ? Math.max(0, 1 - Math.min(state.tailSegmentCount, readyTail) / state.tailSegmentCount)
-      : 0;
+    state.trackEndSeconds = Math.min(duration, state.durationSeconds + state.clockSeconds);
   }
   if (trackState.some(({ segments }) => segments.length === 0)) {
     return result(false, null, buffered, reserve, null, "timeline-unavailable", 0);
@@ -604,19 +591,10 @@ export function predictPlaybackReadiness(input = {}) {
       // Supply interruption coverage is stock held by the proxy as well as
       // the browser. It is not a browser buffer-size admission rule.
       // The reserve is bounded by what is left of the track, not of the window.
-      const left = state.tailEndSeconds === null ? secondsAhead(trackEnd, before)
-        : Math.max(0, state.tailEndSeconds - toSeconds(before));
+      const left = Math.max(0, state.trackEndSeconds - toSeconds(before));
       const ahead = Math.max(0, secondsAhead(before, at) - Math.min(reserve, left) * Number(production.requiresSource));
       constrain(production.at - ahead, "production", trackIndex, production.segment.index, production.at, ahead,
         production.requiresSource, production.sourceArrivalAt, production.sourcePlanned);
-    }
-  }
-  if (trackState.some(({ tailEndSeconds }) => Number.isFinite(tailEndSeconds))) {
-    const stop = scheduleTail({ trackState, sourceState, sourceByteCoverage, runStarts, trackFinish,
-      link, position, buffered, reserve, transferFinish, constrain, duration });
-    if (stop) {
-      return { ...result(false, null, buffered, reserve, null, stop.reason, preparedSegments),
-        ...(stop.unavailableSource ? { unavailableSource: stop.unavailableSource } : {}) };
     }
   }
   const firstRequiredStages = trackState.slice(0, requiredTracks).map((state, trackIndex) => {
@@ -681,93 +659,6 @@ export function predictPlaybackReadiness(input = {}) {
 function isPiece(segment) {
   return Number.isInteger(segment?.index) && Number.isFinite(segment?.startSeconds) &&
     Number.isFinite(segment?.endSeconds) && segment.endSeconds > segment.startSeconds;
-}
-
-/**
- * A duration-level estimate of the suffix after the exact near window. Source
- * work uses each file's aggregate byte density and measured download service;
- * processing uses each track's measured rate; delivery uses output bitrates and
- * measured link service. Held source bytes and made segments reduce the
- * estimate. This conditional forecast does not assert exact source ranges or
- * individual frame timing. Its work is bounded by sources and tracks, not by
- * the film's segment count.
- *
- * @returns {{ reason: string, unavailableSource?: object } | null} Why there is no answer, or null.
- */
-function scheduleTail({ trackState, sourceState, sourceByteCoverage, runStarts, trackFinish, link,
-  position, buffered, reserve, transferFinish, constrain, duration }) {
-  const tailStart = Math.max(position, ...trackState.map(state => state.tailStartSeconds));
-  if (!Number.isFinite(tailStart)) return null;
-  const sourceDurations = new Map();
-  for (const state of trackState) {
-    const seconds = Math.max(0, state.tailEndSeconds - tailStart) * state.tailWorkFraction;
-    if (!(seconds > 0)) continue;
-    for (const sourceId of new Set(state.track.sourceIds ?? [])) {
-      sourceDurations.set(sourceId, Math.max(sourceDurations.get(sourceId) ?? 0, seconds));
-    }
-  }
-
-  let sourceArrivalAt = 0;
-  for (const [sourceId, seconds] of sourceDurations) {
-    const source = sourceState.get(sourceId);
-    if (!source) return { reason: "source-measurement-unavailable" };
-    if (source.source.complete === true) continue;
-    const bytes = estimateUnmappedSourceBytes(source.source, seconds, duration,
-      sourceByteCoverage.get(sourceId));
-    if (bytes === null) return { reason: "source-measurement-unavailable",
-      unavailableSource: { sourceId, phase: "tail" } };
-    if (!(bytes > 0)) continue;
-    const { service } = source;
-    if (!service.rate || !(service.rate.rateAt(0) > 0)) {
-      return { reason: service.rate ? "service-not-advancing" : "download-rate-unavailable",
-        unavailableSource: { sourceId, estimatedBytes: bytes, phase: "tail" } };
-    }
-    service.finish = service.rate.finish(bytes, service.finish);
-    sourceArrivalAt = Math.max(sourceArrivalAt, service.finish);
-    const state = trackState.find(candidate => candidate.track.sourceIds?.includes(sourceId));
-    const index = state?.segments.at(-1)?.index ?? 0;
-    const ahead = Math.max(0, (state?.tailEndSeconds ?? tailStart) - position);
-    constrain(service.finish - Math.max(0, ahead - reserve), "source", trackState.indexOf(state), index,
-      service.finish, ahead, true, service.finish, false);
-  }
-
-  let outputBits = 0;
-  let latestTrackFinish = 0;
-  for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
-    const state = trackState[trackIndex];
-    const end = state.tailEndSeconds;
-    const seconds = Math.max(0, end - tailStart);
-    if (!(seconds > 0)) continue;
-    const track = state.track;
-    const segment = state.segments.at(-1) ?? { index: 0 };
-    const remaining = seconds * state.tailWorkFraction;
-    const work = Math.max(0, remaining - numericCoverage((track.processingRanges ?? [])
-      .filter(range => Number.isFinite(range?.start) && Number.isFinite(range?.end))
-      .map(range => ({ start: Math.max(tailStart, range.start), end: Math.min(end, range.end) }))
-      .filter(range => range.end > range.start)).reduce((sum, range) => sum + range.end - range.start, 0));
-    const processing = state.curve;
-    if (work > 0 && !processing) return { reason: "encode-rate-unavailable" };
-    const run = runStarts[trackIndex];
-    const localStart = tailStart - state.clockSeconds;
-    const inRun = run.spans.some(span => localStart >= span.start && localStart < span.end);
-    const open = work > 0 && !inRun ? run.openSeconds : 0;
-    const finishedAt = work > 0 ? processing.finish(work, trackFinish[trackIndex] + open) : trackFinish[trackIndex];
-    latestTrackFinish = Math.max(latestTrackFinish, finishedAt);
-    const deliveryStart = Math.max(tailStart, position + buffered);
-    outputBits += Math.max(0, state.bitsPerMediaSecond) * Math.max(0, end - deliveryStart);
-    const ahead = Math.max(0, end - position);
-    constrain(finishedAt - Math.max(0, ahead - reserve), "production", trackIndex, segment.index,
-      finishedAt, ahead, sourceArrivalAt > 0, sourceArrivalAt, false);
-  }
-
-  if (outputBits > 0) {
-    const end = Math.max(...trackState.map(state => state.tailEndSeconds));
-    const completedAt = link.finish(outputBits, Math.max(transferFinish, latestTrackFinish));
-    const ahead = Math.max(0, end - position);
-    constrain(completedAt - Math.max(0, ahead - reserve), "delivery", 0,
-      trackState[0]?.segments.at(-1)?.index ?? 0, completedAt, ahead, false, sourceArrivalAt, false);
-  }
-  return null;
 }
 
 /**
@@ -1075,7 +966,7 @@ function numericCoverage(ranges) {
 /**
  * Estimate download work without claiming an address or held byte. The whole
  * file's measured density, reduced by the held fraction, prices unresolved
- * intervals and the aggregate suffix.
+ * intervals in the near window.
  */
 function estimateUnmappedSourceBytes(source, mediaSeconds, durationSeconds, coverage = null) {
   const fileLength = Number(source.fileLength);

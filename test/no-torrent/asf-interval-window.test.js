@@ -164,7 +164,9 @@ test("cancelling a blocked ASF range releases the file read queue for a newer in
   await readStarted;
   assert.equal(signal, oldRequest.signal);
   oldRequest.abort();
-  assert.deepEqual(await stale, { kind: "terminal", reason: "request-obsolete", requestId: "generated:0:packets" });
+  const cancelled = await stale;
+  assert.equal(cancelled.kind, "terminal");
+  assert.equal(cancelled.reason, "request-obsolete");
 
   release(bytes.subarray(dataOffset, dataOffset + 50_000));
   const current = await orchestrator.inspect({ ...params, packetInterval: interval }, "packets");

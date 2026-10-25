@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.21
 
 - **Fix**: Measure encoder speed from active work when a run contains one segment, and keep source waits out of the playback estimate. A one-segment audio run had no measured encoder rate, so readiness used end-to-end media progress and counted the same source waits again; this projected thousands of seconds before playback.
 

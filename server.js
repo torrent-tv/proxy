@@ -73,7 +73,6 @@ import { nativeSourceMap, nativeOriginalSourceMap } from "./services/viewer/Nati
 import { MediaReadRequests } from "./services/media/MediaReadRequests.js";
 import { SegmentInputs } from "./services/media/SegmentInputs.js";
 import { directSegmentInput } from "./services/media/direct-segment-input.js";
-import { piecesRunPastEnd } from "./services/encode/output/Timeline.js";
 import { ContainerTrack } from "./services/media/tracks/ContainerTrack.js";
 import { pauseCoefficient, viewerStartsOn } from "./services/viewer/PriorityMap.js";
 import { coalescing } from "./utils/coalesce.js";
@@ -717,9 +716,9 @@ export async function startProxyServer({
         const revision = outputParts.segmentStore.revisionOf(output.outputKey);
         const links = consumers.map(viewer => viewer.linkReading()?.linkMbps)
           .filter(value => Number.isFinite(value) && value > 0);
-        // A piece copying a stream answers for the second its end falls in,
-        // as the encode plan reads it (`piecesRunPastEnd`).
-        played.push({ outputKey: output.outputKey, grid, runsPastEnd: piecesRunPastEnd(output.spec),
+        // Every piece answers for its exact ending boundary, as the encode
+        // plan reads it: the player may request the preceding piece there.
+        played.push({ outputKey: output.outputKey, grid,
           encodeSpeed: outputParts.encodeCost.latestSpeedReadingOf(output)?.speed,
           bytesPerSecond: bytesPerSecondOf(output, revision), linkMbps: links.length ? Math.min(...links) : null,
           readyRevision: revision, ready: () => outputParts.segmentStore.sizesOf(output.outputKey),

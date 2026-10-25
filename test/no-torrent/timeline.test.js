@@ -11,8 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { piecesRunPastEnd, Timeline, Timelines } from "../../services/encode/output/Timeline.js";
-import { outputSpec } from "./helpers/output-spec.js";
+import { Timeline, Timelines } from "../../services/encode/output/Timeline.js";
 import { PacketIndex } from "../../services/media/container/PacketIndex.js";
 import { mapForViewer, mergeMaps } from "../../services/viewer/PriorityMap.js";
 
@@ -128,30 +127,14 @@ test("a timeline nobody holds is dropped", () => {
   assert.equal(timelines.size, 1);
 });
 
-test("a copied piece is wanted by the second its end falls in, because a copy runs past its end", () => {
-  // MP3 copied out of an AVI on a 4 s grid ended up to 24 ms past each cut, and
-  // the player placed the next piece there: a viewer at 8 s asked for the piece
-  // ending at 8 s (field 2026-10-09, torrent-tv/meta#159).
+test("the piece ending at an exact boundary is wanted alongside the next piece", () => {
+  // hls.js may first request the piece whose end is the seek target. Both
+  // pieces are demanded at the boundary so the encoder can satisfy that
+  // request before it moves on to the piece beginning there.
   const timeline = new Timeline({ boundaries: [0, 4, 8, 12], cutGrid: "uniform" });
   const map = yielded(8);
   assert.deepEqual(timeline.inSegments(map, 3), [
-    { from: 0, to: 1, priority: 1, withinSeconds: Number.POSITIVE_INFINITY, urgent: false, behind: true },
-    { from: 2, to: 2, priority: 100, withinSeconds: 0, urgent: false, behind: false }
-  ]);
-  assert.deepEqual(timeline.inSegments(map, 3, { runsPastEnd: true }), [
     { from: 0, to: 0, priority: 1, withinSeconds: Number.POSITIVE_INFINITY, urgent: false, behind: true },
     { from: 1, to: 2, priority: 100, withinSeconds: 0, urgent: false, behind: false }
   ]);
-});
-
-test("a copied picture's pieces run past their end, as a soundtrack's do however it is made", () => {
-  // Field r43: a seek to 1000.000 s, the published start of a copied Matroska
-  // picture's piece #96, asked for #95 on both tracks (torrent-tv/meta#178).
-  assert.equal(piecesRunPastEnd(outputSpec({ transcodeVideo: false, transcodeAudio: true })), true, "a copied picture");
-  assert.equal(piecesRunPastEnd(outputSpec({ transcodeVideo: true, transcodeAudio: false })), true, "a copied soundtrack");
-  assert.equal(piecesRunPastEnd(outputSpec({ audioOnly: true, transcodeAudio: false })), true);
-  // r44: the soundtrack, AAC encoded from the film, asked for #95 as well.
-  assert.equal(piecesRunPastEnd(outputSpec({ audioOnly: true, transcodeAudio: true })), true, "an encoded soundtrack");
-  assert.equal(piecesRunPastEnd(outputSpec({ transcodeVideo: true, audioSeparate: true })), false,
-    "a re-encoded picture alone, a keyframe at every cut");
 });

@@ -42,32 +42,6 @@
  * reveal where the file's cuts really are.
  */
 
-/**
- * Whether an output's pieces may hold a little past their published end: a
- * piece ends at the first frame boundary at or after it, and the player places
- * the next piece where this one truly ends (hls.js `updateFragPTSDTS`). A
- * viewer standing at a published edge is then asked for by the piece BEFORE
- * it. True of a copied picture, whose pieces end at a packet, and of sound
- * however it is made: copied sound ends at a packet, and encoded sound at a
- * frame of the encoder — 1024 samples of AAC, 21.3 ms at 48 kHz. Only a
- * re-encoded picture, given a keyframe at every cut, ends where it is published.
- *
- * Field 2026-10-09, MP3 copied out of an AVI: a seek to 4000 s asked for the
- * piece ending at 4000 s. Field r43 (Home Assistant, 2026-10-15), a copied
- * Matroska picture: a seek to 1000.000 s, the published start of #96, asked for
- * #95 on both tracks; the picture's pieces were not counted as copies, nothing
- * made #95, and the picture stood 131 s until the viewer moved. With the
- * picture counted (r44), its #95 was made in 6.4 s and the soundtrack's, AAC
- * encoded from the film (`its muxer counts cuts -0.021333s`), was still not
- * made (torrent-tv/meta#178).
- *
- * @param {{ video?: object | null, audio?: object | null, transcodesVideo?: boolean, transcodesAudio?: boolean } | null | undefined} spec
- * @returns {boolean}
- */
-export function piecesRunPastEnd(spec) {
-  return (Boolean(spec?.video) && spec.transcodesVideo !== true) || Boolean(spec?.audio);
-}
-
 export class Timeline {
   /**
    * @param {object} params
@@ -185,13 +159,10 @@ export class Timeline {
    * @param {import("../../viewer/PriorityMap.js").PriorityMap} map - What every
    *   viewer of this output wants, in seconds of film.
    * @param {number} segmentCount - How many pieces this output has.
-   * @param {{ runsPastEnd?: boolean }} [shape] - `runsPastEnd`: the output's
-   *   pieces copy a stream, which is cut where its packets end, so a piece
-   *   holds sound past its published end by up to one packet.
    * @returns {import("../../viewer/PriorityMap.js").DemandZone[]} Runs of pieces
    *   that agree. Empty where nothing is stated, which says nobody is coming.
    */
-  inSegments(map, segmentCount, { runsPastEnd = false } = {}) {
+  inSegments(map, segmentCount) {
     if (!(segmentCount > 0) || !map || !(map.durationSeconds > 0)) {
       return [];
     }
@@ -202,17 +173,16 @@ export class Timeline {
       // whole, so it is wanted as soon as the soonest second inside it is
       // wanted — and the piece a viewer is standing in the middle of is wanted
       // exactly as much as the second under their feet.
-      // A COPIED PIECE ALSO HOLDS THE SECOND ITS END FALLS IN. A copy ends at
-      // the first packet boundary at or after its published end, and the
-      // player places the next piece where this one truly ends (hls.js
-      // `updateFragPTSDTS` carries a parsed piece's end to every later one).
-      // Field 2026-10-09, MP3 copied out of an AVI on a 4 s grid: pieces ended
-      // up to 24 ms late, and a seek to 4000 s asked for the piece ending at
-      // 4000 s, which nothing made because second 4000 belonged to the next.
+      // A PIECE ALSO HOLDS THE SECOND ITS END FALLS IN. At an exact playlist
+      // boundary hls.js may request the fragment ending there before it asks
+      // for the one beginning there. Excluding that second from this piece can
+      // leave the request waiting while the plan starts at the following one.
+      // Copied streams also run past their published end by up to one packet,
+      // and hls.js carries that parsed end to every later piece.
       const from = Math.max(0, Math.floor(this.publishedStartOf(index)));
       const end = this.publishedStartOf(index + 1);
       const until = index + 1 < segmentCount
-        ? Math.max(from + 1, runsPastEnd ? Math.floor(end) + 1 : Math.ceil(end))
+        ? Math.max(from + 1, Math.floor(end) + 1)
         : map.durationSeconds;
       // Asked of the map for the piece's seconds as a whole, not second by
       // second: a walk of every second of the film for every output on every

@@ -1,10 +1,9 @@
 /**
- * @file The pass that turned a file's priority map into what the torrent is
- * told, as it was worked out WHOLE on every map until the projection kept it
- * (`services/torrent/PlaybackProjection.js`, torrent-tv/meta#178): every
- * segment's demand, its deadline less making and delivery, and the next run's
- * input raised to its first segment's place. Kept here, unchanged, as the
- * rule the projection is held against.
+ * @file A whole-pass reference for translating priority maps into torrent
+ * demand: each segment's demand, its deadline less making and delivery, and
+ * the next run's input raised to its first segment's place. The projection is
+ * compared against this simpler calculation, including non-final segment end
+ * boundaries.
  */
 
 /** Translate map demand to complete output intervals and selected source tracks. */
@@ -29,7 +28,9 @@ export function segmentDemands(output, fileIndex, zones) {
   const ordered = ascendingAndApart(zones);
   let first = 0;
   for (let index = 0; index + 1 < grid.length; index++) {
-    const from = grid[index], to = grid[index + 1];
+    const from = grid[index];
+    const to = grid[index + 1];
+    const reach = index + 2 < grid.length ? Math.max(to, Math.floor(to) + 1) : to;
     if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from)) throw new Error("An output segment needs a valid interval.");
     if (ordered) while (first < zones.length && zones[first].to <= from) first += 1;
     // The zones a segment overlaps are folded as they are met, into numbers:
@@ -39,8 +40,8 @@ export function segmentDemands(output, fileIndex, zones) {
     let owner = null, ownerDeadline = Infinity, priority = 0, urgent = false, behind = true, deferred = true;
     for (let at = ordered ? first : 0; at < zones.length; at += 1) {
       const zone = zones[at];
-      if (ordered && !(zone.from < to)) break;
-      if (!(zone.priority > 0) || !(zone.from < to && zone.to > from)) continue;
+      if (ordered && !(zone.from < reach)) break;
+      if (!(zone.priority > 0) || !(zone.from < reach && zone.to > from)) continue;
       // A zone states the deadline of its near edge. A later segment within it
       // is reached later, at one second of film per second of playback.
       const deadline = Number.isFinite(zone.deadlineAt) ? zone.deadlineAt + Math.max(0, from - zone.from) * 1000 : Infinity;

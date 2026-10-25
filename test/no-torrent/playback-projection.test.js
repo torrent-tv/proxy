@@ -178,20 +178,18 @@ test("a map that only moved the time base reworks no segment and keeps the windo
     `a second of playing on reworks the segments a boundary crossed, not ${projection.lastUpdate.segments} of 200`);
 });
 
-// Field r43 (Home Assistant, 2026-10-15, torrent-tv/meta#178): a seek to the
-// published start of a copied picture's piece asked for the piece before it,
-// and its bytes were never asked of the swarm. A piece that copies a stream
-// answers for the second its end falls in, as the encode plan reads it.
-test("a copied piece is asked for by a viewer standing at its end", () => {
+// Field 2026-10-25, ttv-245: a seek to a published segment boundary asked for
+// the preceding piece, but the supply projection requested only the following
+// piece's bytes for a transcoded picture.
+test("the piece ending at a viewer's exact boundary is included in byte demand", () => {
   const grid = [0, 4, 8, 12, 16];
   const now = 1_000_000;
   const zones = zonesFor([{ at: 8, playing: true, pausedFor: 0, urgentReady: false }], 16, 8, now);
-  const asked = (runsPastEnd) => {
+  const asked = () => {
     const projection = new PlaybackProjection();
-    projection.update({ zones, outputs: [{ outputKey: "out", grid, runsPastEnd, encodeSpeed: 1.5, bytesPerSecond: 100_000,
+    projection.update({ zones, outputs: [{ outputKey: "out", grid, encodeSpeed: 1.5, bytesPerSecond: 100_000,
       linkMbps: 10, readyRevision: 0, ready: () => new Map(), target: null }] });
     return projection.unresolved().filter((demand) => !demand.behind).map((demand) => demand.index).sort((a, b) => a - b);
   };
-  assert.deepEqual(asked(false), [2, 3], "a re-encoded piece ends where it is published");
-  assert.deepEqual(asked(true), [1, 2, 3], "the copied piece ending at 8 s is wanted by the viewer at 8 s");
+  assert.deepEqual(asked(), [1, 2, 3], "both pieces at the boundary and the next piece are demanded");
 });

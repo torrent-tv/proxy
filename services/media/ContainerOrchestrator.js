@@ -237,7 +237,7 @@ export class ContainerOrchestrator {
         value = await container.readSourceRanges(params.packetInterval);
         if (value.kind !== "result") return { ...value, requestId };
       } else if (statement === "packets") {
-        value = await container.readPacketIndex(params.packetInterval, { isCurrent, signal: params.signal, account: params.walkAccount });
+        value = await container.readPacketIndex(params.packetInterval, { isCurrent: params.isCurrent, signal: params.signal, account: params.walkAccount });
         if (value === null) return { kind: "terminal", reason: "request-obsolete", requestId };
         const readRange = (start, end) => container.readRange(start, end, { signal: params.signal });
         await value?.prepareAudioDependencies?.(params.packetInterval, readRange);
@@ -253,7 +253,7 @@ export class ContainerOrchestrator {
       }
       return { kind: "result", value, requestId };
     } catch (error) {
-      if (!isCurrent()) return { kind: "terminal", reason: "request-obsolete", requestId };
+      if (params.isCurrent?.() === false) return { kind: "terminal", reason: "request-obsolete", requestId };
       if (error instanceof ChapterUnsupported) return { kind: "terminal", reason: "chapter-not-supported", chapterReason: error.message, requestId };
       if (error instanceof IndexMemoryUnavailable) {
         const result = { kind: "needs-memory", bytes: error.bytes, requestId };

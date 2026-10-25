@@ -137,7 +137,7 @@ test("a viewer the start forecast holds for an encoder's piece is told to whoeve
   assert.deepEqual(waits.at(-1), { viewer: "viewer-one", wait: null });
 });
 
-test("the start forecast includes an unread segment ending exactly at a seek position", async (t) => {
+test("the start forecast includes an unread segment ending within the seek tolerance", async (t) => {
   const { parts } = wired(t);
   const outputKey = "surface:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
   const session = {
@@ -163,7 +163,7 @@ test("the start forecast includes an unread segment ending exactly at a seek pos
   };
   parts.outputs.set(session.id, session);
   parts.viewers.get = () => ({ linkReading: () => ({ linkSampleMbps: 100, linkSampleMeasuredAt: Date.now(),
-    positionSeconds: 8, bufferedAheadSec: 0 }) });
+    positionSeconds: 8.033, bufferedAheadSec: 0 }) });
   parts.encodeCost.projectedSpeedOf = () => 0.5;
   parts.sourceInputsFor = (_output, index) => [{ sourceId: "torrent:abc:0",
     ranges: [{ start: index * 1e7, end: (index + 1) * 1e7 }] }];
@@ -173,5 +173,5 @@ test("the start forecast includes an unread segment ending exactly at a seek pos
   const readiness = (await parts.viewerRequests.getSessionProgress(session.id, "viewer-one")).playbackReadiness;
 
   assert.ok(readiness.firstRequiredSegmentsSeconds > 16,
-    "the missing segment ending at the seek position must be encoded before the target segment");
+    "the missing segment ending just before the seek position must be encoded before the target segment");
 });

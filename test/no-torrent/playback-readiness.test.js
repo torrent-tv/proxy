@@ -578,10 +578,10 @@ test("accepts a first delivered range within the browser's seek-start tolerance"
     "a real gap beyond the 250 ms seek-start tolerance remains a refusal");
 });
 
-test("prices an unread segment ending exactly at the seek target before the target segment", () => {
-  const state = input({ positionSeconds: 4, durationSeconds: 12, bufferedAheadSeconds: 0,
+test("prices an unread segment just before the seek target within the player's seek tolerance", () => {
+  const state = input({ positionSeconds: 8.033, durationSeconds: 16, bufferedAheadSeconds: 0,
     reserveSeconds: 0, lookaheadSeconds: 8 });
-  const segments = [0, 1, 2].map(index => ({
+  const segments = [0, 1, 2, 3].map(index => ({
     index,
     startSeconds: index * 4,
     endSeconds: (index + 1) * 4,
@@ -592,22 +592,22 @@ test("prices an unread segment ending exactly at the seek target before the targ
     processedSeconds: 0,
     segments,
     readySegmentIndices: [],
-    segmentSizesBytes: new Map([[0, 40], [1, 40], [2, 40]])
+    segmentSizesBytes: new Map([[0, 40], [1, 40], [2, 40], [3, 40]])
   };
 
   const withBoundary = predictPlaybackReadiness(state);
   const withoutBoundary = predictPlaybackReadiness({
     ...state,
-    tracks: [{ ...state.tracks[0], segments: segments.slice(1) }]
+    tracks: [{ ...state.tracks[0], segments: segments.slice(2) }]
   });
 
-  assert.equal(withBoundary.firstRequiredStages[0].segment, 1,
+  assert.equal(withBoundary.firstRequiredStages[0].segment, 2,
     "the first frame at the target is still in the segment that starts there");
   assert.ok(withBoundary.firstRequiredStages[0].completionSeconds >
     withoutBoundary.firstRequiredStages[0].completionSeconds,
-  "the exact-boundary segment requested by the player delays the target segment");
+  "the preceding segment requested within the seek tolerance delays the target segment");
   assert.ok(withBoundary.delaySeconds > withoutBoundary.delaySeconds,
-    "the missing pre-roll segment is part of the safe-start calculation");
+    "the timestamp spillover segment is part of the safe-start calculation");
 });
 
 test("keeps source-stall reserve in the proxy's prepared timeline, not the capped browser buffer", () => {

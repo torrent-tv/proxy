@@ -303,17 +303,59 @@ test("overlapping unordered arrivals preserve the latest required byte and ignor
   assert.deepEqual(predictPlaybackReadiness(state).unavailableSource.missing, [{ start: 6, end: 7 }]);
 });
 
-test("missing packet addresses cannot be replaced by file-average density even when bytes are held", () => {
+test("an unmapped segment uses file density only to estimate source work", () => {
   const state = input({ reserveSeconds: 8 });
   state.sources[0] = { id: "source", complete: false, bytesPerMediaSecond: 1,
-    readings: [{ at: state.now, value: 2 }], residence: [{ start: 0, end: 8, location: "disk" }] };
+    fileLength: 8, readings: [{ at: state.now, value: 2 }],
+    residence: [{ start: 0, end: 4, location: "disk" }] };
   delete state.tracks[0].segments[1].sourceInputs;
   const forecast = predictPlaybackReadiness(state);
+  assert.equal(forecast.reason, "download-rate-unavailable");
+  assert.equal(forecast.delaySeconds, null);
+  assert.equal(forecast.unavailableSource.sourceId, "source");
+  assert.equal(forecast.unavailableSource.segmentIndex, 1);
+  assert.equal(forecast.unavailableSource.estimatedBytes, 2);
+});
+
+test("an unmapped segment without file density remains explicitly unavailable", () => {
+  const state = input({ reserveSeconds: 0 });
+  state.sources[0] = { id: "source", complete: false, readings: [], residence: [],
+    downloadRateReadings: [{ at: state.now - 1_000, value: 1 }, { at: state.now, value: 1 }] };
+  delete state.tracks[0].segments[1].sourceInputs;
+
+  const forecast = predictPlaybackReadiness(state);
+
+  assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "source-input-ranges-unavailable");
   assert.equal(forecast.delaySeconds, null);
-  assert.deepEqual(forecast.unavailableSource, {
-    sourceId: "source", trackId: "video", segmentIndex: 1, phase: "near"
-  });
+  assert.equal(forecast.unavailableSource.segmentIndex, 1);
+});
+
+test("a missing source residence range does not reduce the density estimate", () => {
+  const state = input({ reserveSeconds: 8 });
+  state.sources[0] = { id: "source", complete: false, bytesPerMediaSecond: 1, fileLength: 8,
+    residence: [{ start: 0, end: 8, location: "missing" }] };
+  delete state.tracks[0].segments[1].sourceInputs;
+
+  const forecast = predictPlaybackReadiness(state);
+
+  assert.equal(forecast.reason, "download-rate-unavailable");
+  assert.equal(forecast.unavailableSource.estimatedBytes, 4);
+});
+
+test("unmapped near source work is charged at the measured download rate", () => {
+  const state = input({ reserveSeconds: 0 });
+  state.sources[0] = { id: "source", complete: false, fileLength: 8, bytesPerMediaSecond: 1,
+    residence: [], downloadRateReadings: [{ at: state.now - 1_000, value: 1 },
+      { at: state.now, value: 1 }] };
+  delete state.tracks[0].segments[1].sourceInputs;
+  const slow = predictPlaybackReadiness(state);
+  state.sources[0].downloadRateReadings = [{ at: state.now - 1_000, value: 100 },
+    { at: state.now, value: 100 }];
+  const fast = predictPlaybackReadiness(state);
+  assert.ok(Number.isFinite(slow.delaySeconds));
+  assert.ok(Number.isFinite(fast.delaySeconds));
+  assert.ok(slow.delaySeconds > fast.delaySeconds);
 });
 
 test("unresolved source ranges identify the known cold-open, URL, and seek targets", () => {
@@ -332,22 +374,41 @@ test("unresolved source ranges identify the known cold-open, URL, and seek targe
     delete state.tracks[0].segments[scenario.segmentIndex].sourceInputs;
 
     const forecast = predictPlaybackReadiness(state);
-    assert.equal(forecast.reason, "source-input-ranges-unavailable", scenario.name);
+    assert.equal(forecast.reason, "download-rate-unavailable", scenario.name);
     assert.equal(forecast.unavailableSource.segmentIndex, scenario.segmentIndex, scenario.name);
-    assert.equal(forecast.unavailableSource.phase, "near", scenario.name);
   }
 });
 
 test("an unmapped tail segment beyond the exact near window does not prevent startup", () => {
   const state = input({ lookaheadSeconds: 4, reserveSeconds: 0, bufferedAheadSeconds: 4 });
   state.tracks[0].clientRanges = [{ start: 0, end: 4 }];
-  state.sources[0] = { id: "source", complete: false, residence: [{ start: 0, end: 8, location: "disk" }] };
+  state.sources[0] = { id: "source", complete: false, fileLength: 8, bytesPerMediaSecond: 1,
+    residence: [{ start: 0, end: 8, location: "disk" }] };
   const segment = state.tracks[0].segments[1];
   delete segment.sourceInputs;
 
   const forecast = predictPlaybackReadiness(state);
   assert.equal(forecast.ready, true);
   assert.equal(forecast.reason, "trajectory-safe-now");
+});
+
+test("the suffix estimate charges aggregate source work at the measured torrent rate", () => {
+  const build = rate => {
+    const segments = Array.from({ length: 30 }, (_, index) => ({ index, startSeconds: index * 4,
+      endSeconds: (index + 1) * 4, sourceInputs: [{ sourceId: "source",
+        ranges: [{ start: index * 4, end: (index + 1) * 4 }] }] }));
+    return input({ durationSeconds: 120, bufferedAheadSeconds: 4, reserveSeconds: 4, lookaheadSeconds: 4,
+      sources: [{ id: "source", complete: false, fileLength: 120, bytesPerMediaSecond: 1,
+        residence: [], downloadRateReadings: [{ at: 9_000, value: rate }, { at: 10_000, value: rate }] }],
+      tracks: [{ ...input().tracks[0], durationSeconds: 120, segmentCount: segments.length, segments,
+        readySegmentIndices: [0], segmentSizesBytes: new Map([[0, 40]]) }] });
+  };
+  const fast = predictPlaybackReadiness(build(100));
+  const slow = predictPlaybackReadiness(build(0.1));
+  assert.equal(fast.ready, true);
+  assert.equal(fast.reason, "trajectory-safe-now");
+  assert.equal(slow.ready, false);
+  assert.ok(slow.delaySeconds > 1_000);
 });
 
 test("an unmapped near segment beyond the visible buffer and reserve does not prevent startup", () => {
@@ -841,9 +902,9 @@ test("does not invent future encode acceleration to start an unsustainable outpu
 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "minimum-safe-delay");
-  // The two pieces took 1/0.1 + 1/0.15 of their film: no faster than that is assumed.
+  // Near work retains the measured harmonic rate; the suffix uses one aggregate delivery estimate.
   const rate = 2 / (1 / 0.1 + 1 / 0.15);
-  assert.ok(Math.abs(forecast.delaySeconds - (4 / rate + 8 / 100 - 6)) < 1e-8);
+  assert.ok(Math.abs(forecast.delaySeconds - (4 / rate + 8 / 100 - 8 + 1)) < 1e-8);
 });
 
 test("a faster old probe cannot turn positive delivery into a permanent zero rate", () => {
@@ -986,11 +1047,11 @@ test("a track's time geometry kept between polls is the one worked out anew", ()
   poll(s => { s.bufferedAheadSeconds = 0.30000000000000004; });
 });
 
-test("a piece whose inputs are told again keeps its times, and is read with its new inputs", () => {
+test("a near piece whose inputs are told again keeps its times, and is read with its new inputs", () => {
   // The download map tells a piece's torrent inputs again, and the piece is a
   // new object with the same times: in r37 most polls placed every piece of the
   // film again (torrent-tv/meta#178).
-  const state = input({ durationSeconds: 12 });
+  const state = input({ durationSeconds: 12, lookaheadSeconds: 12 });
   const [first] = state.tracks[0].segments;
   first.mediaRanges = servedMs([42, 4042]);
   state.tracks[0].segments = [first,

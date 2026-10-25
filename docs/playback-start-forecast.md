@@ -14,99 +14,67 @@ torrent-tv/meta#245).
 
 ## Audit scope and the calculation to retain
 
-The implementation described here was checked at proxy `230cdb3` (2.107.6)
-and server `2a62d48` (0.66.6), 2026-10-24. The
-[atomic audit and Luna High execution plan](https://github.com/torrent-tv/meta/blob/main/research/forecast-atomic-audit-2026-10-24-ttv185.md)
-map all 121 process-inventory records to the current calculation and its
-missing terms. They include pure mathematical reproductions and saved
-real-session evidence. The audit does not change application formulas.
+The atomic audit linked below records the earlier implementation and its
+measurements. The current forecast follows the scope agreed in
+torrent-tv/meta#245: use exact source ranges and segment timing near the viewer,
+then estimate remaining source, processing and delivery work from aggregate
+measurements. The goal is uninterrupted viewing; the forecast does not resolve
+every future segment before playback starts.
 
-Two numerical paths currently exist. Before active scheduling is available,
-`LocalObservations.firstFrameEstimate` sums five stage-duration medians from
-completed waits. The owner has ordered that calculation removed. The retained
-calculation must use current unfinished work, measured service and physically
-matching calibration. Before enough facts exist, it must return an explicit
-noncomputable reason. Completed waits remain evaluation data, not another ETA.
-
-The active numeric `waitEstimate` uses `firstRequiredSegmentsSeconds`: the
-completion of the first required segment on each track. This is different
-from the full-film continuity delay, and neither endpoint includes all browser,
-subtitle, control-observation and presentation prerequisites. An already
-buffered first segment can make the numeric remaining time zero while the
-continuity gate still requires six seconds. The diagram shows current code;
-the missing dependencies are planned corrections, not implemented behavior.
+The proxy still reports the first required segment estimate separately.
+Readiness combines the exact near schedule with a duration-level suffix
+estimate. Before enough source, encoder or link measurements exist, the result
+states a specific noncomputable reason. Completed waits remain evaluation data,
+not another ETA. The [atomic audit](https://github.com/torrent-tv/meta/blob/main/research/forecast-atomic-audit-2026-10-24-ttv185.md)
+describes proxy `230cdb3` (2.107.6) and server `2a62d48` (0.66.6), before this
+scope change.
 
 ```mermaid
 flowchart TD
   History["Five medians from completed waits"] --> Early["Early numeric estimate: remove"]
-  Input["Held input and whole source-piece arrivals"] --> Processing["Per-output processing schedule"]
-  Processing --> Delivery["Modeled shared transfer queue"]
-  Delivery --> First["First required segment completion"]
-  First --> Active["Active numeric waitEstimate"]
-  Early --> Display["Browser countdown"]
-  Active --> Display
-  Delivery --> Continuity["Continuity over the remaining film"]
-  Continuity --> Gate["Readiness gate"]
+  Input["Exact nearby source ranges and held bytes"] --> Near["Exact near schedule"]
+  Missing["Unresolved near input"] --> Estimate["Aggregate file density and measured source service"]
+  Near --> Gate["Playback readiness"]
+  Estimate --> Gate
+  Aggregate["Remaining duration and measured source, encoder and link rates"] --> Suffix["Aggregate suffix estimate"]
+  Suffix --> Gate
   Subtitle["Required subtitle readiness"] --> Gate
   Gate --> Frame["Actual advancing audio-ready frame"]
   Browser["Init, remux, append, observation and playback"] --> Frame
 ```
 
-## Current service schedule
+## Current forecast
 
-For resource r, measured service is S_r(t) = rate_r * t. New observations
-replace the conditional future rate; polling cannot invent acceleration,
-exponential recovery or a new physical measurement.
+Inside the configured look-ahead, the forecast uses exact segment boundaries,
+mapped source ranges, held bytes, planned piece arrivals, measured encoding and
+client delivery. If a nearby map entry is unresolved, it estimates the input
+volume from selected-file length and duration, reduced by the held fraction.
+That volume is charged at the measured torrent rate; the estimate never creates
+a byte address or treats guessed bytes as present. A malformed exact map entry
+remains an explicit refusal.
 
-Source work uses the file's measured byte density, missing local byte ranges
-and the observed torrent download rate. Shared input ranges are downloaded
-once. Files on the same torrent share a queue; distinct torrents use distinct
-observed services. Local input reading is included in effective processing
-speed, rather than charged again as a separate disk or memory delay.
+Past the look-ahead, the forecast does not visit each segment. For each
+unfinished source file it estimates remaining bytes from file length, duration
+and the fraction not already held or mapped. It estimates unfinished output
+work from each track's remaining duration and measured encoding rate, and
+delivery from output size per media second and measured link rate. Shared
+source files and the client link are charged once. The suffix work scales with
+the number of sources and tracks rather than the number of segments.
 
-Each output's remaining processing work subtracts progress only within its
-actual live run intervals. Initial video rates use existing codec/size/encoder
-calibration. Initial audio rates use short packaged per-codec measurements and
-sample work (encoding) or encoded bytes (copying). Actual output progress
-replaces these initial rates. That rate is the run's processing speed: film
-made over the run's own working time, with the time its input waited for the
-swarm and the time it was stopped taken out (`RunClock`, fed by the stream
-route, which marks each wait of a run's input read, and by the writer of an
-input piped to the encoder, which marks each wait for the next segment's
-input). The download is charged
-once, by the source service, and not a second time inside the processing rate.
-Startup is intended to be charged once, separately from processing throughput,
-and disappears once actual run progress establishes processing. The audit
-identifies an unstarted-run state where both the startup reservation and an
-inferred opening are charged. A two-second input wait, five-second open and
-one-second production finish at 11 seconds in the code, versus eight seconds
-for the stated single-run dependencies. Actual run/admission state must
-determine the remaining opening work.
+This suffix is an aggregate estimate. It predicts the effect of measured
+sustained rates on the remaining duration, not the arrival time of each future
+packet or frame. Exact near scheduling protects the upcoming work; the suffix
+accounts for a source, encoder or link that cannot keep pace over time. New
+exact ranges and measurements replace estimates on later polls.
 
-The literal scheduler admits a segment after all of its required source input
-is held. With source arrival D(j), previous output completion C, inferred
-opening O(j), remaining media work W(j), and processing rate e, it computes
+Readiness is held by the greatest lateness from the exact near schedule or the
+aggregate resource finish against the media already ahead of the viewer. Slow
+service adds startup wait when prepared media cannot cover the estimated work.
+Missing distant addresses alone do not make the forecast noncomputable.
 
-    processingStart(j) = max(C, D(j)) + O(j)
-    processingFinish(j) = processingStart(j) + W(j)/e.
-
-Different segments and resources can overlap. This is not continuous processing
-of the same partially downloaded segment. Copying and opening may overlap in
-the actual input path; that overlap needs the real admission/copy boundaries.
-Client delivery follows production and uses one modeled queue in media/track
-order. It can reserve idle link time for unready video ahead of ready audio;
-that order is an unverified approximation of concurrent response forwarding.
-Measured client ranges and prepared media establish each track's deadlines.
-
-The minimum start delay for this conditional trajectory is
-
-    max(0, max_j(completion_j - presentation_deadline_j)).
-
-This covers the remaining finite movie, including rates below real time. Slow
-positive service gives a finite preproduction delay; it is not rejected by a
-browser-capacity threshold or a capped search. Observed supply-interruption
-coverage is held in prepared proxy media and client media, without requiring
-the browser to hold it all.
+The earlier audit's findings about run opening, service measurements and
+overlap between input, encoding and delivery remain evaluation questions for
+field measurements. They do not require scheduling every remaining segment.
 
 Critical review: future rates can change, average byte density is an initial
 mapping rather than an exact packet index, initial audio sample-work scaling
@@ -121,17 +89,15 @@ noncomputable states. The UI reports their causes instead of an estimating
 placeholder or a fabricated duration.
 
 The forecast is answered on every progress poll of a waiting viewer, on the
-proxy's main thread, so it does no work twice (torrent-tv/meta#178). A piece
+proxy's main thread, so it avoids repeating work (torrent-tv/meta#178). A piece
 already played that was never read and is not made is left out before anything
 is converted: it is not scheduled, not where a track starts, places no unread
 piece and lends no frame to what the page holds. The exact edges of a piece are
 converted once and kept with it; the pieces an output hands over between polls
-are the same objects while their edges, read ranges and torrent inputs stay
-the same. An unread piece finds the read pieces around it by halves and is
-placed in the forecast's ticks as one fraction. Torrent bytes estimated to
-arrive join the coverage in place. The whole remaining film is still planned;
-the answer is unchanged (checked against the previous computation on 500
-varied inputs, none different).
+are the same objects while their edges, read ranges and torrent inputs stay the
+same. The request hands the forecast the first piece and the pieces inside its
+configured near window. The suffix estimate uses track and source totals; it
+does not build a schedule for each later piece.
 
 This forecast covers part of the viewer's wait. The whole wait, from the
 viewer's action to the first moving frame, is described process by process,

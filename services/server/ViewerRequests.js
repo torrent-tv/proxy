@@ -985,6 +985,9 @@ export class ViewerRequests {
           residence: stats?.residence,
           fileOffset: stats?.fileOffset,
           fileLength: stats?.fileLength,
+          bytesPerMediaSecond: Number.isFinite(stats?.fileLength) && stats.fileLength > 0 &&
+            Number.isFinite(session.file.durationSeconds) && session.file.durationSeconds > 0
+            ? stats.fileLength / session.file.durationSeconds : null,
           pieceLength: stats?.pieceLength,
           downloadRateReadings: this.#sourceRateReadings(measurement, output.file.sourceKey, stats, now),
           downloadRateSummaries: this.#sourceRateSummaries(measurement, output.file.sourceKey),
@@ -1022,6 +1025,8 @@ export class ViewerRequests {
         })),
         bitsPerMediaSecond: Number.isFinite(observedMbps) && observedMbps > 0 ? observedMbps * 1_000_000 :
           this.#host.initialOutputBitsPerMediaSecondOf?.(output) ?? 0,
+        durationSeconds: output.timeline?.publishedStartOf(output.timeline.segmentCount) ?? session.file.durationSeconds,
+        segmentCount: output.timeline?.segmentCount ?? segments.length,
         readings: trackRates,
         segments,
         geometry: this.#forecastPieces.get(output)?.geometry,
@@ -1247,7 +1252,27 @@ export class ViewerRequests {
     }
     const kept = forecast.pieces;
     const segments = [];
-    for (let index = 0; index < count; index++) {
+    const lookahead = Number(this.#host.lookaheadSeconds);
+    const start = Number.isFinite(positionSeconds) ? Math.max(0, positionSeconds) : 0;
+    const end = Number.isFinite(lookahead) && lookahead > 0 ? start + lookahead : Number.POSITIVE_INFINITY;
+    let low = 0, high = count;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (timeline.publishedStartOf(middle + 1) <= start) low = middle + 1;
+      else high = middle;
+    }
+    const first = Math.max(0, low - 1);
+    low = first;
+    high = count;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (timeline.publishedStartOf(middle) < end) low = middle + 1;
+      else high = middle;
+    }
+    const last = low;
+    const indexes = new Set([0]);
+    for (let index = first; index < last; index++) indexes.add(index);
+    for (const index of indexes) {
       const endSeconds = timeline.publishedStartOf(index + 1);
       // Only a made piece has media intervals to read. Asked of every piece,
       // each one not made cost a `stat` of its file in the store's safety net

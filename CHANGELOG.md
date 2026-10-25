@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Forecast unresolved source work from measured aggregate file density and replace per-segment tail scans with a duration-level continuity estimate.
+
 ## 2.107.19
 
 - **Fix**: Stop playback readiness checks at an unmapped source range beyond the visible buffer and reserve.

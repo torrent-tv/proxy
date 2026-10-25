@@ -207,6 +207,9 @@ export class EncodeAdmission {
     if (!address) {
       return { admitted: false, reason: "the output has no address", speedX: null };
     }
+    if (this.#host.finished?.(address) === true) {
+      return { admitted: true, reason: "everything it serves is already made", speedX: null };
+    }
     if ((this.#host.liveRunsByAddress().get(address) ?? 0) > 0) {
       return { admitted: true, reason: "an encoder already runs there", speedX: null };
     }

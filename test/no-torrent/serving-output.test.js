@@ -70,6 +70,15 @@ test("an output without the piece at the viewer's position spares them nothing",
   assert.equal(choose({ candidates: [candidate("1080", 1920, 1080, { readyHere: false })] }), null);
 });
 
+test("an unfinished output the machine cannot continue does not stand in for the requested output", () => {
+  const candidates = [candidate("too-slow", 1920, 1080), candidate("fits", 1824, 1026)];
+  assert.equal(
+    choose({ candidates, canProduce: (one) => one.key !== "too-slow" }),
+    "fits",
+    "a link-admitted partial output is not reusable if this machine cannot keep making it"
+  );
+});
+
 test("a size chosen by hand is served only exactly, and only if the link admits it", () => {
   const candidates = [candidate("1080", 1920, 1080), candidate("exact", 1824, 1026)];
   assert.equal(choose({ mode: "manual", candidates }), "exact");

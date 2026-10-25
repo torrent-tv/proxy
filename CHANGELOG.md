@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.29
 
 - **Fix**: Abort an obsolete ASF range read while it waits for bytes, so a seek can start its own read without waiting for the old request.
 

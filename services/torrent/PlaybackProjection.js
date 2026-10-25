@@ -273,10 +273,9 @@ class Segment {
     this.from = from;
     this.to = to;
     /**
-     * Up to which second the map's zones are read for it: its end, and for a
-     * piece that copies a stream the second its end falls in as well, as the
-     * encode plan reads it (`Timeline.inSegments`): the player asks a viewer
-     * standing at its end for this piece, and its bytes are fetched for them.
+     * Up to which second the map's zones are read for it: its end and the exact
+     * end boundary. The encode plan includes that boundary for every output,
+     * since the player may request the piece ending there before the next one.
      */
     this.reach = reach;
     /** Whether a zone of the map overlaps it. */
@@ -311,16 +310,15 @@ class Segment {
 
 /** One output: its grid, how long its segments take to make and deliver, what is made, and its next input. */
 class OutputState {
-  constructor(outputKey, grid, runsPastEnd = false) {
+  constructor(outputKey, grid) {
     this.outputKey = outputKey;
     this.grid = grid;
-    this.runsPastEnd = runsPastEnd;
     /** @type {Segment[]} */
     this.segments = [];
     for (let index = 0; index + 1 < grid.length; index++) {
       const end = grid[index + 1];
       this.segments.push(new Segment(this, index, grid[index], end,
-        runsPastEnd && index + 2 < grid.length ? Math.max(end, Math.floor(end) + 1) : end));
+        index + 2 < grid.length ? Math.max(end, Math.floor(end) + 1) : end));
     }
     this.encodeSpeed = undefined;
     this.bytesPerSecond = undefined;
@@ -380,7 +378,7 @@ export class PlaybackProjection {
    * @param {object} params
    * @param {Array<{ from: number, to: number, priority: number, urgent?: boolean, behind?: boolean, deferred?: boolean,
    *   deadlineAt?: number }>} params.zones - The file's map zones, deadlines as instants.
-   * @param {Array<{ outputKey: string, grid: number[], runsPastEnd?: boolean, encodeSpeed?: number, bytesPerSecond?: number | null,
+   * @param {Array<{ outputKey: string, grid: number[], encodeSpeed?: number, bytesPerSecond?: number | null,
    *   linkMbps?: number | null, readyRevision: unknown, ready: () => Map<number, number>,
    *   target: number | null }>} params.outputs - Every output of the file somebody is watching, with
    *   what decides how long its segments take to make and deliver (`sourceDeadline`), what it has made
@@ -401,13 +399,13 @@ export class PlaybackProjection {
     for (const info of outputs) {
       seen.add(info.outputKey);
       let output = this.#outputs.get(info.outputKey);
-      if (output && (output.grid !== info.grid || output.runsPastEnd !== Boolean(info.runsPastEnd))) {
+      if (output && output.grid !== info.grid) {
         this.#dropOutput(output);
         output = undefined;
       }
       const fresh = !output;
       if (fresh) {
-        output = new OutputState(info.outputKey, info.grid, Boolean(info.runsPastEnd));
+        output = new OutputState(info.outputKey, info.grid);
         this.#outputs.set(info.outputKey, output);
       }
       // How long a segment of it takes to make and deliver.
@@ -436,8 +434,9 @@ export class PlaybackProjection {
         for (const segment of output.segments) if (this.#demand(segment, zones, ordered, nextBase, leadMoved)) reworked++;
       } else {
         for (const { from, to } of stretches) {
-          // A piece reaching past its end is read for the stretch after it too.
-          for (let index = Math.max(0, segmentAt(output.grid, from) - (output.runsPastEnd ? 1 : 0));
+          // A viewer at an exact playlist boundary may request the piece
+          // ending there before requesting the one that starts there.
+          for (let index = Math.max(0, segmentAt(output.grid, from) - 1);
             index < output.segments.length && output.segments[index].from < to; index++) {
             if (this.#demand(output.segments[index], zones, ordered, nextBase, false)) reworked++;
           }

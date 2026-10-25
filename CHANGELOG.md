@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Include a fragment's exact ending boundary in encoding and byte demand. A seek to 900 s requested fragment 224 while the proxy planned and fetched only fragment 225, leaving the request waiting for output and input that the active run could not produce.
+
 ## 2.107.23
 
 - **Fix**: Preserve the viewer's 250 ms seek-start tolerance when forecasting the first arriving media range. A WMV picture range starting 67 ms after a seek target was treated as a permanent timeline gap, even though it is within the media element's initial seek tolerance.

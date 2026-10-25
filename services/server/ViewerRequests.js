@@ -1282,8 +1282,11 @@ export class ViewerRequests {
       const ranges = inventory.has(index) ? this.#host.encodeRuns.finishedMediaRangesOf(output, index) : undefined;
       const mediaRanges = ranges && output.segmentFormat?.servedMediaRanges ?
         output.segmentFormat.servedMediaRanges(ranges, { initBytes: sessionInit }) : undefined;
+      // At a playlist boundary the player can request the fragment ending
+      // exactly at its seek target. It is work needed to reach the target,
+      // even though it adds no media after the viewer's position.
       if (index !== 0 && mediaRanges === undefined && !inventory.has(index) &&
-        Number.isFinite(endSeconds) && Number.isFinite(positionSeconds) && endSeconds <= positionSeconds) {
+        Number.isFinite(endSeconds) && Number.isFinite(positionSeconds) && endSeconds < positionSeconds) {
         continue;
       }
       const startSeconds = timeline.publishedStartOf(index);

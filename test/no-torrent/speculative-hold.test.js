@@ -136,3 +136,42 @@ test("a viewer the start forecast holds for an encoder's piece is told to whoeve
   assert.notEqual(after?.kind, "production");
   assert.deepEqual(waits.at(-1), { viewer: "viewer-one", wait: null });
 });
+
+test("the start forecast includes an unread segment ending exactly at a seek position", async (t) => {
+  const { parts } = wired(t);
+  const outputKey = "surface:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
+  const session = {
+    id: "bbbbbbbbccccdddd",
+    spec: outputSpec({ cutGrid: "keyframe", audioSeparate: false }),
+    outputKey,
+    dirPath: path.join(os.tmpdir(), "speculative-hold-boundary-does-not-exist"),
+    file: new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv" })
+      .learn({ width: 1920, height: 1080, durationSeconds: 40 }),
+    get inputFile() { return this.file; },
+    get audioFile() { return this.file; },
+    timeline: new Timeline({ boundaries: Array.from({ length: 11 }, (_, index) => index * 4), cutGrid: "keyframe" }),
+    segmentFormat: fmp4Format,
+    output: new Output({ encodeWidth: 0, encodeHeight: 0, outputFps: 24, softwarePreset: null, applyTonemap: false }),
+    transcodeVideo: false,
+    transcodeAudio: true,
+    audioTrackIndex: 0,
+    audioSourceTrackIndex: 0,
+    useSyntheticPlaylist: true,
+    playlistText: "#EXTM3U\n",
+    segmentCount: 10,
+    progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
+  };
+  parts.outputs.set(session.id, session);
+  parts.viewers.get = () => ({ linkReading: () => ({ linkSampleMbps: 100, linkSampleMeasuredAt: Date.now(),
+    positionSeconds: 8, bufferedAheadSec: 0 }) });
+  parts.encodeCost.projectedSpeedOf = () => 0.5;
+  parts.sourceInputsFor = (_output, index) => [{ sourceId: "torrent:abc:0",
+    ranges: [{ start: index * 1e7, end: (index + 1) * 1e7 }] }];
+  parts.getSourceStats = async () => ({ fileAvailable: true, downloadSpeed: 50e6, fileOffset: 0,
+    fileLength: 1e8, pieceLength: 1 << 20 });
+
+  const readiness = (await parts.viewerRequests.getSessionProgress(session.id, "viewer-one")).playbackReadiness;
+
+  assert.ok(readiness.firstRequiredSegmentsSeconds > 16,
+    "the missing segment ending at the seek position must be encoded before the target segment");
+});

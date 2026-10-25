@@ -936,7 +936,7 @@ export class ViewerRequests {
     const tracks = [];
     for (const output of outputs) {
       const trackProgress = output === session ? progress : this.#host.encodeRuns.progressOf(output);
-      const trackRates = this.#trackRateReadings(output, now, trackProgress, measurement);
+      const trackRates = this.#trackRateReadings(output, now);
       const trackName = output === session ? "video" : "audio";
       // The page states the offset its player applied to this track, and the
       // init it applied it to is the session's. Until both are known, the
@@ -1311,8 +1311,7 @@ export class ViewerRequests {
     const id = typeof consumerId === "string" ? consumerId : "";
     let state = byViewer.get(id);
     if (!state) {
-      state = { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), sources: new Map(),
-        trackProgress: new WeakMap() };
+      state = { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), sources: new Map() };
       byViewer.set(id, state);
     }
     return state;
@@ -1325,7 +1324,7 @@ export class ViewerRequests {
    * runs of one output can report out of order, so a summary kept and added to
    * would drop the later-told, earlier-taken one (torrent-tv/meta#178).
    */
-  #trackRateReadings(output, now, progress, measurement) {
+  #trackRateReadings(output, now) {
     const readings = (this.#host.encodeSpeedReadingsOf?.(output) ?? []).filter(reading => reading.at <= now);
     const summary = readings.length > 0 ? this.#host.playbackReadiness.rateSummaryOf(readings) : null;
     if (summary) return summary;
@@ -1340,21 +1339,9 @@ export class ViewerRequests {
       seed.add(now, projected);
       return seed.snapshot();
     }
-    // A separate soundtrack may have no calibrated codec reading and no
-    // completed segment yet. Its progress is still a measured rate: retain the
-    // time since the previous advance so source waits reduce, rather than
-    // inflate, the speed used by the forecast.
-    if (output?.spec?.carries === "audio-only") {
-      let trend = measurement.trackProgress.get(output);
-      if (!trend) {
-        trend = new this.#host.playbackReadiness.ProgressRate(
-          this.#host.lookaheadSeconds,
-          this.#host.segmentDurationSec
-        );
-        measurement.trackProgress.set(output, trend);
-      }
-      return trend.note(now, progress?.processedSeconds, progress?.startPositionSeconds);
-    }
+    // Progress over wall time includes source waits, which the forecast prices
+    // separately. Keep the rate unknown until a measured or calibrated
+    // processing rate exists; single-piece runs now publish their own rate.
     return null;
   }
 

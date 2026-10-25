@@ -170,7 +170,7 @@ test("a process that could not be started ends like any other failure", () => {
   assert.match(ends[0].because, /ENOENT/);
 });
 
-test("its speed is film made between closed pieces over its own working time", () => {
+test("its speed is film made over its own working time, including for a one-piece run", () => {
   const clock = { at: 1000 };
   const process_ = new FakeProcess();
   process_.stdout = new EventEmitter();
@@ -186,6 +186,7 @@ test("its speed is film made between closed pieces over its own working time", (
     spawn: () => process_,
     logger: { info() {}, warn() {} },
     now: () => clock.at,
+    publishesAlone: true,
     onSpeedMeasured: (reading) => readings.push(reading),
     onClosed: (name, following) => { closedPairs.push([name, following]); return name; }
   });
@@ -193,21 +194,18 @@ test("its speed is film made between closed pieces over its own working time", (
   const report = (seconds) => process_.stdout.emit("data", `out_time_ms=${seconds * 1_000_000}\n`);
   const closed = (name) => process_.stdio[3].emit("data", `${name}\n`);
   report(0);
-  closed("a");
-  clock.at += 1000;
-  report(4);
-  closed("b"); // "a" is published: the reckoning starts here
-  assert.equal(run.speedX, 0, "one closed piece measures nothing");
+  closed("early"); // The filename can arrive before the next progress report.
   // The input waits for the swarm for 30 s; that is not the run's work.
   run.inputWaitBegins();
   clock.at += 30_000;
   run.inputWaitEnds();
-  clock.at += 2000;
-  report(12);
-  closed("c"); // "b" is published
-  assert.deepEqual(closedPairs, [["a", "b"], ["b", "c"]], "only a named closed successor may supply neighboring media");
-  assert.equal(run.speedX, 4, "8 s of film over 2 s of work");
-  assert.deepEqual(readings, [{ speed: 4, at: 34_000 }], "told once, with when");
+  report(0.5);
+  clock.at += 1000;
+  report(4);
+  closed("a");
+  assert.equal(run.speedX, 3.5, "3.5 s of film over 1 s of work, excluding the input wait");
+  assert.deepEqual(closedPairs, [["early", null], ["a", null]], "completed pieces are published on their own");
+  assert.deepEqual(readings, [{ speed: 3.5, at: 32_000 }], "told once, with when");
 });
 
 test("a segment number behind its own start is not its to claim", () => {

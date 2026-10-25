@@ -127,6 +127,7 @@ test("an obsolete ASF interval stops reading its packet window", async () => {
     return bytes.subarray(start, end + 1);
   } });
   const info = await container.readMediaInfo();
+  packetReads.length = 0;
   let checks = 0;
   const index = await container.readPacketIndex({ from: info.startTimeSeconds, to: info.startTimeSeconds + 2 }, {
     isCurrent: () => ++checks < 9

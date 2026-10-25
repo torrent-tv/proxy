@@ -1,5 +1,13 @@
 # First-frame wait: process model
 
+Scope clarification (owner, 2026-10-25, torrent-tv/meta#245): the product goal
+is playback without buffering interruptions. References here to a full-film
+continuity forecast describe the audited implementation, not a requirement to
+resolve or calculate every remaining segment before starting. Precise near-term
+calculation and cheap aggregate estimates may be used; their cost and playback
+reliability must be measured.
+
+
 This document describes the wait between a viewer's action and the first
 presented frame as a set of atomic processes taken from the current code, with
 their dependencies, alternatives, parallelism and shared resources

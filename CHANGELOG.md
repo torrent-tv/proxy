@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.20
 
 - **Fix**: Forecast unresolved source work from measured aggregate file density and replace per-segment tail scans with a duration-level continuity estimate.
 

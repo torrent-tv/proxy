@@ -1,10 +1,12 @@
+## Unreleased
+
+- **Fix**: Allow playback readiness to finish at the exact mapped near window when later source ranges have not been requested yet.
+
 ## 2.107.17
 
 - **Chore**: Record whether source ranges for a blocking playback segment are available when its forecast blocker clears (#ttv-185).
 
 ## 2.107.16
-
-- **Fix**: Allow playback readiness to finish at the exact mapped near window when later source ranges have not been requested yet.
 
 - **Fix**: Wait for the playback map before starting a full source-rest packet scan. On WMV, the scan could request the whole file before its transcoded output was registered, delaying the first segment.
 

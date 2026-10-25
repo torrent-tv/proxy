@@ -749,8 +749,13 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArriv
         if (!source) return { reason: "source-measurement-unavailable" };
         if (source.source.complete === true) continue;
         const ranges = exactInputs ? inputRangesOf(exactInputs, sourceId) : null;
-        if (ranges === null) return { reason: "source-input-ranges-unavailable",
-          unavailableSource: { sourceId, trackId: track.id, segmentIndex: segment.index, phase: "tail" } };
+        if (ranges === null) {
+          // The tail extends beyond the ranges the playback map has asked to
+          // resolve. Stop this projection at that boundary: the near window
+          // remains exact, and later segments enter the map as the viewer
+          // advances. Waiting for the whole tail here prevents a cold start.
+          return null;
+        }
         const bytes = supplyOf(sourceId);
         let order = 0;
         for (const range of ranges) {

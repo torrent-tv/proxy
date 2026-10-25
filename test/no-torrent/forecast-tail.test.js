@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { predictPlaybackReadiness, RateTrend } from "../../services/viewer/playback-readiness.js";
 
+const PIECE_BYTES = 16 * 1024;
+
 /** A deterministic sequence in [0, 1). */
 function randomFrom(seed) {
   let state = seed >>> 0;

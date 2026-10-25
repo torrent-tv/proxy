@@ -1,5 +1,6 @@
 ## 2.107.30
 
+- **Fix**: start playback from the ready near window without waiting for a forecast of the whole remaining film.
 - **Fix**: prioritize exact playback input reads over speculative input extensions in the per-file media read queue.
 
 ## 2.107.29

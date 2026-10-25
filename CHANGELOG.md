@@ -1,6 +1,7 @@
 ## 2.107.27
 
 - **Fix**: Exclude unfinished outputs the proxy cannot keep producing before reusing them for a viewer.
+- **Fix**: Stop obsolete ASF packet-window reads when the viewer changes time, so old interval reads cannot delay the current input.
 
 ## 2.107.26
 

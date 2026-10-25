@@ -304,7 +304,7 @@ test("overlapping unordered arrivals preserve the latest required byte and ignor
 });
 
 test("missing packet addresses cannot be replaced by file-average density even when bytes are held", () => {
-  const state = input();
+  const state = input({ reserveSeconds: 8 });
   state.sources[0] = { id: "source", complete: false, bytesPerMediaSecond: 1,
     readings: [{ at: state.now, value: 2 }], residence: [{ start: 0, end: 8, location: "disk" }] };
   delete state.tracks[0].segments[1].sourceInputs;
@@ -347,6 +347,24 @@ test("an unmapped tail segment beyond the exact near window does not prevent sta
 
   const forecast = predictPlaybackReadiness(state);
   assert.equal(forecast.ready, true);
+  assert.equal(forecast.reason, "trajectory-safe-now");
+});
+
+test("an unmapped near segment beyond the visible buffer and reserve does not prevent startup", () => {
+  const segments = Array.from({ length: 30 }, (_, index) => ({ index, startSeconds: index * 4,
+    endSeconds: (index + 1) * 4,
+    sourceInputs: [{ sourceId: "source", ranges: [{ start: index * 4, end: (index + 1) * 4 }] }] }));
+  const state = input({ durationSeconds: 120, bufferedAheadSeconds: 104, reserveSeconds: 4, lookaheadSeconds: 120,
+    sources: [{ id: "source", complete: false, fileOffset: 0, fileLength: 120, pieceLength: 4,
+      residence: [{ start: 0, end: 120, location: "disk" }],
+      downloadRateReadings: [{ at: 9_000, value: 100 }, { at: 10_000, value: 100 }] }],
+    tracks: [{ ...input().tracks[0], segments, readySegmentIndices: Array.from({ length: 27 }, (_, index) => index),
+      segmentSizesBytes: Object.fromEntries(segments.map(({ index }) => [index, 40])),
+      clientRanges: [{ start: 0, end: 104 }] }] });
+  delete state.tracks[0].segments[28].sourceInputs;
+
+  const forecast = predictPlaybackReadiness(state);
+  assert.equal(forecast.ready, true, forecast.reason);
   assert.equal(forecast.reason, "trajectory-safe-now");
 });
 

@@ -556,6 +556,28 @@ test("accepts the browser's initial media range when one track starts within its
   assert.equal(outsideSlack.ready, false);
 });
 
+test("accepts a first delivered range within the browser's seek-start tolerance", () => {
+  const state = input({ positionSeconds: 900, durationSeconds: 904, bufferedAheadSeconds: 0,
+    bufferLimitSeconds: 4, reserveSeconds: 0, lookaheadSeconds: 4 });
+  state.tracks[0] = {
+    ...state.tracks[0],
+    processedSeconds: 900,
+    clientRanges: [],
+    segments: [{ index: 225, startSeconds: 900, endSeconds: 904, mediaRanges: servedMs([900067, 904000]) }],
+    readySegmentIndices: [225],
+    segmentSizesBytes: new Map([[225, 40]])
+  };
+
+  const forecast = predictPlaybackReadiness(state);
+
+  assert.equal(forecast.reason, "minimum-safe-delay");
+  assert.ok(Number.isFinite(forecast.delaySeconds));
+
+  state.tracks[0].segments[0].mediaRanges = servedMs([900251, 904000]);
+  assert.equal(predictPlaybackReadiness(state).reason, "media-continuity-unavailable",
+    "a real gap beyond the 250 ms seek-start tolerance remains a refusal");
+});
+
 test("keeps source-stall reserve in the proxy's prepared timeline, not the capped browser buffer", () => {
   const now = 10_000;
   const forecast = predictPlaybackReadiness({

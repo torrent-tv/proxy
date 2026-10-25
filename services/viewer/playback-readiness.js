@@ -552,7 +552,9 @@ export function predictPlaybackReadiness(input = {}) {
     let after = contiguousEnd(delivered, at);
     for (const completion of completions.filter((item) => item.trackIndex === trackIndex)) {
       const before = after;
-      for (const range of completion.segment.ranges) addMediaRange(delivered, range);
+      const ranges = compare(before, at) === 0
+        ? withSeekStartTolerance(completion.segment.ranges, at, unit) : completion.segment.ranges;
+      for (const range of ranges) addMediaRange(delivered, range);
       after = contiguousEnd(delivered, at);
       const ahead = secondsAhead(earliest(before, trackEnd), at);
       constrain(completion.at - ahead, "delivery", trackIndex, completion.segment.index, completion.at, ahead, false,
@@ -581,7 +583,9 @@ export function predictPlaybackReadiness(input = {}) {
     }
     for (const production of productions.filter((item) => item.trackIndex === trackIndex)) {
       const before = contiguousEnd(prepared, at);
-      for (const range of production.segment.ranges) addMediaRange(prepared, range);
+      const ranges = compare(before, at) === 0
+        ? withSeekStartTolerance(production.segment.ranges, at, unit) : production.segment.ranges;
+      for (const range of ranges) addMediaRange(prepared, range);
       // Supply interruption coverage is stock held by the proxy as well as
       // the browser. It is not a browser buffer-size admission rule.
       // The reserve is bounded by what is left of the track, not of the window.
@@ -849,6 +853,25 @@ function heldRanges(ranges, segments, unit, position) {
     addMediaRange(held, { start, end, frame: latest(zero, ...inside.map(({ frame }) => frame)) });
   }
   return held;
+}
+
+/**
+ * Include the first arriving range when its start is within the media
+ * element's allowance for a seek target. This does not bridge later gaps.
+ *
+ * @param {import("./media-time.js").MediaRange[]} ranges
+ * @param {import("./media-time.js").MediaTime} position
+ * @param {bigint} unit
+ * @returns {import("./media-time.js").MediaRange[]}
+ */
+function withSeekStartTolerance(ranges, position, unit) {
+  const first = ranges.reduce((earliestRange, range) =>
+    !earliestRange || compare(range.start, earliestRange.start) < 0 ? range : earliestRange, null);
+  const toleranceEnd = add(position, rescale(fromSeconds(CLIENT_RANGE_START_TOLERANCE_SECONDS), unit));
+  if (!first || compare(first.start, position) <= 0 || compare(first.start, toleranceEnd) > 0) {
+    return ranges;
+  }
+  return ranges.map((range) => range === first ? { ...range, start: position } : range);
 }
 
 /**

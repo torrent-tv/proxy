@@ -1045,10 +1045,13 @@ export async function startProxyServer({
         if (!params) return { kind: "needs-source" };
         if (timing) {
           params.walkAccount = timing.walk ??= { lockMs: 0, reads: 0, bytes: 0 };
-          params.onTimed = (_statement, waitedMs, readMs) => {
+          params.onTimed = (statement, waitedMs, readMs) => {
             timing.reads += 1;
             timing.queuedMs += waitedMs;
             timing.readMs += readMs;
+            const measured = timing.readsByStatement[statement] ??= { queuedMs: 0, readMs: 0 };
+            measured.queuedMs += waitedMs;
+            measured.readMs += readMs;
           };
         }
         const tracks = await containerOrchestrator.inspect(params, "tracks");

@@ -20,7 +20,7 @@ export async function readAsfData({ readRange, fileSize, info }) {
 }
 
 /** ASF payload addresses, including fragmented and compressed media objects. */
-export async function readAsfPackets({ readRange, fileSize, tracks, info, firstPicture = false, packetMemory, state = {} }) {
+export async function readAsfPackets({ readRange, fileSize, tracks, info, firstPicture = false, packetMemory, state = {}, isCurrent }) {
   if (!state.initialized) {
   const data = await readAsfData({ readRange, fileSize, info });
   Object.assign(state, { initialized: true, at: data.start, end: data.end, count: data.count, packets: 0,
@@ -30,6 +30,7 @@ export async function readAsfPackets({ readRange, fileSize, tracks, info, firstP
   const { end, count, frames, assembling } = state;
   const declared = new Map(tracks.map(track => [track.trackNumber, track]));
   while (at < end && (!count || packets < count)) {
+    if (isCurrent?.() === false) return null;
     const previousObjects = new Map([...assembling].map(([id, object]) => [id, { ...object, ranges: [...object.ranges] }]));
     const previousLengths = new Map([...frames].map(([id, stream]) => [id, stream.length]));
     try {
@@ -37,6 +38,7 @@ export async function readAsfPackets({ readRange, fileSize, tracks, info, firstP
     packets++;
     state.at = at;
     state.packets = packets;
+    if (isCurrent?.() === false) return null;
     if (firstPicture) {
       const video = tracks.find(track => track.type === "video");
       const stream = video && frames.get(video.trackNumber);
@@ -105,7 +107,7 @@ export async function readAsfPacketTime({ readRange, at, end, info }) {
  * @param {number} params.sentFrom - When packet `first` is sent, as far as the caller knows.
  * @returns {Promise<{ index: PacketIndex, startCovered: boolean }>}
  */
-export async function readAsfWindow({ readRange, data, tracks, requested, info, first, interval, sentFrom }) {
+export async function readAsfWindow({ readRange, data, tracks, requested, info, first, interval, sentFrom, isCurrent }) {
   const declared = new Map(tracks.map(track => [track.trackNumber, track]));
   // Not admitted to IndexMemory: one segment's records, a few hundred, held
   // by the request that asked and dropped with it. Nothing owns a window to
@@ -125,23 +127,30 @@ export async function readAsfWindow({ readRange, data, tracks, requested, info, 
   const held = (start, end) => buffer !== null && start >= bufferAt && end < bufferAt + buffer.length;
   const read = (start, end) => held(start, end) ? buffer.subarray(start - bufferAt, end - bufferAt + 1) : readRange(start, end);
   const load = async () => {
+    if (isCurrent?.() === false) return false;
     try {
       buffer = await readRange(at, Math.min(dataEnd - 1, at + WINDOW_PORTION_PACKETS * data.length - 1));
     } catch (error) {
+      if (isCurrent?.() === false) return false;
       if (!isUnavailable(error)) throw error;
       try {
         buffer = await readRange(at, Math.min(dataEnd - 1, at + data.length - 1));
       } catch (missing) {
+        if (isCurrent?.() === false) return false;
         if (!isUnavailable(missing)) throw missing;
         const ahead = Math.ceil(Math.max(0, interval.to + WINDOW_LEAD_SECONDS - sent) * rate);
         throw new BytesUnavailable(at, Math.min(dataEnd - 1, Math.max(at + data.length, at + ahead) - 1), 0);
       }
     }
+    if (isCurrent?.() === false) return false;
     bufferAt = at;
+    return true;
   };
   for (;;) {
+    if (isCurrent?.() === false) return null;
     if (at >= dataEnd) { reachedEnd = true; break; }
-    if (!held(at, Math.min(dataEnd, at + data.length) - 1)) await load();
+    if (!held(at, Math.min(dataEnd, at + data.length) - 1) && !(await load())) return null;
+    if (isCurrent?.() === false) return null;
     ({ next: at, sent } = await readPacket({ readRange: read, at, end: data.end, info, declared, frames, assembling, started }));
     for (const id of ids) {
       const stream = frames.get(id), times = after.get(id);

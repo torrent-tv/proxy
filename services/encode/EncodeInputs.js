@@ -413,7 +413,7 @@ export class EncodeInputs {
     // field 2026-10-10, a picture's request took 38 s before its copy began and
     // nothing said on what (torrent-tv/meta#166).
     request.timing ??= { askedAt: this.#now(), attempts: 0, resolutions: 0, resolveMs: 0,
-      reads: 0, queuedMs: 0, readMs: 0, heldMs: 0, budgetMs: 0 };
+      reads: 0, queuedMs: 0, readMs: 0, readsByStatement: {}, heldMs: 0, budgetMs: 0 };
     request.timing.attempts += 1;
     this.#observe(request, "attempt", { request: request.key, attempt: request.timing.attempts });
     request.promise = (async () => {
@@ -742,9 +742,12 @@ function awaitedIn(waiting, arrived) {
  */
 function describeTiming(timing, now) {
   if (!timing) return "";
+  const statements = Object.entries(timing.readsByStatement ?? {}).map(([statement, measured]) =>
+    `${statement} queued ${measured.queuedMs}ms/read ${measured.readMs}ms`).join(", ");
   return `; asked ${Math.max(0, now - timing.askedAt)}ms ago over ${timing.attempts} attempt(s): ` +
     `${timing.resolutions} resolution(s) ${timing.resolveMs}ms ` +
     `(${timing.reads} file read(s): queued ${timing.queuedMs}ms, reading ${timing.readMs}ms), ` +
+    (statements ? `by statement: ${statements}, ` : "") +
     `held ranges ${timing.heldMs}ms, budget ${timing.budgetMs}ms` +
     // Where a packet input's walk spent its read: waiting for the same
     // track's earlier walks, or reading the file (r62, torrent-tv/meta#178).

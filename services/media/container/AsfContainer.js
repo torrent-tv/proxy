@@ -212,15 +212,20 @@ export class AsfContainer extends Container {
     const index = await this.readPacketIndex();
     return { times: index.keyframesOf(track.trackNumber), tolerance: 0 };
   }
-  async readPacketIndex(interval) {
+  async readPacketIndex(interval, { isCurrent } = {}) {
+    if (isCurrent?.() === false) return null;
     await this.#readHeader();
+    if (isCurrent?.() === false) return null;
     if (!this.#packets && Number.isFinite(interval?.from) && Number.isFinite(interval?.to) && interval.to > interval.from) {
-      const window = await this.#readWindow(interval);
+      const window = await this.#readWindow(interval, isCurrent);
+      if (isCurrent?.() === false) return null;
       if (window) return window;
     }
+    if (isCurrent?.() === false) return null;
     if (!this.#packets) {
       const index = await readAsfPackets({ readRange: this.readRange, fileSize: this.fileSize, tracks: this.#tracks,
-        info: { ...this.#info, durationSeconds: this.#duration }, state: this.#packetState, packetMemory: this.packetMemory });
+        info: { ...this.#info, durationSeconds: this.#duration }, state: this.#packetState, packetMemory: this.packetMemory, isCurrent });
+      if (index === null) return null;
       const timeline = this.#tracks.find(track => track.type === "video") ?? this.#tracks.find(track => track.type === "audio");
       const bounds = timeline ? index.boundsOf(timeline.trackNumber) : null;
       if (bounds) {
@@ -246,17 +251,21 @@ export class AsfContainer extends Container {
    * interval, is read again from twice as far back, and from the first packet
    * at the latest; which it reaches is checked on what it read, not assumed.
    */
-  async #readWindow(interval) {
+  async #readWindow(interval, isCurrent) {
     const data = await this.#dataLayout();
+    if (isCurrent?.() === false) return null;
     if (!data) return null;
     const requested = this.#tracks.filter(track => ["video", "audio"].includes(track.type) &&
       (!interval.trackIds?.length || interval.trackIds.includes(track.trackNumber)));
     if (!requested.length) return null;
     const info = { ...this.#info, durationSeconds: this.#duration };
     for (let lead = this.#info.prerollSeconds + WINDOW_LEAD_SECONDS; ; lead *= 2) {
+      if (isCurrent?.() === false) return null;
       const sentFrom = interval.from - lead;
-      const first = await this.#packetSentBefore(sentFrom, data, interval.to + WINDOW_LEAD_SECONDS);
-      const window = await readAsfWindow({ readRange: this.readRange, data, tracks: this.#tracks, requested, info, first, interval, sentFrom });
+      const first = await this.#packetSentBefore(sentFrom, data, interval.to + WINDOW_LEAD_SECONDS, isCurrent);
+      if (isCurrent?.() === false) return null;
+      const window = await readAsfWindow({ readRange: this.readRange, data, tracks: this.#tracks, requested, info, first, interval, sentFrom, isCurrent });
+      if (isCurrent?.() === false) return null;
       if (window.startCovered || first === 0) return window.index;
     }
   }
@@ -291,14 +300,16 @@ export class AsfContainer extends Container {
    * bytes the window from it to `until` is estimated to take, so the swarm is
    * asked for the packet and the window it begins at once.
    */
-  async #packetSentBefore(seconds, data, until) {
-    let low = 0, high = data.count, lowSent = await this.#sentAt(0, data), highSent = this.#duration;
+  async #packetSentBefore(seconds, data, until, isCurrent) {
+    if (isCurrent?.() === false) return null;
+    let low = 0, high = data.count, lowSent = await this.#sentAt(0, data, 1, isCurrent), highSent = this.#duration;
+    if (isCurrent?.() === false) return null;
     if (lowSent > seconds) return 0;
     // Past the last packet nothing is sent before the film ends; the last
     // packet itself is read only when the search needs it.
     if (!(highSent > seconds)) {
       high = data.count - 1;
-      highSent = await this.#sentAt(high, data);
+      highSent = await this.#sentAt(high, data, 1, isCurrent);
       if (highSent <= seconds) return high;
     }
     for (const [number, at] of this.#sent) {
@@ -307,12 +318,14 @@ export class AsfContainer extends Container {
       else { high = number; highSent = at; }
     }
     for (let guesses = 0; high - low > 1 && seconds - lowSent > WINDOW_SEARCH_SECONDS; guesses++) {
+      if (isCurrent?.() === false) return null;
       const perSecond = (high - low) / (highSent - lowSent);
       const aim = seconds - WINDOW_SEARCH_SECONDS / 2;
       const guess = guesses >= 3 || !(perSecond > 0) ? Math.floor((low + high) / 2) : low + Math.floor((aim - lowSent) * perSecond);
       const probe = Math.min(high - 1, Math.max(low + 1, guess));
       const window = perSecond > 0 ? Math.ceil((until - aim) * perSecond) : 1;
-      const at = await this.#sentAt(probe, data, Math.max(1, window));
+      const at = await this.#sentAt(probe, data, Math.max(1, window), isCurrent);
+      if (isCurrent?.() === false) return null;
       if (at <= seconds) { low = probe; lowSent = at; }
       else { high = probe; highSent = at; }
     }
@@ -323,7 +336,8 @@ export class AsfContainer extends Container {
    * When packet `number` is sent. A packet that is not held is said as
    * missing with the `packets` packets from it.
    */
-  async #sentAt(number, data, packets = 1) {
+  async #sentAt(number, data, packets = 1, isCurrent) {
+    if (isCurrent?.() === false) return null;
     if (!this.#sent.has(number)) {
       const at = data.start + number * data.length;
       try {
@@ -333,6 +347,6 @@ export class AsfContainer extends Container {
         throw new BytesUnavailable(at, Math.min(data.start + data.count * data.length, at + packets * data.length) - 1, 0);
       }
     }
-    return this.#sent.get(number);
+    return isCurrent?.() === false ? null : this.#sent.get(number);
   }
 }

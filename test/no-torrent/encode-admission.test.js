@@ -35,7 +35,7 @@ const SOUNDTRACK = 0.02;
  * A machine with the outputs named, their costs, what runs and who is being
  * prepared onto what.
  *
- * @param {{ costs: Record<string, number | null>, running?: Record<string, number>, share?: number | null }} how
+ * @param {{ costs: Record<string, number | null>, running?: Record<string, number>, share?: number | null, finished?: string[] }} how
  */
 function machine(how) {
   const running = new Map(Object.entries(how.running ?? {}));
@@ -45,6 +45,7 @@ function machine(how) {
     liveRunsByAddress: () => new Map([...running].filter(([, count]) => count > 0)),
     preparedAddresses: () => new Set([...preparing].filter(([, viewers]) => viewers.size > 0).map(([address]) => address)),
     loadOf: (address) => (address in how.costs ? { costSec: how.costs[address], fileKey: "", fileCostSec: 0 } : null),
+    finished: (address) => how.finished?.includes(address) === true,
     availability: () => (how.share === undefined || how.share === null ? null : { share: how.share, known: true })
   });
   return {
@@ -135,6 +136,14 @@ test("an output with no measured cost is not admitted", () => {
   const answer = admission.admitsPreparation("b");
   assert.equal(answer.admitted, false);
   assert.match(answer.reason, /no measured encoding cost/);
+});
+
+test("an output already finished on disk remains reusable without a new encoder", () => {
+  const { admission } = machine({ costs: {}, finished: ["complete"] });
+  const answer = admission.previewCandidate({ toKey: () => "complete" }, {});
+
+  assert.equal(answer.admitted, true);
+  assert.match(answer.reason, /everything it serves is already made/);
 });
 
 test("unpriced occupied work is neither spare pool headroom nor capacity for another output", () => {

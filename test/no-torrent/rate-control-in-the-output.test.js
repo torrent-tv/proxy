@@ -57,6 +57,59 @@ test("a software output is bounded at its size's nominal rate unless a lower lim
   assert.notEqual(decide(SOFTWARE).spec.toKey(), decide(SOFTWARE, 1400).spec.toKey(), "and are two outputs");
 });
 
+test("an unfinished output beyond machine capacity does not prevent a viable requested encode", () => {
+  const frame = { width: 1280, height: 720 };
+  const pixelsPerSec = frame.width * frame.height * 24 * 1.1;
+  const specWith = (encode) => new OutputSpec({
+    sourceKey: "torrent:abc",
+    segmentFormatId: "fmp4",
+    grid: new CutGrid({ kind: "uniform", fileIndex: 0 }),
+    video: new VideoOutput({ fileIndex: 0, encode }),
+    audio: null
+  });
+  const partialSlowOutput = specWith({
+    encoder: SOFTWARE.name,
+    ...frame,
+    fps: 24,
+    preset: "veryfast",
+    tonemap: false,
+    rateControl: null
+  });
+  const decided = decideOutputFormat({
+    encodesPicture: true,
+    exact: true,
+    target: frame,
+    source: { ...SOURCE, megabitsPerSecond: 8, decode: null },
+    fps: 24,
+    encoder: SOFTWARE,
+    benchmark: [{
+      preset: "ultrafast",
+      pixelsPerSec,
+      bySize: [{ ...frame, pixelsPerSec }],
+      interpolationError: null
+    }],
+    cost: { decodeModel: null, observedDecodeCostSec: null, requiredSpeed: 1 },
+    chooseBudget: () => null,
+    machineAdmission: (spec) => ({
+      admitted: spec.video.encode.preset !== "veryfast",
+      reason: "the unfinished output cannot be produced at realtime",
+      speedX: spec.video.encode.preset === "veryfast" ? 0.73 : 1.02
+    }),
+    tonemap: false,
+    limitsFor: () => [null],
+    specWith,
+    serving: {
+      mode: "auto",
+      linkMbps: null,
+      keys: [partialSlowOutput.toKey()],
+      readyAt: () => true
+    }
+  });
+
+  assert.equal(decided.reusedKey, null, "the partial output is not resumed at a speed the machine cannot sustain");
+  assert.equal(decided.spec.video.encode.preset, "ultrafast", "the viable requested output is considered after it");
+});
+
 test("a limit named in the request is not answered by an output of another limit already here", () => {
   // The nominal 720p output exists and is ready, and it suits this viewer —
   // which is exactly what a move to a lower limit is for leaving.

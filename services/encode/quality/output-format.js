@@ -228,6 +228,20 @@ export function decideOutputFormat({
       rateControl: limit === null ? null : softwareRateControlFor({ width: w, height: h, fps, source, capKbps: limit })
     }));
   };
+  let machineRefusal = null;
+  const machineAdmissionFor = (spec) => typeof machineAdmission === "function" ? machineAdmission(spec) : null;
+  const machineCanContinue = (spec) => machineAdmissionFor(spec)?.admitted !== false;
+  const admittedByMachine = (spec) => {
+    if (!machineCan(spec.video?.encode?.width ?? 0, spec.video?.encode?.height ?? 0)) {
+      return false;
+    }
+    const answer = machineAdmissionFor(spec);
+    if (answer?.admitted === false) {
+      machineRefusal ??= answer;
+      return false;
+    }
+    return true;
+  };
   const wantedFormats = formatsAt(width, height);
   const wantedSpec = wantedFormats[0];
   const wantedKey = wantedSpec.toKey();
@@ -247,6 +261,7 @@ export function decideOutputFormat({
       wanted: { width, height },
       nextLowerArea: nextRungAreaBelow(buildResolutionLadder(ceiling.w, ceiling.h), height),
       atRisk: measured && !canSustainOutput({ benchmark, ...priced, outputPixelsPerSec: width * height * fps, frame: { width, height } }).sustainable,
+      canProduce: (candidate) => machineCanContinue(candidate.spec),
       judge: (candidate) => judge(candidate.spec),
       candidates: servingCandidates({
         wanted: wantedSpec,
@@ -262,18 +277,6 @@ export function decideOutputFormat({
   }
 
   let anySizeHeld = false;
-  let machineRefusal = null;
-  const admittedByMachine = (spec) => {
-    if (!machineCan(spec.video?.encode?.width ?? 0, spec.video?.encode?.height ?? 0)) {
-      return false;
-    }
-    const answer = typeof machineAdmission === "function" ? machineAdmission(spec) : null;
-    if (answer?.admitted === false) {
-      machineRefusal ??= answer;
-      return false;
-    }
-    return true;
-  };
   if (machineCan(width, height)) {
     for (const spec of wantedFormats) {
       if (!admittedByMachine(spec)) {

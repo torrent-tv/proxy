@@ -48,15 +48,17 @@ import { admissionRank } from "./link-budget.js";
  *   on this viewer's own ladder; zero when there is none.
  * @param {boolean} params.atRisk - Producing `wanted` here is measured not to
  *   keep up with what the file needs. False where nothing measured it.
+ * @param {(candidate: Candidate) => boolean} [params.canProduce] - Whether
+ *   this machine can keep producing an output that is not finished.
  * @param {(candidate: Candidate) => { admitted: boolean, load: object }} params.judge -
  *   What this viewer's link does with the candidate's whole load.
  * @param {Candidate[]} params.candidates
  * @returns {{ key: string, answer: object } | null} The output to serve, or
  *   null to produce `wanted`.
  */
-export function chooseServingOutput({ mode, wanted, nextLowerArea, atRisk, judge, candidates }) {
+export function chooseServingOutput({ mode, wanted, nextLowerArea, atRisk, canProduce = () => true, judge, candidates }) {
   const admitted = (candidates ?? [])
-    .filter((candidate) => candidate.readyHere === true)
+    .filter((candidate) => candidate.readyHere === true && canProduce(candidate))
     .map((candidate) => ({ candidate, answer: judge(candidate) }))
     .filter((one) => one.answer.admitted);
   const areaOf = (one) => one.candidate.width * one.candidate.height;

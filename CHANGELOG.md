@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Exclude unfinished outputs the proxy cannot keep producing before reusing them for a viewer.
+
 ## 2.107.26
 
 - **Fix**: Keep an unread fragment in the seek readiness forecast when its media timestamps can extend across the player's seek target.

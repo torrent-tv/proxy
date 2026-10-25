@@ -38,9 +38,20 @@ import {
   ZERO
 } from "./media-time.js";
 
-// Match the media element's allowance for a range that starts a few frames
-// after its current position (see server/public/domain/buffer-metrics.js).
-const CLIENT_RANGE_START_TOLERANCE_SECONDS = 0.25;
+// Match the media element's allowance around a seek target. A fragment's
+// timestamps can extend slightly beyond its nominal playlist boundary.
+export const PLAYER_SEEK_TOLERANCE_SECONDS = 0.25;
+
+/**
+ * @param {number} segmentEndSeconds
+ * @param {number} positionSeconds
+ * @returns {boolean}
+ */
+export function endsWithinPlayerSeekTolerance(segmentEndSeconds, positionSeconds) {
+  return Number.isFinite(segmentEndSeconds) && Number.isFinite(positionSeconds) &&
+    segmentEndSeconds <= positionSeconds &&
+    positionSeconds - segmentEndSeconds <= PLAYER_SEEK_TOLERANCE_SECONDS;
+}
 
 /**
  * The mean rate predicted over a horizon by the integral of the measured rate.
@@ -223,7 +234,8 @@ export function predictPlaybackReadiness(input = {}) {
     bitsPerMediaSecond: averageBitsPerMediaSecond(track, track.segments,
       new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : [])),
     segments: segmentsOf[trackIndex]
-      .filter((segment) => isPiece(segment) && segment.endSeconds >= position && segment.startSeconds < horizonEnd)
+      .filter((segment) => isPiece(segment) &&
+        segment.endSeconds >= position - PLAYER_SEEK_TOLERANCE_SECONDS && segment.startSeconds < horizonEnd)
       .sort((left, right) => left.startSeconds - right.startSeconds || left.index - right.index),
     // The pieces after the near window, as the playlist cuts them, and the
     // offset the page's player placed them by.
@@ -290,11 +302,11 @@ export function predictPlaybackReadiness(input = {}) {
     for (const segment of segments) {
       // Media the page already holds is not transferred again: every range of
       // the piece still ahead of the viewer lies inside what the page holds.
-      const exactBoundaryPrerequisite = segment.endSeconds === position;
+      const boundaryPrerequisite = endsWithinPlayerSeekTolerance(segment.endSeconds, position);
       let held = segment.ranges.length > 0;
       for (const range of segment.ranges) {
-        const requiredStart = exactBoundaryPrerequisite ? range.start : latest(range.start, at);
-        if ((exactBoundaryPrerequisite || compare(range.end, at) > 0) &&
+        const requiredStart = boundaryPrerequisite ? range.start : latest(range.start, at);
+        if ((boundaryPrerequisite || compare(range.end, at) > 0) &&
           !contains(state.clientRanges, requiredStart, range.end)) {
           held = false;
           break;
@@ -843,7 +855,7 @@ function heldRanges(ranges, segments, unit, position) {
   const pieces = segments.flatMap((segment) => segment.ranges ?? []);
   const zero = mediaTime(0n, unit);
   const error = rescale(REPORTED_TIME_ERROR, unit);
-  const startTolerance = add(position, rescale(fromSeconds(CLIENT_RANGE_START_TOLERANCE_SECONDS), unit));
+  const startTolerance = add(position, rescale(fromSeconds(PLAYER_SEEK_TOLERANCE_SECONDS), unit));
   const held = [];
   for (const range of ranges) {
     const reportedStart = rescale(range.start, unit);
@@ -870,7 +882,7 @@ function heldRanges(ranges, segments, unit, position) {
 function withSeekStartTolerance(ranges, position, unit) {
   const first = ranges.reduce((earliestRange, range) =>
     !earliestRange || compare(range.start, earliestRange.start) < 0 ? range : earliestRange, null);
-  const toleranceEnd = add(position, rescale(fromSeconds(CLIENT_RANGE_START_TOLERANCE_SECONDS), unit));
+  const toleranceEnd = add(position, rescale(fromSeconds(PLAYER_SEEK_TOLERANCE_SECONDS), unit));
   if (!first || compare(first.start, position) <= 0 || compare(first.start, toleranceEnd) > 0) {
     return ranges;
   }
@@ -879,10 +891,11 @@ function withSeekStartTolerance(ranges, position, unit) {
 
 /**
  * The pieces of a track this forecast places in exact time: those still to
- * play (ending at or after `position`) that start before `horizonEnd`, the first
- * piece, every piece that has been read and every piece that is made. The piece
- * ending exactly at a seek position is kept as a prerequisite: the playlist
- * player can request it before the piece starting at that position. A piece
+ * play (ending within the player's seek tolerance of `position`) that start
+ * before `horizonEnd`, the first piece, every piece that has been read and
+ * every piece that is made. A piece ending just before a seek target is kept
+ * as a prerequisite because its media timestamps can extend past its nominal
+ * playlist boundary. A piece
  * that is none of these changes no exact answer: after the near window it is
  * scheduled in seconds, it is not where the track starts, no unread piece is
  * placed by it (only read pieces are), it lends no frame to what the page
@@ -896,7 +909,8 @@ function withSeekStartTolerance(ranges, position, unit) {
 function piecesThatMatter(track, position, horizonEnd = Number.POSITIVE_INFINITY) {
   const made = new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : []);
   const kept = track.segments.filter((segment) => segment?.index === 0 || segment?.mediaRanges !== undefined ||
-    made.has(segment?.index) || (!(Number.isFinite(segment?.endSeconds) && segment.endSeconds < position) &&
+    made.has(segment?.index) || (!(Number.isFinite(segment?.endSeconds) &&
+      segment.endSeconds < position - PLAYER_SEEK_TOLERANCE_SECONDS) &&
       !(Number.isFinite(segment?.startSeconds) && segment.startSeconds >= horizonEnd)));
   return kept.length === track.segments.length ? track.segments : kept;
 }

@@ -4,6 +4,8 @@
 
 ## 2.107.16
 
+- **Fix**: Allow playback readiness to finish at the exact mapped near window when later source ranges have not been requested yet.
+
 - **Fix**: Wait for the playback map before starting a full source-rest packet scan. On WMV, the scan could request the whole file before its transcoded output was registered, delaying the first segment.
 
 ## 2.107.15

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.24
 
 - **Fix**: Include a fragment's exact ending boundary in encoding and byte demand. A seek to 900 s requested fragment 224 while the proxy planned and fetched only fragment 225, leaving the request waiting for output and input that the active run could not produce.
 

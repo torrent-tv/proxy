@@ -229,7 +229,18 @@ export class ViewerRequests {
       sourceObserved: true, waitElapsedMs });
     const featuresChanged = this.#recordEarlyWaitSnapshot(context, context.features);
     const elapsedMs = waitElapsedSince(context, waitElapsedMs);
-    const measuredWorkSeconds = processing.firstRequiredSegmentsSeconds;
+    // The wait ends when the start forecast lets the picture start, and the
+    // first required pieces being there is only part of that: a source
+    // supplied slower than the film plays is held until the cushion carries
+    // it to the end. Counted to the first pieces alone, the estimate reached
+    // zero with seven minutes still to wait, and the page had no time to show
+    // (Home Assistant 2026-10-26, Despicable Me 3 BDRemux at 0.53x,
+    // torrent-tv/meta#239).
+    const firstRequiredSeconds = processing.firstRequiredSegmentsSeconds;
+    const startGateSeconds = processing.startGateSeconds;
+    const measuredWorkSeconds = Number.isFinite(startGateSeconds) && startGateSeconds >= 0
+      ? Math.max(startGateSeconds, Number.isFinite(firstRequiredSeconds) ? firstRequiredSeconds : 0)
+      : firstRequiredSeconds;
     const hasActiveEstimate = Number.isFinite(measuredWorkSeconds) && measuredWorkSeconds >= 0;
     const stagesChanged = Array.isArray(processing.firstRequiredStages) &&
       JSON.stringify(processing.firstRequiredStages) !== JSON.stringify(context.activeFirstRequiredStages);
@@ -258,7 +269,8 @@ export class ViewerRequests {
     const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
     if (!Number.isFinite(seconds) || seconds < 0) return null;
     this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, historical,
-      firstRequiredSegmentsSeconds: hasActiveEstimate ? measuredWorkSeconds : context.activeFirstRequiredSegmentsSeconds,
+      firstRequiredSegmentsSeconds: hasActiveEstimate ? firstRequiredSeconds ?? null : context.activeFirstRequiredSegmentsSeconds,
+      startGateSeconds: hasActiveEstimate && Number.isFinite(startGateSeconds) ? startGateSeconds : null,
       firstRequiredStages: context.activeFirstRequiredStages });
     return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
   }
@@ -269,11 +281,14 @@ export class ViewerRequests {
   }
 
   #logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, historical, firstRequiredSegmentsSeconds,
-    firstRequiredStages }) {
+    startGateSeconds = null, firstRequiredStages }) {
     if (context.loggedForecastRevision === context.revision) return;
-    const basis = Number.isFinite(firstRequiredSegmentsSeconds) ? "first-required" : "historical-stages";
-    const estimate = basis === "first-required"
-      ? { firstRequiredSegmentsSeconds, ...(Array.isArray(firstRequiredStages) ? { firstRequiredStages } : {}) }
+    const gated = Number.isFinite(startGateSeconds) &&
+      !(Number.isFinite(firstRequiredSegmentsSeconds) && firstRequiredSegmentsSeconds >= startGateSeconds);
+    const basis = gated ? "start-gate" : Number.isFinite(firstRequiredSegmentsSeconds) ? "first-required" : "historical-stages";
+    const estimate = basis !== "historical-stages"
+      ? { firstRequiredSegmentsSeconds, ...(Number.isFinite(startGateSeconds) ? { startGateSeconds } : {}),
+        ...(Array.isArray(firstRequiredStages) ? { firstRequiredStages } : {}) }
       : { stagesMs: historical?.stagesMs ?? null, observations: historical?.observations ?? null };
     logger.info(`early wait forecast ${JSON.stringify({ waitId: context.waitId, consumer: context.consumerId,
       generation: context.generation, features: context.features, elapsedMs, revision: context.revision,
@@ -1121,6 +1136,10 @@ export class ViewerRequests {
           videoSpeedX: videoOperation?.speed,
           audioSpeedX: audioOperation?.speed,
           firstRequiredSegmentsSeconds: forecast.firstRequiredSegmentsSeconds,
+          // When the start forecast lets the picture start: its delay while
+          // it holds the start, and nothing to add once it does not.
+          ...(forecast.ready !== true && Number.isFinite(forecast.delaySeconds)
+            ? { startGateSeconds: forecast.delaySeconds } : {}),
           firstRequiredStages: forecast.firstRequiredStages
         } });
       if (waitEstimate) forecast.waitEstimate = waitEstimate;

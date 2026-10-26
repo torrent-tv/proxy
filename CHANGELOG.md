@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.38
 
 - **Fix**: The time shown before a film starts runs to the moment the start forecast lets the picture start, not to the moment its first pieces are ready. With a source supplied slower than the film plays, the first pieces were buffered and the estimate reached zero while the picture was held minutes longer to carry the cushion to the end, so the page showed "Playback readiness has not been confirmed" instead of a time.
 

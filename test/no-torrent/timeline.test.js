@@ -54,7 +54,7 @@ test("packet admission uses exact source cuts rather than rounded playlist bound
   assert.equal(index.inputFor({ trackId: 1, ...timeline.sourceInterval(1, 1), mode: "copy" }).kind, "result");
   assert.deepEqual(timeline.sourceInterval(1, 1, 2), { from: 15.5, to: cuts[2] + 2 });
   assert.deepEqual(new Timeline({ boundaries: [0, 4, 8], cutGrid: "uniform" }).sourceInterval(1, 1, 2),
-    { from: 6, to: 10 });
+    { from: 6, to: 10, endsWithSource: true });
 });
 
 /**
@@ -137,4 +137,11 @@ test("the piece ending at an exact boundary is wanted alongside the next piece",
     { from: 0, to: 0, priority: 1, withinSeconds: Number.POSITIVE_INFINITY, urgent: false, behind: true },
     { from: 1, to: 2, priority: 100, withinSeconds: 0, urgent: false, behind: false }
   ]);
+});
+
+test("only the last piece's source interval says it ends with the source", () => {
+  const timeline = new Timeline({ boundaries: [0, 4, 8, 12], cutGrid: "uniform" });
+  assert.equal(timeline.sourceInterval(1, 1).endsWithSource, undefined);
+  assert.equal(timeline.sourceInterval(2, 2).endsWithSource, true);
+  assert.equal(timeline.sourceInterval(0, 2).endsWithSource, true, "a run that reaches the last piece reaches the end");
 });

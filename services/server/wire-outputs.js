@@ -629,7 +629,7 @@ export function wireOutputs({
     viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
     minimumBufferSecondsFor: (output) => minimumBufferSecondsOf(output),
     // What this proxy may keep of downloaded pieces on disk.
-    sourceStorageBytes: () => parts.machineBudget?.allowedFor?.("spilled pieces") ?? null,
+    sourceStorageBytes: () => parts.machineBudget?.allowedFor("spilled pieces") ?? null,
     getSourceStats: (...args) => parts.getSourceStats?.(...args) ?? null,
     disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
     planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),

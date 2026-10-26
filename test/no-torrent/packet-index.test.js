@@ -146,3 +146,41 @@ test("a future timestamp is not proof that every reordered packet has been index
   index.coverThrough(1, 2);
   assert.deepEqual(index.inputFor({ trackId: 1, from: 0, to: 2 }).ranges, [[0, 29]]);
 });
+
+test("the last piece of a copied MP4 ends with the source when the indexed end lands past the declared duration", () => {
+  // `2026-08-03 QUICK RELIEF 0364 BY KARA_C.mp4`, read from its own moov
+  // (Home Assistant 2026-10-26, torrent-tv/meta#239): video timescale 25000,
+  // one frame every 1000 ticks, keyframes every 25 frames, the last at
+  // 314.28 s; the movie declares 314960 ms. The cut grid ends the last piece
+  // at that duration; the index adds the last frame's duration to its start.
+  const scale = 25000, tick = 1000;
+  const index = new PacketIndex();
+  index.declareTrack(1, { type: "video" });
+  for (let frame = 7857; frame < 7874; frame++) {
+    index.append(1, { pts: (frame * tick) / scale, dts: (frame * tick) / scale, duration: tick / scale,
+      keyframe: frame === 7857, ranges: [[frame * 10, frame * 10 + 9]] });
+  }
+  index.complete(1);
+  const declared = 314960 / 1000;
+  const from = (7857 * tick) / scale;
+  assert.equal(index.boundsOf(1).end, 314.96000000000004, "the field's indexed end, past the declared one");
+  assert.equal(declared, 314.96);
+
+  const refused = index.inputFor({ trackId: 1, from, to: declared, mode: "copy" });
+  assert.equal(refused.reason, "video-copy-cut-is-not-a-keyframe", "unmarked, it is still an interior cut");
+  assert.match(refused.message, /copy of 314\.28\.\.314\.96 begins at the keyframe of 314\.28, ends at no keyframe; the track ends at 314\.96000000000004/);
+
+  const last = index.inputFor({ trackId: 1, from, to: declared, mode: "copy", endsWithSource: true });
+  assert.equal(last.kind, "result");
+  assert.equal(last.packets.length, 17, "every frame from the keyframe to the end of the track");
+  assert.equal(last.sourceEndSeconds, 314.96000000000004);
+});
+
+test("a last piece is not taken as reaching the end before the track is indexed to its end", () => {
+  const index = new PacketIndex();
+  index.declareTrack(1, { type: "video" });
+  for (let pts = 0; pts < 4; pts++) index.append(1, { pts, duration: 1, keyframe: pts === 0 || pts === 2, ranges: [[pts * 10, pts * 10 + 9]] });
+  const early = index.inputFor({ trackId: 1, from: 2, to: 3.5, mode: "copy", endsWithSource: true });
+  assert.equal(early.reason, "video-copy-cut-is-not-a-keyframe");
+  assert.match(early.message, /\(the last piece\).*the track is not indexed to its end yet/);
+});

@@ -11,12 +11,13 @@ export class SegmentInputs {
     this.#tracks = tracks;
   }
 
-  forInterval({ from, to, tracks = this.#tracks, mode = "transcode" }) {
+  forInterval({ from, to, tracks = this.#tracks, mode = "transcode", endsWithSource = false }) {
     const packets = [];
     const ranges = [];
     for (const track of tracks) {
       if (!["audio", "video"].includes(track.type)) continue;
-      const input = this.#index.inputFor({ trackId: track.trackNumber, from, to, mode: typeof mode === "function" ? mode(track) : mode });
+      const input = this.#index.inputFor({ trackId: track.trackNumber, from, to,
+        mode: typeof mode === "function" ? mode(track) : mode, endsWithSource });
       if (input.kind !== "result") return { ...input, trackId: track.trackNumber };
       packets.push({ track, ...input });
       ranges.push(...input.ranges);

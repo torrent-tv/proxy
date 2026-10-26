@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The last piece of a copied picture ends where the source ends and needs no keyframe there. Its end is the file's declared duration, and the track's indexed end — the last frame's start plus its duration in floating point — could land past it (314.96 s against 314.96000000000004 s), so the last piece of a copied MP4 was refused: the viewer got an error at the end of the film, and reopening near the end failed at once. A refused copy cut now states its interval, its keyframes and the track's end.
+
 ## 2.107.36
 
 - **Fix**: The line saying a file's own reads are withheld from the swarm, because no present viewer holds the file, is written whichever publication of the map meets the change first. On 2.107.35 a publication made for another reason could meet it first, and the line was not written.

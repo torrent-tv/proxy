@@ -175,8 +175,20 @@ export class PacketIndex {
     track.coveredThrough = seconds;
   }
 
-  /** The same calculation is used to order source bytes and admit an encode. */
-  inputFor({ trackId, from, to, mode = "transcode" }) {
+  /**
+   * The same calculation is used to order source bytes and admit an encode.
+   *
+   * `endsWithSource` says this is the output's last piece: it ends where the
+   * source ends, and a copy of it needs no keyframe at `to`. Its `to` is the
+   * file's declared duration, and the track's end, its last frame's start plus
+   * that frame's duration added in floating point, can land past it: 314.96 s
+   * declared, 314.88 + 0.04 = 314.96000000000004 indexed. Compared with that
+   * end, the last piece of a copied MP4 was refused, the viewer got HTTP 500 at
+   * the end of the film and reopening near the end was refused at once (Home
+   * Assistant 2026-10-26, `2026-08-03 QUICK RELIEF 0364 BY KARA_C.mp4`,
+   * torrent-tv/meta#239).
+   */
+  inputFor({ trackId, from, to, mode = "transcode", endsWithSource = false }) {
     this.flushPending();
     if (!["copy", "transcode"].includes(mode)) throw new TypeError("Unknown segment input mode.");
     if (!Number.isFinite(from) || !Number.isFinite(to) || from < 0 || to <= from) {
@@ -223,9 +235,13 @@ export class PacketIndex {
         : { kind: "needs-index", trackId, from: startAt, to };
       let endsAtKeyframe = false;
       if (mode === "copy") endsAtKeyframe = packets.someAtTime(to, index => packets.keyframeAt(index));
-      if (mode === "copy" && (packets.ptsAt(first) !== from ||
-        (!endsAtKeyframe && (!track.complete || to < this.boundsOf(trackId).end)))) {
-        return { kind: "terminal", reason: "video-copy-cut-is-not-a-keyframe" };
+      const reachesEnd = track.complete && (endsWithSource || to >= this.boundsOf(trackId).end);
+      if (mode === "copy" && (packets.ptsAt(first) !== from || (!endsAtKeyframe && !reachesEnd))) {
+        const bounds = track.complete ? this.boundsOf(trackId) : null;
+        return { kind: "terminal", reason: "video-copy-cut-is-not-a-keyframe",
+          message: `copy of ${from}..${to}${endsWithSource ? " (the last piece)" : ""} begins at the keyframe of ` +
+            `${packets.ptsAt(first)}, ${endsAtKeyframe ? "ends at a keyframe" : "ends at no keyframe"}; ` +
+            (bounds ? `the track ends at ${bounds.end}` : "the track is not indexed to its end yet") };
       }
     }
     // A transcoder needs the first audio packet at or after the cut to flush
@@ -248,7 +264,7 @@ export class PacketIndex {
       decodeFrom: packets.ptsAt(first),
       from,
       to,
-      ...(track.complete && to >= this.boundsOf(trackId).end ? { sourceEndSeconds: this.boundsOf(trackId).end } : {}),
+      ...(track.complete && (endsWithSource || to >= this.boundsOf(trackId).end) ? { sourceEndSeconds: this.boundsOf(trackId).end } : {}),
       packets: input
     };
   }

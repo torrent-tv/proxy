@@ -125,7 +125,10 @@ export class Timeline {
     const shift = sourceStartTime - (base ?? 0);
     return {
       from: from === null ? this.publishedStartOf(fromIndex) + sourceStartTime : from + shift,
-      to: to === null ? this.publishedStartOf(toIndex + 1) + sourceStartTime : to + shift
+      to: to === null ? this.publishedStartOf(toIndex + 1) + sourceStartTime : to + shift,
+      // The last piece ends where the source does, wherever its declared
+      // duration lands against the frames (`PacketIndex.inputFor`).
+      ...(toIndex === this.segmentCount - 1 ? { endsWithSource: true } : {})
     };
   }
 

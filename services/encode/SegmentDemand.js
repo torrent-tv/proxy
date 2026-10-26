@@ -92,4 +92,27 @@ export class SegmentDemand {
     }
     return { rank, topRank };
   }
+
+  /**
+   * The viewer-derived demand for one output segment, including its due time.
+   *
+   * @param {string} address
+   * @param {number} index
+   * @param {number} now
+   * @returns {{ rank: number, topRank: number, urgent: boolean, deadlineAt: number }}
+   */
+  demandAt(address, index, now = Date.now()) {
+    const zones = this.mapOn(address);
+    let rank = 0, topRank = 0, urgent = false, deadlineAt = Number.POSITIVE_INFINITY;
+    for (const zone of zones) {
+      topRank = Math.max(topRank, Number.isFinite(zone.priority) ? zone.priority : 0);
+      if (index < zone.from || index > zone.to || !(zone.priority > 0)) continue;
+      rank = Math.max(rank, zone.priority);
+      urgent ||= zone.urgent === true;
+      const due = Number.isFinite(zone.deadlineAt) ? zone.deadlineAt
+        : Number.isFinite(zone.withinSeconds) ? now + Math.max(0, zone.withinSeconds) * 1000 : Number.POSITIVE_INFINITY;
+      deadlineAt = Math.min(deadlineAt, due);
+    }
+    return { rank, topRank, urgent, deadlineAt };
+  }
 }

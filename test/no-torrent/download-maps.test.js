@@ -167,6 +167,20 @@ test("speculative index reads retain their own priority and deadline", async () 
     urgent: false, downloadOnly: true, requestId: "future", deadlineAt: 1234 }]);
 });
 
+test("an active encode input reprices each of its missing metadata reads", async () => {
+  let published;
+  const maps = new DownloadMaps({ publish: map => { published = map; } });
+  const address = { sourceKey: "source", fileIndex: 0 };
+  for (const [statement, start] of [["tracks:encode:out:2", 10], ["media-info:encode:out:2", 30]]) {
+    await maps.metadata({ ...address, statement, scope: "preparation", priority: 95, urgent: false, deadlineAt: 17_000,
+      result: { kind: "needs-ranges", requestId: "encode:out:2", ranges: [[start, start + 9]] } });
+  }
+  await maps.repriceRequest("encode:out:2", { priority: 100, urgent: true, deadlineAt: 12_000 });
+  assert.deepEqual(published.zones.map(zone => [zone.priority, zone.urgent, zone.deadlineAt]), [
+    [100, true, 12_000], [100, true, 12_000]
+  ]);
+});
+
 test("a withdrawn interval removes its metadata and rejects a late missing-byte result", async () => {
   let published;
   const maps = new DownloadMaps({ publish: map => { published = map; }, resolvePlayback: async () => [] });

@@ -228,6 +228,7 @@ export function wireOutputs({
     diagnosticsRoot = "",
     memoryClaimant = null,
     resolveEncodeInput = null,
+    repriceEncodeDemand = null,
     readSourceMedia = null,
     readMetadataActivity = null,
     sourceInputsFor = null,
@@ -1191,7 +1192,12 @@ export function wireOutputs({
     urgent: (output, index) => parts.encodeOrchestrator.wantedSegmentsOn(output.outputKey).some(window =>
       index >= window.from && index <= window.to && window.urgent === true),
     // The piece's rank in the output's own map, said with an input's state.
-    rankAt: (output, index) => parts.encodeOrchestrator?.rankAt?.(output.outputKey ?? "", index) ?? null,
+    rankAt: (output, index) => parts.encodeOrchestrator?.demandAt?.(output.outputKey ?? "", index) ?? null,
+    demandChanged: (_output, demand) => {
+      void Promise.resolve(repriceEncodeDemand?.({ priority: demand.rank, urgent: demand.urgent === true,
+        deadlineAt: Number.isFinite(demand.deadlineAt) ? demand.deadlineAt : Number.POSITIVE_INFINITY,
+        requestId: demand.requestId })).catch(error => logger.warn(`encode input demand repricing failed: ${error.message}`));
+    },
     log: line => logger.info(line),
     observeWait,
     changed: (output, result) => {

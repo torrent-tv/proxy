@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Carry the live encode input priority, urgency and due time into source metadata download demand, and withdraw that demand when its input is obsolete.
+
 ## 2.107.32
 
 - **Fix**: Allow playback to start after the browser has received the completed final output, even when the declared file duration extends beyond its media.

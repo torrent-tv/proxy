@@ -238,6 +238,22 @@ export class DownloadMaps {
     return this.#emit(file);
   }
 
+  /** Reprice source metadata owned by one live encode input request. */
+  repriceRequest(requestId, demand) {
+    const changed = [];
+    for (const file of this.#files.values()) {
+      let fileChanged = false;
+      for (const metadata of file.metadata.values()) {
+        if (metadata.requestId !== requestId) continue;
+        if (Object.keys(demand).every(key => Object.is(metadata[key], demand[key]))) continue;
+        Object.assign(metadata, demand);
+        fileChanged = true;
+      }
+      if (fileChanged) changed.push(this.#emit(file));
+    }
+    return Promise.all(changed);
+  }
+
   forget(sourceKey, fileIndex, { keepPreparation = false } = {}) {
     const file = this.#file(sourceKey, fileIndex);
     this.#setZones(file, []);

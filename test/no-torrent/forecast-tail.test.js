@@ -154,7 +154,7 @@ test("an exact queue arrival beyond the near window does not replace the aggrega
  * (torrent-tv/meta#239): 43 929 276 423 bytes over 5 380.4 s, a copied picture,
  * the swarm at 1.4 MB/s. Cut in 4 s pieces, the viewer at the start.
  */
-function despicableMe3({ recent = 1_400_000, session = null, storage = null, fileOffset = 0, plannedToEnd = false } = {}) {
+function despicableMe3({ recent = 1_400_000, session = null, storage = null, fileOffset = 0, plannedToEnd = false, readsIndex = false } = {}) {
   const now = 1_000_000, piece = 4, duration = 5380.4, fileLength = 43_929_276_423;
   const count = Math.ceil(duration / piece);
   const byteAt = (seconds) => Math.min(fileLength, Math.round(seconds * fileLength / duration));
@@ -163,7 +163,8 @@ function despicableMe3({ recent = 1_400_000, session = null, storage = null, fil
     lookaheadSeconds: 120,
     ...(storage === null ? {} : { sourceStorageBytes: storage }),
     sources: [{ id: "source", complete: false, fileOffset, fileLength, pieceLength: 16_777_216,
-      residence: [],
+      // A copied Matroska file reads its index at the end, held from the open.
+      residence: readsIndex ? [{ start: fileLength - 2_330_631, end: fileLength, location: "disk" }] : [],
       // The torrent thread's plan, which can reach the end of the file.
       downloadForecast: { ranges: plannedToEnd ? [{ start: fileLength - 16_777_216, end: fileLength, availableAt: now + 3_600_000 }] : [] },
       downloadRateReadings: summaryOf(recent, now),
@@ -173,7 +174,8 @@ function despicableMe3({ recent = 1_400_000, session = null, storage = null, fil
       bitsPerMediaSecond: 65_000_000, readings: summaryOf(97, now),
       segments: Array.from({ length: count }, (_, place) => ({
         index: place, startSeconds: place * piece, endSeconds: Math.min(duration, (place + 1) * piece),
-        sourceInputs: [{ sourceId: "source", ranges: [{ start: byteAt(place * piece), end: byteAt((place + 1) * piece) }] }]
+        sourceInputs: [{ sourceId: "source", ranges: [{ start: byteAt(place * piece), end: byteAt((place + 1) * piece) },
+          ...(readsIndex && place === 0 ? [{ start: fileLength - 2_330_631, end: fileLength }] : [])] }]
       })),
       readySegmentIndices: [], segmentSizesBytes: new Map()
     }],
@@ -242,4 +244,12 @@ test("the rest of the film is not taken as held because the torrent's plan reach
   // Taken as the near window's end, that plan left the tail no bytes at all.
   const answer = predictPlaybackReadiness(despicableMe3({ fileOffset: 80_000_000_000, plannedToEnd: true }));
   assert.ok(Math.abs(answer.delaySeconds - 25_998) < 150, `${answer.delaySeconds} s`);
+});
+
+test("the rest of the film is not taken as held because the first piece reads the index at the end of the file", () => {
+  // Despicable Me 3 on 2.107.41: the bytes the near window read ended at the
+  // file's last byte, and the 43.6 GB still to come counted as held.
+  const answer = predictPlaybackReadiness(despicableMe3({ readsIndex: true }));
+  assert.ok(Math.abs(answer.delaySeconds - 25_998) < 150, `${answer.delaySeconds} s`);
+  assert.ok(answer.tail.every(part => !part.skipped), JSON.stringify(answer.tail));
 });

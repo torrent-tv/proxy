@@ -687,8 +687,16 @@ export function predictPlaybackReadiness(input = {}) {
   }
   const tailStock = [];
   if (trackState.some(({ tailEndSeconds }) => Number.isFinite(tailEndSeconds))) {
-    const stop = scheduleTail({ trackState, sourceState, sourceByteCoverage, runStarts, trackFinish,
-      link, position, buffered, reserve, transferFinish, constrain, duration, stock: tailStock });
+    // Where each source's bytes stop being the near window's: the last byte
+    // its pieces read, in the file's own offsets.
+    const windowEnds = new Map();
+    for (const { sourceByteIntervals } of jobs) {
+      for (const [sourceId, ranges] of sourceByteIntervals) {
+        for (const range of ranges) windowEnds.set(sourceId, Math.max(windowEnds.get(sourceId) ?? 0, range.end));
+      }
+    }
+    const stop = scheduleTail({ trackState, sourceState, runStarts, trackFinish,
+      link, position, buffered, reserve, transferFinish, constrain, duration, stock: tailStock, windowEnds });
     if (stop) {
       return { ...result(false, null, buffered, reserve, null, stop.reason, preparedSegments),
         ...(stop.unavailableSource ? { unavailableSource: stop.unavailableSource } : {}) };
@@ -786,8 +794,8 @@ function isPiece(segment) {
  *
  * @returns {{ reason: string, unavailableSource?: object } | null} Why there is no answer, or null.
  */
-function scheduleTail({ trackState, sourceState, sourceByteCoverage, runStarts, trackFinish, link,
-  position, buffered, reserve, transferFinish, constrain, duration, stock = null }) {
+function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
+  position, buffered, reserve, transferFinish, constrain, duration, stock = null, windowEnds = null }) {
   const tailStart = Math.max(position, ...trackState.map(state => state.tailStartSeconds));
   if (!Number.isFinite(tailStart)) return null;
   const sourceDurations = new Map();
@@ -804,10 +812,11 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, runStarts, 
     const source = sourceState.get(sourceId);
     if (!source) return { reason: "source-measurement-unavailable" };
     if (source.source.complete === true) continue;
-    // Held means on this proxy now, past the bytes the near window already
-    // scheduled: those are counted above, and the window's planned arrivals
-    // counted again as held took 117 s of film off a 90-minute tail.
-    const windowEnd = Math.max(0, ...(sourceByteCoverage.get(sourceId) ?? []).map(range => range.end));
+    // Held means on this proxy now, past the last byte the near window's
+    // pieces read: those are counted above, and the window's planned arrivals
+    // counted again as held took 117 s of film off a 90-minute tail. The
+    // torrent thread's plan is not that end: it can reach the end of the file.
+    const windowEnd = windowEnds?.get(sourceId) ?? 0;
     const bytes = estimateUnmappedSourceBytes(source.source, seconds, duration,
       heldBeyond(source.source.residence, windowEnd), windowEnd);
     if (bytes === null) return { reason: "source-measurement-unavailable",

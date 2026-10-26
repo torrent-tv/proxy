@@ -72,7 +72,7 @@ import { ViewerRequests } from "./ViewerRequests.js";
 import { OutputLifecycle } from "./OutputLifecycle.js";
 import { SegmentServing } from "./SegmentServing.js";
 import { audioStartSecondsFor } from "../viewer/audio-start.js";
-import { endsWithinPlayerSeekTolerance, forecastRate, rateSummaryOf, predictPlaybackReadiness, RateTrend } from "../viewer/playback-readiness.js";
+import { endsWithinPlayerSeekTolerance, forecastRate, rateSummaryOf, predictPlaybackReadiness, RateTrend, SessionRate } from "../viewer/playback-readiness.js";
 import { audioRenditionName } from "../media/audio-inventory.js";
 import { Renditions } from "../encode/Renditions.js";
 import { CushionReport, LOOKAHEAD_PAUSE_SECONDS } from "../encode/CushionReport.js";
@@ -628,6 +628,8 @@ export function wireOutputs({
     activeOutputFor: (args) => activeOutputFor({ ...args, viewers: parts.viewers }),
     viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
     minimumBufferSecondsFor: (output) => minimumBufferSecondsOf(output),
+    // What this proxy may keep of downloaded pieces on disk.
+    sourceStorageBytes: () => parts.machineBudget?.allowedFor?.("spilled pieces") ?? null,
     getSourceStats: (...args) => parts.getSourceStats?.(...args) ?? null,
     disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
     planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
@@ -635,7 +637,7 @@ export function wireOutputs({
     get encodeRuns() { return parts.encodeRuns; },
     // When this viewer's playback can start and run to the end: the viewer
     // component's forecast, which models the viewer's browser.
-    playbackReadiness: { predict: predictPlaybackReadiness, forecastRate, rateSummaryOf, RateTrend,
+    playbackReadiness: { predict: predictPlaybackReadiness, forecastRate, rateSummaryOf, RateTrend, SessionRate,
       endsWithinPlayerSeekTolerance },
     // Whether the subtitle a viewer chose has been read where they stand — the
     // source preparation's answer, set on these parts by the assembly.

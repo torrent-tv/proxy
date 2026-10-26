@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: A film supplied slower than it plays waits until the rest of it can arrive before playback reaches it, instead of starting on the next two minutes and then stopping for the swarm again and again. Past the near window the forecast prices the rest of the film at one rate over its whole byte size: the mean download rate since the session began, because the recent reading jumps with the swarm and after three minutes the session mean was the better forecast of the next ones (24 field runs). It takes microseconds on the addon host. When the stock the start would have to hold exceeds the share of disk this proxy gives downloaded pieces, the forecast answers `cushion-exceeds-storage` and does not start: Despicable Me 3 (43.9 GB at 1.4 MB/s) would hold about 36 GB against 29.5 GB.
+
 ## 2.107.38
 
 - **Fix**: The time shown before a film starts runs to the moment the start forecast lets the picture start, not to the moment its first pieces are ready. With a source supplied slower than the film plays, the first pieces were buffered and the estimate reached zero while the picture was held minutes longer to carry the cushion to the end, so the page showed "Playback readiness has not been confirmed" instead of a time.

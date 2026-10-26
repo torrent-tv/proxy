@@ -1005,6 +1005,7 @@ export class ViewerRequests {
             ? stats.fileLength / session.file.durationSeconds : null,
           pieceLength: stats?.pieceLength,
           downloadRateReadings: this.#sourceRateReadings(measurement, output.file.sourceKey, stats, now),
+          tailRateReadings: this.#sourceTailRateReadings(measurement, output.file.sourceKey, now),
           downloadRateSummaries: this.#sourceRateSummaries(measurement, output.file.sourceKey),
           downloadForecast,
         });
@@ -1081,6 +1082,9 @@ export class ViewerRequests {
       bufferLimitSeconds: viewerReading?.bufferLimitSeconds,
       reserveSeconds,
       lookaheadSeconds: this.#host.lookaheadSeconds,
+      // What this proxy may keep of downloaded pieces on disk: the most a
+      // start can hold of the film ahead of the viewer.
+      sourceStorageBytes: this.#host.sourceStorageBytes?.() ?? null,
       requiredAudio: requiresSeparateAudio,
       sources: [...sourceMeasurements.values()],
       tracks,
@@ -1380,20 +1384,33 @@ export class ViewerRequests {
   #sourceRateReadings(state, id, stats, now) {
     let source = state.sources.get(id);
     if (!source) {
-      const { RateTrend } = this.#host.playbackReadiness;
-      source = { delivered: new RateTrend(this.#host.lookaheadSeconds), free: new RateTrend(this.#host.lookaheadSeconds), limit: null };
+      const { RateTrend, SessionRate } = this.#host.playbackReadiness;
+      source = { delivered: new RateTrend(this.#host.lookaheadSeconds), free: new RateTrend(this.#host.lookaheadSeconds),
+        // The same readings over the whole session, which the rest of the film is priced by.
+        deliveredAll: new SessionRate(), freeAll: new SessionRate(), limit: null };
       state.sources.set(id, source);
     }
     if (Number.isFinite(stats?.downloadSpeed) && stats.downloadSpeed >= 0) {
       source.delivered.add(now, stats.downloadSpeed);
+      source.deliveredAll.add(now, stats.downloadSpeed);
     }
     const limit = stats?.selectionLimit;
     if (limit && source.limit && limit.freeMs > source.limit.freeMs) {
-      source.free.add(now, Math.max(0, limit.freeBytes - source.limit.freeBytes) * 1000 / (limit.freeMs - source.limit.freeMs));
+      const free = Math.max(0, limit.freeBytes - source.limit.freeBytes) * 1000 / (limit.freeMs - source.limit.freeMs);
+      source.free.add(now, free);
+      source.freeAll.add(now, free);
     }
     // Totals that went back belong to a torrent added again: read on from them.
     if (limit) source.limit = limit;
     return sourceService(source.free.snapshot(), source.delivered.snapshot(),
+      (summary) => this.#host.playbackReadiness.forecastRate(summary, now, 0, "time"));
+  }
+
+  /** The source's service over the whole session, chosen by the same rule as the recent one. */
+  #sourceTailRateReadings(state, id, now) {
+    const source = state.sources.get(id);
+    if (!source) return null;
+    return sourceService(source.freeAll.snapshot(), source.deliveredAll.snapshot(),
       (summary) => this.#host.playbackReadiness.forecastRate(summary, now, 0, "time"));
   }
 

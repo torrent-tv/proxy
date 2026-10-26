@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.42
 
 - **Fix**: The rest of a film starts, in its file, where its density places the end of the near window. 2.107.41 took the last byte the near window reads, and a copied Matroska file reads its index at the end of the file: the whole of Despicable Me 3 counted as held, its 43.6 GB still to download were left out, and the page promised a start in 37 minutes.
 

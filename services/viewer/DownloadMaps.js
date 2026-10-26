@@ -21,13 +21,21 @@ export class DownloadMaps {
   /** What the torrent is told of the playback zones: as many windows as say the same thing. */
   #pack;
   #observeWait;
+  /**
+   * Whether a present viewer holds this file, chosen or listed. A read the
+   * file itself made — its track table, media info, keyframes, cover — has no
+   * owner of its own, so it is wanted exactly while the file is.
+   */
+  #fileWanted;
 
   constructor({ publish, resolvePlayback = async map => map.zones, log = null, now = Date.now,
-    clock = () => performance.timeOrigin + performance.now(), pack = zones => zones, observeWait = null }) {
+    clock = () => performance.timeOrigin + performance.now(), pack = zones => zones, observeWait = null,
+    fileWanted = () => true }) {
     if (typeof publish !== "function") throw new TypeError("Download map publication is required.");
     this.#publish = publish;
     this.#resolvePlayback = resolvePlayback;
     this.#pack = pack;
+    this.#fileWanted = fileWanted;
     this.#log = typeof log === "function" ? log : null;
     this.#now = now;
     this.#clock = clock;
@@ -178,7 +186,14 @@ export class DownloadMaps {
     return Boolean(file && zoneIndexOf(file).exactly({ from, to }));
   }
 
-  metadata({ sourceKey, fileIndex, statement, result, priority = 100, urgent = true, deadlineAt = 0, interval, leadSeconds = 0, scope = "playback", order = 0 }) {
+  /**
+   * @param {object} params
+   * @param {"file"} [params.owner] - `"file"` for a read the file made for
+   *   itself with no viewer's demand behind it. Such a statement is published
+   *   only while {@link DownloadMaps#viewersChanged}'s question says the file
+   *   is held by somebody.
+   */
+  metadata({ sourceKey, fileIndex, statement, result, priority = 100, urgent = true, deadlineAt = 0, interval, leadSeconds = 0, scope = "playback", order = 0, owner }) {
     if (!Number.isFinite(leadSeconds) || leadSeconds < 0) throw new TypeError("Metadata preparation time must be finite and nonnegative.");
     const file = this.#file(sourceKey, fileIndex);
     if (result.kind === "needs-ranges") {
@@ -189,7 +204,8 @@ export class DownloadMaps {
         urgent = current.urgent;
         deadlineAt = Number.isFinite(current.deadlineAt) ? current.deadlineAt - leadSeconds * 1000 : current.deadlineAt;
       }
-      const entry = { ranges: result.ranges, requestId: result.requestId, priority, urgent, deadlineAt, interval, leadSeconds, scope, order };
+      const entry = { ranges: result.ranges, requestId: result.requestId, priority, urgent, deadlineAt, interval, leadSeconds, scope, order,
+        ...(owner === "file" ? { owner } : {}) };
       const previous = file.metadata.get(statement);
       if (previous && sameMetadata(previous, entry) && this.#standing(file)) return this.#unchanged(file);
       file.metadata.set(statement, entry);
@@ -254,6 +270,35 @@ export class DownloadMaps {
     return Promise.all(changed);
   }
 
+  /**
+   * The viewers changed: a file's own reads are published again where whether
+   * anybody holds the file has changed.
+   *
+   * A read the file made for itself states its bytes at the urgency of a
+   * stopped viewer, and the swarm fetches only the most urgent class across
+   * every torrent. Kept after its viewer had gone, the head of a film nobody
+   * was opening any more held that class for the whole proxy: its swarm gave
+   * nothing, and every other film was told to fetch only the piece its viewer
+   * stood on (Home Assistant 2026-10-26, PPPD-452, torrent-tv/meta#239).
+   *
+   * @returns {Promise<unknown[]>}
+   */
+  viewersChanged() {
+    const sent = [];
+    for (const file of this.#files.values()) {
+      const own = [...file.metadata].filter(([, metadata]) => metadata.owner === "file");
+      if (own.length === 0) continue;
+      const wanted = this.#fileWanted(file.sourceKey, file.fileIndex) === true;
+      if (file.ownReadsWanted === wanted) continue;
+      file.ownReadsWanted = wanted;
+      this.#log?.(`download map ${file.sourceKey}:${file.fileIndex}: ${own.length} read(s) of the file itself ` +
+        `${wanted ? "stated again — a viewer holds the file" : "withheld — no present viewer holds the file"} ` +
+        `[${own.map(([statement]) => statement).join(", ")}]`);
+      sent.push(this.#emit(file));
+    }
+    return Promise.all(sent);
+  }
+
   forget(sourceKey, fileIndex, { keepPreparation = false } = {}) {
     const file = this.#file(sourceKey, fileIndex);
     this.#setZones(file, []);
@@ -302,7 +347,10 @@ export class DownloadMaps {
     // Compared and sent as the torrent is to act on it: the playback zones
     // packed into as few windows as say the same (`coalescedZones`).
     const zones = [...this.#packedPlayback(file)];
-    for (const { ranges, requestId, priority, urgent, deadlineAt, order } of file.metadata.values()) {
+    const ownReadsWanted = this.#fileWanted(file.sourceKey, file.fileIndex) === true;
+    file.ownReadsWanted = ownReadsWanted;
+    for (const { ranges, requestId, priority, urgent, deadlineAt, order, owner } of file.metadata.values()) {
+      if (owner === "file" && !ownReadsWanted) continue;
       for (const [byteStart, byteEnd] of ranges) {
         zones.push({ byteStart, byteEnd, priority, urgent, downloadOnly: true, requestId, deadlineAt, ...(order ? { order } : {}) });
       }
@@ -520,6 +568,7 @@ function sameMetadata(left, right) {
   return left.requestId === right.requestId && Object.is(left.priority, right.priority) &&
     left.urgent === right.urgent && Object.is(left.deadlineAt, right.deadlineAt) &&
     Object.is(left.leadSeconds, right.leadSeconds) && left.scope === right.scope && left.order === right.order &&
+    left.owner === right.owner &&
     (left.interval?.from ?? null) === (right.interval?.from ?? null) &&
     (left.interval?.to ?? null) === (right.interval?.to ?? null) &&
     left.ranges.length === right.ranges.length &&

@@ -744,3 +744,54 @@ test("playback map resolution reports a paired P4 span on success and failure", 
   assert.deepEqual(events.map(([, , fields]) => fields.phase), ["begin", "end"]);
   assert.equal(events[1][2].outcome, "error");
 });
+
+test("a file's own read is published only while a present viewer holds the file", async () => {
+  // Home Assistant 2026-10-26 (torrent-tv/meta#239): the plan's header reads of
+  // a film whose swarm gave nothing stayed stated at a stopped viewer's urgency
+  // after the viewer had moved to another film, and held the swarm's first
+  // class for every torrent on the proxy.
+  const holders = new Map([["dead", [0]], ["live", []]]);
+  const published = new Map();
+  const lines = [];
+  const maps = new DownloadMaps({
+    publish: map => { published.set(map.sourceKey, map); },
+    log: line => lines.push(line),
+    fileWanted: (sourceKey, fileIndex) => (holders.get(sourceKey) ?? []).includes(fileIndex)
+  });
+  const header = { sourceKey: "dead", fileIndex: 0, statement: "tracks", owner: "file",
+    result: { kind: "needs-ranges", ranges: [[0, 15]], requestId: "torrent:dead:0:tracks" } };
+  await maps.metadata(header);
+  await maps.metadata({ ...header, statement: "keyframes", result: { kind: "needs-ranges", ranges: [[9000, 9999]], requestId: "torrent:dead:0:keyframes" } });
+  assert.deepEqual(published.get("dead").zones.map(zone => [zone.byteStart, zone.byteEnd, zone.priority, zone.urgent]),
+    [[0, 15, 100, true], [9000, 9999, 100, true]], "a read the file made is stated at once while its viewer holds it");
+
+  // The viewer moves to the other film.
+  holders.set("dead", []);
+  holders.set("live", [3]);
+  await maps.viewersChanged();
+  assert.deepEqual(published.get("dead").zones, [], "nobody holds the file: its own reads are withdrawn from the swarm");
+  assert.match(lines.at(-1), /dead:0: 2 read\(s\) of the file itself withheld — no present viewer holds the file \[tracks, keyframes\]/);
+
+  // A read that answers again while nobody holds the file is kept, not sent.
+  await maps.metadata({ ...header, result: { kind: "needs-ranges", ranges: [[0, 31]], requestId: "torrent:dead:0:tracks" } });
+  assert.deepEqual(published.get("dead").zones, [], "restated while unheld, it is still not sent");
+
+  // And comes back without being read again when a viewer holds the file.
+  holders.set("dead", [0]);
+  await maps.viewersChanged();
+  assert.deepEqual(published.get("dead").zones.map(zone => [zone.byteStart, zone.byteEnd]), [[0, 31], [9000, 9999]]);
+});
+
+test("a viewer's own demand and a preparation read are not withheld with the file's reads", async () => {
+  let held = true;
+  let published;
+  const maps = new DownloadMaps({ publish: map => { published = map; }, fileWanted: () => held });
+  await maps.metadata({ sourceKey: "s", fileIndex: 1, statement: "tracks", owner: "file",
+    result: { kind: "needs-ranges", ranges: [[0, 15]] } });
+  await maps.metadata({ sourceKey: "s", fileIndex: 1, statement: "packets:prepare", scope: "preparation", priority: 10, urgent: false,
+    result: { kind: "needs-ranges", ranges: [[100, 199]] } });
+  held = false;
+  await maps.viewersChanged();
+  assert.deepEqual(published.zones.map(zone => [zone.byteStart, zone.byteEnd]), [[100, 199]],
+    "preparation has its own owner and is withdrawn by it, not by this rule");
+});

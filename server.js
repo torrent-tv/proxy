@@ -649,6 +649,7 @@ export async function startProxyServer({
       return downloadMaps.refresh(sourceKey, fileIndex);
     }).catch(error => logger.warn(`download map after a packet table: ${error?.message ?? error}`));
   };
+  let outputPartsReady = false;
   const downloadMaps = new DownloadMaps({
     // The ranges a picture reads at open are named again by every segment;
     // only the zone the swarm would rank first is sent (torrent-tv/meta#166).
@@ -665,6 +666,12 @@ export async function startProxyServer({
     pack: (zones) => coalescedZones(zones),
     log: (line) => logger.info(line),
     observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
+    // A file's own reads are wanted while a present viewer has the file chosen
+    // or on screen. The viewers are assembled below; until they exist no read
+    // can have been asked for by one.
+    fileWanted: (sourceKey, fileIndex) => (outputPartsReady ? outputParts.viewers.forSource(sourceKey) : [])
+      .some(viewer => viewer.source?.selectedFileIndex === fileIndex ||
+        viewer.source?.visibleFileIndices?.includes(fileIndex)),
     resolvePlayback: async (map) => {
       const fileKey = `${map.sourceKey}:${map.fileIndex}`;
       if (map.zones.length === 0) {
@@ -1000,7 +1007,10 @@ export async function startProxyServer({
             ...(demand ? { priority: demand.priority, urgent: demand.urgent, deadlineAt: demand.deadlineAt, interval: demand, leadSeconds: demand.leadSeconds ?? 0 } : {}),
             ...(readPriority?.requestId ? { priority: readPriority.rank, urgent: readPriority.urgent === true,
               deadlineAt: Number.isFinite(readPriority.deadlineAt) ? readPriority.deadlineAt : Number.POSITIVE_INFINITY,
-              scope: "preparation" } : {}) });
+              scope: "preparation" } : {}),
+            // Neither a viewer's interval nor an encode input asked for it: the
+            // file read itself, and that read is wanted while the file is.
+            ...(!demand && !readPriority?.requestId ? { owner: "file" } : {}) });
         }
         if (finished && result.kind === "result") {
           void downloadMaps.refresh(sourceKey, fileIndex).catch(error =>
@@ -1039,7 +1049,11 @@ export async function startProxyServer({
     pinnedPreset,
     indexMemory,
     readMetadataActivity: () => containerOrchestrator.activity(),
-    onViewerChanged: () => { void sourcePreparation?.refresh(); onStateChanged(); },
+    onViewerChanged: () => {
+      void sourcePreparation?.refresh();
+      void downloadMaps.viewersChanged().catch(error => logger.warn(`download maps after a viewer change: ${error.message}`));
+      onStateChanged();
+    },
     onEncodersChanged: () => onStateChanged(),
     sourceInputsFor: (output, index) => segmentInputs.inputsFor(output.file.sourceKey, output.outputKey, index),
     readSourceMedia: async (params) => {
@@ -1333,6 +1347,7 @@ export async function startProxyServer({
       await torrentPool.fillFileInBackground?.(torrent, fileIndex);
     }
   });
+  outputPartsReady = true;
   // Where the processor goes, and at a cold start what the main thread does
   // with it, when the operator asks (torrent-tv/meta#177).
   const startupProfile = startupCpuProfile({

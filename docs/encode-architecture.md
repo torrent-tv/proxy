@@ -72,19 +72,16 @@ output chosen for this viewer at that height (`chosen`), and only then by the
 rule — and a repeat whose output has gone is served from its stored piece or by
 an output with a proven-compatible header, or answered `assignment-lost`. The
 rule (`serving-output.js`, `outputSuits`) asks the picture's material, the size
-a viewer who picked by hand requires, and what the viewer's OWN link does with
-the output's whole load: the picture and the soundtrack they chose, each part
-`known` (a limit), `estimated` (a stated average) or `unknown` (no bound), the
-load as trustworthy as its worst part (`link-budget.js`). On top of the picture
-and the sound the load carries what the same connection carries besides them —
-message framing, playlists, poll answers, probes, cues — as the share the
-transport measured over everything this proxy has delivered
-(`transport/delivery-shares.js`); it moves the figure and not the class, and is
-absent until a film has been delivered. `unknown` is refused
-against a measured link; `estimated` is admitted by estimate and reported to
-the page as not confirmed; a bound is taken before an average. When nothing
-suits, nothing is handed over: the answer is `output-unavailable`, with the
-figures, and the page explains it. The shared `OutputCatalog.servedBy` record
+a viewer who picked by hand requires, and uses the viewer's link estimate to
+prefer outputs whose picture and chosen soundtrack rates fit the measured
+connection. Each part is `known` (a limit), `estimated` (a stated average) or
+`unknown` (no figure), and the load is as trustworthy as its least trustworthy
+part (`link-budget.js`). Control traffic and link measurements are not added to
+the output rate: lifetime connection counters cannot describe the cost of one
+video. A link estimate never refuses an output. If no machine-supported output
+fits it, `output-format.js` prepares the first available format and playback
+readiness waits for media. Machine capacity remains a separate refusal. The
+shared `OutputCatalog.servedBy` record
 and the worst link over all viewers are gone; the quality budget asks each
 viewer's link for that viewer alone.
 

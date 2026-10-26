@@ -148,8 +148,7 @@ export class Renditions {
             Number.isFinite(base.file.pictureKbps) ? base.file.pictureKbps / 1000 : null,
             this.#host.observedPeakMbps?.(spec) ?? null
           ),
-          audioLoad,
-          this.#host.serviceShare?.() ?? null
+          audioLoad
         )
       )
     });
@@ -504,8 +503,8 @@ export class Renditions {
    * size whose bounds are two neighbouring limits of `limitsFor(frame, file)` — the
    * source-scaled nominal for the frame on screen, the same nominal used
    * to open the output (`output-format.js`). Down,
-   * the highest lower limit their link admits; up, the next limit only, and
-   * only if their link admits it. A copy has no limit and a hardware encode is
+   * the highest lower limit the measured link supports; up, the next limit
+   * only, and only if the measured link supports it. A copy has no limit and a hardware encode is
    * given none, so neither has anywhere to move to here, and the caller's other
    * lever — another height — is what remains.
    *
@@ -551,11 +550,10 @@ export class Renditions {
     }
     const linkMbps = this.#host.linkMbpsOf(base, consumerId);
     const audioLoad = this.viewerAudioLoadOf(base, consumerId);
-    const serviceShare = this.#host.serviceShare?.() ?? null;
-    const admits = (limit) => linkCouldCarry(linkMbps, loadOf(videoLoadOfLimit(limit), audioLoad, serviceShare)).admitted;
+    const fits = (limit) => linkCouldCarry(linkMbps, loadOf(videoLoadOfLimit(limit), audioLoad)).fits;
     const target = direction === "down"
-      ? limits.slice(at + 1).find(admits)
-      : (at > 0 && admits(limits[at - 1]) ? limits[at - 1] : undefined);
+      ? limits.slice(at + 1).find(fits)
+      : (at > 0 && fits(limits[at - 1]) ? limits[at - 1] : undefined);
     if (target === undefined) {
       return refuse(direction === "down"
         ? `no lower limit of ${encode.height}p is admitted by this viewer's link`

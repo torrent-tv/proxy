@@ -19,7 +19,6 @@ import { BytesUnavailable, isUnavailable } from "../../services/media/container/
 import { playbackDeclarations } from "../../services/media/playback-declarations.js";
 import { PICTURE_RATE_SOURCE, SourceFile, sourcePictureRate } from "../../services/media/SourceFile.js";
 import { LINK_VERDICT, PEAK_CLASS, linkCouldCarry, loadOf, soundtrackLoadOf, videoLoadOfSpec } from "../../services/encode/quality/link-budget.js";
-import { DELIVERY_KIND, DeliveryShares, deliveryKindOf } from "../../services/transport/delivery-shares.js";
 
 // ---- MP4, built byte by byte -------------------------------------------------
 
@@ -222,37 +221,12 @@ test("the field case: Moana's declarations now give its copied picture a figure,
   assert.equal(load.video.peakClass, PEAK_CLASS.ESTIMATED);
 });
 
-// ---- What the connection carries besides the film ----------------------------
-
-test("request paths are sorted into film, measurement and everything else", () => {
-  assert.equal(deliveryKindOf("/transcode/abc/segment-00012.mp4"), DELIVERY_KIND.MEDIA);
-  assert.equal(deliveryKindOf("/transcode/abc/a/0/init.mp4"), DELIVERY_KIND.MEDIA);
-  assert.equal(deliveryKindOf("/transcode/abc/v/720/segment-00003.ts"), DELIVERY_KIND.MEDIA);
-  assert.equal(deliveryKindOf("/api/link-probe?bytes=2097152"), DELIVERY_KIND.MEASUREMENT);
-  assert.equal(deliveryKindOf("/transcode/abc/index.m3u8"), DELIVERY_KIND.SERVICE);
-  assert.equal(deliveryKindOf("/api/transcode-sessions/abc/progress"), DELIVERY_KIND.SERVICE);
-});
-
-test("the share is everything accepted beyond the film and the measurements, per byte of film", () => {
-  const shares = new DeliveryShares();
-  assert.equal(shares.serviceShare(), null, "nothing delivered is not a share of zero");
-  shares.recordBody("/api/link-probe", 2_000_000);
-  shares.recordBody("/transcode/abc/segment-00001.mp4", 10_000_000);
-  shares.recordBody("/transcode/abc/index.m3u8", 4_000);
-  shares.recordSent(12_031_000);
-  assert.equal(shares.serviceShare(), 0.0031);
-});
-
-test("the load carries the measured share on top of the film, and its class stays the film's", () => {
+test("connection history cannot be added to the selected video and soundtrack", () => {
   const video = { mbps: 2, peakClass: PEAK_CLASS.KNOWN };
   const audio = { mbps: 0.5, peakClass: PEAK_CLASS.KNOWN };
-  const plain = loadOf(video, audio);
-  assert.equal(plain.totalMbps, 2.5);
-  assert.equal(plain.serviceShare, null);
-  const withService = loadOf(video, audio, 0.02);
-  assert.equal(withService.serviceMbps, 0.05);
-  assert.equal(withService.totalMbps, 2.55);
-  assert.equal(withService.peakClass, PEAK_CLASS.KNOWN);
-  assert.equal(linkCouldCarry(2.52, plain).verdict, LINK_VERDICT.FITS);
-  assert.equal(linkCouldCarry(2.52, withService).verdict, LINK_VERDICT.DOES_NOT_FIT);
+  const load = loadOf(video, audio);
+  assert.equal(load.totalMbps, 2.5);
+  const answer = linkCouldCarry(2.52, load);
+  assert.equal(answer.verdict, LINK_VERDICT.FITS);
+  assert.equal(answer.fits, true);
 });

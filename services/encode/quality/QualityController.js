@@ -276,8 +276,8 @@ export class QualityController {
    *    being told (roadmap item 97, step 12). A limit is part of an output, so
    *    this is a move between outputs, prepared for one viewer.
    * 2. ANOTHER HEIGHT, asked of the player in AUTO — only for a viewer with no
-   *    higher limit to go to on the height they watch, and only if their own
-   *    link admits the next height's whole load.
+   *    higher limit to go to on the height they watch, and when the measured
+   *    link supports the next height's whole load.
    *
    * Both follow one window: the machine and the viewer's link have held the
    * output on screen, with room to spare, for four times as long as a step
@@ -382,10 +382,9 @@ export class QualityController {
     const report = this.#host.linkReportOf(session, consumerId);
     const load = loadOf(
       this.#host.qualityOffer.videoLoadFor(base, height, this.#host.videoEncoder?.kind ?? ""),
-      this.#host.viewerAudioLoadOf(base, consumerId),
-      this.#host.serviceShare?.() ?? null
+      this.#host.viewerAudioLoadOf(base, consumerId)
     );
-    return linkCouldCarry(report?.linkMbps ?? null, load).admitted;
+    return linkCouldCarry(report?.linkMbps ?? null, load).fits;
   }
 
   /**

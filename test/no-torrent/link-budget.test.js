@@ -80,24 +80,26 @@ test("the sound is counted with the picture against the whole measured link", ()
   );
 });
 
-test("a known load that passes fits and is confirmed; an estimated one is admitted and not confirmed", () => {
+test("link measurements report sustainability without blocking the output", () => {
   const fits = linkCouldCarry(10, loadOf(known(5), null));
   assert.equal(fits.verdict, LINK_VERDICT.FITS);
   assert.equal(fits.confirmed, true);
   const byEstimate = linkCouldCarry(10, loadOf(estimated(5), null));
   assert.equal(byEstimate.verdict, LINK_VERDICT.ESTIMATED_TO_FIT);
-  assert.equal(byEstimate.admitted, true);
+  assert.equal(byEstimate.fits, true);
   assert.equal(byEstimate.confirmed, false, "an average is not a bound");
+  const slowerLink = linkCouldCarry(1, loadOf(known(5), null));
+  assert.equal(slowerLink.verdict, LINK_VERDICT.DOES_NOT_FIT);
+  assert.equal(slowerLink.fits, false, "the measurement only ranks this output below sustainable ones");
 });
 
-test("an unknown load is refused against a measured link, and admitted while nothing measured it", () => {
+test("an unknown load stays playable whether the link is measured or not", () => {
   const measured = linkCouldCarry(50, loadOf(unknown(), null));
   assert.equal(measured.verdict, LINK_VERDICT.NO_SAFE_BOUND);
-  assert.equal(measured.admitted, false, "there is no number to compare, however fast the link");
+  assert.equal(measured.fits, false);
   for (const unmeasured of [null, 0, Number.NaN]) {
     const answer = linkCouldCarry(unmeasured, loadOf(unknown(), null));
     assert.equal(answer.verdict, LINK_VERDICT.NO_MEASUREMENT);
-    assert.equal(answer.admitted, true, "the link gave no ground to refuse");
     assert.equal(answer.confirmed, false);
   }
 });

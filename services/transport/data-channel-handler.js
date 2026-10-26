@@ -47,7 +47,6 @@
 /** @import { DataChannel } from 'node-datachannel' */
 
 import { createDeliveryProbe, PROBE_INTERVAL_MS } from "./delivery-probe.js";
-import { DeliveryShares } from "./delivery-shares.js";
 import { Agent } from "undici";
 
 // Route availability and caller cancellation determine media request lifetime.
@@ -885,7 +884,6 @@ export function createDataChannelHandler({
       }
       try {
         channel.sendMessage(message);
-        deliveryShares.recordSent(Buffer.byteLength(message));
         sent += 1;
       } catch {
         // Closed between the lookup and the send. The subscription belongs to
@@ -903,9 +901,7 @@ export function createDataChannelHandler({
   /** Channel-scoped requests cannot be cancelled by a different connection. */
   const activeRequests = new WeakMap();
 
-  // How much of what the connections carry is not the film
-  // (`delivery-shares.js`), counted where both halves are seen.
-  const deliveryShares = new DeliveryShares();
+  // Transport delivery observations used to report link quality.
   const { watchSendQueue, readDelivery, noteBrowserReport } = makeSendQueueWatcher({
     log: (message) => log(message),
     getTransportSnapshot,
@@ -931,8 +927,7 @@ export function createDataChannelHandler({
     readDelivery,
     getTransportSnapshot,
     witness,
-    usrsctpState,
-    onSent: (bytes) => deliveryShares.recordSent(bytes)
+    usrsctpState
   });
 
   /**
@@ -1307,7 +1302,6 @@ export function createDataChannelHandler({
         if (done) {
           chunks += body.flush();
           sendChunk(channel, requestId, null, true);
-          deliveryShares.recordBody(path, totalBytes);
           const elapsedMs = Date.now() - sendStartedAt;
           let bufferedNow = 0;
           try { bufferedNow = typeof channel.bufferedAmount === "function" ? channel.bufferedAmount() : 0; } catch { /* ignore */ }
@@ -1396,7 +1390,6 @@ export function createDataChannelHandler({
     try {
       const frame = encodeFrame(requestIdBytes(requestId), bytes, done);
       channel.sendMessageBinary(frame);
-      deliveryShares.recordSent(frame.length);
     } catch {
       // Channel closed between check and send — safe to ignore.
     }
@@ -1503,7 +1496,6 @@ export function createDataChannelHandler({
     try {
       const text = JSON.stringify(message);
       channel.sendMessage(text);
-      deliveryShares.recordSent(Buffer.byteLength(text));
     } catch {
       // Channel closed between check and send — safe to ignore.
     }
@@ -1512,8 +1504,6 @@ export function createDataChannelHandler({
   return {
     handleChannel,
     publishSubtitleCues,
-    /** What the film costs viewers' links beyond itself, per byte of film, or null. */
-    serviceShare: () => deliveryShares.serviceShare(),
     publishChaptersChanged
   };
 }

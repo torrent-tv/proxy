@@ -140,9 +140,6 @@ export async function startProxyServer({
   // The one software preset every picture is encoded at, for runs compared at
   // one quality; null leaves the choice to the machine.
   pinnedPreset = null,
-  // What viewers' connections carry beyond the film, per byte of film; the
-  // transport counts it and is built after this server, so it is late-bound.
-  serviceShare = () => null,
   // Where the proxy writes its own log. Its DIRECTORY is what matters here:
   // the browser's half of every session is written beside it, so the two are
   // on one durable disk and join by name.
@@ -1041,7 +1038,6 @@ export async function startProxyServer({
     observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
     pinnedPreset,
     indexMemory,
-    serviceShare,
     readMetadataActivity: () => containerOrchestrator.activity(),
     onViewerChanged: () => { void sourcePreparation?.refresh(); onStateChanged(); },
     onEncodersChanged: () => onStateChanged(),

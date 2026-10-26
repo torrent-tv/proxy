@@ -229,3 +229,14 @@ test("a claimant below its own minimum says so", async () => {
   assert.equal(said.length, 1, "working below what it needs is a fault of the machine, and invisible otherwise");
   assert.match(said[0], /below the 64MB it needs/);
 });
+
+test("the wired budget says what the spilled pieces may keep, which the start forecast compares its stock with", async () => {
+  // Missing from the wired surface on 2.107.39-2.107.41, the share read as
+  // null and a start holding 41 GB against a 28 GB share was not refused.
+  const wired = wireMachineBudget({ segmentStore: { root: os.tmpdir(), stats: () => ({ bytes: 0 }) },
+    spill: { allow: () => {}, held: () => 0 }, readFree: async () => 90 * MEGABYTE,
+    policy: { kind: "fixed", bytes: 90 * MEGABYTE }, logger: { info: () => {}, warn: () => {} } });
+  assert.equal(wired.allowedFor("spilled pieces"), null, "unknown before the first measurement");
+  await wired.revise();
+  assert.equal(wired.allowedFor("spilled pieces"), 45 * MEGABYTE);
+});

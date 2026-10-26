@@ -194,6 +194,8 @@ export function wireMachineBudget({
 
   return {
     capacityOf: name => budget.capacityOf(name),
+    /** What one claimant was last allowed, or null before a measured division. */
+    allowedFor: name => budget.allowedFor(name),
     /**
      * @param {string | null} [resource] - One resource to revise; all when absent.
      * @param {string | null} [because] - Who asked, for the revision's line.

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.33
 
 - **Fix**: Carry the live encode input priority, urgency and due time into source metadata download demand, and withdraw that demand when its input is obsolete.
 

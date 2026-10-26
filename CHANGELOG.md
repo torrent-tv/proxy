@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The rest of a film is priced from the last byte the near window reads, not from the last byte the torrent thread plans. Its plan can reach the end of the file, and on 2.107.39 the rest of Despicable Me 3 then counted as held: the forecast left out its 40 GB still to download and gave 23 minutes against the 14 hours the swarm needs.
+
 ## 2.107.39
 
 - **Fix**: A film supplied slower than it plays waits until the rest of it can arrive before playback reaches it, instead of starting on the next two minutes and then stopping for the swarm again and again. Past the near window the forecast prices the rest of the film at one rate over its whole byte size: the mean download rate since the session began, because the recent reading jumps with the swarm and after three minutes the session mean was the better forecast of the next ones (24 field runs). It takes microseconds on the addon host. When the stock the start would have to hold exceeds the share of disk this proxy gives downloaded pieces, the forecast answers `cushion-exceeds-storage` and does not start: Despicable Me 3 (43.9 GB at 1.4 MB/s) would hold about 36 GB against 29.5 GB.

@@ -154,7 +154,7 @@ test("an exact queue arrival beyond the near window does not replace the aggrega
  * (torrent-tv/meta#239): 43 929 276 423 bytes over 5 380.4 s, a copied picture,
  * the swarm at 1.4 MB/s. Cut in 4 s pieces, the viewer at the start.
  */
-function despicableMe3({ recent = 1_400_000, session = null, storage = null } = {}) {
+function despicableMe3({ recent = 1_400_000, session = null, storage = null, fileOffset = 0, plannedToEnd = false } = {}) {
   const now = 1_000_000, piece = 4, duration = 5380.4, fileLength = 43_929_276_423;
   const count = Math.ceil(duration / piece);
   const byteAt = (seconds) => Math.min(fileLength, Math.round(seconds * fileLength / duration));
@@ -162,8 +162,11 @@ function despicableMe3({ recent = 1_400_000, session = null, storage = null } = 
     now, positionSeconds: 0, durationSeconds: duration, bufferedAheadSeconds: 0, reserveSeconds: 4,
     lookaheadSeconds: 120,
     ...(storage === null ? {} : { sourceStorageBytes: storage }),
-    sources: [{ id: "source", complete: false, fileOffset: 0, fileLength, pieceLength: 16_777_216,
-      residence: [], downloadForecast: { ranges: [] }, downloadRateReadings: summaryOf(recent, now),
+    sources: [{ id: "source", complete: false, fileOffset, fileLength, pieceLength: 16_777_216,
+      residence: [],
+      // The torrent thread's plan, which can reach the end of the file.
+      downloadForecast: { ranges: plannedToEnd ? [{ start: fileLength - 16_777_216, end: fileLength, availableAt: now + 3_600_000 }] : [] },
+      downloadRateReadings: summaryOf(recent, now),
       ...(session === null ? {} : { tailRateReadings: summaryOf(session, now) }) }],
     tracks: [{
       id: "video", sourceIds: ["source"], processedSeconds: 0, startupRemainingSeconds: 0, openSeconds: 0,
@@ -231,4 +234,12 @@ test("the session's rate weighs each reading by how long it stood, in constant m
   assert.equal(summary.timeWeightedValue, 1_500_000);
   assert.equal(summary.spanSeconds, 40);
   assert.equal(summary.lastValue, 1_000_000);
+});
+
+test("the rest of the film is not taken as held because the torrent's plan reaches the end of the file", () => {
+  // The field case: the third file of a trilogy, its bytes 80 GB into the
+  // torrent, with the torrent thread planning a piece at the end of the file.
+  // Taken as the near window's end, that plan left the tail no bytes at all.
+  const answer = predictPlaybackReadiness(despicableMe3({ fileOffset: 80_000_000_000, plannedToEnd: true }));
+  assert.ok(Math.abs(answer.delaySeconds - 25_998) < 150, `${answer.delaySeconds} s`);
 });

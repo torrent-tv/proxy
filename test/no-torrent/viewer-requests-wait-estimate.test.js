@@ -414,3 +414,28 @@ test("an outcome from another generation cannot train the current wait", () => {
   requests.noteFirstFrameObservation({ consumerId: "viewer", generation: 2, waitId: "source:0:2", wait: 0, elapsedMs: 1_000 });
   assert.equal(noted, false);
 });
+
+test("the early forecast runs to the start gate, not to the first required pieces", () => {
+  // Home Assistant 2026-10-26 (torrent-tv/meta#239): Despicable Me 3 BDRemux
+  // supplied at 0.53x. The first pieces were buffered, so the forecast said
+  // zero, while the start forecast held the picture 433 s more; the page had
+  // no time to show and read "Playback readiness has not been confirmed".
+  const lines = [];
+  const restore = logger.info;
+  logger.info = line => lines.push(line);
+  try {
+    const requests = new ViewerRequests({ viewers: { get: () => null }, firstFrameSecondsOf: () => null });
+    const source = { consumerId: "viewer", generation: 0, sourceKey: "torrent:hash", fileIndex: 0,
+      fileName: "Film.mkv", stats: { fileLength: 43_929_276_423, downloadSpeed: 727_327 }, waitElapsedMs: 252_000 };
+    const gated = requests.waitEstimateForSource({ ...source,
+      processing: { firstRequiredSegmentsSeconds: 0, startGateSeconds: 433.45 } });
+    assert.ok(Math.abs(gated.remainingSeconds - 433.45) < 0.5, `remaining ${gated.remainingSeconds}`);
+    assert.match(lines.at(-1), /"basis":"start-gate","firstRequiredSegmentsSeconds":0,"startGateSeconds":433\.45/);
+
+    const open = requests.waitEstimateForSource({ ...source, waitElapsedMs: 253_000,
+      processing: { firstRequiredSegmentsSeconds: 2.5 } });
+    assert.ok(Math.abs(open.remainingSeconds - 2.5) < 0.5, "once the gate is open, the first pieces decide");
+  } finally {
+    logger.info = restore;
+  }
+});

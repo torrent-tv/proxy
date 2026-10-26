@@ -687,16 +687,8 @@ export function predictPlaybackReadiness(input = {}) {
   }
   const tailStock = [];
   if (trackState.some(({ tailEndSeconds }) => Number.isFinite(tailEndSeconds))) {
-    // Where each source's bytes stop being the near window's: the last byte
-    // its pieces read, in the file's own offsets.
-    const windowEnds = new Map();
-    for (const { sourceByteIntervals } of jobs) {
-      for (const [sourceId, ranges] of sourceByteIntervals) {
-        for (const range of ranges) windowEnds.set(sourceId, Math.max(windowEnds.get(sourceId) ?? 0, range.end));
-      }
-    }
     const stop = scheduleTail({ trackState, sourceState, runStarts, trackFinish,
-      link, position, buffered, reserve, transferFinish, constrain, duration, stock: tailStock, windowEnds });
+      link, position, buffered, reserve, transferFinish, constrain, duration, stock: tailStock });
     if (stop) {
       return { ...result(false, null, buffered, reserve, null, stop.reason, preparedSegments),
         ...(stop.unavailableSource ? { unavailableSource: stop.unavailableSource } : {}) };
@@ -799,7 +791,7 @@ function isPiece(segment) {
  * @returns {{ reason: string, unavailableSource?: object } | null} Why there is no answer, or null.
  */
 function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
-  position, buffered, reserve, transferFinish, constrain, duration, stock = null, windowEnds = null }) {
+  position, buffered, reserve, transferFinish, constrain, duration, stock = null }) {
   const tailStart = Math.max(position, ...trackState.map(state => state.tailStartSeconds));
   if (!Number.isFinite(tailStart)) return null;
   const sourceDurations = new Map();
@@ -823,11 +815,17 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
       stock?.push({ sourceId, skipped: "complete" });
       continue;
     }
-    // Held means on this proxy now, past the last byte the near window's
-    // pieces read: those are counted above, and the window's planned arrivals
-    // counted again as held took 117 s of film off a 90-minute tail. The
-    // torrent thread's plan is not that end: it can reach the end of the file.
-    const windowEnd = windowEnds?.get(sourceId) ?? 0;
+    // Held means on this proxy now, in the bytes of the film after the near
+    // window: the window's own bytes are counted above, and its planned
+    // arrivals counted again as held took 117 s of film off a 90-minute tail.
+    // Where those bytes begin is placed by the density the tail is priced at.
+    // Neither the torrent thread's plan nor the bytes the window reads are
+    // that place: both can reach the end of the file — a copied Matroska file
+    // reads its index there — and the whole of Despicable Me 3 then counted
+    // as held (Home Assistant 2026-10-26, torrent-tv/meta#239).
+    const fileLength = Number(source.source.fileLength);
+    const windowEnd = fileLength > 0 && duration > 0
+      ? Math.min(fileLength, Math.max(0, fileLength * tailStart / duration)) : 0;
     const bytes = estimateUnmappedSourceBytes(source.source, seconds, duration,
       heldBeyond(source.source.residence, windowEnd), windowEnd);
     if (bytes === null) return { reason: "source-measurement-unavailable",

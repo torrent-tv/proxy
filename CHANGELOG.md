@@ -1,9 +1,10 @@
 ## Unreleased
 
-- **Chore**: The readiness line states what the rest of the film was priced at, per source: the seconds and bytes still missing, the rate and when they arrive, or why a source contributed nothing. On 2.107.40 Despicable Me 3 had 43.6 GB missing at 0.6 MB/s and still no wait for them, and nothing said why.
+- **Fix**: The rest of a film starts, in its file, where its density places the end of the near window. 2.107.41 took the last byte the near window reads, and a copied Matroska file reads its index at the end of the file: the whole of Despicable Me 3 counted as held, its 43.6 GB still to download were left out, and the page promised a start in 37 minutes.
 
 ## 2.107.41
 
+- **Chore**: The readiness line states what the rest of the film was priced at, per source: the seconds and bytes still missing, the rate and when they arrive, or why a source contributed nothing. On 2.107.40 Despicable Me 3 had 43.6 GB missing at 0.6 MB/s and still no wait for them, and nothing said why.
 - **Fix**: A start whose stock does not fit the disk this proxy keeps for downloaded pieces is refused, as 2.107.39 meant: the forecast never received that share, because the assembled budget did not offer it, and read it as unknown. Despicable Me 3 at 0.45 MB/s was promised a start in 26 hours while that start would hold about 41 GB against a 28 GB share.
 
 ## 2.107.40

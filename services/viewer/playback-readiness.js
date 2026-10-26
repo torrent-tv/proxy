@@ -88,6 +88,57 @@ export function rateSummaryOf(readings) {
 }
 
 /**
+ * Every measurement of one session, summarised as it arrives: the same
+ * summary {@link RateTrend} gives over its horizon, kept in O(1).
+ *
+ * The rest of the film is priced at this mean, and the near window at the
+ * recent one. Compared on field download readings (24 runs of 10-22 minutes,
+ * 0.4-13 MB/s, torrent-tv/meta#239,
+ * `research/coarse-tail-forecast-2026-10-26.md`), the mean since the start
+ * had the smallest worst-case error for the next 3-10 minutes (p90 34-44 %
+ * against 39-57 % for the 120 s mean) at a slightly larger typical error, and
+ * a slope through recent readings was the worst predictor at every horizon of
+ * 3 minutes or more.
+ */
+export class SessionRate {
+  #count = 0;
+  #first = null;
+  #last = null;
+  #sum = 0;
+  #inverseSum = 0;
+  #zero = false;
+  #weighted = 0;
+
+  add(at, value) {
+    if (!Number.isFinite(at) || !Number.isFinite(value) || value < 0 || at <= (this.#last?.at ?? Number.NEGATIVE_INFINITY)) {
+      return false;
+    }
+    if (this.#last) this.#weighted += this.#last.value * (at - this.#last.at);
+    this.#first ??= { at, value };
+    this.#last = { at, value };
+    this.#count += 1;
+    this.#sum += value;
+    if (value > 0) this.#inverseSum += 1 / value;
+    else this.#zero = true;
+    return true;
+  }
+
+  snapshot() {
+    if (!this.#last) return null;
+    const spanMs = this.#last.at - this.#first.at;
+    return {
+      count: this.#count,
+      lastAt: this.#last.at,
+      lastValue: this.#last.value,
+      meanValue: this.#sum / this.#count,
+      harmonicValue: this.#zero ? 0 : this.#count / this.#inverseSum,
+      timeWeightedValue: spanMs > 0 ? this.#weighted / spanMs : this.#last.value,
+      spanSeconds: spanMs / 1000
+    };
+  }
+}
+
+/**
  * Measurements over the output's existing look-ahead horizon. The oldest
  * boundary sample is retained until another sample replaces it, so a repeated
  * report never changes the history or invents a new measurement.
@@ -133,6 +184,7 @@ export class RateTrend {
  * @param {boolean} [input.requiredAudio]
  * @param {Array<{ id: string, serviceKey?: string, complete: boolean, fileOffset?: number,
  *   fileLength?: number, bytesPerMediaSecond?: number, pieceLength?: number, downloadRateReadings?: object,
+ *   tailRateReadings?: object,
  *   downloadForecast?: { ranges: Array<{ start: number, end: number, availableAt: number | null }> } }>} input.sources
  * @param {Array<{ id: string, sourceIds: string[], processedSeconds: number, durationSeconds?: number,
  *   segmentCount?: number,
@@ -158,17 +210,16 @@ export function predictPlaybackReadiness(input = {}) {
   // starts), the read piece nearest before them (what an unread piece is placed
   // by) and read pieces inside what the page reports holding (their frames).
   //
-  // THE NEAR WINDOW. The look-ahead is scheduled with exact segment times and
-  // source ranges when known. Missing range metadata is priced from aggregate
-  // file density and measured download service without claiming an address or
-  // byte. This forecast decides whether playback can start from work near the
-  // viewer; it does not make the first frame wait on an aggregate estimate of
-  // the whole remaining film. Each later poll advances this same window.
+  // THE NEAR WINDOW AND THE SUFFIX. The look-ahead is scheduled with exact
+  // segment times and source ranges when known. Missing range metadata is priced
+  // from aggregate file density and measured download service without claiming
+  // an address or byte. Beyond the look-ahead, {@link scheduleTail} estimates
+  // remaining source, encoder and delivery work without visiting every segment.
   const lookahead = finiteNonNegative(input.lookaheadSeconds);
   const horizonEnd = lookahead > 0 ? finiteNonNegative(input.positionSeconds) + lookahead : Number.POSITIVE_INFINITY;
   const tracks = (Array.isArray(input.tracks) ? input.tracks : []).map((track) =>
-    Array.isArray(track.segments)
-      ? { ...track, segments: piecesThatMatter(track, finiteNonNegative(input.positionSeconds), horizonEnd) } : track);
+    Array.isArray(track.segments) ? { ...track, segmentCount: track.segmentCount ?? track.segments.length,
+      segments: piecesThatMatter(track, finiteNonNegative(input.positionSeconds), horizonEnd) } : track);
   const duration = finiteNonNegative(input.durationSeconds);
   // Each track's served ticks are placed on the clock the page reports by the
   // offset its player applied (`timestampOffset`).
@@ -239,11 +290,25 @@ export function predictPlaybackReadiness(input = {}) {
       .filter((segment) => isPiece(segment) &&
         segment.endSeconds >= position - PLAYER_SEEK_TOLERANCE_SECONDS && segment.startSeconds < horizonEnd)
       .sort((left, right) => left.startSeconds - right.startSeconds || left.index - right.index),
+    // The pieces after the near window, as the playlist cuts them, and the
+    // offset the page's player placed them by.
+    tail: [],
+    tailStartSeconds: horizonEnd,
     durationSeconds: Number.isFinite(track.durationSeconds) ? track.durationSeconds : duration,
+    segmentCount: Number.isSafeInteger(track.segmentCount) ? track.segmentCount
+      : Math.max(0, ...track.segments.map(segment => segment.index + 1)),
     clockSeconds: Number.isFinite(track.clockOffsetSeconds) ? track.clockOffsetSeconds : 0
   }));
   for (const state of trackState) {
-    state.trackEndSeconds = Math.min(duration, state.durationSeconds + state.clockSeconds);
+    state.tailEndSeconds = Number.isFinite(horizonEnd) && horizonEnd < duration
+      ? Math.min(duration, state.durationSeconds + state.clockSeconds) : null;
+    const endIndex = state.segments.reduce((last, segment) => segment.startSeconds < horizonEnd
+      ? Math.max(last, segment.index) : last, -1);
+    state.tailSegmentCount = Math.max(0, state.segmentCount - endIndex - 1);
+    const readyTail = [...state.ready].reduce((count, index) => count + Number(index > endIndex), 0);
+    state.tailWorkFraction = state.tailSegmentCount > 0
+      ? Math.max(0, 1 - Math.min(state.tailSegmentCount, readyTail) / state.tailSegmentCount)
+      : 0;
   }
   // A file can declare a duration longer than its last packet. The HLS VOD
   // playlist still has a final numbered piece, but its made fragment ends at
@@ -277,7 +342,9 @@ export function predictPlaybackReadiness(input = {}) {
       // Bytes over time across the readings the trend keeps: the last 5 s of a
       // swarm moved between 0.97 and 5.8 MB/s and was carried to the end of the
       // film each time (torrent-tv/meta#178).
-      service = { rate: rateCurve(source.downloadRateReadings, now, "time"), finish: 0 };
+      service = { rate: rateCurve(source.downloadRateReadings, now, "time"),
+        // The rest of the film at the mean since the session began (`SessionRate`).
+        tailRate: rateCurve(source.tailRateReadings ?? source.downloadRateReadings, now, "time"), finish: 0 };
       sourceServices.set(serviceKey, service);
     }
     sourceState.set(id, { source, service });
@@ -611,10 +678,20 @@ export function predictPlaybackReadiness(input = {}) {
       // Supply interruption coverage is stock held by the proxy as well as
       // the browser. It is not a browser buffer-size admission rule.
       // The reserve is bounded by what is left of the track, not of the window.
-      const left = Math.max(0, state.trackEndSeconds - toSeconds(before));
+      const left = state.tailEndSeconds === null ? secondsAhead(trackEnd, before)
+        : Math.max(0, state.tailEndSeconds - toSeconds(before));
       const ahead = Math.max(0, secondsAhead(before, at) - Math.min(reserve, left) * Number(production.requiresSource));
       constrain(production.at - ahead, "production", trackIndex, production.segment.index, production.at, ahead,
         production.requiresSource, production.sourceArrivalAt, production.sourcePlanned);
+    }
+  }
+  const tailStock = [];
+  if (trackState.some(({ tailEndSeconds }) => Number.isFinite(tailEndSeconds))) {
+    const stop = scheduleTail({ trackState, sourceState, sourceByteCoverage, runStarts, trackFinish,
+      link, position, buffered, reserve, transferFinish, constrain, duration, stock: tailStock });
+    if (stop) {
+      return { ...result(false, null, buffered, reserve, null, stop.reason, preparedSegments),
+        ...(stop.unavailableSource ? { unavailableSource: stop.unavailableSource } : {}) };
     }
   }
   const firstRequiredStages = trackState.slice(0, requiredTracks).map((state, trackIndex) => {
@@ -646,6 +723,23 @@ export function predictPlaybackReadiness(input = {}) {
   const firstRequiredSegmentsSeconds = firstRequiredTrackSeconds.every(Number.isFinite)
     ? Math.max(0, ...firstRequiredTrackSeconds) : null;
   const delay = Math.max(0, ...constraints);
+  // THE STOCK THE START ASKS FOR HAS TO FIT. Starting without a stop while the
+  // source comes slower than the film plays means holding, at the start, what
+  // is already here and everything that arrives before it. Where that is more
+  // than this proxy may keep of downloaded pieces, the oldest of it would be
+  // given up before the viewer reached it, and no wait makes the start safe:
+  // Despicable Me 3 BDRemux at 1.4 MB/s asked for about 36 GB against a 29.5 GB
+  // share (Home Assistant 2026-10-26, torrent-tv/meta#239). Said as such, and
+  // the viewer keeps waiting rather than starting into stops.
+  const storageBytes = Number(input.sourceStorageBytes);
+  if (Number.isFinite(delay) && Number.isFinite(storageBytes) && storageBytes >= 0 && tailStock.length > 0) {
+    const cushionBytes = tailStock.reduce((sum, part) => sum + Math.max(0, part.totalBytes - part.missingBytes) +
+      Math.max(0, part.missingBytes - part.bytesPerSecond * Math.max(0, part.finish - delay)), 0);
+    if (cushionBytes > storageBytes) {
+      return { ...result(false, null, buffered, reserve, null, "cushion-exceeds-storage", preparedSegments),
+        cushionBytes, storageBytes };
+    }
+  }
   const originReady = trackState.every(({ clientRanges }) => compare(contiguousEnd(clientRanges, at), at) > 0);
   const ready = delay === 0 && originReady;
   const forecast = result(ready, Number.isFinite(delay) ? delay : null, buffered, reserve,
@@ -679,6 +773,102 @@ export function predictPlaybackReadiness(input = {}) {
 function isPiece(segment) {
   return Number.isInteger(segment?.index) && Number.isFinite(segment?.startSeconds) &&
     Number.isFinite(segment?.endSeconds) && segment.endSeconds > segment.startSeconds;
+}
+
+/**
+ * A duration-level estimate of the suffix after the exact near window. Source
+ * work uses each file's aggregate byte density and measured download service;
+ * processing uses each track's measured rate; delivery uses output bitrates and
+ * measured link service. Held source bytes and made segments reduce the
+ * estimate. This conditional forecast does not assert exact source ranges or
+ * individual frame timing. Its work is bounded by sources and tracks, not by
+ * the film's segment count.
+ *
+ * @returns {{ reason: string, unavailableSource?: object } | null} Why there is no answer, or null.
+ */
+function scheduleTail({ trackState, sourceState, sourceByteCoverage, runStarts, trackFinish, link,
+  position, buffered, reserve, transferFinish, constrain, duration, stock = null }) {
+  const tailStart = Math.max(position, ...trackState.map(state => state.tailStartSeconds));
+  if (!Number.isFinite(tailStart)) return null;
+  const sourceDurations = new Map();
+  for (const state of trackState) {
+    const seconds = Math.max(0, state.tailEndSeconds - tailStart) * state.tailWorkFraction;
+    if (!(seconds > 0)) continue;
+    for (const sourceId of new Set(state.track.sourceIds ?? [])) {
+      sourceDurations.set(sourceId, Math.max(sourceDurations.get(sourceId) ?? 0, seconds));
+    }
+  }
+
+  let sourceArrivalAt = 0;
+  for (const [sourceId, seconds] of sourceDurations) {
+    const source = sourceState.get(sourceId);
+    if (!source) return { reason: "source-measurement-unavailable" };
+    if (source.source.complete === true) continue;
+    // Held means on this proxy now, past the bytes the near window already
+    // scheduled: those are counted above, and the window's planned arrivals
+    // counted again as held took 117 s of film off a 90-minute tail.
+    const windowEnd = Math.max(0, ...(sourceByteCoverage.get(sourceId) ?? []).map(range => range.end));
+    const bytes = estimateUnmappedSourceBytes(source.source, seconds, duration,
+      heldBeyond(source.source.residence, windowEnd), windowEnd);
+    if (bytes === null) return { reason: "source-measurement-unavailable",
+      unavailableSource: { sourceId, phase: "tail" } };
+    if (!(bytes > 0)) continue;
+    const { service } = source;
+    const rate = service.tailRate ?? service.rate;
+    if (!rate || !(rate.rateAt(0) > 0)) {
+      return { reason: rate ? "service-not-advancing" : "download-rate-unavailable",
+        unavailableSource: { sourceId, estimatedBytes: bytes, phase: "tail" } };
+    }
+    service.finish = rate.finish(bytes, service.finish);
+    sourceArrivalAt = Math.max(sourceArrivalAt, service.finish);
+    // What this stretch weighs and what it still lacks: the stock the start
+    // asks to hold is read from these once the start's delay is known.
+    stock?.push({ totalBytes: estimateUnmappedSourceBytes(source.source, seconds, duration, []) ?? bytes,
+      missingBytes: bytes, bytesPerSecond: rate.rateAt(0), finish: service.finish });
+    const state = trackState.find(candidate => candidate.track.sourceIds?.includes(sourceId));
+    const index = state?.segments.at(-1)?.index ?? 0;
+    const ahead = Math.max(0, (state?.tailEndSeconds ?? tailStart) - position);
+    constrain(service.finish - Math.max(0, ahead - reserve), "source", trackState.indexOf(state), index,
+      service.finish, ahead, true, service.finish, false);
+  }
+
+  let outputBits = 0;
+  let latestTrackFinish = 0;
+  for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
+    const state = trackState[trackIndex];
+    const end = state.tailEndSeconds;
+    const seconds = Math.max(0, end - tailStart);
+    if (!(seconds > 0)) continue;
+    const track = state.track;
+    const segment = state.segments.at(-1) ?? { index: 0 };
+    const remaining = seconds * state.tailWorkFraction;
+    const work = Math.max(0, remaining - numericCoverage((track.processingRanges ?? [])
+      .filter(range => Number.isFinite(range?.start) && Number.isFinite(range?.end))
+      .map(range => ({ start: Math.max(tailStart, range.start), end: Math.min(end, range.end) }))
+      .filter(range => range.end > range.start)).reduce((sum, range) => sum + range.end - range.start, 0));
+    const processing = state.curve;
+    if (work > 0 && !processing) return { reason: "encode-rate-unavailable" };
+    const run = runStarts[trackIndex];
+    const localStart = tailStart - state.clockSeconds;
+    const inRun = run.spans.some(span => localStart >= span.start && localStart < span.end);
+    const open = work > 0 && !inRun ? run.openSeconds : 0;
+    const finishedAt = work > 0 ? processing.finish(work, trackFinish[trackIndex] + open) : trackFinish[trackIndex];
+    latestTrackFinish = Math.max(latestTrackFinish, finishedAt);
+    const deliveryStart = Math.max(tailStart, position + buffered);
+    outputBits += Math.max(0, state.bitsPerMediaSecond) * Math.max(0, end - deliveryStart);
+    const ahead = Math.max(0, end - position);
+    constrain(finishedAt - Math.max(0, ahead - reserve), "production", trackIndex, segment.index,
+      finishedAt, ahead, sourceArrivalAt > 0, sourceArrivalAt, false);
+  }
+
+  if (outputBits > 0) {
+    const end = Math.max(...trackState.map(state => state.tailEndSeconds));
+    const completedAt = link.finish(outputBits, Math.max(transferFinish, latestTrackFinish));
+    const ahead = Math.max(0, end - position);
+    constrain(completedAt - Math.max(0, ahead - reserve), "delivery", 0,
+      trackState[0]?.segments.at(-1)?.index ?? 0, completedAt, ahead, false, sourceArrivalAt, false);
+  }
+  return null;
 }
 
 /**
@@ -986,9 +1176,9 @@ function numericCoverage(ranges) {
 /**
  * Estimate download work without claiming an address or held byte. The whole
  * file's measured density, reduced by the held fraction, prices unresolved
- * intervals in the near window.
+ * intervals and the aggregate suffix.
  */
-function estimateUnmappedSourceBytes(source, mediaSeconds, durationSeconds, coverage = null) {
+function estimateUnmappedSourceBytes(source, mediaSeconds, durationSeconds, coverage = null, from = 0) {
   const fileLength = Number(source.fileLength);
   const density = Number(source.bytesPerMediaSecond) > 0 ? Number(source.bytesPerMediaSecond)
     : fileLength > 0 && durationSeconds > 0 ? fileLength / durationSeconds : 0;
@@ -999,7 +1189,15 @@ function estimateUnmappedSourceBytes(source, mediaSeconds, durationSeconds, cove
     range?.location !== "missing" && Number.isFinite(range?.start) && Number.isFinite(range?.end) &&
     range.end > range.start));
   const heldBytes = held.reduce((sum, range) => sum + range.end - range.start, 0);
-  return density * mediaSeconds * Math.max(0, Math.min(1, (fileLength - heldBytes) / fileLength));
+  const span = Math.max(0, fileLength - Math.max(0, from));
+  return span > 0 ? density * mediaSeconds * Math.max(0, Math.min(1, (span - heldBytes) / span)) : 0;
+}
+
+/** The held ranges past `from`, cut at it. */
+function heldBeyond(ranges, from) {
+  return (Array.isArray(ranges) ? ranges : [])
+    .filter(range => range?.location !== "missing" && Number.isFinite(range?.start) && range.end > from)
+    .map(range => ({ start: Math.max(from, range.start), end: range.end }));
 }
 
 /** Already held bytes have no arrival delay. Index future arrivals once. */

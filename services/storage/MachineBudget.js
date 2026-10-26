@@ -152,6 +152,20 @@ export class MachineBudget {
     this.#claimants = this.#claimants.filter((one) => one.name !== name);
   }
 
+  /**
+   * What one claimant was last allowed, or null before a measured division.
+   *
+   * @param {string} name
+   * @returns {number | null}
+   */
+  allowedFor(name) {
+    for (const reading of this.#last.values()) {
+      const share = reading.measured ? reading.shares.find((one) => one.name === name) : null;
+      if (share) return share.allowed;
+    }
+    return null;
+  }
+
   /** Total measured policy allowance, independent of its current division. */
   capacityOf(name) {
     const reading = this.#last.get(name);

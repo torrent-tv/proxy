@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: The line saying a file's own reads are withheld from the swarm, because no present viewer holds the file, is written whichever publication of the map meets the change first. On 2.107.35 a publication made for another reason could meet it first, and the line was not written.
+
 ## 2.107.35
 
 - **Fix**: A read a file makes for itself — its track table, media info, keyframes or cover — is stated to the swarm only while a present viewer has that file chosen or listed. Left stated after the viewer moved on, the header reads of a film whose swarm gave nothing held the first download class for every torrent on the proxy, and every other film fetched only the piece its viewer stood on: the picture stopped every few seconds and a new film would not start until play was pressed. The line naming the first class now also names the request holding it.

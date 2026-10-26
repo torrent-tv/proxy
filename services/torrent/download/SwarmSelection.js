@@ -89,6 +89,9 @@ export class SwarmSelection {
     const strictFirstClass = first !== null && !isConditional(first.urgency);
     /** @type {Map<string, { from: number, to: number, priority: number }>} */
     const wanted = new Map();
+    // Who asked for the first class here, for the line that says what the
+    // swarm is told first: which file and which request holds it.
+    const holders = new Set();
     for (const priority of [1, 0]) {
       const ranges = [];
       for (const window of missing) {
@@ -99,6 +102,7 @@ export class SwarmSelection {
           && window.urgency === first.urgency && window.priority >= first.priority;
         if (strictFirstClass && !inFirstClass) continue;
         if ((inFirstClass ? 1 : 0) !== priority) continue;
+        if (priority === 1) holders.add(`${window.fileIndex}:${window.requestId}`);
         const range = this.#piecesFor(window);
         if (range) ranges.push(range);
       }
@@ -114,6 +118,7 @@ export class SwarmSelection {
       for (const range of union) wanted.set(`${range.from}-${range.to}-${priority}`, range);
       if (priority === 1) {
         this.firstClassPieces = union.map(range => range.from === range.to ? `${range.from}` : `${range.from}-${range.to}`);
+        this.firstClassHolders = [...holders].sort();
         this.#required = strictFirstClass ? union.map(({ from, to }) => ({ from, to })) : [];
       }
     }

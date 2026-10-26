@@ -318,3 +318,16 @@ test("the store is told what will be read soon, from the same stated needs", () 
   assert.equal(protectedBy.has("video"), false, "a withdrawn range does not remain wanted");
   assert.equal(protectedBy.size, 1, "background demand remains at its own deadline");
 });
+
+test("the first class names the requests that hold it", () => {
+  const torrent = stubTorrent();
+  const register = new DemandRegister();
+  const selection = new SwarmSelection({ torrent, register });
+  register.state({ claimant: "a", fileIndex: 0, byteStart: 0, byteEnd: PIECE - 1, urgency: Urgency.NEAR, priority: 100,
+    requestId: "torrent:dead:0:tracks" });
+  register.state({ claimant: "b", fileIndex: 0, byteStart: 4 * PIECE, byteEnd: 5 * PIECE - 1, urgency: Urgency.NEAR, priority: 99,
+    requestId: "encode:#1" });
+  selection.reconcile();
+  assert.deepEqual(selection.firstClassHolders, ["0:torrent:dead:0:tracks"],
+    "only the windows in the first class are named, by file and request");
+});

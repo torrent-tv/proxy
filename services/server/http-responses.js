@@ -2,10 +2,7 @@
  * Shared HTTP responses used by more than one route.
  */
 /**
- * The answer given when no output suits this viewer: nothing this proxy holds
- * or could produce is admitted by their link. Machine-readable, because the
- * page has to explain it to the viewer and offer what they can do; the
- * figures are the ones the decision was made on.
+ * The answer given when no output can be opened.
  *
  * 409 and not a 5xx: nothing is wrong with the proxy, and repeating the same
  * request against the same link gives the same answer.

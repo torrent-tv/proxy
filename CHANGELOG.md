@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Viewer-link measurements and lifetime service traffic can no longer refuse a video output; when no measured rate fits, prepare the machine-supported output and let playback readiness wait. Remove the lifetime service-to-media ratio, which turned a small or interrupted media sample into hundreds of megabits per second of fictitious output demand.
+
 ## 2.107.33
 
 - **Fix**: Carry the live encode input priority, urgency and due time into source metadata download demand, and withdraw that demand when its input is obsolete.

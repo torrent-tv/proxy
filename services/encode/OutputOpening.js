@@ -599,8 +599,7 @@ export class OutputOpening {
         linkMbps: viewerLinkMbps,
         keys: [...this.#host.outputs.values()].map((other) => other.outputKey).concat(this.#host.segmentOutputFiles.addresses()),
         readyAt: (key) => this.#host.segmentOutputFiles.isClosed(key, timeline.indexForTime(Math.max(0, startPositionSeconds))),
-        observedPeakMbps: (candidate) => this.#host.observedPeakMbps?.(candidate) ?? null,
-        serviceShare: () => this.#host.serviceShare?.() ?? null
+        observedPeakMbps: (candidate) => this.#host.observedPeakMbps?.(candidate) ?? null
       }
     });
     // Which picture rate the link was asked about, and where it came from

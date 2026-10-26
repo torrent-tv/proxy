@@ -3,14 +3,14 @@
  * encode of the format they would otherwise be given.
  *
  * Decided with the user 2026-09-16, and made one rule for every path on
- * 2026-09-23 (roadmap item 97, step 11). Quality is compared by the number of
- * points in the picture. An output qualifies only if the piece at the viewer's
+ * 2026-09-23. Quality is compared by the number of points in the picture.
+ * An output qualifies only if the piece at the viewer's
  * position is already made — material somewhere else in the film spares them
- * nothing — AND the viewer's own link admits its load (`link-budget.js`), in
- * every mode and on every branch. A load whose figure is a bound (`known`) is
+ * nothing — and the viewer's own link can carry its load (`link-budget.js`)
+ * where possible. A load whose figure is a bound (`known`) is
  * taken before one whose figure is an average (`estimated`), whatever their
- * sizes; an `unknown` load is admitted only while nothing has measured the
- * link.
+ * sizes. If none fit the measured rate, format selection prepares a supported
+ * output and readiness waits for media to arrive.
  *
  * AUTOMATIC:
  * 1. at least the quality wanted — the nearest to it;
@@ -20,9 +20,9 @@
  *    waiting: this machine does not hold it at the speed the file needs — the
  *    largest of those.
  *
- * CHOSEN BY HAND: exactly the size chosen — of those, the one with the highest
- * bitrate the link admits. Which encoder made it and at which speed setting do
- * not matter to the viewer.
+ * CHOSEN BY HAND: exactly the size chosen — of sustainable outputs, use the
+ * one with the highest bitrate. Which encoder made it and at which speed
+ * setting do not matter to the viewer.
  *
  * No reading of disk or machine here: every figure arrives as a plain value.
  */
@@ -50,7 +50,7 @@ import { admissionRank } from "./link-budget.js";
  *   keep up with what the file needs. False where nothing measured it.
  * @param {(candidate: Candidate) => boolean} [params.canProduce] - Whether
  *   this machine can keep producing an output that is not finished.
- * @param {(candidate: Candidate) => { admitted: boolean, load: object }} params.judge -
+ * @param {(candidate: Candidate) => { fits: boolean, load: object }} params.judge -
  *   What this viewer's link does with the candidate's whole load.
  * @param {Candidate[]} params.candidates
  * @returns {{ key: string, answer: object } | null} The output to serve, or
@@ -60,7 +60,7 @@ export function chooseServingOutput({ mode, wanted, nextLowerArea, atRisk, canPr
   const admitted = (candidates ?? [])
     .filter((candidate) => candidate.readyHere === true && canProduce(candidate))
     .map((candidate) => ({ candidate, answer: judge(candidate) }))
-    .filter((one) => one.answer.admitted);
+    .filter((one) => one.answer.fits);
   const areaOf = (one) => one.candidate.width * one.candidate.height;
   const rateOf = (one) => one.answer.load.totalMbps ?? 0;
   const byRank = (left, right) => admissionRank(right.answer) - admissionRank(left.answer);
@@ -185,8 +185,8 @@ export function servingCandidates({ wanted, keys, source, encoderName, readyAt }
 
 /**
  * Whether ONE output may serve this viewer: the same material as the picture
- * it would stand in for, the size their mode requires, and a load their own
- * link admits.
+ * it would stand in for, the size their mode requires, and its link estimate
+ * for quality selection.
  *
  * THE ONE RULE EVERY PATH ASKS (roadmap item 97, step 11). The picture
  * answering for its own height, an output found already producing a height,
@@ -201,7 +201,7 @@ export function servingCandidates({ wanted, keys, source, encoderName, readyAt }
  *   output produces; for a copy, the source's.
  * @param {{ width: number, height: number } | null} params.wanted - The size a
  *   viewer who picked by hand must get exactly; ignored in AUTO.
- * @param {(spec: OutputSpec) => { admitted: boolean }} params.judge
+ * @param {(spec: OutputSpec) => { fits: boolean }} params.judge
  * @returns {{ suits: boolean, answer: object | null, reason: string }}
  */
 export function outputSuits({ spec, pictureSpec, mode, size, wanted, judge }) {
@@ -212,7 +212,7 @@ export function outputSuits({ spec, pictureSpec, mode, size, wanted, judge }) {
     return { suits: false, answer: null, reason: "not the size picked" };
   }
   const answer = judge(spec);
-  return answer.admitted
+  return answer.fits
     ? { suits: true, answer, reason: answer.verdict }
     : { suits: false, answer, reason: answer.verdict };
 }

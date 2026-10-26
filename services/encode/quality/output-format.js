@@ -18,17 +18,16 @@
  * for (`capKbps`), and declared at that source and size's nominal level. A
  * hardware encoder is given no bound. Unknown source rates mean no bound.
  *
- * AND THE VIEWER'S LINK DECIDES WHETHER IT MAY BE GIVEN AT ALL (roadmap item
- * 97, step 11). Every format considered is judged by what this viewer's link
- * does with its whole load — the picture and the soundtrack THEY chose
- * (`link-budget.js`). In order:
+ * THE VIEWER'S LINK HELPS CHOOSE A SUSTAINABLE FORMAT, BUT NEVER DECIDES
+ * WHETHER THE VIDEO MAY OPEN. Every format is compared with the measured rate
+ * against the picture and soundtrack they chose (`link-budget.js`). In order:
  *
  * 1. an output already here that suits them (`serving-output.js`);
- * 2. the size wanted, at the highest limit their link admits;
- * 3. in AUTO only, a smaller rung of their ladder at the highest limit their
- *    link admits — a smaller size proves nothing by itself;
- * 4. otherwise NOTHING: the answer is `unavailable`, with the figures, and no
- *    output is named. A format known not to fit is never handed over.
+ * 2. the size wanted, at the highest limit the measured link supports;
+ * 3. in AUTO only, a smaller rung when its measured load fits;
+ * 4. when no sustainable format is available, prepare the first
+ *    machine-supported format in this order and let playback readiness wait
+ *    for its continuous media.
  *
  * Nothing here reads the machine or the disk: what it needs arrives as values
  * and as functions over them.
@@ -39,7 +38,7 @@ import { buildResolutionLadder, canSustainOutput, pickSoftwarePreset } from "../
 import { OutputSpec } from "../output/OutputSpec.js";
 import { throughputAt } from "../throughput.js";
 import { chooseServingOutput, nextRungAreaBelow, servingCandidates } from "./serving-output.js";
-import { linkAnswerFigures, linkCouldCarry, linkRefusalReason, loadOf, videoLoadOfSpec } from "./link-budget.js";
+import { linkAnswerFigures, linkCouldCarry, loadOf, videoLoadOfSpec } from "./link-budget.js";
 
 /**
  * @param {object} params
@@ -67,7 +66,7 @@ import { linkAnswerFigures, linkCouldCarry, linkRefusalReason, loadOf, videoLoad
  *   soundtrack this viewer receives with the picture, from it or beside it.
  * @param {(encode: object | null) => OutputSpec} params.specWith - The output
  *   with this picture format and every other part as the request made it.
- * @param {{ mode: "auto" | "manual", linkMbps: number | null, keys: Iterable<string>, readyAt: (key: string) => boolean, observedPeakMbps?: (spec: OutputSpec) => number | null, serviceShare?: () => number | null }} params.serving
+ * @param {{ mode: "auto" | "manual", linkMbps: number | null, keys: Iterable<string>, readyAt: (key: string) => boolean, observedPeakMbps?: (spec: OutputSpec) => number | null }} params.serving
  * @returns {{
  *   spec: OutputSpec | null,
  *   budget: object | null,
@@ -103,8 +102,7 @@ export function decideOutputFormat({
     loadOf(
       videoLoadOfSpec(spec, Number.isFinite(source.pictureKbps) ? source.pictureKbps / 1000 : null,
         serving.observedPeakMbps?.(spec) ?? null),
-      audioLoad,
-      serving.serviceShare?.() ?? null
+      audioLoad
     )
   );
   const given = (spec, answer, extra = {}) => ({
@@ -122,7 +120,7 @@ export function decideOutputFormat({
     wantedKey: spec.toKey(),
     reusedKey: null,
     answer,
-    unavailable: { reason, figures: answer ? linkAnswerFigures(answer) : null, bound: "link" },
+    unavailable: { reason, figures: answer ? linkAnswerFigures(answer) : null },
     ...extra
   });
 
@@ -134,9 +132,7 @@ export function decideOutputFormat({
       return given(spec, null);
     }
     const answer = judge(spec);
-    return answer.admitted
-      ? given(spec, answer)
-      : refused(spec, answer, linkRefusalReason(answer, "the source's own picture is more than this viewer's link carries"));
+    return given(spec, answer);
   }
 
   const ceiling = computeOutputDimensions(target.width, target.height, source.width, source.height);
@@ -277,6 +273,7 @@ export function decideOutputFormat({
   }
 
   let anySizeHeld = false;
+  let fallback = null;
   if (machineCan(width, height)) {
     for (const spec of wantedFormats) {
       if (!admittedByMachine(spec)) {
@@ -284,7 +281,8 @@ export function decideOutputFormat({
       }
       anySizeHeld = true;
       const answer = judge(spec);
-      if (answer.admitted) {
+      fallback ??= { spec, answer };
+      if (answer.fits) {
         return given(spec, answer, { budget: budgetFor(spec), wantedKey });
       }
     }
@@ -300,7 +298,8 @@ export function decideOutputFormat({
         }
         anySizeHeld = true;
         const answer = judge(spec);
-        if (answer.admitted) {
+        fallback ??= { spec, answer };
+        if (answer.fits) {
           return given(spec, answer, { budget: budgetFor(spec), wantedKey });
         }
       }
@@ -329,16 +328,7 @@ export function decideOutputFormat({
       }
     };
   }
-  const wantedAnswer = judge(wantedSpec);
-  return refused(
-    wantedSpec,
-    wantedAnswer,
-    linkRefusalReason(
-      wantedAnswer,
-      serving.mode === "manual"
-        ? "no limit of the size picked is admitted by this viewer's link"
-        : "no size and limit this viewer's ladder offers is admitted by their link"
-    ),
-    { budget, wantedKey }
-  );
+  // Link measurements are advisory. If none of the sustainable formats can be
+  // used yet, keep the best machine-supported output and let readiness wait.
+  return given(fallback.spec, fallback.answer, { budget: budgetFor(fallback.spec), wantedKey });
 }

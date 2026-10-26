@@ -5,7 +5,7 @@
  * the last report showed — and never as a reference to a viewer. Nothing here
  * holds anybody, reads anything or can be asked at the wrong moment.
  *
- * WHAT A LINK CARRIES IS A LOAD, NOT A PICTURE (roadmap item 97, step 11). The
+ * WHAT A LINK CARRIES IS A LOAD, NOT A PICTURE. The
  * viewer receives the picture AND the soundtrack they chose — inside the
  * picture's own stream, or as a separate one — so both are added before the
  * link is asked. And each part says how much its figure can be trusted:
@@ -14,20 +14,16 @@
  *    most a copied soundtrack's codec allows it to carry;
  * 2. `estimated` — an average: a copied picture's or soundtrack's rate as the
  *    FILE states it, or the target a re-encoded soundtrack is asked for. An
- *    average is not a bound, so a load built on it is admitted only by
- *    estimate and is never confirmed;
+ *    average is not a bound, so a load built on it is only estimated to fit
+ *    and is never confirmed;
  * 3. `unknown` — no figure at all: a hardware encoder given no limit, a copied
  *    soundtrack whose rate nothing states.
  *
  * A load is as trustworthy as its least trustworthy part.
  *
- * AND WHAT THE CONNECTION CARRIES BESIDES THE FILM (torrent-tv/meta#169). The
- * same connection carries message framing, playlists, poll answers, probes and
- * pushed cues. Their share is measured by the transport over everything this
- * proxy has delivered (`transport/delivery-shares.js`) and added on top of the
- * picture and the sound. It is an average proportion and not a bound, so it
- * moves the figure without deciding the load's class; unmeasured, nothing is
- * added and the figures say so (`serviceShare: null`).
+ * Control traffic and measurement transfers cannot be apportioned to a new
+ * output from lifetime byte counters; doing so turned short or interrupted
+ * playback into fictitious per-video rates.
  */
 
 import { AUDIO_TRANSCODE_KBPS, maxrateKbpsFor, nominalKbpsFor } from "../args.js";
@@ -52,7 +48,7 @@ const CLASS_ORDER = [PEAK_CLASS.KNOWN, PEAK_CLASS.ESTIMATED, PEAK_CLASS.UNKNOWN]
 
 /**
  * @typedef {{ mbps: number | null, peakClass: string }} LoadPart
- * @typedef {{ video: LoadPart | null, audio: LoadPart | null, serviceMbps: number | null, serviceShare: number | null, totalMbps: number | null, peakClass: string }} Load
+ * @typedef {{ video: LoadPart | null, audio: LoadPart | null, totalMbps: number | null, peakClass: string }} Load
  */
 
 /**
@@ -233,52 +229,43 @@ export const SOUNDTRACK_MODE_CAUSE = Object.freeze({
  *
  * @param {LoadPart | null} video
  * @param {LoadPart | null} audio
- * @param {number | null} [serviceShare] - What the connection carries beyond
- *   the film, per byte of film, as the transport measured it; null while
- *   nothing has been measured.
  * @returns {Load}
  */
-export function loadOf(video, audio, serviceShare = null) {
+export function loadOf(video, audio) {
   const parts = [video, audio].filter(Boolean);
   const peakClass = parts.reduce(
     (worst, one) => (CLASS_ORDER.indexOf(one.peakClass) > CLASS_ORDER.indexOf(worst) ? one.peakClass : worst),
     PEAK_CLASS.KNOWN
   );
-  const share = Number.isFinite(serviceShare) && serviceShare >= 0 ? serviceShare : null;
   const filmMbps = peakClass === PEAK_CLASS.UNKNOWN
     ? null
     : parts.reduce((sum, one) => sum + one.mbps, 0);
-  const serviceMbps = filmMbps === null || share === null ? null : filmMbps * share;
-  const totalMbps = filmMbps === null ? null : filmMbps + (serviceMbps ?? 0);
-  return { video, audio, serviceMbps, serviceShare: share, totalMbps, peakClass };
+  return { video, audio, totalMbps: filmMbps, peakClass };
 }
 
 /**
  * What a link that measured `linkMbps` does with a load.
  *
- * 1. nothing measured the link — every class is admitted, since the link gave
- *    no ground to refuse, and nothing is confirmed;
- * 2. an `unknown` load against a measured link — `no safe bound`, refused:
- *    there is no number to compare;
- * 3. otherwise the load is compared with the usable share of the link: a
- *    `known` load that passes FITS and is confirmed, an `estimated` one that
- *    passes is admitted by estimate and is NOT confirmed.
+ * 1. nothing measured the link — no comparison can be made;
+ * 2. an `unknown` load against a measured link — `no safe bound`;
+ * 3. otherwise the load is compared with the measured link. The result helps
+ *    choose a sustainable format, but every result remains playable.
  *
  * @param {number | null} linkMbps
  * @param {Load} load
- * @returns {{ verdict: string, admitted: boolean, confirmed: boolean, linkMbps: number | null, load: Load }}
+ * @returns {{ verdict: string, confirmed: boolean, fits: boolean, linkMbps: number | null, load: Load }}
  */
 export function linkCouldCarry(linkMbps, load) {
   const measured = Number.isFinite(linkMbps) && linkMbps > 0;
-  const answer = (verdict, admitted, confirmed) => ({
+  const answer = (verdict, confirmed, fits) => ({
     verdict,
-    admitted,
     confirmed,
+    fits,
     linkMbps: measured ? linkMbps : null,
     load
   });
   if (!measured) {
-    return answer(LINK_VERDICT.NO_MEASUREMENT, true, false);
+    return answer(LINK_VERDICT.NO_MEASUREMENT, false, true);
   }
   if (load.peakClass === PEAK_CLASS.UNKNOWN) {
     return answer(LINK_VERDICT.NO_SAFE_BOUND, false, false);
@@ -292,44 +279,20 @@ export function linkCouldCarry(linkMbps, load) {
   }
   return load.peakClass === PEAK_CLASS.KNOWN
     ? answer(LINK_VERDICT.FITS, true, true)
-    : answer(LINK_VERDICT.ESTIMATED_TO_FIT, true, false);
+    : answer(LINK_VERDICT.ESTIMATED_TO_FIT, false, true);
 }
 
 /**
- * Why a link refused a load, in words naming what was missing or too much.
- *
- * `no safe bound` names every part that has no figure — the picture, the
- * soundtrack or both — because that, and not the link, is what the refusal is
- * about. Any other refusal is about the size of the load and is described by
- * the caller, who knows which outputs were weighed.
- *
- * @param {{ verdict: string, load: Load }} answer
- * @param {string} otherwise - The words for a load that is too large.
- * @returns {string}
- */
-export function linkRefusalReason(answer, otherwise) {
-  if (answer?.verdict !== LINK_VERDICT.NO_SAFE_BOUND) {
-    return otherwise;
-  }
-  const missing = [
-    answer.load?.video?.peakClass === PEAK_CLASS.UNKNOWN ? "the picture" : "",
-    answer.load?.audio?.peakClass === PEAK_CLASS.UNKNOWN ? "the soundtrack" : ""
-  ].filter(Boolean);
-  return `nothing states how much ${missing.length > 0 ? missing.join(" or ") : "this output"} would send, ` +
-    "so this viewer's link cannot be asked whether it fits";
-}
-
-/**
- * How strongly an answer is admitted, for ordering: a load whose figure is a
+ * How strongly a sustainable answer ranks, for selection: a load whose figure is a
  * bound before one whose figure is an average, and both before one with no
- * figure (which is only ever admitted with nothing measured). Zero for a
- * refusal.
+ * figure. A load above the measured link remains playable but ranks below
+ * outputs the measurement supports.
  *
- * @param {{ admitted: boolean, load: Load }} answer
+ * @param {{ fits: boolean, load: Load }} answer
  * @returns {number}
  */
 export function admissionRank(answer) {
-  if (!answer.admitted) {
+  if (!answer.fits) {
     return 0;
   }
   return 3 - CLASS_ORDER.indexOf(answer.load.peakClass);
@@ -350,8 +313,6 @@ export function linkAnswerFigures(answer) {
     videoClass: answer.load.video?.peakClass ?? null,
     audioMbps: answer.load.audio?.mbps ?? null,
     audioClass: answer.load.audio?.peakClass ?? null,
-    serviceMbps: answer.load.serviceMbps ?? null,
-    serviceShare: answer.load.serviceShare ?? null,
     totalMbps: answer.load.totalMbps,
     peakClass: answer.load.peakClass
   };

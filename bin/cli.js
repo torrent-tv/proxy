@@ -405,7 +405,6 @@ try {
     onSubtitleCues: (event) => dataChannelHandler?.publishSubtitleCues(event),
     // Late-bound for the same reason: what the connections carry beyond the
     // film is counted by the data-channel handler, built further down.
-    serviceShare: () => dataChannelHandler?.serviceShare?.() ?? null,
     onStateChanged: () => void stateReporter.changed(),
     onChaptersChanged: (event) => dataChannelHandler?.publishChaptersChanged(event)
   });

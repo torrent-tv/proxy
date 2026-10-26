@@ -195,30 +195,31 @@ test("a size picked by hand keeps its height and takes the highest limit the lin
   assert.equal(decided.answer.verdict, "fits");
 });
 
-test("AUTO moves to a smaller rung only when that rung's own load is admitted", () => {
+test("AUTO prefers a sustainable smaller rung but still opens when no rung fits", () => {
   // Nothing at 720p fits 3 Mbit/s with only the nominal limit, and 480p's
   // nominal peak (1.82 Mbit/s) does.
   const decided = decideFor({ mode: "auto", linkMbps: 3 });
   assert.equal(decided.unavailable, null);
   assert.ok(decided.spec.video.encode.height < 720, "a smaller rung");
-  assert.ok(decided.answer.admitted, "whose own load the link admits");
+  assert.ok(decided.answer.fits, "whose own load the link carries");
   assert.equal(
-    decideFor({ mode: "auto", linkMbps: 0.3 }).unavailable?.reason?.length > 0,
-    true,
-    "and with nothing admitted at any rung, nothing is handed over"
+    decideFor({ mode: "auto", linkMbps: 0.3 }).unavailable,
+    null,
+    "no rung meeting the estimate is a reason to wait, not refuse the video"
   );
 });
 
-test("nothing admitted is answered as unavailable, with the figures, and names no output", () => {
+test("a manual output opens when its measured rate exceeds the viewer-link estimate", () => {
   const decided = decideFor({ mode: "manual", linkMbps: 3 });
-  assert.equal(decided.spec, null, "a format known not to fit is never handed over");
-  assert.ok(decided.unavailable.reason.length > 0);
-  assert.equal(decided.unavailable.figures.verdict, "does not fit");
-  assert.equal(decided.unavailable.figures.linkMbps, 3);
+  assert.ok(decided.spec, "the requested output is still prepared");
+  assert.equal(decided.unavailable, null);
+  assert.equal(decided.answer.verdict, "does not fit");
+  assert.equal(decided.answer.linkMbps, 3);
 });
 
-test("a hardware output is unavailable against a measured link, and given while nothing measured it", () => {
-  assert.equal(decideFor({ encoder: HARDWARE, linkMbps: 50 }).unavailable.figures.verdict, "no safe bound");
+test("a hardware output with no stated rate remains available for preparation", () => {
+  assert.equal(decideFor({ encoder: HARDWARE, linkMbps: 50 }).unavailable, null);
+  assert.equal(decideFor({ encoder: HARDWARE, linkMbps: 50 }).answer.verdict, "no safe bound");
   assert.equal(decideFor({ encoder: HARDWARE, linkMbps: null }).answer.verdict, "no measurement");
 });
 
@@ -229,9 +230,10 @@ test("the soundtrack the viewer hears counts toward what their link carries", ()
   const linkMbps = 3.7;
 
   assert.equal(decideFor({ mode: "manual", linkMbps }).answer.verdict, "fits");
-  assert.ok(
-    decideFor({ mode: "manual", linkMbps, audioLoad: { mbps: 0.128, peakClass: "known" } }).unavailable,
-    "with the sound it no longer fits"
+  assert.equal(
+    decideFor({ mode: "manual", linkMbps, audioLoad: { mbps: 0.128, peakClass: "known" } }).answer.fits,
+    false,
+    "with the sound its measured rate is no longer sustainable"
   );
 });
 

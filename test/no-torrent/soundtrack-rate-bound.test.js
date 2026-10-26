@@ -21,7 +21,6 @@ import {
   chooseSoundtrackMode,
   LINK_VERDICT,
   linkCouldCarry,
-  linkRefusalReason,
   loadOf,
   PEAK_CLASS,
   SOUNDTRACK_MODE_CAUSE,
@@ -279,7 +278,7 @@ test("the field case: a dub with no stated rate on an 80 Mbit/s link is now re-e
   assert.equal(mode.transcode, true);
   assert.equal(mode.cause, SOUNDTRACK_MODE_CAUSE.NO_FIGURE);
   const sent = linkCouldCarry(80.57, loadOf(picture, soundtrackLoadOf(dub, mode.transcode)));
-  assert.equal(sent.admitted, true);
+  assert.equal(sent.fits, true);
   assert.equal(sent.verdict, LINK_VERDICT.ESTIMATED_TO_FIT);
 });
 
@@ -298,13 +297,13 @@ test("a track's mode follows from what the browser plays, whether it has a figur
   assert.deepEqual(mode(stated, false, false), { transcode: null, cause: SOUNDTRACK_MODE_CAUSE.CANNOT_SERVE });
 });
 
-test("a refusal with no figure names the part that has none", () => {
+test("a missing rate is reported for quality selection and never blocks the output", () => {
   const picture = { mbps: null, peakClass: PEAK_CLASS.UNKNOWN };
   const sound = { mbps: null, peakClass: PEAK_CLASS.UNKNOWN };
   const known = { mbps: 1, peakClass: PEAK_CLASS.KNOWN };
 
-  assert.match(linkRefusalReason(linkCouldCarry(50, loadOf(known, sound)), "too big"), /how much the soundtrack would send/);
-  assert.match(linkRefusalReason(linkCouldCarry(50, loadOf(picture, known)), "too big"), /how much the picture would send/);
-  assert.match(linkRefusalReason(linkCouldCarry(50, loadOf(picture, sound)), "too big"), /the picture or the soundtrack/);
-  assert.equal(linkRefusalReason(linkCouldCarry(0.5, loadOf(known, known)), "too big"), "too big");
+  assert.equal(linkCouldCarry(50, loadOf(known, sound)).fits, false);
+  assert.equal(linkCouldCarry(50, loadOf(picture, known)).fits, false);
+  assert.equal(linkCouldCarry(50, loadOf(picture, sound)).fits, false);
+  assert.equal(linkCouldCarry(0.5, loadOf(known, known)).fits, false);
 });

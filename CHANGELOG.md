@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.37
 
 - **Fix**: The last piece of a copied picture ends where the source ends and needs no keyframe there. Its end is the file's declared duration, and the track's indexed end — the last frame's start plus its duration in floating point — could land past it (314.96 s against 314.96000000000004 s), so the last piece of a copied MP4 was refused: the viewer got an error at the end of the film, and reopening near the end failed at once. A refused copy cut now states its interval, its keyframes and the track's end.
 

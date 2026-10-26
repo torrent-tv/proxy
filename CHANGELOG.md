@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Allow playback to start after the browser has received the completed final output, even when the declared file duration extends beyond its media.
+
 ## 2.107.31
 
 - **Fix**: base playback readiness on the near viewer window instead of forecasting the remaining film.

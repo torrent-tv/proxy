@@ -134,7 +134,8 @@ export class RateTrend {
  * @param {Array<{ id: string, serviceKey?: string, complete: boolean, fileOffset?: number,
  *   fileLength?: number, bytesPerMediaSecond?: number, pieceLength?: number, downloadRateReadings?: object,
  *   downloadForecast?: { ranges: Array<{ start: number, end: number, availableAt: number | null }> } }>} input.sources
- * @param {Array<{ id: string, sourceIds: string[], processedSeconds: number,
+ * @param {Array<{ id: string, sourceIds: string[], processedSeconds: number, durationSeconds?: number,
+ *   segmentCount?: number,
  *   bitsPerMediaSecond: number, readings: Array<{ at: number, value: number }>,
  *   clockOffsetSeconds?: number, clientRanges?: Array<{ start: number, end: number }>,
  *   segments: Array<{ index: number, startSeconds: number, endSeconds: number,
@@ -243,6 +244,25 @@ export function predictPlaybackReadiness(input = {}) {
   }));
   for (const state of trackState) {
     state.trackEndSeconds = Math.min(duration, state.durationSeconds + state.clockSeconds);
+  }
+  // A file can declare a duration longer than its last packet. The HLS VOD
+  // playlist still has a final numbered piece, but its made fragment ends at
+  // the output's actual last frame. Waiting for the declaration then asks the
+  // source for media after EOF. The final piece and the browser's contiguous
+  // held range together are positive evidence of the terminal output: require
+  // both on every track the viewer must play.
+  const finishedOutputHeld = measured && trackState.slice(0, requiredTracks).every((state, index) => {
+    const count = Number(state.track.segmentCount);
+    if (!Number.isSafeInteger(count) || count <= 0 || !state.ready.has(count - 1)) return false;
+    const last = state.segments.find(segment => segment.index === count - 1);
+    if (!Array.isArray(last?.ranges) || last.ranges.length === 0) return false;
+    const heldEnd = contiguousEnd(measuredRanges[index], at);
+    if (!heldEnd) return false;
+    const outputEnd = latest(...last.ranges.map(range => range.end));
+    return compare(heldEnd, outputEnd) >= 0;
+  });
+  if (finishedOutputHeld) {
+    return result(true, 0, buffered, reserve, 0, "client-buffer-covers-end", 0);
   }
   if (trackState.some(({ segments }) => segments.length === 0)) {
     return result(false, null, buffered, reserve, null, "timeline-unavailable", 0);

@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.36
 
 - **Fix**: The line saying a file's own reads are withheld from the swarm, because no present viewer holds the file, is written whichever publication of the map meets the change first. On 2.107.35 a publication made for another reason could meet it first, and the line was not written.
 

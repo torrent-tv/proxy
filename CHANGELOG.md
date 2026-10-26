@@ -1,7 +1,10 @@
 ## Unreleased
 
-- **Fix**: A start whose stock does not fit the disk this proxy keeps for downloaded pieces is refused, as 2.107.39 meant: the forecast never received that share, because the assembled budget did not offer it, and read it as unknown. Despicable Me 3 at 0.45 MB/s was promised a start in 26 hours while that start would hold about 41 GB against a 28 GB share.
 - **Chore**: The readiness line states what the rest of the film was priced at, per source: the seconds and bytes still missing, the rate and when they arrive, or why a source contributed nothing. On 2.107.40 Despicable Me 3 had 43.6 GB missing at 0.6 MB/s and still no wait for them, and nothing said why.
+
+## 2.107.41
+
+- **Fix**: A start whose stock does not fit the disk this proxy keeps for downloaded pieces is refused, as 2.107.39 meant: the forecast never received that share, because the assembled budget did not offer it, and read it as unknown. Despicable Me 3 at 0.45 MB/s was promised a start in 26 hours while that start would hold about 41 GB against a 28 GB share.
 
 ## 2.107.40
 

@@ -56,6 +56,7 @@ export class EncodeInputs {
   #capacity;
   #urgent;
   #rankAt;
+  #demandChanged;
   #log;
   #now;
   /**
@@ -68,7 +69,7 @@ export class EncodeInputs {
   #observeWait;
 
   constructor({ resolve, readRanges, openWholeFile = null, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
-    rankAt = () => null, openOf = () => null, log = () => {}, now = Date.now, stretchCopied = () => {},
+    rankAt = () => null, demandChanged = () => {}, openOf = () => null, log = () => {}, now = Date.now, stretchCopied = () => {},
     observeWait = null }) {
     this.#stretchCopied = stretchCopied;
     this.#observeWait = observeWait;
@@ -83,6 +84,7 @@ export class EncodeInputs {
     this.#capacity = capacity;
     this.#urgent = urgent;
     this.#rankAt = rankAt;
+    this.#demandChanged = demandChanged;
     this.#log = log;
     this.#now = now;
   }
@@ -204,7 +206,12 @@ export class EncodeInputs {
       if (request.output !== output) continue;
       const covered = windows.some(window => request.from <= window.to && request.to >= window.from);
       const unused = starts !== null && request.result?.kind === "result" && !starts.has(request.from);
-      if (covered && !unused) continue;
+      if (covered && !unused) {
+        const current = this.#readPriority(request, request.from, request.from);
+        Object.assign(request.readPriority ??= {}, current);
+        this.#demandChanged(output, request.readPriority);
+        continue;
+      }
       this.#note(request, covered ? "withdrawn: no live run ends before it and no start is placed there"
         : "withdrawn: no wanted window covers it");
       this.#requests.delete(key);
@@ -503,13 +510,15 @@ export class EncodeInputs {
    * @param {object} request
    * @param {number} from
    * @param {number} to
-   * @returns {{ rank: number, serves: number, from: number, to: number }}
+   * @returns {{ rank: number, topRank: number, serves: number, from: number, to: number, urgent?: boolean, deadlineAt?: number, requestId: string }}
    */
   #readPriority(request, from, to) {
     const serves = request.serves ?? request.from;
     const rank = this.#rankAt(request.output, serves);
     return { rank: Number.isFinite(rank?.rank) ? rank.rank : 0, topRank: Number.isFinite(rank?.topRank) ? rank.topRank : 0,
-      serves, from, to };
+      ...(typeof rank?.urgent === "boolean" ? { urgent: rank.urgent } : {}),
+      ...(Number.isFinite(rank?.deadlineAt) ? { deadlineAt: rank.deadlineAt } : {}),
+      serves, from, to, requestId: `encode:${request.key}` };
   }
 
   /**

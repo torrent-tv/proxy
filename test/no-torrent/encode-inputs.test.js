@@ -6,6 +6,25 @@ import { MachineBudget } from "../../services/storage/MachineBudget.js";
 
 const output = { id: "output" };
 
+test("container reads carry the output demand into source metadata", async () => {
+  let readPriority;
+  const inputs = new EncodeInputs({
+    resolve: async (_output, _from, _to, _timing, _isCurrent, _signal, priority) => {
+      readPriority = priority;
+      return { kind: "needs-bytes", ranges: [[0, 9]] };
+    },
+    rankAt: () => ({ rank: 95, topRank: 100, urgent: false, deadlineAt: 17_000 }),
+    readRanges: async () => null, reviseBudget: async () => {}, changed: () => {}, failed: (_output, error) => { throw error; }
+  });
+  inputs.take(output, 4, 8, 4);
+  await setImmediate();
+  assert.deepEqual({ rank: readPriority.rank, topRank: readPriority.topRank, urgent: readPriority.urgent,
+    deadlineAt: readPriority.deadlineAt, serves: readPriority.serves },
+  { rank: 95, topRank: 100, urgent: false, deadlineAt: 17_000, serves: 4 });
+  assert.match(readPriority.requestId, /^encode:/);
+  inputs.forget(output);
+});
+
 test("input allowance changing before a pending memory refusal is returned is not lost", async () => {
   let finish, calls = 0;
   const inputs = new EncodeInputs({

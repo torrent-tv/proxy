@@ -917,7 +917,8 @@ export async function startProxyServer({
     reviseBudget: () => { void outputParts.machineBudget.revise("memory", "media metadata").catch(error => logger.warn(`packet index budget: ${error.message}`)); },
     changed: () => { mediaReads.memoryChanged(); probeReads.memoryChanged(); outputParts.encodeInputs?.memoryChanged(); }
   });
-  const containerOver = async ({ sourceKey, fileIndex, requestId, packetInterval, demand, readPriority }) => {
+  const encodeMetadataRequests = new WeakMap();
+  const containerOver = async ({ sourceKey, fileIndex, requestId, packetInterval, demand, readPriority, signal }) => {
     const record = sourceRegistry.get(sourceKey);
     if (!record) {
       return null;
@@ -927,10 +928,34 @@ export async function startProxyServer({
     if (!file || !(file.length > 0)) {
       return null;
     }
+    let metadataTracker = null;
+    let trackersForSignal = null;
+    const trackerKey = `${sourceKey}:${fileIndex}`;
+    if (readPriority?.requestId && signal) {
+      trackersForSignal = encodeMetadataRequests.get(signal);
+      if (!trackersForSignal) encodeMetadataRequests.set(signal, trackersForSignal = new Map());
+      metadataTracker = trackersForSignal.get(trackerKey);
+      if (!metadataTracker) {
+        metadataTracker = { statements: new Set(), abort: null };
+        metadataTracker.abort = () => {
+          for (const statement of metadataTracker.statements) {
+            void downloadMaps.withdrawMetadata(sourceKey, fileIndex, statement).catch(error =>
+              logger.warn(`encode input demand withdrawal failed: ${error.message}`));
+          }
+          metadataTracker.statements.clear();
+          trackersForSignal.delete(trackerKey);
+          if (trackersForSignal.size === 0) encodeMetadataRequests.delete(signal);
+        };
+        trackersForSignal.set(trackerKey, metadataTracker);
+        if (signal.aborted) metadataTracker.abort();
+        else signal.addEventListener("abort", metadataTracker.abort, { once: true });
+      }
+    }
     const params = {
       sourceKey,
       fileIndex,
       requestId,
+      signal,
       packetInterval,
       readPriority,
       packetMemory: indexMemory.forFile(sourceKey, fileIndex),
@@ -969,9 +994,17 @@ export async function startProxyServer({
         }
         const finished = mediaReads.record(params, statement, result, revision.storage, revision.memory);
         if (statement === "chapters" && result.passive) await downloadMaps.withdrawMetadata(sourceKey, fileIndex, statement);
-        else await downloadMaps.metadata({ sourceKey, fileIndex, statement: requestId ? `${statement}:${requestId}` : statement, result,
-          ...(statement === "chapters" ? { priority: 1, urgent: false, deadlineAt: null } : {}),
-          ...(demand ? { priority: demand.priority, urgent: demand.urgent, deadlineAt: demand.deadlineAt, interval: demand, leadSeconds: demand.leadSeconds ?? 0 } : {}) });
+        else {
+          const metadataStatement = requestId ? `${statement}:${requestId}` : statement;
+          if (metadataTracker && result.kind === "needs-ranges") metadataTracker.statements.add(metadataStatement);
+          if (metadataTracker && result.kind !== "needs-ranges") metadataTracker.statements.delete(metadataStatement);
+          await downloadMaps.metadata({ sourceKey, fileIndex, statement: metadataStatement, result,
+            ...(statement === "chapters" ? { priority: 1, urgent: false, deadlineAt: null } : {}),
+            ...(demand ? { priority: demand.priority, urgent: demand.urgent, deadlineAt: demand.deadlineAt, interval: demand, leadSeconds: demand.leadSeconds ?? 0 } : {}),
+            ...(readPriority?.requestId ? { priority: readPriority.rank, urgent: readPriority.urgent === true,
+              deadlineAt: Number.isFinite(readPriority.deadlineAt) ? readPriority.deadlineAt : Number.POSITIVE_INFINITY,
+              scope: "preparation" } : {}) });
+        }
         if (finished && result.kind === "result") {
           void downloadMaps.refresh(sourceKey, fileIndex).catch(error =>
             logger.warn(`download map source=${sourceKey} file=${fileIndex} metadata refresh failed: ${error?.message ?? error}`));
@@ -1042,7 +1075,8 @@ export async function startProxyServer({
       // reassembled packets otherwise.
       const files = [];
       for (const [fileIndex, choices] of selected) {
-        const params = await containerOver({ sourceKey: output.file.sourceKey, fileIndex, readPriority });
+        const params = await containerOver({ sourceKey: output.file.sourceKey, fileIndex,
+          requestId: readPriority?.requestId, readPriority, signal });
         if (!params) return { kind: "needs-source" };
         if (isCurrent) params.isCurrent = isCurrent;
         if (signal) params.signal = signal;
@@ -1145,6 +1179,7 @@ export async function startProxyServer({
           .finally(() => releaseInput?.());
       }
     },
+    repriceEncodeDemand: demand => downloadMaps.repriceRequest(demand.requestId, demand),
     readEncodeRanges: async (source, ranges, maxBytes) => {
       const torrent = torrentPool.knownTorrent(source.sourceKey);
       return torrent ? torrentPool.readHeldRangesOf(torrent, source.fileIndex, ranges, maxBytes) : null;

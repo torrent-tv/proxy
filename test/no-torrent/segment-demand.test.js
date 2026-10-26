@@ -25,6 +25,20 @@ test("an output nothing has been said about wants nothing", () => {
   assert.deepEqual(demand.addresses(), []);
 });
 
+test("an input read can use the live output priority, urgency and due time", () => {
+  const demand = new SegmentDemand();
+  demand.state(PICTURE, [
+    { from: 2, to: 4, priority: 95, withinSeconds: 7, urgent: false },
+    { from: 4, to: 6, priority: 100, deadlineAt: 12_000, urgent: true }
+  ]);
+  assert.deepEqual(demand.demandAt(PICTURE, 4, 10_000), {
+    rank: 100, topRank: 100, urgent: true, deadlineAt: 12_000
+  });
+  assert.deepEqual(demand.demandAt(PICTURE, 3, 10_000), {
+    rank: 95, topRank: 100, urgent: false, deadlineAt: 17_000
+  });
+});
+
 test("a map replaces whatever was wanted before, rather than adding to it", () => {
   // The map is a statement of what is wanted NOW, built fresh each time from
   // where the viewers are. Accumulating them would keep serving people who have

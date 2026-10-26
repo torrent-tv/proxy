@@ -503,6 +503,11 @@ export class EncodeOrchestrator {
     return this.#demand.rankOf(address, index);
   }
 
+  /** The viewer-derived priority, urgency and due time for one output segment. */
+  demandAt(address, index) {
+    return this.#demand.demandAt(address, index);
+  }
+
   /**
    * How many encoder processes are running on this machine right now, over
    * every output.

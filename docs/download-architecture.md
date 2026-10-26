@@ -12,6 +12,16 @@ ranges, native source playback ranges and metadata reads that returned missing
 bytes. Only this publication can state download demand. A media read cannot
 select a torrent piece, and a storage read cannot create download demand.
 
+A metadata read with no viewer interval and no encode input behind it — the
+track table, media info, keyframes or cover a file reads for itself — has the
+file as its owner. It is published only while a present viewer has that file
+chosen or listed, and published again when one does. The registry orders
+groups across every torrent, so such a read left stated after its viewer moved
+on held the first class for the whole host; on 2026-10-26 a film whose swarm
+gave nothing kept every other film to the one piece its viewer stood on
+(torrent-tv/meta#239). The line naming the first class also names which
+`file:request` holds it.
+
 The media layer resolves segment input once for both download demand and encoder
 admission. It reads available bytes and returns a result, missing ranges, memory
 requirements or an explicit terminal refusal. Results belong to the source file;

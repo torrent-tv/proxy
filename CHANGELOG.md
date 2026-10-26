@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.40
 
 - **Fix**: The rest of a film is priced from the last byte the near window reads, not from the last byte the torrent thread plans. Its plan can reach the end of the file, and on 2.107.39 the rest of Despicable Me 3 then counted as held: the forecast left out its 40 GB still to download and gave 23 minutes against the 14 hours the swarm needs.
 

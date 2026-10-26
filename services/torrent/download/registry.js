@@ -285,9 +285,16 @@ export function reconcileAll() {
   for (const entry of entries) entry.limit.sample();
   // What the swarm is told to fetch FIRST, said when it changes. Lower classes
   // are withheld because a wire with no first-class piece would fall through.
+  // And who asked for it, as file:request: a class one torrent holds is what
+  // every other torrent waits behind, so the line names the request holding it.
+  const holdersOf = entry => {
+    const holders = entry.selection.firstClassPieces?.length ? entry.selection.firstClassHolders ?? [] : [];
+    return holders.length ? ` (held by ${holders.slice(0, 4).join(", ")}${holders.length > 4 ? ` +${holders.length - 4} more` : ""})` : "";
+  };
   const said = entries.map(entry => `${String(entry.torrent.infoHash ?? "").slice(0, 8)}: ` +
     `${(entry.selection.firstClassPieces ?? []).slice(0, 8).join(",") || "nothing"}` +
-    `${(entry.selection.firstClassPieces?.length ?? 0) > 8 ? ` +${entry.selection.firstClassPieces.length - 8} more` : ""}`).join("; ");
+    `${(entry.selection.firstClassPieces?.length ?? 0) > 8 ? ` +${entry.selection.firstClassPieces.length - 8} more` : ""}` +
+    holdersOf(entry)).join("; ");
   const head = firstClass ? `${urgencyName(firstClass.urgency)} priority ${firstClass.priority}` : "none";
   firstClassStated = `${head} — pieces ${said}`;
   return { torrents: entries.length, speculativeAllowed, stated, withdrawn };

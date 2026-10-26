@@ -286,17 +286,28 @@ export class DownloadMaps {
   viewersChanged() {
     const sent = [];
     for (const file of this.#files.values()) {
-      const own = [...file.metadata].filter(([, metadata]) => metadata.owner === "file");
-      if (own.length === 0) continue;
-      const wanted = this.#fileWanted(file.sourceKey, file.fileIndex) === true;
-      if (file.ownReadsWanted === wanted) continue;
-      file.ownReadsWanted = wanted;
-      this.#log?.(`download map ${file.sourceKey}:${file.fileIndex}: ${own.length} read(s) of the file itself ` +
-        `${wanted ? "stated again — a viewer holds the file" : "withheld — no present viewer holds the file"} ` +
-        `[${own.map(([statement]) => statement).join(", ")}]`);
+      if (![...file.metadata.values()].some(metadata => metadata.owner === "file")) continue;
+      if (file.ownReadsWanted === (this.#fileWanted(file.sourceKey, file.fileIndex) === true)) continue;
       sent.push(this.#emit(file));
     }
     return Promise.all(sent);
+  }
+
+  /**
+   * Whether a present viewer holds this file, decided where the map is built
+   * and said when it changes for a file that has reads of its own.
+   *
+   * @returns {boolean}
+   */
+  #ownReadsWanted(file) {
+    const wanted = this.#fileWanted(file.sourceKey, file.fileIndex) === true;
+    const own = [...file.metadata].filter(([, metadata]) => metadata.owner === "file").map(([statement]) => statement);
+    if (own.length && wanted !== file.ownReadsWanted && (file.ownReadsWanted !== undefined || !wanted)) {
+      this.#log?.(`download map ${file.sourceKey}:${file.fileIndex}: ${own.length} read(s) of the file itself ` +
+        `${wanted ? "stated again — a viewer holds the file" : "withheld — no present viewer holds the file"} [${own.join(", ")}]`);
+    }
+    file.ownReadsWanted = wanted;
+    return wanted;
   }
 
   forget(sourceKey, fileIndex, { keepPreparation = false } = {}) {
@@ -347,8 +358,7 @@ export class DownloadMaps {
     // Compared and sent as the torrent is to act on it: the playback zones
     // packed into as few windows as say the same (`coalescedZones`).
     const zones = [...this.#packedPlayback(file)];
-    const ownReadsWanted = this.#fileWanted(file.sourceKey, file.fileIndex) === true;
-    file.ownReadsWanted = ownReadsWanted;
+    const ownReadsWanted = this.#ownReadsWanted(file);
     for (const { ranges, requestId, priority, urgent, deadlineAt, order, owner } of file.metadata.values()) {
       if (owner === "file" && !ownReadsWanted) continue;
       for (const [byteStart, byteEnd] of ranges) {

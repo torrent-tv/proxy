@@ -795,3 +795,21 @@ test("a viewer's own demand and a preparation read are not withheld with the fil
   assert.deepEqual(published.zones.map(zone => [zone.byteStart, zone.byteEnd]), [[100, 199]],
     "preparation has its own owner and is withdrawn by it, not by this rule");
 });
+
+test("withholding a file's own reads is said once, whichever publication meets it first", async () => {
+  // Field 2026-10-26 on 2.107.35: preparation was withdrawn when the viewer
+  // moved on, its publication already left the file's reads out, and the
+  // viewer change that followed found nothing changed and said nothing.
+  let held = true;
+  const lines = [];
+  const maps = new DownloadMaps({ publish() {}, log: line => lines.push(line), fileWanted: () => held });
+  await maps.metadata({ sourceKey: "s", fileIndex: 0, statement: "tracks", owner: "file",
+    result: { kind: "needs-ranges", ranges: [[0, 15]] } });
+  await maps.metadata({ sourceKey: "s", fileIndex: 0, statement: "packets:prepare", scope: "preparation",
+    result: { kind: "needs-ranges", ranges: [[100, 199]] } });
+  held = false;
+  await maps.withdrawMetadata("s", 0, "packets:prepare");
+  await maps.viewersChanged();
+  assert.deepEqual(lines.filter(line => /read\(s\) of the file itself/.test(line)),
+    ["download map s:0: 1 read(s) of the file itself withheld — no present viewer holds the file [tracks]"]);
+});

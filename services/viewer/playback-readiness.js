@@ -740,12 +740,13 @@ export function predictPlaybackReadiness(input = {}) {
   // share (Home Assistant 2026-10-26, torrent-tv/meta#239). Said as such, and
   // the viewer keeps waiting rather than starting into stops.
   const storageBytes = Number(input.sourceStorageBytes);
-  if (Number.isFinite(delay) && Number.isFinite(storageBytes) && storageBytes >= 0 && tailStock.length > 0) {
-    const cushionBytes = tailStock.reduce((sum, part) => sum + Math.max(0, part.totalBytes - part.missingBytes) +
+  const tailParts = tailStock.filter(part => !part.skipped);
+  if (Number.isFinite(delay) && Number.isFinite(storageBytes) && storageBytes >= 0 && tailParts.length > 0) {
+    const cushionBytes = tailParts.reduce((sum, part) => sum + Math.max(0, part.totalBytes - part.missingBytes) +
       Math.max(0, part.missingBytes - part.bytesPerSecond * Math.max(0, part.finish - delay)), 0);
     if (cushionBytes > storageBytes) {
       return { ...result(false, null, buffered, reserve, null, "cushion-exceeds-storage", preparedSegments),
-        cushionBytes, storageBytes };
+        cushionBytes, storageBytes, tail: tailStock };
     }
   }
   const originReady = trackState.every(({ clientRanges }) => compare(contiguousEnd(clientRanges, at), at) > 0);
@@ -756,6 +757,9 @@ export function predictPlaybackReadiness(input = {}) {
   return { ...forecast, measuredAt: now, predictedStartAt: Number.isFinite(delay) ? now + delay * 1000 : null,
     firstRequiredSegmentsSeconds,
     firstRequiredStages,
+    // What the rest of the film weighs per source, at what rate it comes and
+    // when, or why a source has none: said in the readiness line.
+    tail: tailStock,
     // The piece whose `kind` — its production, or its delivery to the page —
     // comes `atSeconds` from now while the media before it lasts
     // `aheadSeconds`: the difference is the delay.
@@ -801,7 +805,11 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
   const sourceDurations = new Map();
   for (const state of trackState) {
     const seconds = Math.max(0, state.tailEndSeconds - tailStart) * state.tailWorkFraction;
-    if (!(seconds > 0)) continue;
+    if (!(seconds > 0)) {
+      stock?.push({ track: state.track.id, skipped: "no-work", tailStart, tailEnd: state.tailEndSeconds,
+        workFraction: state.tailWorkFraction, tailSegments: state.tailSegmentCount });
+      continue;
+    }
     for (const sourceId of new Set(state.track.sourceIds ?? [])) {
       sourceDurations.set(sourceId, Math.max(sourceDurations.get(sourceId) ?? 0, seconds));
     }
@@ -811,7 +819,10 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
   for (const [sourceId, seconds] of sourceDurations) {
     const source = sourceState.get(sourceId);
     if (!source) return { reason: "source-measurement-unavailable" };
-    if (source.source.complete === true) continue;
+    if (source.source.complete === true) {
+      stock?.push({ sourceId, skipped: "complete" });
+      continue;
+    }
     // Held means on this proxy now, past the last byte the near window's
     // pieces read: those are counted above, and the window's planned arrivals
     // counted again as held took 117 s of film off a 90-minute tail. The
@@ -821,7 +832,10 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
       heldBeyond(source.source.residence, windowEnd), windowEnd);
     if (bytes === null) return { reason: "source-measurement-unavailable",
       unavailableSource: { sourceId, phase: "tail" } };
-    if (!(bytes > 0)) continue;
+    if (!(bytes > 0)) {
+      stock?.push({ sourceId, skipped: "held", seconds, windowEnd });
+      continue;
+    }
     const { service } = source;
     const rate = service.tailRate ?? service.rate;
     if (!rate || !(rate.rateAt(0) > 0)) {
@@ -832,7 +846,7 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
     sourceArrivalAt = Math.max(sourceArrivalAt, service.finish);
     // What this stretch weighs and what it still lacks: the stock the start
     // asks to hold is read from these once the start's delay is known.
-    stock?.push({ totalBytes: estimateUnmappedSourceBytes(source.source, seconds, duration, []) ?? bytes,
+    stock?.push({ sourceId, seconds, windowEnd, totalBytes:estimateUnmappedSourceBytes(source.source, seconds, duration, []) ?? bytes,
       missingBytes: bytes, bytesPerSecond: rate.rateAt(0), finish: service.finish });
     const state = trackState.find(candidate => candidate.track.sourceIds?.includes(sourceId));
     const index = state?.segments.at(-1)?.index ?? 0;

@@ -31,13 +31,21 @@
  * @returns {number | null} Film seconds made per second of the run's own work.
  */
 export function speedFromWork(previous, current) {
-  if (!previous || !current) {
-    return null;
-  }
-  const producedSeconds = current.producedSeconds - previous.producedSeconds;
+  const work = workDeltaBetween(previous, current);
+  return work === null ? null : work.workSeconds / work.workingSeconds;
+}
+
+/**
+ * Produced media and active processing time between samples of one run.
+ * @param {WorkSample | null} previous
+ * @param {WorkSample | null} current
+ * @returns {{ workSeconds: number, workingSeconds: number } | null}
+ */
+export function workDeltaBetween(previous, current) {
+  if (!previous || !current) return null;
+  const workSeconds = current.producedSeconds - previous.producedSeconds;
   const workingSeconds = (current.workingMs - previous.workingMs) / 1000;
-  if (!(producedSeconds > 0) || !(workingSeconds > 0)) {
-    return null;
-  }
-  return producedSeconds / workingSeconds;
+  return Number.isFinite(workSeconds) && workSeconds > 0 &&
+    Number.isFinite(workingSeconds) && workingSeconds > 0
+    ? { workSeconds, workingSeconds } : null;
 }

@@ -45,6 +45,13 @@ flowchart TD
 
 ## Current forecast
 
+Processing readings retain the media produced (`workSeconds`) and active
+processing time (`workingSeconds`). Their service rate is total media divided
+by total active time, so splitting the same work into unequal pieces does not
+change the rate. The observation's wall-clock span and descriptive rate means
+remain separate quantities. Point-only legacy readings retain their previous
+equal-work summary until measured work quantities are available.
+
 Inside the configured look-ahead, the forecast uses exact segment boundaries,
 mapped source ranges, held bytes, planned piece arrivals, measured encoding and
 client delivery. If a nearby map entry is unresolved, it estimates the input

@@ -39,7 +39,7 @@
 
 import { ENCODE_RUN_EVENT, ENCODE_RUN_STATE, INITIAL_RUN_STATE, nextState } from "./encode-run-state.js";
 import { classifyEncodeExit, ENCODE_EXIT } from "./encode-exit.js";
-import { speedFromWork } from "./encoder-readings.js";
+import { workDeltaBetween } from "./encoder-readings.js";
 import { RunClock } from "./RunClock.js";
 import { RunProgress } from "./RunProgress.js";
 
@@ -229,7 +229,7 @@ export class EncodeRun {
    * @param {{ info: (line: string) => void, warn: (line: string) => void, error?: (line: string) => void }} params.logger
    * @param {() => number} [params.now]
    * @param {(ended: RunEnded) => void} [params.onEnded]
-   * @param {(reading: { speed: number, at: number }) => void} [params.onSpeedMeasured] -
+   * @param {(reading: { speed: number, at: number, workSeconds: number, workingSeconds: number }) => void} [params.onSpeedMeasured] -
    *   Told each time this run has measured its processing speed, once per
    *   reading.
    * @param {(name: string, following: string | null) => string | null} [params.onClosed] - Called with the
@@ -353,10 +353,10 @@ export class EncodeRun {
   }
 
   /**
-   * The same speed with the moment it was measured, or null before a closed
-   * piece has enough progress data.
+   * The processing speed, its produced media and active working time, with
+   * the measurement time; null before a piece supplies a measured interval.
    *
-   * @returns {{ speed: number, at: number } | null}
+   * @returns {{ speed: number, at: number, workSeconds: number, workingSeconds: number } | null}
    */
   get speedReading() {
     return this.#speedReading === null ? null : { ...this.#speedReading };
@@ -764,9 +764,9 @@ export class EncodeRun {
     if (sample === null) {
       return;
     }
-    const speed = speedFromWork(this.#pieceSample, sample);
-    if (speed !== null) {
-      this.#speedReading = { speed, at: sample.at };
+    const work = workDeltaBetween(this.#pieceSample, sample);
+    if (work !== null) {
+      this.#speedReading = { speed: work.workSeconds / work.workingSeconds, at: sample.at, ...work };
       this.#pieceSample = sample;
       this.#speedMeasurementPending = false;
       this.onSpeedMeasured(this.speedReading);

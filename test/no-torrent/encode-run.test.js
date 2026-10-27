@@ -203,7 +203,8 @@ test("its speed is film made over its own working time, including for a one-piec
   closed("a");
   assert.equal(run.speedX, 3.5, "3.5 s of film over 1 s of work, excluding the input wait");
   assert.deepEqual(closedPairs, [["a", null]], "a completed piece is published on its own");
-  assert.deepEqual(readings, [{ speed: 3.5, at: 32_000 }], "told once, with when");
+  assert.deepEqual(readings, [{ speed: 3.5, at: 32_000, workSeconds: 3.5, workingSeconds: 1 }],
+    "the measured media and active time reach the forecast with their measurement time");
 });
 
 test("one positive progress report measures a one-piece run after its input wait", () => {
@@ -230,7 +231,7 @@ test("one positive progress report measures a one-piece run after its input wait
   report(4);
   assert.equal(run.speedX, 2, "4 s of film over 2 s of active encoder work");
   assert.deepEqual(closed, ["segment-00000.mp4"]);
-  assert.deepEqual(readings, [{ speed: 2, at: 33_000 }]);
+  assert.deepEqual(readings, [{ speed: 2, at: 33_000, workSeconds: 4, workingSeconds: 2 }]);
 });
 
 test("a segment number behind its own start is not its to claim", () => {

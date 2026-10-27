@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.43
 
 - **Fix**: Calculate measured processing throughput from total media produced and active processing time, so unequal segment lengths do not receive equal weight in start forecasts (#ttv-185).
 

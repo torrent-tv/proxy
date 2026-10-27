@@ -6,9 +6,30 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SpeedReadings } from "../../services/encode/SpeedReadings.js";
-import { rateSummaryOf } from "../../services/viewer/playback-readiness.js";
+import { forecastRate, rateSummaryOf } from "../../services/viewer/playback-readiness.js";
 
 const harmonic = (values) => values.length / values.reduce((sum, value) => sum + 1 / value, 0);
+
+test("processing service uses total media work over active time regardless of piece partition", () => {
+  for (const samples of [
+    [[1, 1], [9, 3]],
+    [[1, 1], [3, 1], [6, 2]]
+  ]) {
+    const readings = new SpeedReadings(120);
+    const output = {};
+    for (const [index, [workSeconds, workingSeconds]] of samples.entries()) {
+      readings.note(output, { at: index * 40_000, speed: workSeconds / workingSeconds,
+        workSeconds, workingSeconds });
+    }
+    const summary = rateSummaryOf(readings.windowOf(output));
+    assert.equal(summary.workSeconds, 10);
+    assert.equal(summary.workingSeconds, 4);
+    assert.equal(summary.spanSeconds, (samples.length - 1) * 40,
+      "wall-clock observation span remains distinct from active processing time");
+    assert.equal(forecastRate(summary, 120_000, 0, "piece"), 10 / 4,
+      "ten seconds of media took four seconds of active processing");
+  }
+});
 
 test("readings of runs that ended between two polls reach the forecast", () => {
   // r37 on Home Assistant: the runs measured 0.78, 1.80, 2.25, 2.84 and

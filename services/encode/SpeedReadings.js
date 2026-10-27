@@ -14,7 +14,7 @@
  */
 
 export class SpeedReadings {
-  /** @type {WeakMap<object, Array<{ speed: number, at: number }>>} */
+  /** @type {WeakMap<object, Array<{ speed: number, at: number, workSeconds?: number, workingSeconds?: number }>>} */
   #byOutput = new WeakMap();
   #keepMs;
 
@@ -25,7 +25,7 @@ export class SpeedReadings {
 
   /**
    * @param {object} output
-   * @param {{ speed: number, at: number } | null} reading
+   * @param {{ speed: number, at: number, workSeconds?: number, workingSeconds?: number } | null} reading
    */
   note(output, reading) {
     if (!output || !(reading?.speed > 0) || !Number.isFinite(reading.at)) return;
@@ -33,7 +33,12 @@ export class SpeedReadings {
     if (!readings) this.#byOutput.set(output, readings = []);
     let place = readings.length;
     while (place > 0 && readings[place - 1].at > reading.at) place -= 1;
-    readings.splice(place, 0, { speed: reading.speed, at: reading.at });
+    const sample = { speed: reading.speed, at: reading.at };
+    if (Number.isFinite(reading.workSeconds) && reading.workSeconds > 0 &&
+        Number.isFinite(reading.workingSeconds) && reading.workingSeconds > 0) {
+      Object.assign(sample, { workSeconds: reading.workSeconds, workingSeconds: reading.workingSeconds });
+    }
+    readings.splice(place, 0, sample);
     const cutoff = readings.at(-1).at - this.#keepMs;
     // As the forecast's own trend keeps them: the newest one before the horizon stays.
     while (readings.length > 1 && readings[1].at <= cutoff) readings.shift();
@@ -41,7 +46,7 @@ export class SpeedReadings {
 
   /**
    * @param {object} output
-   * @returns {Array<{ speed: number, at: number }>} The window, in the order the readings were taken.
+   * @returns {Array<{ speed: number, at: number, workSeconds?: number, workingSeconds?: number }>} The readings in measurement order.
    */
   windowOf(output) {
     return [...(this.#byOutput.get(output) ?? [])];

@@ -843,8 +843,9 @@ comparison in section 8.5, it maps every atomic inventory record. Parent
 envelopes and instantaneous/background events are explicitly identified;
 their elapsed times are not additional serial work.
 
-The active numeric `waitEstimate` uses `firstRequiredSegmentsSeconds`, while
-the full-film continuity delay is only a readiness condition. Init/manifest,
+In the audited 2026-10-24 snapshot, numeric `waitEstimate` used
+`firstRequiredSegmentsSeconds`, while full-film continuity delay was only a
+readiness condition. Init/manifest,
 browser remux/append, current gate observation, required subtitles and final
 presentation are not all numerical predecessors of that endpoint. The caller
 does not supply the optional `appendSeconds`, which therefore becomes zero.
@@ -860,6 +861,12 @@ Four pure replays reproduce specific discrepancies in the audited code:
    aggregate of 1.5x; total work divided by working time is 2.5x.
 4. A ready soundtrack waits behind a future video transfer reservation; both
    finish at 12 seconds instead of 11 on the declared work-conserving link.
+
+Processing-work correction, 2026-10-27: runtime measurements retain media work
+and active processing time through the forecast summary. Their ratio is
+2.5x in example 3, independently of how that work is partitioned into pieces.
+The observation's wall-clock span remains distinct from active time. This
+correction does not resolve the other examples or establish a full-frame ETA.
 
 Below E01's saved first displayed value was 24.65 seconds when 19.5536 seconds
 remained to the canonical frame, an error of +5.0964 seconds (26.06%). This is

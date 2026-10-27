@@ -76,12 +76,13 @@ export function forecastRate(readings, now = Date.now(), horizonSeconds = 0, wei
  * ordered by when each was taken, readings taken in the same millisecond kept
  * apart. Null for no reading.
  *
- * @param {Array<{ at: number, speed?: number, value?: number }>} readings
+ * @param {Array<{ at: number, speed?: number, value?: number, workSeconds?: number, workingSeconds?: number }>} readings
  * @returns {object | null}
  */
 export function rateSummaryOf(readings) {
   const ordered = (Array.isArray(readings) ? readings : [])
-    .map(reading => ({ at: reading?.at, value: reading?.value ?? reading?.speed }))
+    .map(reading => ({ at: reading?.at, value: reading?.value ?? reading?.speed,
+      workSeconds: reading?.workSeconds, workingSeconds: reading?.workingSeconds }))
     .filter(reading => Number.isFinite(reading.at) && Number.isFinite(reading.value) && reading.value >= 0)
     .sort((left, right) => left.at - right.at);
   return ordered.length > 0 ? summarizeRate(ordered) : null;
@@ -278,9 +279,9 @@ export function predictPlaybackReadiness(input = {}) {
       [{ start: at, end: add(at, measured ? nearest(fromSeconds(buffered), unit) :
         rescale(fromSeconds(buffered), unit)), frame: zero }],
     ready: new Set(Array.isArray(track.readySegmentIndices) ? track.readySegmentIndices : []),
-    // Film made over the encoder's working time, over the readings the trend
-    // keeps: one reading is one closed piece, so the harmonic mean is that
-    // ratio. The last reading alone is one piece's content and machine — a
+    // Film made over active processing time, summed over the readings retained.
+    // Point-only legacy readings retain their equal-work harmonic summary.
+    // The last reading alone is one piece's content and machine — a
     // first piece of credits read 6.49x and started a cold AVI on 2.4 s of
     // buffer that the next piece, at 0.57x, did not hold (torrent-tv/meta#178).
     curve: rateCurve(track.readings, now, "piece"),
@@ -1417,6 +1418,10 @@ function rateCurve(readings, now, weighting = "last") {
 
 function summarizeRate(readings) {
   const latest = readings.at(-1);
+  const workKnown = readings.every(reading => Number.isFinite(reading.workSeconds) && reading.workSeconds > 0 &&
+    Number.isFinite(reading.workingSeconds) && reading.workingSeconds > 0);
+  const workSeconds = workKnown ? readings.reduce((sum, reading) => sum + reading.workSeconds, 0) : null;
+  const workingSeconds = workKnown ? readings.reduce((sum, reading) => sum + reading.workingSeconds, 0) : null;
   let weighted = 0;
   for (let index = 0; index + 1 < readings.length; index += 1) {
     weighted += readings[index].value * (readings[index + 1].at - readings[index].at);
@@ -1427,12 +1432,13 @@ function summarizeRate(readings) {
     lastAt: latest.at,
     lastValue: latest.value,
     meanValue: readings.reduce((sum, reading) => sum + reading.value, 0) / readings.length,
-    // Each reading one piece of work: work over the time it took.
+    // Equal-work summary for legacy readings without measured work quantities.
     harmonicValue: readings.some(reading => !(reading.value > 0)) ? 0
       : readings.length / readings.reduce((sum, reading) => sum + 1 / reading.value, 0),
     // Each reading holding until the next: quantity over the span.
     timeWeightedValue: spanMs > 0 ? weighted / spanMs : latest.value,
-    spanSeconds: spanMs / 1000
+    spanSeconds: spanMs / 1000,
+    ...(workKnown ? { workSeconds, workingSeconds, workRateValue: workSeconds / workingSeconds } : {})
   };
 }
 
@@ -1440,7 +1446,8 @@ function rateCurveFrom(summary, weighting = "last") {
   // Conditional projection of the measured service. No exponential
   // relaxation, smoothing time, slope extrapolation or guessed recovery.
   // A new measurement changes the integral; polling does not change its rate.
-  const value = weighting === "piece" && Number.isFinite(summary.harmonicValue) ? summary.harmonicValue
+  const value = weighting === "piece" && Number.isFinite(summary.workRateValue) ? summary.workRateValue
+    : weighting === "piece" && Number.isFinite(summary.harmonicValue) ? summary.harmonicValue
     : weighting === "time" && Number.isFinite(summary.timeWeightedValue) ? summary.timeWeightedValue
       : summary.lastValue;
   const rate = Math.max(0, value);

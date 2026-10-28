@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.45
 
 - **Fix**: Do not use medians from completed waits as a current first-frame forecast; keep the estimate unknown until the active process model has enough inputs.
 

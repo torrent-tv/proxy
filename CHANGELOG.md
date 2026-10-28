@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.48
 
 - **Chore**: Retain browser append and media-fragment parse samples for the playback forecast.
 - **Chore**: Keep first-required-segment completion unavailable until browser append duration has a process-based model.

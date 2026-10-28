@@ -62,7 +62,6 @@ export const PROXY_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url))
  * figure follows the host as it changes.
  */
 const READINGS_KEPT = 20;
-const FIRST_FRAME_CATEGORICAL = new Set(["fileAvailable", "videoOperation", "audioOperation"]);
 
 /** The version of the file's shape; a file of another shape is not read. */
 const FILE_VERSION = 1;
@@ -292,50 +291,6 @@ export class LocalObservations {
     this.#save();
   }
 
-  /**
-   * Price the early wait from separate measured stage medians on this proxy
-   * configuration. Before the container and track operations are known, use
-   * measurements from every observed file type; once current cache and
-   * operation facts are known, retain only observations that match those
-   * facts. Numeric proximity to a past file, source rate, or link rate never
-   * selects a completed run. Each observation contributes once, using its
-   * latest snapshot that states the current cache and operation path.
-   *
-   * @param {object} features
-   * @returns {number | null}
-   */
-  firstFrameSeconds(features) {
-    return this.firstFrameEstimate(features)?.seconds ?? null;
-  }
-
-  /**
-   * Return the current stage-median forecast and the measurements that formed it.
-   *
-   * @param {object} features
-   * @returns {{ seconds: number, stagesMs: object, observations: number } | null}
-   */
-  firstFrameEstimate(features) {
-    if (!features || typeof features !== "object") return null;
-    const stages = ["transportMs", "planMs", "prepareMs", "prebufferMs", "presentationMs"];
-    const candidates = [];
-    for (const reading of this.#entries.firstFrame[this.#firstFrameKey()] ?? []) {
-      if (!reading.stages) continue;
-      const points = Array.isArray(reading.featureSnapshots) && reading.featureSnapshots.length > 0
-        ? reading.featureSnapshots : [reading];
-      const point = [...points].reverse().find(candidate => firstFramePathMatches(features, candidate));
-      if (point) candidates.push(reading.stages);
-    }
-    if (candidates.length === 0) return null;
-    const prices = stages.map(stage => median(candidates.map(reading => reading[stage])
-      .filter(Number.isFinite)));
-    if (prices.some(value => value === null)) return null;
-    return {
-      seconds: prices.reduce((sum, value) => sum + value, 0) / 1000,
-      stagesMs: Object.fromEntries(stages.map((stage, index) => [stage, prices[index]])),
-      observations: candidates.length
-    };
-  }
-
   #firstFrameKey() {
     return `firstFrame:${[...this.#configurations].sort().join("||")}`;
   }
@@ -451,20 +406,6 @@ function operationOf(value) {
   return value === "copy" || value === "encode" ? value : null;
 }
 
-/** @param {object} current @param {object} previous @returns {boolean} */
-function firstFramePathMatches(current, previous) {
-  for (const key of FIRST_FRAME_CATEGORICAL) {
-    const expected = key === "fileAvailable" ? current[key] : operationOf(current[key]);
-    if (expected !== null && expected !== undefined && previous[key] !== expected) return false;
-  }
-  const preparedBytes = nonNegative(current.preparedOutputBytes);
-  if (preparedBytes !== null) {
-    const previousBytes = nonNegative(previous.preparedOutputBytes);
-    if (previousBytes === null || (previousBytes > 0) !== (preparedBytes > 0)) return false;
-  }
-  return true;
-}
-
 /** @param {unknown} value @returns {{ totalMs: number, transportMs: number, planMs: number, prepareMs: number, prebufferMs: number, presentationMs: number } | null} */
 function stagesOf(value) {
   if (!value || typeof value !== "object") return null;
@@ -490,14 +431,6 @@ function firstFrameFeatures(features) {
     videoSpeedX: nonNegative(features.videoSpeedX),
     audioSpeedX: nonNegative(features.audioSpeedX)
   };
-}
-
-/** @param {number[]} values @returns {number | null} */
-function median(values) {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
 /**

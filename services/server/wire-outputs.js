@@ -652,7 +652,6 @@ export function wireOutputs({
       const predicted = Number(qualityStateOf(output).predictedSpeedWhenOffered);
       return Number.isFinite(predicted) && predicted > 0 ? predicted : null;
     },
-    firstFrameSecondsOf: (features) => parts.localObservations?.firstFrameEstimate(features) ?? null,
     noteFirstFrame: (observation) => parts.localObservations?.noteFirstFrame(observation),
     audioDescriptionOf,
     openSecondsOf: (output) => runStartSecondsOf(output),

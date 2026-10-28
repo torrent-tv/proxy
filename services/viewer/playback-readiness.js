@@ -521,7 +521,7 @@ export function predictPlaybackReadiness(input = {}) {
   }));
   const sourceByteCoverage = new Map([...sourceByteService].map(([id, ranges]) => [id, numericCoverage(ranges)]));
   const sourceArrivals = new Map([...sourceByteService].map(([id, ranges]) => [id, indexedArrivals(ranges)]));
-  let transferFinish = 0;
+  const transferJobs = [];
   const completions = [];
   const productions = [];
   for (const job of jobs) {
@@ -609,9 +609,17 @@ export function predictPlaybackReadiness(input = {}) {
     const sourcePlanned = sourceArrivalAt > 0 && plan.finish >= sourceArrivalAt;
     productions.push({ at: producedAt, trackIndex, segment, requiresSource: sourceArrivalAt > 0, sourceArrivalAt,
       sourcePlanned, runAdmissionAt, runOpenSeconds, productionStartAt, encodeWork });
-    const deliveryAt = link.finish(sizeBits, Math.max(transferFinish, producedAt));
-    transferFinish = deliveryAt;
-    const appendSeconds = finiteNonNegative(track.appendSeconds);
+    transferJobs.push({ trackIndex, segment, sizeBits, readyAt: producedAt, sourceArrivalAt, sourcePlanned,
+      order: transferJobs.length, appendSeconds: finiteNonNegative(track.appendSeconds) });
+  }
+  // A transfer waits only for work that is ready on its own stream and for
+  // bytes already being served by the shared link. A video piece whose encode
+  // is still running cannot reserve link time ahead of a ready audio piece.
+  // Each stream remains ordered; the single link remains shared.
+  const transfers = scheduleTransfers(transferJobs, link);
+  const transferFinish = transfers.reduce((finish, transfer) => Math.max(finish, transfer.deliveryAt), 0);
+  for (const transfer of transfers) {
+    const { trackIndex, segment, deliveryAt, appendSeconds, sourceArrivalAt, sourcePlanned } = transfer;
     completions.push({ at: deliveryAt + appendSeconds, deliveryAt, appendSeconds, trackIndex, segment, sourceArrivalAt,
       sourcePlanned });
   }
@@ -778,6 +786,48 @@ export function predictPlaybackReadiness(input = {}) {
 function isPiece(segment) {
   return Number.isInteger(segment?.index) && Number.isFinite(segment?.startSeconds) &&
     Number.isFinite(segment?.endSeconds) && segment.endSeconds > segment.startSeconds;
+}
+
+/**
+ * Serve each stream's fragments in order on one shared link, starting the
+ * earliest released fragment whenever the link becomes free.
+ *
+ * @param {Array<{ trackIndex: number, segment: object, sizeBits: number, readyAt: number,
+ *   order: number, appendSeconds: number }>} jobs
+ * @param {{ finish: (bits: number, startAt: number) => number }} link
+ */
+function scheduleTransfers(jobs, link) {
+  const queues = new Map();
+  for (const job of jobs) {
+    const queue = queues.get(job.trackIndex) ?? [];
+    queue.push(job);
+    queues.set(job.trackIndex, queue);
+  }
+  const served = new Map();
+  const trackFreeAt = new Map();
+  const transfers = [];
+  let linkFreeAt = 0;
+  while (transfers.length < jobs.length) {
+    let selected = null;
+    let selectedReadyAt = Number.POSITIVE_INFINITY;
+    for (const [trackIndex, queue] of queues) {
+      const nextIndex = served.get(trackIndex) ?? 0;
+      const job = queue[nextIndex];
+      if (!job) continue;
+      const readyAt = Math.max(job.readyAt, trackFreeAt.get(trackIndex) ?? 0);
+      if (readyAt < selectedReadyAt || readyAt === selectedReadyAt && (selected === null || job.order < selected.order)) {
+        selected = job;
+        selectedReadyAt = readyAt;
+      }
+    }
+    if (!selected) break;
+    const deliveryAt = link.finish(selected.sizeBits, Math.max(linkFreeAt, selectedReadyAt));
+    transfers.push({ ...selected, deliveryAt });
+    served.set(selected.trackIndex, (served.get(selected.trackIndex) ?? 0) + 1);
+    trackFreeAt.set(selected.trackIndex, deliveryAt);
+    linkFreeAt = deliveryAt;
+  }
+  return transfers;
 }
 
 /**

@@ -77,6 +77,36 @@ test("forecasts the first required segment from source, processing, and client d
   }]);
 });
 
+test("a ready audio fragment uses the shared link while video production is unfinished", () => {
+  const now = 10_000;
+  const segments = ["video", "audio"].map(id => ({
+    id,
+    sourceIds: ["source"],
+    processedSeconds: 0,
+    bitsPerMediaSecond: 8,
+    readings: [{ at: now, value: id === "video" ? 1 : 10 }],
+    segments: [{ index: 0, startSeconds: 0, endSeconds: 10,
+      sourceInputs: [{ sourceId: "source", ranges: [{ start: 0, end: 100 }] }] }],
+    readySegmentIndices: [],
+    segmentSizesBytes: new Map([[0, 10]])
+  }));
+  const forecast = predictPlaybackReadiness(input({
+    now,
+    durationSeconds: 10,
+    reserveSeconds: 0,
+    lookaheadSeconds: 10,
+    requiredAudio: true,
+    tracks: segments,
+    linkReadings: [{ at: now, value: 80 }]
+  }));
+
+  assert.equal(forecast.firstRequiredSegmentsSeconds, 11);
+  assert.deepEqual(forecast.firstRequiredStages.map(stage => [stage.track, stage.deliveryCompleteSeconds]), [
+    ["video", 11],
+    ["audio", 2]
+  ]);
+});
+
 test("the whole-film suffix overlaps measured processing and delivery services", () => {
   const now = 10_000;
   const durationSeconds = 3_600;
@@ -751,7 +781,7 @@ test("uses each track's own segment boundaries and requires continuous coverage 
   assert.equal(forecast.preparedSegments, 2);
 });
 
-test("overlaps independent track processing and serializes their shared client delivery", () => {
+test("overlaps independent track processing and serves each released fragment on the shared link", () => {
   const common = input();
   const video = { ...common.tracks[0], readySegmentIndices: [],
     readings: [{ at: 9_000, value: 2 }, { at: 10_000, value: 2 }] };
@@ -765,8 +795,8 @@ test("overlaps independent track processing and serializes their shared client d
     linkReadings: [{ at: 9_000, value: 3_200 }, { at: 10_000, value: 3_200 }]
   });
 
-  assert.equal(forecast.firstRequiredSegmentsSeconds, 2.2,
-    "video and audio processing overlap; both outputs then share one delivery path");
+  assert.equal(forecast.firstRequiredSegmentsSeconds, 2.1,
+    "the audio fragment is delivered during video processing; the shared link is work-conserving");
 });
 
 test("does not start when only one required track has continuous coverage", () => {

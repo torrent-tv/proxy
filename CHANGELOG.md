@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.46
 
 - **Fix**: Schedule shared client-link transfers from each track's actual production-ready time, so an unready video piece does not hold ready audio work off the link.
 

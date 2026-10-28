@@ -69,6 +69,14 @@ test("source statistics record viewer facts only for a stated generation", async
     fileName: "", fileLength: null, stats, linkMbps: 18.5, linkSampleAgeMs: 120 });
   assert.equal(Object.hasOwn(result, "waitEstimate"), false);
   assert.equal(result.downloadSpeed, 20);
+  const timing = result.sourceSnapshotTransport;
+  assert.ok(Number.isFinite(timing.requestReceivedAtProxyMs));
+  assert.ok(Number.isFinite(timing.snapshotStartedAtProxyMs));
+  assert.ok(Number.isFinite(timing.snapshotCompletedAtProxyMs));
+  assert.ok(Number.isFinite(timing.responsePreparedAtProxyMs));
+  assert.ok(timing.requestReceivedAtProxyMs <= timing.snapshotStartedAtProxyMs);
+  assert.ok(timing.snapshotStartedAtProxyMs <= timing.snapshotCompletedAtProxyMs);
+  assert.ok(timing.snapshotCompletedAtProxyMs <= timing.responsePreparedAtProxyMs);
 });
 
 test("malformed viewer generations cannot record wait facts", async () => {

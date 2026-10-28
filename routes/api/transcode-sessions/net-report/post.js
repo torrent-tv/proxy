@@ -8,7 +8,9 @@ import { recordViewerReport } from "../../../../services/viewer/report-intake.js
  *
  * POST /api/transcode-sessions/:sessionId/net-report
  * Body: { consumerId: string, bufferedAheadSec: number, linkMbps?: number,
- *         positionSeconds?: number, playingHeight?: number, … }
+ *         positionSeconds?: number, playingHeight?: number, appendEpoch?: string,
+ *         appendEpochStartedAt?: number, appendSnapshotAt?: number,
+ *         appendService?: object, fragmentService?: object, … }
  *
  * `consumerId` and `positionSeconds` say WHO is reporting and WHERE they are.
  * A copied picture is one session shared by every viewer of it, so without them
@@ -115,6 +117,14 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply,
       linkMbps: Number.isFinite(linkMbps) && linkMbps > 0 ? linkMbps : undefined,
       linkSampleMbps: Number.isFinite(linkSampleMbps) && linkSampleMbps > 0 ? linkSampleMbps : undefined,
       linkSampleAt: Number.isFinite(linkSampleAt) && linkSampleAt > 0 ? linkSampleAt : undefined,
+      appendSessionId: sessionId,
+      appendEpoch: typeof body.appendEpoch === "string" ? body.appendEpoch : undefined,
+      appendEpochStartedAt: Number.isFinite(body.appendEpochStartedAt) && body.appendEpochStartedAt > 0
+        ? body.appendEpochStartedAt : undefined,
+      appendSnapshotAt: Number.isFinite(body.appendSnapshotAt) && body.appendSnapshotAt > 0
+        ? body.appendSnapshotAt : undefined,
+      appendService: body.appendService && typeof body.appendService === "object" ? body.appendService : undefined,
+      fragmentService: body.fragmentService && typeof body.fragmentService === "object" ? body.fragmentService : undefined,
       bufferedAheadSec,
       bufferedRanges: body.bufferedRanges,
       timestampOffsets: body.bufferedRanges?.timestampOffsets,

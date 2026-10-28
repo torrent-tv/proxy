@@ -43,6 +43,46 @@ import {
 export const PLAYER_SEEK_TOLERANCE_SECONDS = 0.25;
 
 /**
+ * Choose a point for a supported completion-time distribution under absolute
+ * relative error. For positive completions, minimizing E[|x - T| / T] is a
+ * weighted-median problem with mass p/T. A distribution mixing immediate and
+ * positive completion has no point under this loss definition.
+ *
+ * This summarizes an already-supported probability distribution; it does not
+ * fit one from completed whole waits or supply missing service observations.
+ *
+ * @param {Array<{ completionSeconds: number, probability: number }>} support
+ * @returns {{ pointSeconds: number | null, immediateProbability: number, supportCount: number } | null}
+ */
+export function completionPointUnderRelativeLoss(support) {
+  if (!Array.isArray(support) || support.length === 0 || support.some(sample =>
+    !Number.isFinite(sample?.completionSeconds) || sample.completionSeconds < 0 ||
+    !Number.isFinite(sample?.probability) || sample.probability < 0)) return null;
+  const positiveMass = support.filter(sample => sample.probability > 0);
+  const totalProbability = positiveMass.reduce((sum, sample) => sum + sample.probability, 0);
+  if (!(totalProbability > 0) || !Number.isFinite(totalProbability)) return null;
+  const immediateProbability = positiveMass.filter(sample => sample.completionSeconds === 0)
+    .reduce((sum, sample) => sum + sample.probability, 0) / totalProbability;
+  const positive = positiveMass.filter(sample => sample.completionSeconds > 0);
+  if (positive.length === 0) return { pointSeconds: 0, immediateProbability: 1, supportCount: positiveMass.length };
+  if (immediateProbability > 0) {
+    return { pointSeconds: null, immediateProbability, supportCount: positiveMass.length };
+  }
+  const weighted = positive.map(sample => ({ seconds: sample.completionSeconds,
+    weight: sample.probability / sample.completionSeconds })).sort((left, right) => left.seconds - right.seconds);
+  const totalWeight = weighted.reduce((sum, sample) => sum + sample.weight, 0);
+  if (!(totalWeight > 0) || !Number.isFinite(totalWeight)) return null;
+  let cumulativeWeight = 0;
+  for (const sample of weighted) {
+    cumulativeWeight += sample.weight;
+    if (cumulativeWeight * 2 >= totalWeight) {
+      return { pointSeconds: sample.seconds, immediateProbability: 0, supportCount: positiveMass.length };
+    }
+  }
+  return null;
+}
+
+/**
  * @param {number} segmentEndSeconds
  * @param {number} positionSeconds
  * @returns {boolean}
@@ -191,6 +231,7 @@ export class RateTrend {
  *   segmentCount?: number,
  *   bitsPerMediaSecond: number, readings: Array<{ at: number, value: number }>,
  *   clockOffsetSeconds?: number, clientRanges?: Array<{ start: number, end: number }>,
+ *   appendService?: object, fragmentService?: object,
  *   segments: Array<{ index: number, startSeconds: number, endSeconds: number,
  *     mediaRanges?: { timescale: bigint | null, ranges: Array<{ start: bigint, end: bigint, frame: bigint }> } }>,
  *   readySegmentIndices: number[], segmentSizesBytes: Map<number, number> | object }>} input.tracks
@@ -300,6 +341,13 @@ export function predictPlaybackReadiness(input = {}) {
       : Math.max(0, ...track.segments.map(segment => segment.index + 1)),
     clockSeconds: Number.isFinite(track.clockOffsetSeconds) ? track.clockOffsetSeconds : 0
   }));
+  const missingFirstGeometry = trackState.slice(0, requiredTracks).some(({ segments }) => {
+    const first = segments.find(segment => segment.endSeconds > position);
+    return first && first.ranges.length === 0;
+  });
+  if (missingFirstGeometry) {
+    return result(false, null, buffered, reserve, null, "first-required-media-ranges-unavailable", 0);
+  }
   for (const state of trackState) {
     state.tailEndSeconds = Number.isFinite(horizonEnd) && horizonEnd < duration
       ? Math.min(duration, state.durationSeconds + state.clockSeconds) : null;
@@ -707,16 +755,68 @@ export function predictPlaybackReadiness(input = {}) {
     const first = state.segments.find(segment => segment.endSeconds > position);
     if (!first) return { track: state.track.id ?? trackIndex, segment: null, alreadyBuffered: true,
       sourceArrivalSeconds: 0, runAdmissionSeconds: null, runOpenSeconds: 0, productionStartSeconds: 0,
-      productionCompleteSeconds: 0, deliveryCompleteSeconds: 0, appendSeconds: 0, completionSeconds: 0 };
+      productionCompleteSeconds: 0, deliveryCompleteSeconds: 0, browserLoadToParseSeconds: 0,
+      appendRequestToAckSeconds: 0, appendSeconds: 0, completionSeconds: 0 };
+    if (!Array.isArray(first.ranges) || first.ranges.length === 0) return {
+      track: state.track.id ?? trackIndex,
+      segment: first.index,
+      alreadyBuffered: null,
+      mediaRangesReason: "first-required-media-ranges-unavailable",
+      sourceArrivalSeconds: null,
+      runAdmissionSeconds: null,
+      runOpenSeconds: null,
+      productionStartSeconds: null,
+      productionCompleteSeconds: null,
+      deliveryCompleteSeconds: null,
+      browserLoadToParseSeconds: null,
+      browserLoadToParseReason: "fragment-load-to-parse-distribution-unavailable",
+      appendRequestToAckSeconds: null,
+      appendRequestToAckReason: "append-request-to-ack-distribution-unavailable",
+      appendSeconds: null,
+      appendReason: "append-request-to-ack-distribution-unavailable",
+      completionSeconds: null
+    };
     if (first.ranges.every(range => contains(state.clientRanges, range.start, range.end))) {
       return { track: state.track.id ?? trackIndex, segment: first.index, alreadyBuffered: true,
         sourceArrivalSeconds: 0, runAdmissionSeconds: null, runOpenSeconds: 0, productionStartSeconds: 0,
-        productionCompleteSeconds: 0, deliveryCompleteSeconds: 0, appendSeconds: 0, completionSeconds: 0 };
+        productionCompleteSeconds: 0, deliveryCompleteSeconds: 0, browserLoadToParseSeconds: 0,
+        appendRequestToAckSeconds: 0, appendSeconds: 0, completionSeconds: 0 };
     }
     const completion = completions.find(item => item.trackIndex === trackIndex && item.segment.index === first.index);
+    // HLS playlists for these generated outputs use MEDIA-SEQUENCE:0, so a
+    // complete media fragment's HLS sequence number is the output segment
+    // index. Keep matched browser observations as evidence only: their recent
+    // completed-work spans are not a future-service distribution.
+    const samplesForFirstSegment = (kind) => (service) => {
+      const samples = service?.[kind]?.samples;
+      return Array.isArray(samples) ? samples.filter(sample => sample.fragmentSequence === first.index &&
+        sample.partIndex === null) : [];
+    };
+    const observedBrowserWork = {
+      evidenceOnly: true,
+      fragmentLoadToParse: samplesForFirstSegment("media")(state.track.fragmentService).map(sample => ({
+        bytes: sample.bytes,
+        elapsedMs: sample.elapsedMs,
+        parseElapsedMs: sample.parseElapsedMs ?? null,
+        bufferingElapsedMs: sample.bufferingElapsedMs ?? null,
+        ageMs: sample.ageMs,
+        bufferingAgeMs: sample.bufferingAgeMs ?? null,
+        eventAgesMs: sample.eventAgesMs ?? null
+      })),
+      appendRequestToAck: samplesForFirstSegment("media")(state.track.appendService).map(sample => ({
+        bytes: sample.bytes,
+        elapsedMs: sample.elapsedMs,
+        ageMs: sample.ageMs
+      }))
+    };
+    const observedBrowserWorkField = observedBrowserWork.fragmentLoadToParse.length > 0 ||
+      observedBrowserWork.appendRequestToAck.length > 0 ? { observedBrowserWork } : {};
     if (!completion) return { track: state.track.id ?? trackIndex, segment: first.index, alreadyBuffered: false,
       sourceArrivalSeconds: null, runAdmissionSeconds: null, runOpenSeconds: null, productionStartSeconds: null,
-      productionCompleteSeconds: null, deliveryCompleteSeconds: null, appendSeconds: null, completionSeconds: null };
+      productionCompleteSeconds: null, deliveryCompleteSeconds: null, browserLoadToParseSeconds: null,
+      browserLoadToParseReason: "fragment-load-to-parse-distribution-unavailable",
+      appendRequestToAckSeconds: null, appendRequestToAckReason: "append-request-to-ack-distribution-unavailable",
+      appendSeconds: null, completionSeconds: null, ...observedBrowserWorkField };
     const production = productions.find(item => item.trackIndex === trackIndex && item.segment.index === first.index);
     return { track: state.track.id ?? trackIndex, segment: first.index, alreadyBuffered: false,
       sourceArrivalSeconds: production?.sourceArrivalAt ?? 0,
@@ -725,8 +825,14 @@ export function predictPlaybackReadiness(input = {}) {
       productionStartSeconds: production?.productionStartAt ?? null,
       productionCompleteSeconds: production?.at ?? null,
       deliveryCompleteSeconds: completion.deliveryAt,
-      appendSeconds: completion.appendSeconds,
-      completionSeconds: completion.at };
+      browserLoadToParseSeconds: null,
+      browserLoadToParseReason: "fragment-load-to-parse-distribution-unavailable",
+      appendRequestToAckSeconds: null,
+      appendRequestToAckReason: "append-request-to-ack-distribution-unavailable",
+      appendSeconds: null,
+      appendReason: "append-request-to-ack-distribution-unavailable",
+      completionSeconds: null,
+      ...observedBrowserWorkField };
   });
   const firstRequiredTrackSeconds = firstRequiredStages.map(stage => stage.completionSeconds);
   const firstRequiredSegmentsSeconds = firstRequiredTrackSeconds.every(Number.isFinite)

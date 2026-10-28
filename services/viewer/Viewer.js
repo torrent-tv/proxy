@@ -43,6 +43,104 @@
 import { Assignments } from "./Assignments.js";
 import { bufferTrend, trendRunStart } from "./buffer-trend.js";
 
+const APPEND_TRACKS = ["video", "audio"];
+const APPEND_KINDS = ["init", "media"];
+const FRAGMENT_EVENT_AGES = ["loadStart", "loadFirstByte", "loadEnd", "parseStart", "parseEnd",
+  "bufferingStart", "bufferingEnd"];
+
+function fragmentEventAges(value) {
+  return Object.fromEntries(FRAGMENT_EVENT_AGES.map(name => [name,
+    Number.isFinite(value?.[name]) && value[name] >= 0 ? value[name] : null]));
+}
+
+function appendServiceSnapshot(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const snapshot = {};
+  for (const track of APPEND_TRACKS) {
+    if (!value[track] || typeof value[track] !== "object" || Array.isArray(value[track])) return null;
+    snapshot[track] = {};
+    for (const kind of APPEND_KINDS) {
+      const item = value[track][kind];
+      if (!item || !Number.isSafeInteger(item.bytes) || item.bytes < 0 || !Number.isSafeInteger(item.operations) ||
+          item.operations < 0 || !Number.isFinite(item.elapsedMs) || item.elapsedMs < 0 ||
+          (item.operations === 0 && (item.bytes > 0 || item.elapsedMs > 0)) ||
+          (item.operations > 0 && (item.bytes === 0 || item.elapsedMs === 0)) || !Array.isArray(item.samples) ||
+          !item.samples.every(sample => Number.isSafeInteger(sample?.bytes) && sample.bytes > 0 &&
+            Number.isFinite(sample.elapsedMs) && sample.elapsedMs > 0 &&
+            Number.isFinite(sample.ageMs) && sample.ageMs >= 0 &&
+            (sample.fragmentId === null || typeof sample.fragmentId === "string" && sample.fragmentId.length <= 128) &&
+            (sample.fragmentSequence === undefined || sample.fragmentSequence === null ||
+              Number.isSafeInteger(sample.fragmentSequence) && sample.fragmentSequence >= 0) &&
+            (sample.partIndex === undefined || sample.partIndex === null ||
+              Number.isSafeInteger(sample.partIndex) && sample.partIndex >= 0) &&
+            (sample.fragmentStartSeconds === null || Number.isFinite(sample.fragmentStartSeconds)))) return null;
+      snapshot[track][kind] = { bytes: item.bytes, elapsedMs: item.elapsedMs, operations: item.operations,
+        samples: item.samples.map(({ bytes, elapsedMs, ageMs, fragmentId, fragmentSequence, partIndex,
+          fragmentStartSeconds }) => ({ bytes, elapsedMs, ageMs, fragmentId,
+          fragmentSequence: fragmentSequence ?? null, partIndex: partIndex ?? null, fragmentStartSeconds })) };
+    }
+  }
+  return snapshot;
+}
+
+function fragmentServiceSnapshot(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const snapshot = {};
+  for (const track of APPEND_TRACKS) {
+    if (!value[track] || typeof value[track] !== "object" || Array.isArray(value[track])) return null;
+    snapshot[track] = {};
+    for (const kind of APPEND_KINDS) {
+      const item = value[track][kind];
+      if (!item || typeof item !== "object" || Array.isArray(item) || !Number.isSafeInteger(item.bytes) || item.bytes < 0 ||
+          !Number.isFinite(item.elapsedMs) || item.elapsedMs < 0 || !Number.isSafeInteger(item.operations) ||
+          item.operations < 0 || (item.operations === 0 && (item.bytes > 0 || item.elapsedMs > 0)) ||
+          (item.operations > 0 && (item.bytes === 0 || item.elapsedMs === 0)) || !Array.isArray(item.samples) ||
+          !item.samples.every(sample => Number.isSafeInteger(sample?.bytes) && sample.bytes > 0 &&
+            Number.isFinite(sample.elapsedMs) && sample.elapsedMs > 0 &&
+            Number.isFinite(sample.ageMs) && sample.ageMs >= 0 &&
+            (sample.parseElapsedMs === undefined || sample.parseElapsedMs === null ||
+              Number.isFinite(sample.parseElapsedMs) && sample.parseElapsedMs >= 0) &&
+            (sample.bufferingElapsedMs === undefined || sample.bufferingElapsedMs === null ||
+              Number.isFinite(sample.bufferingElapsedMs) && sample.bufferingElapsedMs >= 0) &&
+            (sample.bufferingAgeMs === undefined || sample.bufferingAgeMs === null ||
+              Number.isFinite(sample.bufferingAgeMs) && sample.bufferingAgeMs >= 0) &&
+            (sample.eventAgesMs === undefined || sample.eventAgesMs && typeof sample.eventAgesMs === "object" &&
+              !Array.isArray(sample.eventAgesMs) && Object.values(sample.eventAgesMs).every(age =>
+                age === null || Number.isFinite(age) && age >= 0)) &&
+            (sample.fragmentId === null || typeof sample.fragmentId === "string" && sample.fragmentId.length <= 128) &&
+            (sample.fragmentSequence === undefined || sample.fragmentSequence === null ||
+              Number.isSafeInteger(sample.fragmentSequence) && sample.fragmentSequence >= 0) &&
+            (sample.partIndex === undefined || sample.partIndex === null ||
+              Number.isSafeInteger(sample.partIndex) && sample.partIndex >= 0) &&
+            (sample.fragmentStartSeconds === null || Number.isFinite(sample.fragmentStartSeconds)))) {
+        return null;
+      }
+      snapshot[track][kind] = { bytes: item.bytes, elapsedMs: item.elapsedMs, operations: item.operations,
+        samples: item.samples.map(({ bytes, elapsedMs, ageMs, fragmentId, fragmentSequence, partIndex, fragmentStartSeconds,
+          parseElapsedMs, bufferingElapsedMs, bufferingAgeMs, eventAgesMs }) =>
+          ({ bytes, elapsedMs, ageMs, fragmentId, fragmentSequence: fragmentSequence ?? null,
+            partIndex: partIndex ?? null, fragmentStartSeconds,
+            parseElapsedMs: parseElapsedMs ?? null, bufferingElapsedMs: bufferingElapsedMs ?? null,
+            bufferingAgeMs: bufferingAgeMs ?? null, eventAgesMs: fragmentEventAges(eventAgesMs) })) };
+    }
+  }
+  return snapshot;
+}
+
+function appendServiceIsMonotonic(next, previous) {
+  return APPEND_TRACKS.every(track => APPEND_KINDS.every(kind =>
+    next[track][kind].bytes >= previous[track][kind].bytes &&
+    next[track][kind].elapsedMs >= previous[track][kind].elapsedMs &&
+    next[track][kind].operations >= previous[track][kind].operations));
+}
+
+function fragmentServiceIsMonotonic(next, previous) {
+  return APPEND_TRACKS.every(track => APPEND_KINDS.every(kind =>
+    next[track][kind].bytes >= previous[track][kind].bytes &&
+    next[track][kind].elapsedMs >= previous[track][kind].elapsedMs &&
+    next[track][kind].operations >= previous[track][kind].operations));
+}
+
 /**
  * How long a generation this viewer has left behind goes on accepting NEW
  * requests.
@@ -373,6 +471,11 @@ export class Viewer {
    *   report still stands: this is a statement about a viewer, not about a link.
    * @param {number} [report.linkSampleAgeMs] - How old the newest raw link
    *   sample was when this report was made.
+   * @param {string} [report.appendSessionId] - Which output the page measured appends for.
+   * @param {string} [report.appendEpoch] - Counter identity; a new page reporter starts a new epoch.
+   * @param {number} [report.appendEpochStartedAt] - Browser epoch start clock used to reject delayed reports from an older reporter.
+   * @param {object} [report.appendService] - Cumulative append totals and recent per-operation byte/time samples.
+   * @param {object} [report.fragmentService] - Cumulative fragment parse totals and recent per-fragment samples.
    * @param {number} report.bufferedAheadSec
    * @param {number} [report.bufferLimitSeconds] - The largest forward buffer
    *   this browser accepted for the current player.
@@ -399,6 +502,12 @@ export class Viewer {
       linkSampleMbps = null,
       linkSampleAt = null,
       linkSampleAgeMs = null,
+      appendSessionId = null,
+      appendEpoch = null,
+      appendEpochStartedAt = null,
+      appendSnapshotAt = null,
+      appendService: appendServiceReading = null,
+      fragmentService: fragmentServiceReading = null,
       bufferedAheadSec,
       bufferedRanges,
       timestampOffsets,
@@ -439,6 +548,20 @@ export class Viewer {
     const sampleMbps = Number(linkSampleMbps);
     const sampleAt = Number(linkSampleAt);
     const previous = this.netReport;
+    const incomingAppendService = typeof appendEpoch === "string" && appendEpoch.length > 0
+      ? appendServiceSnapshot(appendServiceReading) : null;
+    const incomingFragmentService = typeof appendEpoch === "string" && appendEpoch.length > 0
+      ? fragmentServiceSnapshot(fragmentServiceReading) : null;
+    const sameAppendEpoch = appendSessionId === previous?.appendSessionId && appendEpoch === previous?.appendEpoch;
+    const validAppendEpochTime = Number.isFinite(appendEpochStartedAt) && appendEpochStartedAt > 0;
+    const validAppendSnapshotTime = Number.isFinite(appendSnapshotAt) && appendSnapshotAt >= appendEpochStartedAt;
+    const useBrowserService = !stale && typeof appendSessionId === "string" && appendSessionId.length > 0 &&
+      incomingAppendService && incomingFragmentService &&
+      validAppendEpochTime && validAppendSnapshotTime && (sameAppendEpoch
+        ? appendEpochStartedAt === previous?.appendEpochStartedAt && appendSnapshotAt > (previous?.appendSnapshotAt ?? 0) &&
+          (!previous?.appendService || appendServiceIsMonotonic(incomingAppendService, previous.appendService)) &&
+          (!previous?.fragmentService || fragmentServiceIsMonotonic(incomingFragmentService, previous.fragmentService))
+        : appendEpochStartedAt > (previous?.appendEpochStartedAt ?? 0));
     const hasPlaybackSample = Number.isFinite(sampleMbps) && sampleMbps > 0 &&
       Number.isFinite(sampleAt) && sampleAt > 0;
     const newerPlaybackSample = hasPlaybackSample && sampleAt > (this.netReport?.linkSampleAt ?? 0);
@@ -452,6 +575,13 @@ export class Viewer {
           ? now - linkSampleAgeMs
           : now
         : this.netReport?.linkSampleMeasuredAt ?? null,
+      appendSessionId: useBrowserService ? appendSessionId : previous?.appendSessionId ?? null,
+      appendEpoch: useBrowserService ? appendEpoch : previous?.appendEpoch ?? null,
+      appendEpochStartedAt: useBrowserService ? appendEpochStartedAt : previous?.appendEpochStartedAt ?? null,
+      appendSnapshotAt: useBrowserService ? appendSnapshotAt : previous?.appendSnapshotAt ?? null,
+      appendService: useBrowserService ? incomingAppendService : previous?.appendService ?? null,
+      fragmentService: useBrowserService ? incomingFragmentService : previous?.fragmentService ?? null,
+      appendServiceReceivedAt: useBrowserService ? now : previous?.appendServiceReceivedAt ?? null,
       bufferedAheadSec: held,
       timestampOffsets: Object.fromEntries(["video", "audio"].filter((key) =>
         Number.isFinite(timestampOffsets?.[key])).map((key) => [key, timestampOffsets[key]])),

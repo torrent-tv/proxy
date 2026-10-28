@@ -9,6 +9,7 @@
  * @returns {Promise<void>}
  */
 export async function handleApiTranscodeSessionsProgressGet(req, reply, { viewerRequests }) {
+  const requestReceivedAtProxyMs = performance.now();
   const sessionId = typeof req.params.sessionId === "string" ? req.params.sessionId : "";
   if (!sessionId) {
     return reply.code(400).send({ error: "sessionId is required." });
@@ -23,5 +24,11 @@ export async function handleApiTranscodeSessionsProgressGet(req, reply, { viewer
     return reply.code(404).send({ error: "Transcode session was not found." });
   }
 
+  const responsePreparedAtProxyMs = performance.now();
+  progress.snapshotTransport = {
+    requestReceivedAtProxyMs,
+    snapshotAtProxyMs: progress.playbackReadiness?.snapshotAtProxyMs ?? null,
+    responsePreparedAtProxyMs
+  };
   return reply.send(progress);
 }

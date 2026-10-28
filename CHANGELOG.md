@@ -1,6 +1,9 @@
-## 2.107.45
+## Unreleased
 
 - **Fix**: Schedule shared client-link transfers from each track's actual production-ready time, so an unready video piece does not hold ready audio work off the link.
+
+## 2.107.45
+
 - **Fix**: Do not use medians from completed waits as a current first-frame forecast; keep the estimate unknown until the active process model has enough inputs.
 
 ## 2.107.44

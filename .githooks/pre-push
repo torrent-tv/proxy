@@ -1,0 +1,54 @@
+#!/bin/sh
+# Catch a release note that a rebase moved below the latest release heading.
+set -eu
+
+candidate=
+remote_base=
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = "refs/heads/main" ] || continue
+  case "$local_sha" in
+    000000*) continue ;;
+  esac
+  candidate=$local_sha
+  remote_base=$remote_sha
+done
+
+[ -n "$candidate" ] || exit 0
+
+requires_changelog=false
+case "$remote_base" in
+  000000*)
+    release_tag=$(git describe --tags --abbrev=0 "$candidate" 2>/dev/null || true)
+    if [ -z "$release_tag" ]; then
+      echo "pre-push: cannot find a release tag for the main update; fetch tags before pushing" >&2
+      exit 1
+    fi
+    commits=$(git rev-list "$release_tag..$candidate")
+    ;;
+  *) commits=$(git rev-list "$candidate" --not "$remote_base") ;;
+esac
+
+for commit in $commits; do
+  subject=$(git show -s --format=%s "$commit")
+  case "$subject" in
+    feat:*|feat\(*|feat!:*|feat\(*!*|fix:*|fix\(*|fix!:*|fix\(*!*|perf:*|perf\(*|perf!:*|perf\(*!*|revert:*|revert\(*|revert!:*|revert\(*!*)
+      requires_changelog=true
+      break
+      ;;
+  esac
+done
+
+[ "$requires_changelog" = true ] || exit 0
+
+if ! git show "$candidate:CHANGELOG.md" | awk '
+  /^## Unreleased[[:space:]]*$/ { in_unreleased = 1; next }
+  in_unreleased && /^## / { exit }
+  in_unreleased && /^- / { has_entry = 1 }
+  END { exit has_entry ? 0 : 1 }
+'; then
+  echo "pre-push: releasable commits are being pushed to main without an entry under ## Unreleased" >&2
+  echo "  check CHANGELOG.md after rebasing onto the latest main; a release may have moved the entry" >&2
+  exit 1
+fi
+
+exit 0

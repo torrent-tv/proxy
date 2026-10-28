@@ -172,6 +172,8 @@ test("the start forecast includes an unread segment ending within the seek toler
 
   const readiness = (await parts.viewerRequests.getSessionProgress(session.id, "viewer-one")).playbackReadiness;
 
-  assert.ok(readiness.firstRequiredSegmentsSeconds > 16,
+  assert.ok(readiness.delaySeconds > 16,
     "the missing segment ending just before the seek position must be encoded before the target segment");
+  assert.equal(readiness.firstRequiredSegmentsSeconds, null,
+    "the partial continuity delay must not be reported as the full first-frame estimate");
 });

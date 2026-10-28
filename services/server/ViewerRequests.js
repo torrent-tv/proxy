@@ -164,11 +164,10 @@ export class ViewerRequests {
       if (changed) context.revision += 1;
       this.#pruneEarlyWaits();
       const elapsedMs = waitElapsedSince(context, waitElapsedMs);
-      const historical = Number.isFinite(context.activeTotalSeconds) ? null : this.#historicalFirstFrame(context.features);
-      const totalSeconds = Number.isFinite(context.activeTotalSeconds) ? context.activeTotalSeconds : historical?.seconds ?? null;
+      const totalSeconds = context.activeTotalSeconds;
       const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
       if (!Number.isFinite(seconds) || seconds < 0) return null;
-      this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, historical,
+      this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds,
         firstRequiredSegmentsSeconds: context.activeFirstRequiredSegmentsSeconds });
       return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
     }
@@ -180,11 +179,10 @@ export class ViewerRequests {
     if (sameWait && changed) context.revision += 1;
     this.#pruneEarlyWaits();
     const elapsedMs = waitElapsedSince(context, waitElapsedMs);
-    const historical = Number.isFinite(context.activeTotalSeconds) ? null : this.#historicalFirstFrame(context.features);
-    const totalSeconds = Number.isFinite(context.activeTotalSeconds) ? context.activeTotalSeconds : historical?.seconds ?? null;
+    const totalSeconds = context.activeTotalSeconds;
     const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
     if (!Number.isFinite(seconds) || seconds < 0) return null;
-    this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, historical,
+    this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds,
       firstRequiredSegmentsSeconds: context.activeFirstRequiredSegmentsSeconds,
       firstRequiredStages: context.activeFirstRequiredStages });
     return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
@@ -259,37 +257,24 @@ export class ViewerRequests {
     const changed = featuresChanged || activeEstimateChanged;
     if (sameWait && changed) context.revision += 1;
     this.#pruneEarlyWaits();
-    const progressHasComponentForecast = Object.hasOwn(processing, "firstRequiredSegmentsSeconds");
-    let totalSeconds = activeTotalSeconds;
-    let historical = null;
-    if (!Number.isFinite(totalSeconds) && !progressHasComponentForecast) {
-      historical = this.#historicalFirstFrame(context.features);
-      totalSeconds = historical?.seconds ?? null;
-    }
+    const totalSeconds = activeTotalSeconds;
     const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
     if (!Number.isFinite(seconds) || seconds < 0) return null;
-    this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, historical,
+    this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds,
       firstRequiredSegmentsSeconds: hasActiveEstimate ? firstRequiredSeconds ?? null : context.activeFirstRequiredSegmentsSeconds,
       startGateSeconds: hasActiveEstimate && Number.isFinite(startGateSeconds) ? startGateSeconds : null,
       firstRequiredStages: context.activeFirstRequiredStages });
     return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
   }
 
-  #historicalFirstFrame(features) {
-    const estimate = this.#host.firstFrameSecondsOf?.(features) ?? null;
-    return Number.isFinite(estimate) ? { seconds: estimate, stagesMs: null, observations: null } : estimate;
-  }
-
-  #logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, historical, firstRequiredSegmentsSeconds,
+  #logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, firstRequiredSegmentsSeconds,
     startGateSeconds = null, firstRequiredStages }) {
     if (context.loggedForecastRevision === context.revision) return;
     const gated = Number.isFinite(startGateSeconds) &&
       !(Number.isFinite(firstRequiredSegmentsSeconds) && firstRequiredSegmentsSeconds >= startGateSeconds);
-    const basis = gated ? "start-gate" : Number.isFinite(firstRequiredSegmentsSeconds) ? "first-required" : "historical-stages";
-    const estimate = basis !== "historical-stages"
-      ? { firstRequiredSegmentsSeconds, ...(Number.isFinite(startGateSeconds) ? { startGateSeconds } : {}),
-        ...(Array.isArray(firstRequiredStages) ? { firstRequiredStages } : {}) }
-      : { stagesMs: historical?.stagesMs ?? null, observations: historical?.observations ?? null };
+    const basis = gated ? "start-gate" : "first-required";
+    const estimate = { firstRequiredSegmentsSeconds, ...(Number.isFinite(startGateSeconds) ? { startGateSeconds } : {}),
+      ...(Array.isArray(firstRequiredStages) ? { firstRequiredStages } : {}) };
     logger.info(`early wait forecast ${JSON.stringify({ waitId: context.waitId, consumer: context.consumerId,
       generation: context.generation, features: context.features, elapsedMs, revision: context.revision,
       predicted: { remainingSeconds: seconds, totalSeconds, basis, ...estimate } })}`);

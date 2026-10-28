@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Do not use medians from completed waits as a current first-frame forecast; keep the estimate unknown until the active process model has enough inputs.
+
 ## 2.107.44
 
 - **Fix**: Schedule the whole-film suffix as overlapping processing and delivery services instead of adding the full transfer after production (#ttv-185).

@@ -264,7 +264,7 @@ orchestration. The torrent runs in one worker thread
 | P13.v / P13.a | Init readable; fMP4 only. Alternatives: written by FFmpeg at the run's start; or, for an output cut at given times (`cutsAtGivenTimes`), lifted from the first produced piece (`#initFromFirstSegment`); or already kept by `SegmentStore` / readable from a published piece when the output was made before | F1 or P11 of the output, or nothing (exactly one) | init readable | blocking for B6 |
 | P12.v / P12.a | Held request answered (`SegmentServing`) and streamed through the data-channel handler | P11 or P13 of the output, or the piece already published | response sent | blocking for B6 (fMP4), B7 |
 | P14 | Readiness forecast on each progress request (`getSessionProgress` → `#playbackReadinessFor` → `predictPlaybackReadiness`): worker statistics (W10), segment inputs from `SegmentInputTable`, rates, client ranges (C2) | progress request | answer | gate input to C1 |
-| P15 | Early estimate (`waitEstimateForFile` / `waitEstimateForSource` → `LocalObservations.firstFrameSeconds`) | A5, A6, A11, P14 | value or null | observer |
+| P15 | Early wait estimate (`waitEstimateForFile` / `waitEstimateForSource`) from the active readiness calculation | A5, A6, A11, P14 | active estimate or null until its required inputs exist | observer |
 
 ### 3.5 Child processes
 
@@ -366,11 +366,11 @@ orchestration. The torrent runs in one worker thread
 
 ## 7. What the current calculations cover
 
-1. `LocalObservations.firstFrameSeconds` / `firstFrameEstimate` sum five medians of the intervals in
-   section 6 from earlier waits on the same proxy configuration. Overlap and
-   resource sharing inside an interval are whatever they were in those waits.
-   The owner has ordered this early calculation removed. Until its removal,
-   it remains a separate current numeric path, not an atomic work calculation.
+1. The previous `LocalObservations.firstFrameSeconds` / `firstFrameEstimate`
+   calculation, which summed five medians from completed waits, has been removed
+   from the numeric wait path. Before an active readiness estimate exists,
+   `waitEstimateForFile` and `waitEstimateForSource` return null. Completed
+   waits do not supply a replacement forecast.
 2. `predictPlaybackReadiness` schedules, per remaining segment in media order:
    source bytes on the torrent's one service (R1; planned piece arrivals from
    W10 first, then the measured rate); the start of a new run and its open
@@ -389,7 +389,10 @@ orchestration. The torrent runs in one worker thread
    not resolved a remaining segment of an incomplete source),
    `encode-rate-unavailable`, `download-rate-unavailable`,
    `service-not-advancing`; `media-continuity-unavailable` ends the wait.
-4. `firstRequiredSegmentsSeconds`: for each required track (one, or two with a
+4. The active numeric wait still uses `max(firstRequiredSegmentsSeconds,
+   startGateSeconds)` where the latter is available. This remains an
+   intermediate readiness estimate, not the requested action-to-frame result.
+   `firstRequiredSegmentsSeconds`: for each required track (one, or two with a
    separate soundtrack) it takes the first segment of the near window that
    ends after the viewer's position. If all of that segment's media is
    already in the client's ranges, the track contributes 0, even when the
@@ -399,8 +402,7 @@ orchestration. The torrent runs in one worker thread
    not the completion of the first missing segment in general, and it is not
    the first-frame wait: it excludes the rest of the continuity gate, the
    gate's poll latency, C3, B8–B12 and C4–C7.
-5. Not represented as separate terms in either calculation (the medians of
-   item 1 contain them only inside whole intervals): A1–A17, B1–B5 and their
+5. Not represented as separate terms in the active calculation: A1–A17, B1–B5 and their
    retries, P5, P6, P7, P4 pass time, the R8 queue, X1, R2 queueing,
    processor sharing beyond measured rates, memory admission, P13, B8–B12,
    C4–C7.
@@ -890,8 +892,10 @@ flowchart TD
 
 The target is one completion calculation with all real prerequisites and
 shared-service constraints. Removing the historical early calculation is the
-first execution step. Before sufficient facts exist, the retained calculation
-must report the missing fact; it must not substitute another historical wait.
+first execution step and is now reflected in the wait path. Before sufficient
+facts exist, the retained calculation reports no estimate; it must not
+substitute another historical wait. Remaining causal stages and shared services
+are still absent from the numeric forecast.
 See the audit for the target Mermaid graph and step-by-step Luna High plan.
 
 ## 9. Seek, soundtrack and quality change

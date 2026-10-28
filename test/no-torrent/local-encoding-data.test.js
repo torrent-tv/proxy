@@ -322,7 +322,7 @@ test("what is kept applies only on the configuration it was seen on, and survive
   }
 });
 
-test("first-frame stage observations are reused only on the matching proxy configuration", () => {
+test("first-frame stage observations persist under the proxy configuration that recorded them", () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "ttv-first-frame-"));
   const filePath = path.join(directory, "local-observations.json");
   const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
@@ -335,43 +335,15 @@ test("first-frame stage observations are reused only on the matching proxy confi
     peers: 14
   };
   try {
-    const first = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
-    first.load([software]);
-    noteFirstFrame(first, 12.5, features);
-    assert.equal(first.firstFrameSeconds(features), 12.5);
-
-    const restarted = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
-    restarted.load([software]);
-    assert.equal(restarted.firstFrameSeconds({ ...features, linkMbps: 41 }), 12.5);
-
-    const withAnotherEncoder = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
-    withAnotherEncoder.load([software, configurationKeyOf(FINGERPRINT, { name: "h264_vaapi", kind: "vaapi" })]);
-    assert.equal(withAnotherEncoder.firstFrameSeconds(features), null,
-      "a changed set of available proxy configurations does not reuse outcomes from another set");
-
-    const rebuilt = new LocalObservations({ fingerprint: { ...FINGERPRINT, x264: "core 165" }, filePath });
-    rebuilt.load([configurationKeyOf({ ...FINGERPRINT, x264: "core 165" }, { name: "libx264", kind: "software" })]);
-    assert.equal(rebuilt.firstFrameSeconds(features), null);
+    const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath });
+    observations.load([software]);
+    noteFirstFrame(observations, 12.5, features);
+    const entries = JSON.parse(readFileSync(filePath, "utf8")).entries.firstFrame;
+    assert.deepEqual(Object.keys(entries), [`firstFrame:${software}`]);
+    assert.equal(Object.values(entries)[0][0].stages.totalMs, 10_000);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
-});
-
-test("first-frame stage medians do not select a past run by its numeric inputs", () => {
-  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
-  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
-  observations.load([software]);
-  noteFirstFrame(observations, 6, {
-    extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 0, headerRemaining: 0, peers: 0
-  });
-  noteFirstFrame(observations, 18, {
-    extension: "mkv", fileLength: 1000, downloadSpeed: 100, linkMbps: 10, headerRemaining: 100, peers: 8
-  });
-
-  assert.equal(observations.firstFrameSeconds({
-    extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 0, headerRemaining: 0, peers: 0
-  }), 12);
-  assert.equal(observations.firstFrameSeconds({ extension: "mkv" }), 12);
 });
 
 test("first-frame outcomes retain each measured cold-start stage", () => {
@@ -418,143 +390,10 @@ test("first-frame retention excludes older outcomes without measured stages", ()
     const retained = JSON.parse(readFileSync(filePath, "utf8")).entries.firstFrame[key];
     assert.equal(retained.length, 7);
     assert.ok(retained.every(reading => reading.stages));
-    assert.equal(observations.firstFrameSeconds(features), 6.002);
+    assert.equal(retained[0].stages.prepareMs, 2_000);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
-});
-
-test("first-frame forecast sums per-stage medians instead of selecting a completed run", () => {
-  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
-  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
-  observations.load([software]);
-  const features = { extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 10,
-    linkSampleAgeMs: 10, preparedOutputBytes: 0, fileAvailable: false, headerRemaining: 0, peers: 2 };
-  const stagesA = { totalMs: 999_000, transportMs: 1000, planMs: 2000, prepareMs: 3000,
-    prebufferMs: 4000, presentationMs: 5000 };
-  const stagesB = { totalMs: 1, transportMs: 3000, planMs: 4000, prepareMs: 5000,
-    prebufferMs: 6000, presentationMs: 7000 };
-  const stagesC = { totalMs: 500_000, transportMs: 2000, planMs: 4000, prepareMs: 3000,
-    prebufferMs: 5000, presentationMs: 6000 };
-  observations.noteFirstFrame({ seconds: 999, features, featureSnapshots: [features, features], stages: stagesA });
-  observations.noteFirstFrame({ seconds: 0.001, features, stages: stagesB });
-  observations.noteFirstFrame({ seconds: 500, features, stages: stagesC });
-
-  assert.equal(observations.firstFrameSeconds(features), 20,
-    "each stage median is calculated independently; no completed-run total or nearest run is used");
-  const estimate = observations.firstFrameEstimate(features);
-  assert.deepEqual(estimate, {
-    seconds: 20,
-    stagesMs: { transportMs: 2000, planMs: 4000, prepareMs: 3000, prebufferMs: 5000, presentationMs: 6000 },
-    observations: 3
-  }, "diagnostic parts are the exact medians used by the unchanged numeric estimate");
-  assert.equal(Object.values(estimate.stagesMs).reduce((sum, value) => sum + value, 0) / 1000, estimate.seconds);
-});
-
-test("first-frame forecast uses this proxy's stage measurements before the container is known", () => {
-  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
-  observations.load([configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" })]);
-  const avi = { extension: "avi" };
-  const mp4 = { extension: "mp4" };
-  const stagesA = { totalMs: 15_000, transportMs: 1000, planMs: 2000, prepareMs: 3000,
-    prebufferMs: 4000, presentationMs: 5000 };
-  const stagesB = { totalMs: 25_000, transportMs: 3000, planMs: 4000, prepareMs: 5000,
-    prebufferMs: 6000, presentationMs: 7000 };
-  observations.noteFirstFrame({ seconds: 15, features: avi, stages: stagesA });
-  observations.noteFirstFrame({ seconds: 25, features: mp4, stages: stagesB });
-
-  assert.equal(observations.firstFrameSeconds({ extension: "mkv" }), 20,
-    "unknown containers use the independently measured component medians from this proxy");
-});
-
-test("an unsplit historical first-frame total cannot produce a forecast", () => {
-  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
-  observations.load([configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" })]);
-  observations.noteFirstFrame({ seconds: 41.7321, features: {
-    extension: "avi", fileLength: 2_362_982_400, preparedOutputBytes: null, fileAvailable: null
-  } });
-
-  assert.equal(observations.firstFrameSeconds({ extension: "avi", fileLength: 2_362_982_400,
-    preparedOutputBytes: 0, fileAvailable: false }), null);
-});
-
-test("one start retains its original and refined input snapshots without counting twice", () => {
-  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
-  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
-  observations.load([software]);
-  const initial = { extension: "avi", fileLength: 1000, linkMbps: 20 };
-  const refined = { ...initial, preparedOutputBytes: 0, fileAvailable: false,
-    downloadSpeed: 0, peers: 0, headerRemaining: 0 };
-  const stages = { totalMs: 8000, transportMs: 1000, planMs: 1000, prepareMs: 2000,
-    prebufferMs: 4000, presentationMs: 100 };
-  observations.noteFirstFrame({ seconds: 9.1, features: initial, featureSnapshots: [refined], stages });
-
-  assert.equal(observations.firstFrameSeconds(refined), 8.1,
-    "the same measured stages remain usable when later source readings are known");
-});
-
-test("first-frame stage medians do not select a past run by client-link age", () => {
-  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
-  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
-  observations.load([software]);
-  const shared = { extension: "mkv", fileLength: 1000, downloadSpeed: 0, linkMbps: 10,
-    headerRemaining: 0, peers: 0 };
-  noteFirstFrame(observations, 6, { ...shared, linkSampleAgeMs: 100 });
-  noteFirstFrame(observations, 18, { ...shared, linkSampleAgeMs: 10_000 });
-
-  assert.equal(observations.firstFrameSeconds({ ...shared, linkSampleAgeMs: 100 }), 12);
-});
-
-test("first-frame stage medians distinguish prepared from unprepared output", () => {
-  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
-  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
-  observations.load([software]);
-  const shared = { extension: "avi", fileLength: 1000, downloadSpeed: 0, linkMbps: 20,
-    linkSampleAgeMs: 10, headerRemaining: 0, peers: 0 };
-  noteFirstFrame(observations, 1.5, { ...shared, preparedOutputBytes: 12_000_000 });
-  noteFirstFrame(observations, 42, { ...shared, preparedOutputBytes: 0 });
-
-  assert.equal(observations.firstFrameSeconds({ ...shared, preparedOutputBytes: 12_000_000 }), 1.5);
-  assert.equal(observations.firstFrameSeconds({ ...shared, preparedOutputBytes: 0 }), 42);
-});
-
-test("first-frame stage medians distinguish complete and incomplete sources", () => {
-  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
-  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
-  observations.load([software]);
-  const shared = { extension: "avi", fileLength: 2_362_982_400, downloadSpeed: 0, linkMbps: 113,
-    linkSampleAgeMs: 10_758, preparedOutputBytes: 1_268_248, headerRemaining: 0, peers: 0 };
-  noteFirstFrame(observations, 1.5991, { ...shared, fileAvailable: true });
-  noteFirstFrame(observations, 10.4824, { ...shared, fileAvailable: false });
-
-  assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: true }), 1.5991);
-  assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: false }), 10.4824);
-});
-
-test("known availability excludes observations that did not measure source availability", () => {
-  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
-  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
-  observations.load([software]);
-  const shared = { extension: "avi", fileLength: 1000, downloadSpeed: 0, linkMbps: 20,
-    linkSampleAgeMs: 10, preparedOutputBytes: 500, headerRemaining: 0, peers: 0 };
-  noteFirstFrame(observations, 1.5, shared);
-  noteFirstFrame(observations, 10.5, { ...shared, fileAvailable: false });
-
-  assert.equal(observations.firstFrameSeconds({ ...shared, fileAvailable: false }), 10.5);
-});
-
-test("first-frame stage medians distinguish the measured copy or encode path", () => {
-  const observations = new LocalObservations({ fingerprint: FINGERPRINT, filePath: "" });
-  const software = configurationKeyOf(FINGERPRINT, { name: "libx264", kind: "software" });
-  observations.load([software]);
-  const shared = { extension: "mkv", fileLength: 1000, downloadSpeed: 500_000, linkMbps: 30,
-    linkSampleAgeMs: 20, preparedOutputBytes: 0, fileAvailable: false, headerRemaining: 0, peers: 4,
-    audioOperation: "copy", audioSpeedX: 60 };
-  noteFirstFrame(observations, 8, { ...shared, videoOperation: "encode", videoSpeedX: 1.2 });
-  noteFirstFrame(observations, 24, { ...shared, videoOperation: "copy", videoSpeedX: 30 });
-
-  assert.equal(observations.firstFrameSeconds({ ...shared, videoOperation: "encode", videoSpeedX: 1.2 }), 8);
-  assert.equal(observations.firstFrameSeconds({ ...shared, videoOperation: "copy", videoSpeedX: 30 }), 24);
 });
 
 test("a speed seen on easier material is not applied to harder material, and the slowest comparable one is used", () => {

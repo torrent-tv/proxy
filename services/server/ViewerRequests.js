@@ -41,6 +41,36 @@ function sameInputs(left, right) {
   return left.every((input, index) => input.sourceId === right[index].sourceId && input.ranges === right[index].ranges);
 }
 
+function browserServiceSummary(value) {
+  if (!value || typeof value !== "object") return null;
+  return Object.fromEntries(["init", "media"].filter(kind => value[kind]).map(kind => [kind, value[kind]]).map(([kind, service]) => [kind, {
+    bytes: service.bytes,
+    elapsedMs: service.elapsedMs,
+    operations: service.operations,
+    sampleCount: service.samples.length,
+    newestSampleAgeMs: service.samples.reduce((age, sample) => age === null ? sample.ageMs : Math.min(age, sample.ageMs), null),
+    samples: service.samples.map(({ bytes, elapsedMs, ageMs, fragmentId, fragmentSequence, partIndex, fragmentStartSeconds,
+      parseElapsedMs, bufferingElapsedMs, bufferingAgeMs, eventAgesMs }) => ({ bytes, elapsedMs, ageMs, fragmentId,
+      fragmentSequence, partIndex, fragmentStartSeconds,
+      ...(parseElapsedMs === null || parseElapsedMs === undefined ? {} : { parseElapsedMs }),
+      ...(bufferingElapsedMs === null || bufferingElapsedMs === undefined ? {} : { bufferingElapsedMs }),
+      ...(bufferingAgeMs === null || bufferingAgeMs === undefined ? {} : { bufferingAgeMs }),
+      ...(eventAgesMs ? { eventAgesMs } : {}) }))
+  }]));
+}
+
+function browserServiceFingerprint(tracks) {
+  const serviceFingerprint = service => service ? ["init", "media"].map(kind => {
+    const value = service[kind];
+    return value ? [kind, value.bytes, value.elapsedMs, value.operations, value.samples.map(sample => [
+      sample.bytes, sample.elapsedMs, sample.fragmentId, sample.fragmentSequence, sample.partIndex,
+      sample.fragmentStartSeconds, sample.parseElapsedMs, sample.bufferingElapsedMs
+    ])] : [kind, null];
+  }) : null;
+  return JSON.stringify(tracks.map(track => [track.id,
+    serviceFingerprint(track.appendService), serviceFingerprint(track.fragmentService)]));
+}
+
 export function forecastInputState(tracks, identity) {
   if (!identity) return null;
   const track = tracks.find(candidate => candidate.id === identity.trackId);
@@ -912,6 +942,19 @@ export class ViewerRequests {
         clockOffsetSeconds: placedByPlayer ? playerOffset : 0,
         clientRanges: viewerReading?.bufferedRanges?.[output === session ? "video" : "audio"] ??
           viewerReading?.bufferedRanges?.media,
+        // Browser-observed append and fragment-parse samples are retained for
+        // the full model's service schedule; they are not yet used as numeric
+        // predecessors in the partial continuity calculation.
+        appendService: viewerReading?.appendSessionId === session.id && viewerReading?.appendService?.[trackName]
+          ? { ...viewerReading.appendService[trackName], epoch: viewerReading.appendEpoch,
+            epochStartedAt: viewerReading.appendEpochStartedAt, snapshotAt: viewerReading.appendSnapshotAt,
+            receivedAt: viewerReading.appendServiceReceivedAt }
+          : null,
+        fragmentService: viewerReading?.appendSessionId === session.id && viewerReading?.fragmentService?.[trackName]
+          ? { ...viewerReading.fragmentService[trackName], epoch: viewerReading.appendEpoch,
+            epochStartedAt: viewerReading.appendEpochStartedAt, snapshotAt: viewerReading.appendSnapshotAt,
+            receivedAt: viewerReading.appendServiceReceivedAt }
+          : null,
         sourceIds,
         processedSeconds: trackProgress?.processedSeconds,
         startupRemainingSeconds: processingStarted ? 0 : Math.max(0,
@@ -992,6 +1035,7 @@ export class ViewerRequests {
       `start forecast ${Math.round(predictMs)}ms, in all ${Math.round(performance.now() - parts.enteredAt)}ms`);
     const forecast = withSubtitleReadiness(predicted, subtitle,
       subtitle ? this.#host.subtitleReadyFor?.(viewer) !== false : true);
+    forecast.snapshotAtProxyMs = startedAt;
     forecast.operations = outputs.flatMap((output, index) => {
       const common = { speed: this.#host.playbackReadiness.forecastRate(tracks[index].readings, now, 0, "piece"),
         processedSeconds: tracks[index].processedSeconds,
@@ -1049,9 +1093,13 @@ export class ViewerRequests {
     const forecastInputKey = unavailableInput ? JSON.stringify([
       unavailableInput.sourceId, unavailableInput.trackId, unavailableInput.segmentIndex, unavailableInput.phase
     ]) : null;
-    if (measurement.forecastReason !== forecast.reason || measurement.forecastInputKey !== forecastInputKey) {
+    const browserEvidenceKey = browserServiceFingerprint(tracks);
+    const browserEvidenceChanged = measurement.browserEvidenceKey !== browserEvidenceKey;
+    if (measurement.forecastReason !== forecast.reason || measurement.forecastInputKey !== forecastInputKey ||
+        browserEvidenceChanged) {
       measurement.forecastReason = forecast.reason;
       measurement.forecastInputKey = forecastInputKey;
+      measurement.browserEvidenceKey = browserEvidenceKey;
       if (forecast.subtitles) this.#host.observeWait?.(session.file.sourceKey, "process", {
         process: "C3", phase: "event", fileIndex: session.file.fileIndex,
         trackIndex: forecast.subtitles.trackIndex, ready: forecast.subtitles.ready,
@@ -1073,8 +1121,10 @@ export class ViewerRequests {
           downloadRateBytesPerSecond: this.#host.playbackReadiness.forecastRate(downloadRateReadings, now, 0, "time"),
           downloadRateSummaries
         })),
-        tracks: tracks.map(({ id, processedSeconds, readings, segments, readySegmentIndices }) => ({
-          id, processedSeconds, readings, segments: segments.length, prepared: readySegmentIndices.length
+        tracks: tracks.map(({ id, processedSeconds, readings, segments, readySegmentIndices, appendService, fragmentService }) => ({
+          id, processedSeconds, readings, appendService: browserServiceSummary(appendService),
+          fragmentService: browserServiceSummary(fragmentService), segments: segments.length,
+          prepared: readySegmentIndices.length
         }))
       })}`);
     }

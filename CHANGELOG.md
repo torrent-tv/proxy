@@ -1,3 +1,16 @@
+## Unreleased
+
+- **Chore**: Retain browser append and media-fragment parse samples for the playback forecast.
+- **Chore**: Keep first-required-segment completion unavailable until browser append duration has a process-based model.
+- **Chore**: Record browser load-to-parse and append-request-to-acknowledgement as separate unknown predecessors in first-segment diagnostics.
+- **Fix**: Keep first-segment readiness unknown when its media ranges are missing instead of treating an empty range list as buffered.
+- **Chore**: Include per-fragment parsing and buffering spans in the playback model records.
+- **Chore**: Join recent browser work samples to their generated output segment by HLS sequence number.
+- **Chore**: Write a bounded playback forecast record when browser work samples change, not only when readiness changes.
+- **Chore**: Define the completion point under absolute relative error without fitting a completion-time distribution.
+- **Chore**: Include request-received, readiness-snapshot and response-prepared proxy-clock marks in progress responses.
+- **Chore**: Include worker-read and response timing marks with source statistics so the browser can bound their age.
+
 ## 2.107.47
 
 - **Fix**: Stop presenting the whole-film continuity delay as time until the first frame; keep the first-frame estimate unavailable until its full dependency model is implemented.

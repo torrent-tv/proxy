@@ -20,6 +20,7 @@ import { performance } from "node:perf_hooks";
  * @returns {Promise<void>}
  */
 export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torrentPool, viewerRequests }) {
+  const requestReceivedAtProxyMs = performance.now();
   const sourceKey = typeof req.params.sourceKey === "string" ? req.params.sourceKey.trim() : "";
   if (!sourceKey) {
     return reply.code(400).send({ error: "sourceKey is required." });
@@ -67,10 +68,12 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   // local lookup. Without the await the reply was the pending promise itself,
   // which serialises to `{}` — the empty stats seen in the field 2026-08-02.
   const statsStartedAt = performance.now();
+  let statsCompletedAt;
   let stats;
   try {
     stats = await torrentPool.getFileStats(torrent, fileIndex);
   } finally {
+    statsCompletedAt = performance.now();
     logger.info(`[stats] ${sourceKey.slice(0, 8)} getFileStatsMs=${(performance.now() - statsStartedAt).toFixed(1)}`);
   }
   if (stats?.pending || !stats) {
@@ -154,5 +157,11 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
       fileName: torrent.files?.[fileIndex]?.name ?? requestedFileName, fileLength: requestedFileLength,
       stats, ...earlyLink });
   }
-  return reply.send(stats);
+  const responsePreparedAtProxyMs = performance.now();
+  return reply.send({ ...stats, sourceSnapshotTransport: {
+    requestReceivedAtProxyMs,
+    snapshotStartedAtProxyMs: statsStartedAt,
+    snapshotCompletedAtProxyMs: statsCompletedAt,
+    responsePreparedAtProxyMs
+  } });
 }

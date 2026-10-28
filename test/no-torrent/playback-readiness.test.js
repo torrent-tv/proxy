@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { predictPlaybackReadiness, RateTrend, forecastRate } from "../../services/viewer/playback-readiness.js";
+import { completionPointUnderRelativeLoss, predictPlaybackReadiness, RateTrend, forecastRate }
+  from "../../services/viewer/playback-readiness.js";
 
 /** Served ranges in milliseconds, as the format states them for a piece. */
 function servedMs(...pairs) {
@@ -36,6 +37,31 @@ function input(overrides = {}) {
   };
 }
 
+test("uses the p-over-time weighted median for absolute relative loss", () => {
+  assert.deepEqual(completionPointUnderRelativeLoss([
+    { completionSeconds: 1, probability: 0.5 },
+    { completionSeconds: 4, probability: 0.5 }
+  ]), { pointSeconds: 1, immediateProbability: 0, supportCount: 2 });
+});
+
+test("reports immediate completion exactly and withholds a point for mixed immediate and positive mass", () => {
+  assert.deepEqual(completionPointUnderRelativeLoss([
+    { completionSeconds: 0, probability: 1 },
+    { completionSeconds: 0, probability: 2 }
+  ]), { pointSeconds: 0, immediateProbability: 1, supportCount: 2 });
+  assert.deepEqual(completionPointUnderRelativeLoss([
+    { completionSeconds: 0, probability: 1 },
+    { completionSeconds: 2, probability: 3 }
+  ]), { pointSeconds: null, immediateProbability: 0.25, supportCount: 2 });
+});
+
+test("does not create a completion point from absent or malformed probability support", () => {
+  assert.equal(completionPointUnderRelativeLoss([]), null);
+  assert.equal(completionPointUnderRelativeLoss([{ completionSeconds: 4, probability: 0 }]), null);
+  assert.equal(completionPointUnderRelativeLoss([{ completionSeconds: -1, probability: 1 }]), null);
+  assert.equal(completionPointUnderRelativeLoss([{ completionSeconds: 4, probability: Number.NaN }]), null);
+});
+
 test("a later prepared piece places the predicted origin on the same clock", () => {
   const state = input();
   state.tracks[0].segments[1].mediaRanges = servedMs([4042, 8042]);
@@ -58,10 +84,10 @@ test("finds the first safe start from segments delivered before playback", () =>
   assert.ok(Math.abs(forecast.delaySeconds - 1) < 1e-8);
 });
 
-test("forecasts the first required segment from source, processing, and client delivery service", () => {
+test("keeps the first required segment incomplete while browser stages lack future distributions", () => {
   const forecast = predictPlaybackReadiness(input());
 
-  assert.equal(forecast.firstRequiredSegmentsSeconds, 1);
+  assert.equal(forecast.firstRequiredSegmentsSeconds, null);
   assert.deepEqual(forecast.firstRequiredStages, [{
     track: "video",
     segment: 0,
@@ -72,9 +98,50 @@ test("forecasts the first required segment from source, processing, and client d
     productionStartSeconds: 0,
     productionCompleteSeconds: 0,
     deliveryCompleteSeconds: 1,
-    appendSeconds: 0,
-    completionSeconds: 1
+    browserLoadToParseSeconds: null,
+    browserLoadToParseReason: "fragment-load-to-parse-distribution-unavailable",
+    appendRequestToAckSeconds: null,
+    appendRequestToAckReason: "append-request-to-ack-distribution-unavailable",
+    appendSeconds: null,
+    appendReason: "append-request-to-ack-distribution-unavailable",
+    completionSeconds: null
   }]);
+});
+
+test("joins browser observations to the first output segment without turning them into predicted service", () => {
+  const state = input();
+  state.tracks[0].fragmentService = { media: { samples: [
+    { fragmentSequence: 0, partIndex: null, bytes: 1200, elapsedMs: 30, parseElapsedMs: 4,
+      ageMs: 10, bufferingAgeMs: 8, eventAgesMs: { loadEnd: 15 } },
+    { fragmentSequence: 0, partIndex: 0, bytes: 600, elapsedMs: 12, ageMs: 4 },
+    { fragmentSequence: 1, partIndex: null, bytes: 900, elapsedMs: 25, ageMs: 5 }
+  ] } };
+  state.tracks[0].appendService = { media: { samples: [
+    { fragmentSequence: 0, partIndex: null, bytes: 1200, elapsedMs: 6, ageMs: 9 }
+  ] } };
+
+  const forecast = predictPlaybackReadiness(state);
+  const first = forecast.firstRequiredStages[0];
+
+  assert.equal(forecast.firstRequiredSegmentsSeconds, null);
+  assert.equal(first.completionSeconds, null);
+  assert.deepEqual(first.observedBrowserWork, {
+    evidenceOnly: true,
+    fragmentLoadToParse: [{ bytes: 1200, elapsedMs: 30, parseElapsedMs: 4,
+      bufferingElapsedMs: null, ageMs: 10, bufferingAgeMs: 8, eventAgesMs: { loadEnd: 15 } }],
+    appendRequestToAck: [{ bytes: 1200, elapsedMs: 6, ageMs: 9 }]
+  });
+});
+
+test("does not treat missing first-segment media geometry as a buffered segment", () => {
+  const state = input();
+  state.tracks[0].segments[0].mediaRanges = { timescale: 1000n, ranges: [] };
+
+  const forecast = predictPlaybackReadiness(state);
+
+  assert.equal(forecast.ready, false);
+  assert.equal(forecast.delaySeconds, null);
+  assert.equal(forecast.reason, "first-required-media-ranges-unavailable");
 });
 
 test("a ready audio fragment uses the shared link while video production is unfinished", () => {
@@ -100,7 +167,7 @@ test("a ready audio fragment uses the shared link while video production is unfi
     linkReadings: [{ at: now, value: 80 }]
   }));
 
-  assert.equal(forecast.firstRequiredSegmentsSeconds, 11);
+  assert.equal(forecast.firstRequiredSegmentsSeconds, null);
   assert.deepEqual(forecast.firstRequiredStages.map(stage => [stage.track, stage.deliveryCompleteSeconds]), [
     ["video", 11],
     ["audio", 2]
@@ -134,7 +201,9 @@ test("the whole-film suffix overlaps measured processing and delivery services",
     linkReadings: [{ at: now - 1_000, value: 12_000_000 }, { at: now, value: 12_000_000 }]
   });
 
-  assert.ok(Math.abs(forecast.firstRequiredSegmentsSeconds - (4 / 1.5 + 4 * 8_000_000 / 12_000_000)) < 1e-8);
+  assert.equal(forecast.firstRequiredSegmentsSeconds, null);
+  assert.ok(Math.abs(forecast.firstRequiredStages[0].deliveryCompleteSeconds -
+    (4 / 1.5 + 4 * 8_000_000 / 12_000_000)) < 1e-8);
   assert.ok(Math.abs(forecast.delaySeconds - (4 / 1.5 + 4 * 8_000_000 / 12_000_000)) < 1e-8);
 });
 
@@ -664,8 +733,8 @@ test("prices an unread segment just before the seek target within the player's s
 
   assert.equal(withBoundary.firstRequiredStages[0].segment, 2,
     "the first frame at the target is still in the segment that starts there");
-  assert.ok(withBoundary.firstRequiredStages[0].completionSeconds >
-    withoutBoundary.firstRequiredStages[0].completionSeconds,
+  assert.ok(withBoundary.firstRequiredStages[0].deliveryCompleteSeconds >
+    withoutBoundary.firstRequiredStages[0].deliveryCompleteSeconds,
   "the preceding segment requested within the seek tolerance delays the target segment");
   assert.ok(withBoundary.delaySeconds > withoutBoundary.delaySeconds,
     "the timestamp spillover segment is part of the safe-start calculation");
@@ -795,7 +864,9 @@ test("overlaps independent track processing and serves each released fragment on
     linkReadings: [{ at: 9_000, value: 3_200 }, { at: 10_000, value: 3_200 }]
   });
 
-  assert.equal(forecast.firstRequiredSegmentsSeconds, 2.1,
+  assert.equal(forecast.firstRequiredSegmentsSeconds, null,
+    "the shared schedule reaches delivery, but append completion has no supported distribution");
+  assert.equal(forecast.firstRequiredStages[1].deliveryCompleteSeconds, 1.1,
     "the audio fragment is delivered during video processing; the shared link is work-conserving");
 });
 

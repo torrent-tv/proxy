@@ -392,20 +392,31 @@ orchestration. The torrent runs in one worker thread
 4. The browser receives no numeric first-frame estimate until the full
    action-to-frame model is implemented. `delaySeconds` remains the proxy's
    current full-film continuity constraint for its playback-start gate; it is
-   not displayed as the time to the first frame. On 2026-10-28, that partial
-   delay briefly mapped to 42,053 s, then 1.75 s, while the first audio-ready
-   advancing frame occurred 7.36 s after the action. `firstRequiredSegmentsSeconds`
+   not displayed as the time to the first frame. On the pre-correction
+   2026-10-28 Below S01E01 run, that partial delay briefly mapped to 42,053 s,
+   then 1.75 s. Those values came from that run only. On the later run with
+   proxy 2.107.47, add-on 0.100.47 and server 0.66.25, the ETA stayed absent
+   and the first audio-ready advancing frame occurred 18.2228 s after the
+   action. This single playback confirms the observation, not model accuracy.
+   When the full model supplies a supported completion distribution, the point
+   minimizing expected absolute relative error is its weighted median with
+   scenario weights `p / T`. If the distribution mixes immediate and positive
+   completion, no single point is returned. The pure calculation is implemented
+   in `completionPointUnderRelativeLoss`; no current forecast supplies its
+   probability support, so it does not produce an ETA.
+   `firstRequiredSegmentsSeconds`
    remains a component diagnostic only.
-   `firstRequiredSegmentsSeconds`: for each required track (one, or two with a
-   separate soundtrack) it takes the first segment of the near window that
-   ends after the viewer's position. If all of that segment's media is
-   already in the client's ranges, the track contributes 0, even when the
-   next segment is missing. Otherwise it contributes that segment's
-   completion: delivery on the link queue plus `appendSeconds` when supplied.
-   The value is the largest contribution, or null when any is unknown. It is
-   not the completion of the first missing segment in general, and it is not
-   the first-frame wait: it excludes the rest of the continuity gate, the
-   gate's poll latency, C3, B8–B12 and C4–C7.
+   `firstRequiredSegmentsSeconds`: for each required track it takes the first
+   segment after the viewer's position. If that segment is already in the
+   client's ranges, the track contributes 0. Otherwise
+   `deliveryCompleteSeconds` reports the link schedule, but `appendSeconds`
+   and `completionSeconds` are null while the future fragment load-to-parse
+   and append-request-to-acknowledgement distributions and their shared-resource
+   schedule are unavailable. Therefore
+   `firstRequiredSegmentsSeconds` is null if any required segment is not yet
+   confirmed in the browser buffer. It is not the first-frame wait: it excludes
+   the rest of the continuity gate, the gate's poll latency, C3, B8–B12 and
+   C4–C7.
 5. Not represented as separate terms in the active calculation: A1–A17, B1–B5 and their
    retries, P5, P6, P7, P4 pass time, the R8 queue, X1, R2 queueing,
    processor sharing beyond measured rates, memory admission, P13, B8–B12,
@@ -899,7 +910,33 @@ shared-service constraints. Removing the historical early calculation is the
 first execution step and is now reflected in the wait path. Before sufficient
 facts exist, the retained calculation reports no estimate; it must not
 substitute another historical wait. Remaining causal stages and shared services
-are still absent from the numeric forecast.
+are still absent from the numeric forecast. The browser now reports cumulative
+bytes and elapsed append acknowledgements separately for picture/soundtrack
+and init/media data. Recent per-operation byte/time samples are retained with
+their age relative to the snapshot. The browser also reports per-fragment
+network payload bytes, media start time and elapsed time from full fragment
+load through parse.
+These are observation inputs only. A mean append duration is not used as a
+forecast: the model needs a validated mapping from fragment work to append
+operations and joint service observations before it can price that stage.
+For an unbuffered first required segment, the diagnostic records browser
+load-to-parse and append-request-to-acknowledgement as separate unknown
+predecessors with explicit reasons. The event intervals describe completed
+work; they do not supply a distribution for future work. A segment already in
+the browser buffer has zero remaining work for these stages.
+The append interval starts when HLS.js emits the append request and ends at
+its acknowledgement; it includes any queue delay before the browser completes
+the append. Neither event interval isolates a shared-resource service rate.
+The browser also reports HLS.js's per-fragment `parsing.start/end` and
+`buffering.start/end` spans when those boundaries exist. The first is the
+transmux operation span; the second covers buffer append work through the
+fragment's buffered event. They retain fragment identity and media start time
+for paired prediction evidence. Each boundary is sent as its age at the report
+snapshot on the same browser monotonic clock, preserving overlap with network
+load. They remain completed-work observations until a process-based conditional
+distribution and shared-resource model are available.
+Shared browser work and service uncertainty remain outside the numeric
+first-frame estimate.
 See the audit for the target Mermaid graph and step-by-step Luna High plan.
 
 ## 9. Seek, soundtrack and quality change

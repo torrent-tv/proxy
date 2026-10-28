@@ -12,7 +12,7 @@ requires that declaration before using event-driven preparation.
 |---|---|---|
 | `POST /api/sources` | `{ sourceType, source, consumerId }`; older pages may omit `consumerId` | `{ sourceKey, playbackMapVersion: 1 }` identifies the source and declares source viewer reports and event-driven preparation. The page reports an update requirement if the declaration is missing. |
 | `GET /api/sources/:sourceKey/files?consumerId=ID&generation=N&linkMbps=M&linkSampleAgeMs=MS` | Registered `sourceKey`; viewer/action identity and separately measured client link and age | Waits for metadata, terminal failure or cancellation without an elapsed deadline. Success returns `{ name, infoHash, files, items, shape }`. Files do not carry a first-frame estimate. `items` omits samples and release-group promos, maps video indices to audio, subtitle and image indices, and carries filename-derived `episode` metadata. The visible indices are recorded for the viewer. |
-| `GET /api/sources/:sourceKey/stats?fileIndex=N&consumer=ID&generation=N&fileName=NAME&fileLength=BYTES&linkMbps=M&linkSampleAgeMs=MS` | Registered source; viewer/action identity, selected file facts when locally known and separately measured client link and age | Current peer, transfer, header and file progress readings. A reading may not contain every measurement; absent or `null` measurements are unknown. No first-frame estimate is attached. |
+| `GET /api/sources/:sourceKey/stats?fileIndex=N&consumer=ID&generation=N&fileName=NAME&fileLength=BYTES&linkMbps=M&linkSampleAgeMs=MS` | Registered source; viewer/action identity, selected file facts when locally known and separately measured client link and age | Current peer, transfer, header and file progress readings, plus proxy-clock request, worker-read and response timing marks. A reading may not contain every measurement; absent or `null` measurements are unknown. No first-frame estimate is attached. |
 | `POST /api/sources/:sourceKey/warm` | Registered source | Compatibility acknowledgement `{ started, swarm, edges: false, fill: false }`. This does not create a download order; present viewers determine preparation. |
 | `POST /api/sources/:sourceKey/files/:fileIndex/viewer` | `{ consumerId, positionSeconds, generation, playing, waiting }` and optional seek, buffer and visibility readings | `{ received: true }` records direct playback. An obsolete selection returns `409`, `code: REQUEST_OBSOLETE`, `canRetry: false`. Older generations cannot restore a previous position. |
 | `GET /api/sources/:sourceKey/files/:fileIndex/container-metadata` | Registered source; file index | `200` with what the file states about the work: `{ title, otherTitles, segmentTitle, seriesTitle, season, episode, episodeId, episodeTitle, year, itemYear, genres, description, externalIds, trackTitles, chapterTitles, cover, outsideEdges }` (`services/media/container/work-tags.js`). `202 { status: "pending" }` while the first or last piece of the file has not arrived; `404` where the format states nothing this proxy reads. Read only from the edges of the file, which opening it fetches anyway, and from bytes already held; `outsideEdges` says something lay elsewhere and was left out. |
@@ -235,12 +235,37 @@ stage measurements remain evaluation data only and do not produce a forecast.
 mathematical continuity calculation's minimum delay before the proxy's measured
 service trajectory can sustain playback through the remaining film. It remains
 an input to the playback-start gate. It is not the time until the first frame
-and must not be displayed as such. For example, on the 2026-10-28 Below S01E01
-run the partial calculation briefly produced 42,053 s, then 1.75 s, while the
-first advancing audio-ready frame occurred 7.36 s after the action. The first
-frame ETA stays unavailable until the model includes its actual browser,
+and must not be displayed as such. On the pre-correction 2026-10-28 Below
+S01E01 run, the partial calculation briefly produced 42,053 s, then 1.75 s.
+Those values are from that run only. On the later run with proxy 2.107.47,
+add-on 0.100.47 and server 0.66.25, the numeric ETA stayed absent and the
+first advancing audio-ready frame occurred 18.2228 s after the action. This
+single playback confirms the first-frame observation, not model accuracy. The
+first-frame ETA stays unavailable until the model includes its actual browser,
 subtitle, control, polling and presentation predecessors and a supported
 operation-level service uncertainty model.
+
+Progress answers also carry proxy-monotonic request-received, readiness-snapshot
+and response-prepared times. The browser combines these with its own same-
+request elapsed time to bound snapshot age at response parsing. The resulting
+interval does not assume equal upstream and downstream delays. Missing or
+inconsistent clock marks leave age unknown; clocks from the browser and proxy
+are never directly subtracted.
+
+Source-stat responses bracket the worker read with proxy-monotonic timestamps.
+The browser combines that interval with its own request start and response
+parse completion to bound the age of the returned source snapshot. The lower
+bound assumes the worker sampled at the end of its read; the upper bound
+assumes it sampled at the start. The `A5.source-snapshot-age` wait event records
+the interval. Pending responses have no source snapshot and no age interval.
+These marks describe measurement age; they are not ETA adjustments.
+
+Recent HLS fragment and append samples carry the playlist fragment sequence
+and optional part index. These generated playlists use
+`#EXT-X-MEDIA-SEQUENCE:0`, so a complete fragment with no part index maps to
+the output segment with the same index. The proxy retains that mapping in the
+first-required-stage diagnostic as observed work only. It does not use the
+completed span as a future service duration or as an ETA.
 
 The progress response may include `playbackReadiness`:
 

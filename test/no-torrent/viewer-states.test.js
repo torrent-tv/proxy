@@ -88,6 +88,86 @@ test("a report without a link measurement still states everything about the view
   assert.equal(viewer.netReport.positionSeconds, 12);
 });
 
+test("append service accepts advancing cumulative counters once and rejects stale counters", () => {
+  const viewer = new Viewer("one", AT);
+  const report = (bytes, serviceMs, operations, epoch = "page-one", epochStartedAt = AT,
+    snapshotAt = epoch === "page-one" ? AT + bytes : epochStartedAt) => ({
+    appendSessionId: "session-one",
+    appendEpoch: epoch,
+    appendEpochStartedAt: epochStartedAt,
+    appendSnapshotAt: snapshotAt,
+    appendService: {
+      video: { init: { bytes: 0, elapsedMs: 0, operations: 0, samples: [] },
+        media: { bytes, elapsedMs: serviceMs, operations,
+          samples: operations ? [{ bytes, elapsedMs: serviceMs, ageMs: Math.max(0, snapshotAt - (AT + bytes)),
+            fragmentId: "main:0:1:2:0", fragmentSequence: 2, partIndex: null, fragmentStartSeconds: 0 }] : [] } },
+      audio: { init: { bytes: 0, elapsedMs: 0, operations: 0, samples: [] },
+        media: { bytes: 0, elapsedMs: 0, operations: 0, samples: [] } }
+    },
+    fragmentService: {
+      video: { init: { bytes: 0, elapsedMs: 0, operations: 0, samples: [] },
+        media: { bytes, elapsedMs: serviceMs, operations, samples: operations
+          ? [{ bytes, elapsedMs: serviceMs, ageMs: Math.max(0, snapshotAt - (AT + bytes)), fragmentId: "main:0:1:2:0",
+            fragmentSequence: 2, partIndex: null,
+            fragmentStartSeconds: 0, parseElapsedMs: serviceMs / 2, bufferingElapsedMs: serviceMs / 4,
+            bufferingAgeMs: Math.max(0, snapshotAt - (AT + bytes)),
+            eventAgesMs: { loadStart: Math.max(0, snapshotAt - (AT + bytes) + 40),
+              loadFirstByte: Math.max(0, snapshotAt - (AT + bytes) + 30),
+              loadEnd: Math.max(0, snapshotAt - (AT + bytes) + 20),
+              parseStart: Math.max(0, snapshotAt - (AT + bytes) + 15),
+              parseEnd: Math.max(0, snapshotAt - (AT + bytes) + 10),
+              bufferingStart: Math.max(0, snapshotAt - (AT + bytes) + 5),
+              bufferingEnd: Math.max(0, snapshotAt - (AT + bytes)) } }]
+          : [] } },
+      audio: { init: { bytes: 0, elapsedMs: 0, operations: 0, samples: [] },
+        media: { bytes: 0, elapsedMs: 0, operations: 0, samples: [] } }
+    },
+    bufferedAheadSec: 0
+  });
+
+  viewer.report(report(200, 40, 2), AT);
+  assert.deepEqual(viewer.netReport.appendService.video.media.samples,
+    [{ bytes: 200, elapsedMs: 40, ageMs: 0, fragmentId: "main:0:1:2:0", fragmentSequence: 2, partIndex: null,
+      fragmentStartSeconds: 0 }]);
+  assert.deepEqual(viewer.netReport.fragmentService.video.media.samples[0], {
+    bytes: 200, elapsedMs: 40, ageMs: 0, fragmentId: "main:0:1:2:0", fragmentSequence: 2, partIndex: null,
+    fragmentStartSeconds: 0,
+    parseElapsedMs: 20, bufferingElapsedMs: 10, bufferingAgeMs: 0,
+    eventAgesMs: { loadStart: 40, loadFirstByte: 30, loadEnd: 20, parseStart: 15, parseEnd: 10,
+      bufferingStart: 5, bufferingEnd: 0 }
+  });
+  assert.equal(viewer.netReport.appendServiceReceivedAt, AT);
+
+  viewer.report(report(200, 40, 2, "page-one", AT, AT + 500), AT + 1000);
+  assert.equal(viewer.netReport.appendService.video.media.samples[0].ageMs, 300);
+  assert.equal(viewer.netReport.appendServiceReceivedAt, AT + 1000,
+    "a newer snapshot refreshes the sample age even when totals did not change");
+
+  viewer.report(report(300, 60, 3, "page-one", AT, AT + 600), AT + 2000);
+  assert.deepEqual(viewer.netReport.appendService.video.media.samples,
+    [{ bytes: 300, elapsedMs: 60, ageMs: 300, fragmentId: "main:0:1:2:0", fragmentSequence: 2, partIndex: null,
+      fragmentStartSeconds: 0 }]);
+  assert.deepEqual(viewer.netReport.fragmentService.video.media.samples[0], {
+    bytes: 300, elapsedMs: 60, ageMs: 300, fragmentId: "main:0:1:2:0", fragmentSequence: 2, partIndex: null,
+    fragmentStartSeconds: 0,
+    parseElapsedMs: 30, bufferingElapsedMs: 15, bufferingAgeMs: 300,
+    eventAgesMs: { loadStart: 340, loadFirstByte: 330, loadEnd: 320, parseStart: 315, parseEnd: 310,
+      bufferingStart: 305, bufferingEnd: 300 }
+  });
+  assert.equal(viewer.netReport.appendServiceReceivedAt, AT + 2000);
+
+  viewer.report(report(250, 50, 2, "page-one", AT, AT + 550), AT + 3000);
+  assert.equal(viewer.netReport.appendService.video.media.bytes, 300, "an older cumulative report is ignored");
+  assert.equal(viewer.netReport.appendServiceReceivedAt, AT + 2000);
+
+  viewer.report(report(0, 0, 0, "page-two", AT + 3000), AT + 4000);
+  assert.equal(viewer.netReport.appendEpoch, "page-two");
+  assert.deepEqual(viewer.netReport.appendService.video.media.samples, []);
+
+  viewer.report(report(900, 180, 9, "page-one", AT), AT + 5000);
+  assert.equal(viewer.netReport.appendEpoch, "page-two", "a delayed report from an older reporter cannot replace the new epoch");
+});
+
 test("a page one release behind, which cannot say `waiting`, is read from what it does say", () => {
   const starved = new Viewer("starved", AT);
   starved.report({ linkMbps: 5, bufferedAheadSec: 0, positionSeconds: 0, playing: false }, AT);

@@ -77,6 +77,37 @@ test("forecasts the first required segment from source, processing, and client d
   }]);
 });
 
+test("the whole-film suffix overlaps measured processing and delivery services", () => {
+  const now = 10_000;
+  const durationSeconds = 3_600;
+  const segments = Array.from({ length: 900 }, (_, index) => ({
+    index, startSeconds: index * 4, endSeconds: (index + 1) * 4
+  }));
+  const forecast = predictPlaybackReadiness({
+    now,
+    positionSeconds: 0,
+    durationSeconds,
+    bufferedAheadSeconds: 0,
+    bufferLimitSeconds: durationSeconds,
+    reserveSeconds: 0,
+    lookaheadSeconds: 120,
+    sources: [{ id: "source", complete: true }],
+    tracks: [{
+      id: "video",
+      sourceIds: ["source"],
+      bitsPerMediaSecond: 8_000_000,
+      readings: [{ at: now - 1_000, value: 1.5 }, { at: now, value: 1.5 }],
+      segments,
+      readySegmentIndices: [],
+      segmentSizesBytes: new Map()
+    }],
+    linkReadings: [{ at: now - 1_000, value: 12_000_000 }, { at: now, value: 12_000_000 }]
+  });
+
+  assert.ok(Math.abs(forecast.firstRequiredSegmentsSeconds - (4 / 1.5 + 4 * 8_000_000 / 12_000_000)) < 1e-8);
+  assert.ok(Math.abs(forecast.delaySeconds - (4 / 1.5 + 4 * 8_000_000 / 12_000_000)) < 1e-8);
+});
+
 test("a delivered first segment does not hide a later delivery gap", () => {
   const state = input();
   state.tracks[0].clientRanges = [{ start: 0, end: 4 }];
@@ -956,9 +987,10 @@ test("does not invent future encode acceleration to start an unsustainable outpu
 
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "minimum-safe-delay");
-  // Near work retains the measured harmonic rate; the suffix uses one aggregate delivery estimate.
+  // The first service bottleneck sets the tail completion; fast transfer overlaps processing.
   const rate = 2 / (1 / 0.1 + 1 / 0.15);
-  assert.ok(Math.abs(forecast.delaySeconds - (4 / rate + 8 / 100 - 8 + 1)) < 1e-8);
+  assert.ok(Math.abs(forecast.delaySeconds - (4 / rate - 8 + 1)) < 1e-8,
+    `expected measured-service bound, got ${forecast.delaySeconds}`);
 });
 
 test("a faster old probe cannot turn positive delivery into a permanent zero rate", () => {

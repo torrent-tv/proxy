@@ -856,6 +856,7 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
 
   let outputBits = 0;
   let latestTrackFinish = 0;
+  let earliestTrackStart = Number.POSITIVE_INFINITY;
   for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
     const state = trackState[trackIndex];
     const end = state.tailEndSeconds;
@@ -874,7 +875,9 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
     const localStart = tailStart - state.clockSeconds;
     const inRun = run.spans.some(span => localStart >= span.start && localStart < span.end);
     const open = work > 0 && !inRun ? run.openSeconds : 0;
-    const finishedAt = work > 0 ? processing.finish(work, trackFinish[trackIndex] + open) : trackFinish[trackIndex];
+    const productionStart = trackFinish[trackIndex] + open;
+    const finishedAt = work > 0 ? processing.finish(work, productionStart) : trackFinish[trackIndex];
+    if (work > 0) earliestTrackStart = Math.min(earliestTrackStart, productionStart);
     latestTrackFinish = Math.max(latestTrackFinish, finishedAt);
     const deliveryStart = Math.max(tailStart, position + buffered);
     outputBits += Math.max(0, state.bitsPerMediaSecond) * Math.max(0, end - deliveryStart);
@@ -885,7 +888,13 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
 
   if (outputBits > 0) {
     const end = Math.max(...trackState.map(state => state.tailEndSeconds));
-    const completedAt = link.finish(outputBits, Math.max(transferFinish, latestTrackFinish));
+    // Production and transfer are tandem services. Starting the link only
+    // after the last track finishes charges both complete workloads in series.
+    // The fluid suffix is bounded by the later service completion, with the
+    // link queue beginning no earlier than the first produced output.
+    const deliveryStart = Math.max(transferFinish, Number.isFinite(earliestTrackStart) ? earliestTrackStart : 0);
+    const deliveryAt = link.finish(outputBits, deliveryStart);
+    const completedAt = Math.max(latestTrackFinish, deliveryAt);
     const ahead = Math.max(0, end - position);
     constrain(completedAt - Math.max(0, ahead - reserve), "delivery", 0,
       trackState[0]?.segments.at(-1)?.index ?? 0, completedAt, ahead, false, sourceArrivalAt, false);

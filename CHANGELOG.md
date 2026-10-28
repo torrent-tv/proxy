@@ -1,7 +1,10 @@
+## Unreleased
+
+- **Fix**: Schedule the whole-film suffix as overlapping processing and delivery services instead of adding the full transfer after production (#ttv-185).
+
 ## 2.107.43
 
 - **Fix**: Calculate measured processing throughput from total media produced and active processing time, so unequal segment lengths do not receive equal weight in start forecasts (#ttv-185).
-- **Fix**: Schedule the whole-film suffix as overlapping processing and delivery services instead of adding the full transfer after production (#ttv-185).
 
 ## 2.107.42
 

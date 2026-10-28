@@ -11,8 +11,8 @@ requires that declaration before using event-driven preparation.
 | Request | Required input | Successful answer |
 |---|---|---|
 | `POST /api/sources` | `{ sourceType, source, consumerId }`; older pages may omit `consumerId` | `{ sourceKey, playbackMapVersion: 1 }` identifies the source and declares source viewer reports and event-driven preparation. The page reports an update requirement if the declaration is missing. |
-| `GET /api/sources/:sourceKey/files?consumerId=ID&generation=N&linkMbps=M&linkSampleAgeMs=MS&waitElapsedMs=MS` | Registered `sourceKey`; viewer/action identity, the separately measured client link and age, and monotonic elapsed time since a known original action | Waits for metadata, terminal failure or cancellation without an elapsed deadline. Success returns `{ name, infoHash, files, items, shape }`. `files` carries `fileIndex`, `name`, `relativePath`, `length`, `kind`, exclusion facts and, when a host-matched observation exists, `waitEstimate` for video files. `items` omits samples and release-group promos, maps video indices to audio, subtitle and image indices, and carries filename-derived `episode` metadata. The visible indices are recorded for the viewer. |
-| `GET /api/sources/:sourceKey/stats?fileIndex=N&consumer=ID&generation=N&fileName=NAME&fileLength=BYTES&linkMbps=M&linkSampleAgeMs=MS&waitElapsedMs=MS` | Registered source; viewer/action identity, selected file facts when locally known, separately measured client link and age, and monotonic elapsed action time | Current peer, transfer, header, and file progress readings. A reading may not contain every measurement; absent or `null` measurements are unknown. While source or torrent metadata is pending, the response may still carry a host-matched `waitEstimate` when the page supplied the selected file facts; absent history leaves it out. |
+| `GET /api/sources/:sourceKey/files?consumerId=ID&generation=N&linkMbps=M&linkSampleAgeMs=MS` | Registered `sourceKey`; viewer/action identity and separately measured client link and age | Waits for metadata, terminal failure or cancellation without an elapsed deadline. Success returns `{ name, infoHash, files, items, shape }`. Files do not carry a first-frame estimate. `items` omits samples and release-group promos, maps video indices to audio, subtitle and image indices, and carries filename-derived `episode` metadata. The visible indices are recorded for the viewer. |
+| `GET /api/sources/:sourceKey/stats?fileIndex=N&consumer=ID&generation=N&fileName=NAME&fileLength=BYTES&linkMbps=M&linkSampleAgeMs=MS` | Registered source; viewer/action identity, selected file facts when locally known and separately measured client link and age | Current peer, transfer, header and file progress readings. A reading may not contain every measurement; absent or `null` measurements are unknown. No first-frame estimate is attached. |
 | `POST /api/sources/:sourceKey/warm` | Registered source | Compatibility acknowledgement `{ started, swarm, edges: false, fill: false }`. This does not create a download order; present viewers determine preparation. |
 | `POST /api/sources/:sourceKey/files/:fileIndex/viewer` | `{ consumerId, positionSeconds, generation, playing, waiting }` and optional seek, buffer and visibility readings | `{ received: true }` records direct playback. An obsolete selection returns `409`, `code: REQUEST_OBSOLETE`, `canRetry: false`. Older generations cannot restore a previous position. |
 | `GET /api/sources/:sourceKey/files/:fileIndex/container-metadata` | Registered source; file index | `200` with what the file states about the work: `{ title, otherTitles, segmentTitle, seriesTitle, season, episode, episodeId, episodeTitle, year, itemYear, genres, description, externalIds, trackTitles, chapterTitles, cover, outsideEdges }` (`services/media/container/work-tags.js`). `202 { status: "pending" }` while the first or last piece of the file has not arrived; `404` where the format states nothing this proxy reads. Read only from the edges of the file, which opening it fetches anyway, and from bytes already held; `outsideEdges` says something lay elsewhere and was left out. |
@@ -224,67 +224,23 @@ continue to work without sending `connectionId`.
 | `GET /transcode/:id/v/:height/warm` and `/transcode/:id/a/:track/warm` | Prepare the requested video height or audio track at a position. `204` means ready. Audio warm-up `404` means the proxy does not support this operation for that session. Audio warm-up takes an optional `transcode=0\|1`: whether the browser cannot play THAT track's codec as it is. The proxy decides the track's mode by the rule used when a file is opened; without the parameter it assumes the browser needs what it needed for its current track. Audio warm-up `503` with `{ warming: true }` means the track and its mode are recorded for this viewer and its segment is still being made; any other `503`, and `500`, recorded nothing. |
 | `GET /stream?sourceKey=…&fileIndex=N` | Direct file bytes with HTTP range support. |
 
-### Playback readiness forecast
+### First-frame forecast status
 
-The file list may carry an initial `waitEstimate` before a transcode session
-exists, so the browser can start its countdown at file selection without a new
-round trip. The source statistics response may revise that estimate as current
-source readings arrive. The optional viewer and `generation` query fields scope
-both responses to one viewer action. Before a transcode session exists, the
-page supplies its separately measured client-link rate and the age of its
-newest sample; this does not combine client delivery with peer-to-proxy
-download. The proxy compares all measurements shared with its closest saved
-first-frame outcome on the current encoder configuration. Older saved outcomes
-may not have a link reading, so that dimension cannot affect their match. When
-the original action time is known, the page sends elapsed time measured by its
-monotonic clock and the proxy subtracts it from the saved full wait. The page
-also measures request round-trip time and applies it once as response age. Later
-source-statistics requests carry the current action age, so a new reading does
-not restart a full-wait countdown. Older pages without this input use the
-proxy's monotonic time since its first reading. After output creation, the same
-wait identity is revised with the selected per-track copy or encode path and
-its measured processing rates. This value is an initial point estimate; it
-does not authorize playback and does not replace the full readiness
-calculation.
+The proxy does not currently return a numeric estimate for time to the first
+advancing audio-ready frame. File, statistics and progress responses carry no
+`waitEstimate`; the browser clears any earlier value. Completed waits and their
+stage measurements remain evaluation data only and do not produce a forecast.
 
-| Field | Meaning |
-|---|---|
-| `version` | Initial-estimate contract version (`1`). |
-| `waitId` | Source, file and viewer-action identity; a different action starts a separate countdown. |
-| `revision` | Increases when a new merged measurement updates the same wait. |
-| `remainingSeconds` | Host-matched full first-frame observation minus elapsed action time, floored at zero, in seconds. |
-| `ageMs` | Request round-trip age measured by the page and subtracted once when the countdown starts. |
-
-If the current encoder configuration has no saved first-frame observation for
-the same file suffix, this field is omitted. A first-frame observation is
-learned only when the browser reports that the required audio range covers the
-presented frame. This does not meet the one-second availability requirement
-for an action without a matching observation; do not substitute the time to
-read the container header for the time to present the first frame.
-
-The initial value is an empirical estimate, not the playback permission. The
-proxy keeps up to 20 measured first-frame outcomes for the same current set of
-proxy encoder configurations. Each outcome records the original wait duration
-with the file size, suffix, source download rate, remaining container-header
-bytes, connected peer count, and browser-proxy link rate available at the file
-list and latest source-statistics readings. Missing readings stay missing;
-measured zero rates and zero peers stay zero. Outcomes from another available
-encoder-configuration set are discarded, because its proxy work is not known to
-match this one. Later snapshots also retain the measured video and audio copy or
-encode paths and their processing rates, keeping the two tracks as separate
-inputs to the model; these are already reported in the active `playbackReadiness`
-operations and do not add fields to `waitEstimate`.
-
-For a prediction, outcomes with another file suffix are excluded. Each available
-numeric input is transformed as `ln(1 + x / s)`, where `s` is the median
-positive value for that input in the candidate observations. The proxy chooses
-the observation with the smallest mean squared difference over inputs present
-in both the current readings and that observation; ties choose the newer
-observation. The measured outcome includes the proxy's actual work, rather than
-adding a second estimate for proxy work. This closest-observation model has no
-measured 90th-percentile error result yet and cannot return a value before the
-proxy has at least one usable outcome. The full readiness forecast later
-replaces this initial value when it has a finite delay.
+`playbackReadiness.delaySeconds` is a different quantity: the current
+mathematical continuity calculation's minimum delay before the proxy's measured
+service trajectory can sustain playback through the remaining film. It remains
+an input to the playback-start gate. It is not the time until the first frame
+and must not be displayed as such. For example, on the 2026-10-28 Below S01E01
+run the partial calculation briefly produced 42,053 s, then 1.75 s, while the
+first advancing audio-ready frame occurred 7.36 s after the action. The first
+frame ETA stays unavailable until the model includes its actual browser,
+subtitle, control, polling and presentation predecessors and a supported
+operation-level service uncertainty model.
 
 The progress response may include `playbackReadiness`:
 

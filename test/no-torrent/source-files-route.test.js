@@ -93,29 +93,25 @@ test("the files come back in reading order, each saying what it is", () => {
   });
 });
 
-test("a saved first-frame estimate is attached to eligible video files before selection", async () => {
+test("source facts are recorded without attaching a first-frame estimate", async () => {
   const { req, reply, sent, deps } = harness([
     { path: "Film/episode.mkv", length: 900 },
     { path: "Film/subtitle.srt", length: 12 }
   ]);
-  req.query = { consumerId: "viewer", generation: "0", linkMbps: "18.5", linkSampleAgeMs: "120",
-    waitElapsedMs: "4250" };
+  req.query = { consumerId: "viewer", generation: "0", linkMbps: "18.5", linkSampleAgeMs: "120" };
   const calls = [];
   deps.viewerRequests = {
-    waitEstimateForFile: value => {
+    noteWaitFileSnapshot: value => {
       calls.push(value);
-      return { version: 1, waitId: "key:0:0", revision: 0, remainingSeconds: 15, ageMs: 0 };
     }
   };
 
   await handleApiSourceFilesGet(req, reply, deps);
 
-  assert.equal(sent.body.files.find(file => file.kind === "video").waitEstimate.remainingSeconds, 15);
+  assert.equal(sent.body.files.find(file => file.kind === "video").waitEstimate, undefined);
   assert.equal(sent.body.files.find(file => file.kind === "subtitle").waitEstimate, undefined);
-  const { waitElapsedMs, ...request } = calls[0];
-  assert.deepEqual(request, { consumerId: "viewer", generation: 0, sourceKey: "key", fileIndex: 0,
+  assert.deepEqual(calls[0], { consumerId: "viewer", generation: 0, sourceKey: "key", fileIndex: 0,
     fileName: "Film/episode.mkv", fileLength: 900, linkMbps: 18.5, linkSampleAgeMs: 120 });
-  assert.ok(waitElapsedMs >= 4250 && waitElapsedMs < 4300);
 });
 
 test("each picture is named with what belongs to it, by index", () => {

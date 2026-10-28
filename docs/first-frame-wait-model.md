@@ -264,7 +264,7 @@ orchestration. The torrent runs in one worker thread
 | P13.v / P13.a | Init readable; fMP4 only. Alternatives: written by FFmpeg at the run's start; or, for an output cut at given times (`cutsAtGivenTimes`), lifted from the first produced piece (`#initFromFirstSegment`); or already kept by `SegmentStore` / readable from a published piece when the output was made before | F1 or P11 of the output, or nothing (exactly one) | init readable | blocking for B6 |
 | P12.v / P12.a | Held request answered (`SegmentServing`) and streamed through the data-channel handler | P11 or P13 of the output, or the piece already published | response sent | blocking for B6 (fMP4), B7 |
 | P14 | Readiness forecast on each progress request (`getSessionProgress` → `#playbackReadinessFor` → `predictPlaybackReadiness`): worker statistics (W10), segment inputs from `SegmentInputTable`, rates, client ranges (C2) | progress request | answer | gate input to C1 |
-| P15 | Early wait estimate (`waitEstimateForFile` / `waitEstimateForSource`) from the active readiness calculation | A5, A6, A11, P14 | active estimate or null until its required inputs exist | observer |
+| P15 | Retired early wait estimate; source and first-frame facts are kept for evaluation only | A5, A6, A11, P14 | no numeric estimate is emitted | observer |
 
 ### 3.5 Child processes
 
@@ -367,10 +367,10 @@ orchestration. The torrent runs in one worker thread
 ## 7. What the current calculations cover
 
 1. The previous `LocalObservations.firstFrameSeconds` / `firstFrameEstimate`
-   calculation, which summed five medians from completed waits, has been removed
-   from the numeric wait path. Before an active readiness estimate exists,
-   `waitEstimateForFile` and `waitEstimateForSource` return null. Completed
-   waits do not supply a replacement forecast.
+   calculation and the later partial estimate based on first-required pieces
+   or `delaySeconds` are removed from the displayed wait. File and source
+   routes record current facts for evaluation; they do not emit a numeric
+   first-frame estimate. Completed waits remain evaluation data only.
 2. `predictPlaybackReadiness` schedules, per remaining segment in media order:
    source bytes on the torrent's one service (R1; planned piece arrivals from
    W10 first, then the measured rate); the start of a new run and its open
@@ -389,9 +389,13 @@ orchestration. The torrent runs in one worker thread
    not resolved a remaining segment of an incomplete source),
    `encode-rate-unavailable`, `download-rate-unavailable`,
    `service-not-advancing`; `media-continuity-unavailable` ends the wait.
-4. The active numeric wait still uses `max(firstRequiredSegmentsSeconds,
-   startGateSeconds)` where the latter is available. This remains an
-   intermediate readiness estimate, not the requested action-to-frame result.
+4. The browser receives no numeric first-frame estimate until the full
+   action-to-frame model is implemented. `delaySeconds` remains the proxy's
+   current full-film continuity constraint for its playback-start gate; it is
+   not displayed as the time to the first frame. On 2026-10-28, that partial
+   delay briefly mapped to 42,053 s, then 1.75 s, while the first audio-ready
+   advancing frame occurred 7.36 s after the action. `firstRequiredSegmentsSeconds`
+   remains a component diagnostic only.
    `firstRequiredSegmentsSeconds`: for each required track (one, or two with a
    separate soundtrack) it takes the first segment of the near window that
    ends after the viewer's position. If all of that segment's media is
@@ -474,7 +478,7 @@ logged at the process boundary; "derived" is computed from other values;
 | C1.3 | B | wait, attempt | four-second no-growth threshold | `resumeLoadAt(bufferedEnd)` returns | R6 | buffered end seconds | conditional direct operation span |
 | C1.4 | B | wait, attempt | unsuccessful gate iteration ends | 250 ms timer fires or cancellation occurs | browser timer queue | wait duration | direct timer-wait span |
 | P14 | P | session id, consumer | `process=P14 phase=begin` for readiness calculation | matching `phase=end` with duration; `readiness parts … in all <ms>` remains the breakdown and `http-end` the wider request envelope | R2 | — | direct proxy-monotonic process span |
-| P15 | P | source key, wait id, consumer, revision | estimate selected for a revision | `process=P15 phase=event` with remaining and total seconds and estimate basis | R2 | seconds | direct point observation; estimate calculation is synchronous |
+| P15 | P | source key, wait id, consumer | retired; no active forecast event | no runtime event after removal of the partial first-frame estimate | — | — | historical audit record only |
 | C3–C5 | B / P | wait, attempt, consumer and selected track | C3 `subtitle-hold` begin; C5 `play` | C3 release/error/cancel; C4 playback-ready; C5 `playing` | C1 gate | track and state | direct C3 span when held; point or state observations for C4/C5 |
 | S0 seek input | B | wait, attempt, target, input source | player controls: `media-seek-request`; native/system controls: first `seeking` event | `seek-input`; native path also `S0.seek-debounce` end at settled target | — | target seconds, source | direct monotonic trace; native physical input to `seeking` remains unobservable |
 | S1 parent envelope | B | wait, attempt, target | entry to `#moveToPosition` | command completion | contains S1.1–S1.6 and B4; envelope is not an atomic stage |
@@ -648,7 +652,7 @@ did not occur in those captured attempts; it never means zero duration.
 | Proxy parallel output lanes | P12.v | Serve and transfer picture bytes | Alien Romulus, first picture segment request: 2,435.2 ms total; endpoint and transfer records join by request ID |
 | Proxy parallel output lanes | P12.a | Serve and transfer soundtrack bytes | Alien Romulus, first soundtrack segment request: 1,761.3 ms total; endpoint and transfer records join by request ID |
 | Proxy main lane, repeated poll | P14 | Compute playback readiness forecast | Alien Romulus, opt-in wait trace: 45 direct spans, 14.7–344.2 ms; enclosing HTTP request is a separate wider interval |
-| Proxy main lane, observer | P15 | Emit early-estimate revision | Point observations; no duration |
+| Proxy main lane, observer | P15 | Retired early-estimate event | No runtime duration or point event |
 | Proxy main lane, conditional | X1 | Run ffprobe for unrecognised container | Not taken: container was recognised |
 | Encoder lane | F1.v | Hand first picture input bytes to FFmpeg | Post-release 2026-10-23 trace: positive spans of 209.2–1,081.3 ms for run tokens 32–41 |
 | Encoder lane | F1.a | Hand first soundtrack input bytes to FFmpeg | Post-release 2026-10-23 Alien Romulus cold start: 112.5 ms (run token 1), 27.9 ms (run token 3); seek: 29.5 ms (token 37), 36.7 ms (token 39); every admitted-`stdin` span has both events |
@@ -1052,7 +1056,6 @@ flowchart TB
     P12a6["P12.a init answered"]
     P12a7["P12.a fragment answered"]
     P14["P14 readiness forecast"]
-    P15["P15 early estimate"]
   end
 
   subgraph CHILD["Child processes"]
@@ -1224,11 +1227,6 @@ flowchart TB
   C7 -- yes --> O1
   C7 -- no --> O2
 
-  A5 -.-> P15
-  A6 -.-> P15
-  A11 -.-> P15
-  P14 -.-> P15
-  P15 -.-> E1
 ```
 
 The three edges into P13.v (and into P13.a) carry mutually exclusive
@@ -1290,10 +1288,7 @@ flowchart LR
     A6 -.-> P1
     A12 -.-> P1
     A16 -. cannotServe .-> A9
-    A5 -.-> P15["P15 early estimate"]
-    A6 -.-> P15
     A11 -.-> P14["P14 readiness forecast"]
-    P14 -.-> P15
     P6v --> P7v["P7.v picture run plan"]
     P6a["P6.a soundtrack output"] --> P7a["P7.a soundtrack run plan"]
     P7v --> P8v["P8.v picture input admission"]

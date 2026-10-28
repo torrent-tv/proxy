@@ -40,15 +40,15 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
     ? Number(req.query.fileLength) : null;
   const linkMbps = Number(req.query.linkMbps);
   const linkSampleAgeMs = Number(req.query.linkSampleAgeMs);
-  const waitElapsedMs = Number(req.query.waitElapsedMs);
   const earlyLink = Number.isFinite(linkMbps) && linkMbps > 0
     ? { linkMbps, linkSampleAgeMs: Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0 ? linkSampleAgeMs : null }
     : {};
-  const earlyWaitAge = Number.isFinite(waitElapsedMs) && waitElapsedMs >= 0 ? { waitElapsedMs } : {};
-  const initialEstimate = () => consumerId && Number.isSafeInteger(generation) && Number.isSafeInteger(fileIndex)
-    ? viewerRequests?.waitEstimateForFile?.({ consumerId, generation, sourceKey, fileIndex,
-      fileName: requestedFileName, fileLength: requestedFileLength, ...earlyLink, ...earlyWaitAge }) ?? null
-    : null;
+  const noteInitialSnapshot = () => {
+    if (consumerId && Number.isSafeInteger(generation) && Number.isSafeInteger(fileIndex)) {
+      viewerRequests?.noteWaitFileSnapshot?.({ consumerId, generation, sourceKey, fileIndex,
+        fileName: requestedFileName, fileLength: requestedFileLength, ...earlyLink });
+    }
+  };
 
   let torrent;
   try {
@@ -59,8 +59,8 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
     return reply.code(500).send({ error: `Failed to load torrent: ${message}` });
   }
   if (!torrent) {
-    const waitEstimate = initialEstimate();
-    return reply.code(202).send({ pending: true, ...(waitEstimate ? { waitEstimate } : {}) });
+    noteInitialSnapshot();
+    return reply.code(202).send({ pending: true });
   }
 
   // Awaited: with the torrent on its own thread this is a round trip, not a
@@ -74,8 +74,8 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
     logger.info(`[stats] ${sourceKey.slice(0, 8)} getFileStatsMs=${(performance.now() - statsStartedAt).toFixed(1)}`);
   }
   if (stats?.pending || !stats) {
-    const waitEstimate = initialEstimate();
-    return reply.code(202).send({ pending: true, ...(waitEstimate ? { waitEstimate } : {}) });
+    noteInitialSnapshot();
+    return reply.code(202).send({ pending: true });
   }
 
   // Diagnostic: surface the real swarm state per poll so a cold-start download
@@ -149,10 +149,10 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
     `file=${filePct} header=${header}${detail}`
   );
 
-  const waitEstimate = consumerId && Number.isSafeInteger(generation)
-    ? viewerRequests?.waitEstimateForSource?.({ consumerId, generation, sourceKey, fileIndex,
+  if (consumerId && Number.isSafeInteger(generation)) {
+    viewerRequests?.noteWaitSourceSnapshot?.({ consumerId, generation, sourceKey, fileIndex,
       fileName: torrent.files?.[fileIndex]?.name ?? requestedFileName, fileLength: requestedFileLength,
-      stats, ...earlyLink, ...earlyWaitAge }) ?? null
-    : null;
-  return reply.send(waitEstimate ? { ...stats, waitEstimate } : stats);
+      stats, ...earlyLink });
+  }
+  return reply.send(stats);
 }

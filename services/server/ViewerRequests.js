@@ -91,8 +91,8 @@ export class ViewerRequests {
   #host;
   /** @type {WeakMap<object, Map<string, object>>} */
   #rateStateBySession = new WeakMap();
-  /** @type {Map<string, { consumerId: string, generation: number, fileIndex: number | null, waitId: string, features: object, updatedAt: number, revision: number, observedWaits: Set<number> }>} */
-  #earlyWaits = new Map();
+  /** @type {Map<string, { consumerId: string, generation: number, fileIndex: number | null, waitId: string, features: object, updatedAt: number, observedWaits: Set<number> }>} */
+  #waitObservations = new Map();
   /**
    * What the start forecasts cost, said once a minute: how many there were,
    * their time on the main thread, and for each track whether the times of its
@@ -130,17 +130,10 @@ export class ViewerRequests {
     this.#host = host;
   }
 
-  /**
-   * Attach a host-matched estimate to the file list before the viewer chooses
-   * a file, so the original action need not wait for a torrent-worker round trip.
-   *
-   * @param {{ consumerId: string, generation: number, sourceKey: string, fileIndex: number, fileName: string, fileLength: number }} params
-   * @returns {object | null}
-   */
-  waitEstimateForFile({ consumerId, generation, sourceKey, fileIndex, fileName, fileLength, linkMbps, linkSampleAgeMs,
-    waitElapsedMs }) {
+  /** Record the facts known while listing a source, without producing an ETA. */
+  noteWaitFileSnapshot({ consumerId, generation, sourceKey, fileIndex, fileName, fileLength, linkMbps, linkSampleAgeMs }) {
     if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string" ||
-        !Number.isSafeInteger(fileIndex) || fileIndex < 0) return null;
+        !Number.isSafeInteger(fileIndex) || fileIndex < 0) return;
     const waitId = `${sourceKey}:${fileIndex}:${generation}`;
     const key = `${consumerId}:${waitId}`;
     const extension = typeof fileName === "string" ? fileName.split(".").at(-1)?.toLowerCase() ?? "" : "";
@@ -156,48 +149,23 @@ export class ViewerRequests {
       headerRemaining: null,
       peers: null
     };
-    const current = this.#earlyWaits.get(key);
-    if (current?.waitId === waitId && current.hasSourceObservation) {
-      const context = this.#setEarlyWait({ consumerId, generation, sourceKey, fileIndex, waitId, features,
-        revision: current.revision, current, waitElapsedMs });
-      const changed = this.#recordEarlyWaitSnapshot(context, context.features);
-      if (changed) context.revision += 1;
-      this.#pruneEarlyWaits();
-      const elapsedMs = waitElapsedSince(context, waitElapsedMs);
-      const totalSeconds = context.activeTotalSeconds;
-      const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
-      if (!Number.isFinite(seconds) || seconds < 0) return null;
-      this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds,
-        firstRequiredSegmentsSeconds: context.activeFirstRequiredSegmentsSeconds });
-      return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
-    }
-    const sameWait = current?.waitId === waitId;
-    const revision = sameWait ? current.revision : 0;
-    const context = this.#setEarlyWait({ consumerId, generation, sourceKey, fileIndex, waitId, features, revision, current,
-      waitElapsedMs });
-    const changed = this.#recordEarlyWaitSnapshot(context, context.features);
-    if (sameWait && changed) context.revision += 1;
-    this.#pruneEarlyWaits();
-    const elapsedMs = waitElapsedSince(context, waitElapsedMs);
-    const totalSeconds = context.activeTotalSeconds;
-    const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
-    if (!Number.isFinite(seconds) || seconds < 0) return null;
-    this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds,
-      firstRequiredSegmentsSeconds: context.activeFirstRequiredSegmentsSeconds,
-      firstRequiredStages: context.activeFirstRequiredStages });
-    return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
+    const current = this.#waitObservations.get(key);
+    const context = this.#setWaitObservation({ consumerId, generation, sourceKey, fileIndex, waitId, features, current });
+    this.#recordWaitSnapshot(context);
+    this.#pruneWaitObservations();
   }
 
   /**
-   * Keep the measurements available before the container is inspected and
-   * predict the complete first-frame wait from this host's earlier outcomes.
+   * Record current source and link facts for later forecast evaluation. These
+   * partial inputs do not determine the first presented frame, so this method
+   * does not produce a wait estimate.
    *
    * @param {{ consumerId: string, generation: number, sourceKey: string, fileIndex: number | null, fileName?: string, fileLength?: number | null, stats?: object }} params
    * @returns {object | null}
    */
-  waitEstimateForSource({ consumerId, generation, sourceKey, fileIndex, fileName = "", fileLength = null,
-    stats = {}, linkMbps, linkSampleAgeMs, waitElapsedMs, processing = {} }) {
-    if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string") return null;
+  noteWaitSourceSnapshot({ consumerId, generation, sourceKey, fileIndex, fileName = "", fileLength = null,
+    stats = {}, linkMbps, linkSampleAgeMs, processing = {} }) {
+    if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string") return;
     const waitId = `${sourceKey}:${fileIndex ?? "all"}:${generation}`;
     const key = `${consumerId}:${waitId}`;
     const extension = typeof fileName === "string" ? fileName.split(".").at(-1)?.toLowerCase() ?? "" : "";
@@ -220,68 +188,10 @@ export class ViewerRequests {
       videoSpeedX: processing.videoSpeedX ?? null,
       audioSpeedX: processing.audioSpeedX ?? null
     };
-    const current = this.#earlyWaits.get(key);
-    const sameWait = current?.waitId === waitId;
-    const revision = sameWait ? current.revision : 0;
-    const context = this.#setEarlyWait({ consumerId, generation, sourceKey, fileIndex, waitId, features, revision, current,
-      sourceObserved: true, waitElapsedMs });
-    const featuresChanged = this.#recordEarlyWaitSnapshot(context, context.features);
-    const elapsedMs = waitElapsedSince(context, waitElapsedMs);
-    // The wait ends when the start forecast lets the picture start, and the
-    // first required pieces being there is only part of that: a source
-    // supplied slower than the film plays is held until the cushion carries
-    // it to the end. Counted to the first pieces alone, the estimate reached
-    // zero with seven minutes still to wait, and the page had no time to show
-    // (Home Assistant 2026-10-26, Despicable Me 3 BDRemux at 0.53x,
-    // torrent-tv/meta#239).
-    const firstRequiredSeconds = processing.firstRequiredSegmentsSeconds;
-    const startGateSeconds = processing.startGateSeconds;
-    const measuredWorkSeconds = Number.isFinite(startGateSeconds) && startGateSeconds >= 0
-      ? Math.max(startGateSeconds, Number.isFinite(firstRequiredSeconds) ? firstRequiredSeconds : 0)
-      : firstRequiredSeconds;
-    const hasActiveEstimate = Number.isFinite(measuredWorkSeconds) && measuredWorkSeconds >= 0;
-    const stagesChanged = Array.isArray(processing.firstRequiredStages) &&
-      JSON.stringify(processing.firstRequiredStages) !== JSON.stringify(context.activeFirstRequiredStages);
-    const activeTotalSeconds = hasActiveEstimate
-      ? elapsedMs / 1000 + measuredWorkSeconds
-      : context.activeTotalSeconds;
-    const activeEstimateChanged = hasActiveEstimate &&
-      (activeTotalSeconds !== context.activeTotalSeconds || stagesChanged);
-    if (hasActiveEstimate) {
-      context.activeTotalSeconds = activeTotalSeconds;
-      context.activeFirstRequiredSegmentsSeconds = measuredWorkSeconds;
-      if (Array.isArray(processing.firstRequiredStages)) {
-        context.activeFirstRequiredStages = processing.firstRequiredStages;
-      }
-    }
-    const changed = featuresChanged || activeEstimateChanged;
-    if (sameWait && changed) context.revision += 1;
-    this.#pruneEarlyWaits();
-    const totalSeconds = activeTotalSeconds;
-    const seconds = earlyWaitRemainingSeconds(totalSeconds, elapsedMs);
-    if (!Number.isFinite(seconds) || seconds < 0) return null;
-    this.#logEarlyForecast(context, { elapsedMs, seconds, totalSeconds,
-      firstRequiredSegmentsSeconds: hasActiveEstimate ? firstRequiredSeconds ?? null : context.activeFirstRequiredSegmentsSeconds,
-      startGateSeconds: hasActiveEstimate && Number.isFinite(startGateSeconds) ? startGateSeconds : null,
-      firstRequiredStages: context.activeFirstRequiredStages });
-    return { version: 1, waitId, revision: context.revision, remainingSeconds: seconds, ageMs: 0 };
-  }
-
-  #logEarlyForecast(context, { elapsedMs, seconds, totalSeconds, firstRequiredSegmentsSeconds,
-    startGateSeconds = null, firstRequiredStages }) {
-    if (context.loggedForecastRevision === context.revision) return;
-    const gated = Number.isFinite(startGateSeconds) &&
-      !(Number.isFinite(firstRequiredSegmentsSeconds) && firstRequiredSegmentsSeconds >= startGateSeconds);
-    const basis = gated ? "start-gate" : "first-required";
-    const estimate = { firstRequiredSegmentsSeconds, ...(Number.isFinite(startGateSeconds) ? { startGateSeconds } : {}),
-      ...(Array.isArray(firstRequiredStages) ? { firstRequiredStages } : {}) };
-    logger.info(`early wait forecast ${JSON.stringify({ waitId: context.waitId, consumer: context.consumerId,
-      generation: context.generation, features: context.features, elapsedMs, revision: context.revision,
-      predicted: { remainingSeconds: seconds, totalSeconds, basis, ...estimate } })}`);
-    this.#host.observeWait?.(context.sourceKey, "process", { process: "P15", phase: "event",
-      waitId: context.waitId, consumerId: context.consumerId, generation: context.generation,
-      elapsedMs, revision: context.revision, remainingSeconds: seconds, totalSeconds, basis, ...estimate });
-    context.loggedForecastRevision = context.revision;
+    const current = this.#waitObservations.get(key);
+    const context = this.#setWaitObservation({ consumerId, generation, sourceKey, fileIndex, waitId, features, current });
+    this.#recordWaitSnapshot(context);
+    this.#pruneWaitObservations();
   }
 
   /**
@@ -296,20 +206,19 @@ export class ViewerRequests {
    */
   noteFirstFrameObservation({ consumerId, generation, waitId, wait, elapsedMs, stages = null }) {
     const key = `${consumerId}:${waitId}`;
-    const early = this.#earlyWaits.get(key);
-    if (!early || early.generation !== generation || !Number.isSafeInteger(wait) || wait < 0 || early.observedWaits.has(wait) ||
+    const observation = this.#waitObservations.get(key);
+    if (!observation || observation.generation !== generation || !Number.isSafeInteger(wait) || wait < 0 || observation.observedWaits.has(wait) ||
         !Number.isFinite(elapsedMs) || elapsedMs < 0) return;
-    const initialFeatures = early.snapshots[0];
+    const initialFeatures = observation.snapshots[0];
     if (initialFeatures) {
       this.#host.noteFirstFrame?.({ seconds: elapsedMs / 1000, features: initialFeatures,
-        featureSnapshots: early.snapshots.slice(1), stages });
+        featureSnapshots: observation.snapshots.slice(1), stages });
     }
-    early.observedWaits.add(wait);
-    early.updatedAt = Date.now();
+    observation.observedWaits.add(wait);
+    observation.updatedAt = Date.now();
   }
 
-  #setEarlyWait({ consumerId, generation, sourceKey, fileIndex, waitId, features, revision, current,
-    sourceObserved = false, waitElapsedMs }) {
+  #setWaitObservation({ consumerId, generation, sourceKey, fileIndex, waitId, features, current }) {
     const sameWait = current?.waitId === waitId;
     const context = sameWait ? current : {
       consumerId,
@@ -318,26 +227,21 @@ export class ViewerRequests {
       fileIndex,
       waitId,
       snapshots: [],
-      hasSourceObservation: false,
       observedWaits: new Set()
     };
     const measuredAt = performance.now();
-    const actionElapsedMs = Number.isFinite(waitElapsedMs) && waitElapsedMs >= 0 ? waitElapsedMs : null;
-    const startedAt = actionElapsedMs === null
-      ? Number.isFinite(context.startedAt) ? context.startedAt : measuredAt
-      : measuredAt - actionElapsedMs;
     const ageElapsedMs = Number.isFinite(context.featuresMeasuredAt)
       ? Math.max(0, measuredAt - context.featuresMeasuredAt)
       : 0;
     const mergedFeatures = mergeWaitFeatures(context.features, features, ageElapsedMs);
     Object.assign(context, { consumerId, generation, sourceKey, fileIndex, waitId, features: mergedFeatures,
-      featuresMeasuredAt: measuredAt, startedAt, updatedAt: Date.now(), revision,
-      hasSourceObservation: context.hasSourceObservation || sourceObserved });
-    this.#earlyWaits.set(`${consumerId}:${waitId}`, context);
+      featuresMeasuredAt: measuredAt, updatedAt: Date.now() });
+    this.#waitObservations.set(`${consumerId}:${waitId}`, context);
     return context;
   }
 
-  #recordEarlyWaitSnapshot(context, features) {
+  #recordWaitSnapshot(context) {
+    const features = context.features;
     const previous = context.snapshots.at(-1);
     if (previous && JSON.stringify(previous) === JSON.stringify(features)) return false;
     const snapshot = { ...features };
@@ -373,12 +277,12 @@ export class ViewerRequests {
     return bytes;
   }
 
-  #pruneEarlyWaits() {
+  #pruneWaitObservations() {
     const cutoff = Date.now() - 30 * 60_000;
-    for (const [key, value] of this.#earlyWaits) {
-      if (value.updatedAt < cutoff) this.#earlyWaits.delete(key);
+    for (const [key, value] of this.#waitObservations) {
+      if (value.updatedAt < cutoff) this.#waitObservations.delete(key);
     }
-    while (this.#earlyWaits.size > 1000) this.#earlyWaits.delete(this.#earlyWaits.keys().next().value);
+    while (this.#waitObservations.size > 1000) this.#waitObservations.delete(this.#waitObservations.keys().next().value);
   }
 
   /**
@@ -674,13 +578,12 @@ export class ViewerRequests {
       videoSpeedX: null,
       audioSpeedX: null
     };
-    // A seek is a new waiting action even when a caller repeats the same
-    // generation. Start its clock at the explicit seek request, before the
-    // next readiness poll can return the first current-work estimate.
-    this.#earlyWaits.delete(key);
-    const context = this.#setEarlyWait({ consumerId, generation, sourceKey: file.sourceKey,
-      fileIndex: file.fileIndex, waitId, features, revision: 0, current: null, waitElapsedMs: 0 });
-    this.#recordEarlyWaitSnapshot(context, features);
+    // A seek is a new observation group even when a caller repeats the same
+    // generation; its source facts must not join observations from the prior wait.
+    this.#waitObservations.delete(key);
+    const context = this.#setWaitObservation({ consumerId, generation, sourceKey: file.sourceKey,
+      fileIndex: file.fileIndex, waitId, features, current: null });
+    this.#recordWaitSnapshot(context);
   }
 
   /**
@@ -1109,11 +1012,11 @@ export class ViewerRequests {
       ? this.#host.generationOfRequest(consumerId) : null;
     const earlyWaitId = Number.isSafeInteger(generation)
       ? `${session.file.sourceKey}:${session.file.fileIndex}:${generation}` : null;
-    if (earlyWaitId && this.#earlyWaits.has(`${consumerId}:${earlyWaitId}`) && primarySourceStats) {
+    if (earlyWaitId && this.#waitObservations.has(`${consumerId}:${earlyWaitId}`) && primarySourceStats) {
       const linkMeasuredAt = Number(viewerReading?.linkMeasuredAt);
       const videoOperation = forecast.operations.find(operation => operation.track === "video");
       const audioOperation = forecast.operations.find(operation => operation.track === "audio");
-      const waitEstimate = this.waitEstimateForSource({ consumerId, generation,
+      this.noteWaitSourceSnapshot({ consumerId, generation,
         sourceKey: session.file.sourceKey, fileIndex: session.file.fileIndex,
         fileName: session.file.relativePath ?? session.file.name ?? "",
         fileLength: primarySourceStats.fileLength, stats: primarySourceStats,
@@ -1125,14 +1028,12 @@ export class ViewerRequests {
           videoSpeedX: videoOperation?.speed,
           audioSpeedX: audioOperation?.speed,
           firstRequiredSegmentsSeconds: forecast.firstRequiredSegmentsSeconds,
-          // When the start forecast lets the picture start: its delay while
-          // it holds the start, and nothing to add once it does not.
           ...(forecast.ready !== true && Number.isFinite(forecast.delaySeconds)
             ? { startGateSeconds: forecast.delaySeconds } : {}),
           firstRequiredStages: forecast.firstRequiredStages
         } });
-      if (waitEstimate) forecast.waitEstimate = waitEstimate;
     }
+    forecast.waitEstimate = null;
     const unavailableInput = forecast.unavailableSource;
     const previousInputState = measurement.forecastInputState ?? null;
     const currentInputState = forecastInputState(tracks, unavailableInput);
@@ -1464,31 +1365,6 @@ function linkMeasurementOf(viewer, reportedMbps, reportedAgeMs) {
     ? reportedAgeMs
     : Number.isFinite(reading?.linkMeasuredAt) ? Math.max(0, Date.now() - reading.linkMeasuredAt) : null;
   return { mbps, ageMs };
-}
-
-/**
- * Convert a learned full wait into the time still expected after this action.
- *
- * @param {number | null} totalSeconds
- * @param {number} elapsedMs
- * @returns {number | null}
- */
-function earlyWaitRemainingSeconds(totalSeconds, elapsedMs) {
-  if (!Number.isFinite(totalSeconds) || totalSeconds < 0 || !Number.isFinite(elapsedMs) || elapsedMs < 0) return null;
-  return Math.max(0, totalSeconds - elapsedMs / 1000);
-}
-
-/**
- * Prefer the browser's monotonic age of the original action; retain a proxy
- * monotonic clock fallback for older pages that do not send it.
- *
- * @param {object} context
- * @param {number | undefined} reportedElapsedMs
- * @returns {number}
- */
-function waitElapsedSince(context, reportedElapsedMs) {
-  if (Number.isFinite(reportedElapsedMs) && reportedElapsedMs >= 0) return reportedElapsedMs;
-  return Number.isFinite(context.startedAt) ? Math.max(0, performance.now() - context.startedAt) : 0;
 }
 
 /**

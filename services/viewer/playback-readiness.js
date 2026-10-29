@@ -841,16 +841,19 @@ export function predictPlaybackReadiness(input = {}) {
   // THE STOCK THE START ASKS FOR HAS TO FIT. Starting without a stop while the
   // source comes slower than the film plays means holding, at the start, what
   // is already here and everything that arrives before it. Where that is more
-  // than this proxy may keep of downloaded pieces, the oldest of it would be
-  // given up before the viewer reached it, and no wait makes the start safe:
+  // than the disk room left after other active playback stock is reserved,
+  // some of it would be given up before the viewer reached it, so no wait
+  // makes the start safe:
   // Despicable Me 3 BDRemux at 1.4 MB/s asked for about 36 GB against a 29.5 GB
   // share (Home Assistant 2026-10-26, torrent-tv/meta#239). Said as such, and
   // the viewer keeps waiting rather than starting into stops.
   const storageBytes = Number(input.sourceStorageBytes);
   const tailParts = tailStock.filter(part => !part.skipped);
+  const cushionBytes = Number.isFinite(delay) && tailParts.length > 0
+    ? tailParts.reduce((sum, part) => sum + Math.max(0, part.totalBytes - part.missingBytes) +
+      Math.max(0, part.missingBytes - part.bytesPerSecond * Math.max(0, part.finish - delay)), 0)
+    : null;
   if (Number.isFinite(delay) && Number.isFinite(storageBytes) && storageBytes >= 0 && tailParts.length > 0) {
-    const cushionBytes = tailParts.reduce((sum, part) => sum + Math.max(0, part.totalBytes - part.missingBytes) +
-      Math.max(0, part.missingBytes - part.bytesPerSecond * Math.max(0, part.finish - delay)), 0);
     if (cushionBytes > storageBytes) {
       return { ...result(false, null, buffered, reserve, null, "cushion-exceeds-storage", preparedSegments),
         cushionBytes, storageBytes, tail: tailStock };
@@ -862,6 +865,7 @@ export function predictPlaybackReadiness(input = {}) {
     Math.max(0, reserve - buffered), ready ? 'trajectory-safe-now' :
       Number.isFinite(delay) ? 'minimum-safe-delay' : 'service-not-advancing', preparedSegments);
   return { ...forecast, measuredAt: now, predictedStartAt: Number.isFinite(delay) ? now + delay * 1000 : null,
+    ...(cushionBytes === null ? {} : { cushionBytes }),
     firstRequiredSegmentsSeconds,
     firstRequiredStages,
     // What the rest of the film weighs per source, at what rate it comes and

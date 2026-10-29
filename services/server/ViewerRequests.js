@@ -1013,9 +1013,8 @@ export class ViewerRequests {
       bufferLimitSeconds: viewerReading?.bufferLimitSeconds,
       reserveSeconds,
       lookaheadSeconds: this.#host.lookaheadSeconds,
-      // What this proxy may keep of downloaded pieces on disk: the most a
-      // start can hold of the film ahead of the viewer.
-      sourceStorageBytes: this.#host.sourceStorageBytes?.() ?? null,
+      // Disk room remaining after stock reserved for other active outputs.
+      sourceStorageBytes: this.#host.sourceStorageBytes?.(session.outputKey ?? session.id) ?? null,
       requiredAudio: requiresSeparateAudio,
       sources: [...sourceMeasurements.values()],
       tracks,
@@ -1028,6 +1027,9 @@ export class ViewerRequests {
       viewer.subtitle.fileIndex === session.file.fileIndex ? viewer.subtitle : null;
     const startedAt = performance.now();
     const predicted = this.#host.playbackReadiness.predict(input);
+    if (consumerId && Number.isFinite(predicted.cushionBytes)) {
+      this.#host.notePlaybackStorageDemand?.(session.outputKey ?? session.id, consumerId, predicted.cushionBytes);
+    }
     const predictMs = performance.now() - startedAt;
     this.#noteForecast(predictMs, tracks.map(track => track.geometry?.reason ?? "none"));
     logger.info(`readiness parts ${session.id} consumer=${consumerId}: source stats ${Math.round(parts.statsMs)}ms ` +

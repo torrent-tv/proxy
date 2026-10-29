@@ -427,6 +427,7 @@ export class OutputLifecycle {
     if (!output) {
       return false;
     }
+    this.#host.releasePlaybackStorageDemand?.(output.outputKey ?? "", consumerId);
     // Nothing to release in the encoding: it holds one map per output, built
     // from where the viewers are, and the map that arrives next simply does not
     // have this one in it. A name to release was the last place a viewer

@@ -215,6 +215,7 @@ test("a start whose stock cannot be kept on this proxy says so and keeps waiting
   assert.ok(short.cushionBytes > 29_529_000_000 && short.cushionBytes < 43_929_276_423, `${short.cushionBytes} bytes`);
   const roomy = predictPlaybackReadiness(despicableMe3({ storage: 60_000_000_000 }));
   assert.equal(roomy.reason, "minimum-safe-delay");
+  assert.equal(roomy.cushionBytes, short.cushionBytes, "the forecast exposes its stock requirement even when storage can hold it");
 });
 
 test("a film supplied faster than it plays does not wait for the rest of it", () => {

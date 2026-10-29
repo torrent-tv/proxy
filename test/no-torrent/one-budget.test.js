@@ -18,6 +18,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import { MachineBudget } from "../../services/storage/MachineBudget.js";
+import { PlaybackStorageDemand } from "../../services/storage/PlaybackStorageDemand.js";
 import { wireMachineBudget } from "../../services/storage/wire.js";
 
 const MEGABYTE = 1024 * 1024;
@@ -239,4 +240,29 @@ test("the wired budget says what the spilled pieces may keep, which the start fo
   assert.equal(wired.allowedFor("spilled pieces"), null, "unknown before the first measurement");
   await wired.revise();
   assert.equal(wired.allowedFor("spilled pieces"), 45 * MEGABYTE);
+});
+
+test("playback stock is required before empty storage categories divide the remaining room", async () => {
+  const demand = new PlaybackStorageDemand();
+  demand.note("shared-output", "viewer-a", 40 * MEGABYTE);
+  demand.note("shared-output", "viewer-b", 30 * MEGABYTE);
+  demand.note("other-output", "viewer-c", 10 * MEGABYTE);
+  assert.equal(demand.bytes(), 50 * MEGABYTE, "one output's stored bytes count once at its largest live need");
+  assert.equal(demand.bytesExcept("shared-output"), 10 * MEGABYTE,
+    "a forecast compares against capacity after stock reserved for other outputs");
+
+  const wired = wireMachineBudget({ segmentStore: { root: os.tmpdir(), stats: () => ({ bytes: 0 }) },
+    spill: { allow: () => {}, held: () => 0 }, wholeFiles: { allow: () => {}, held: () => 0 },
+    playbackStorage: demand, readFree: async () => 100 * MEGABYTE,
+    policy: { kind: "fixed", bytes: 100 * MEGABYTE }, logger: { info: () => {}, warn: () => {} } });
+  await wired.revise();
+  assert.equal(wired.allowedFor("playback stock"), 50 * MEGABYTE);
+  const remainder = wired.allowedFor("spilled pieces") + wired.allowedFor("whole files") + wired.allowedFor("segments");
+  assert.ok(remainder <= 50 * MEGABYTE && remainder >= 50 * MEGABYTE - 3,
+    "the other claimants divide only what remains after required playback stock");
+
+  demand.release("shared-output", "viewer-a");
+  assert.equal(demand.bytes(), 40 * MEGABYTE, "leaving viewers release only their own demand");
+  demand.release("shared-output", "viewer-b");
+  assert.equal(demand.bytes(), 10 * MEGABYTE, "the output demand ends when its last viewer leaves");
 });

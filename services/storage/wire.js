@@ -10,7 +10,9 @@
  * segments an encoder produced, the files downloaded whole — and the evidence,
  * which is a claimant with a rule of its own (`Diagnostics.js`). Three of the
  * five live on the torrent thread, so they arrive as pairs of closures over its
- * channel rather than as the objects themselves.
+ * channel rather than as the objects themselves. Active playback also
+ * reserves its forecasted source stock here; that is a requirement, not a
+ * store holding bytes yet.
  *
  * **Which RESOURCE each takes is read, not assumed.** Memory is one. Disk is
  * one per device, because two filesystems cannot pay for each other: measured
@@ -56,7 +58,7 @@ import { availableMemoryBytes } from "./machine-memory.js";
  * @param {import("./MachineBudget.js").BudgetPolicy} [params.policy] - What the
  *   operator has said this proxy may take. Absent, the measured default.
  * @param {{ info: Function, warn?: Function }} [params.logger]
- * @returns {{ revise: () => Promise<unknown>, segmentBytes: () => number | null, diagnostics: object | null, describe: () => string }}
+ * @returns {{ revise: (resource?: string | null, because?: string | null) => Promise<unknown>, segmentBytes: () => number | null, storageBytes: () => number | null, storageResource: string, diagnostics: object | null, describe: () => string }}
  *   What the segments may hold is asked for rather than pushed: null until the
  *   first revision, then the measured allowance, including a measured zero.
  */
@@ -68,6 +70,7 @@ export function wireMachineBudget({
   indexMemory,
   wholeFiles,
   inputCaches,
+  playbackStorage,
   diagnostics,
   diagnosticsRoot = "",
   readFree,
@@ -177,6 +180,17 @@ export function wireMachineBudget({
     });
   }
 
+  if (typeof playbackStorage?.bytes === "function") {
+    budget.register({
+      name: "playback stock",
+      resource: segmentsOn,
+      held: () => 0,
+      wanted: () => playbackStorage.bytes(),
+      required: () => playbackStorage.bytes(),
+      allow: () => {}
+    });
+  }
+
   let evidenceOn = null;
   if (diagnostics) {
     evidenceOn = diagnosticsRoot ? deviceOf(diagnosticsRoot) : segmentsOn;
@@ -194,6 +208,8 @@ export function wireMachineBudget({
 
   return {
     capacityOf: name => budget.capacityOf(name),
+    storageBytes: () => budget.capacityOf(segmentsOn),
+    storageResource: segmentsOn,
     /** What one claimant was last allowed, or null before a measured division. */
     allowedFor: name => budget.allowedFor(name),
     /**

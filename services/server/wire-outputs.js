@@ -95,6 +95,7 @@ import { audioReadingFor } from "../encode/audio-work-rate.js";
 import { wireMachineBudget } from "../storage/wire.js";
 import { Returns } from "../storage/returns.js";
 import { freeBytesFor } from "../storage/free.js";
+import { PlaybackStorageDemand } from "../storage/PlaybackStorageDemand.js";
 import { inputCacheRoot, probeInputCache } from "../encode/input-cache.js";
 import path from "node:path";
 import { contentOf, LocalObservations, PROXY_ROOT } from "../encode/LocalObservations.js";
@@ -579,6 +580,7 @@ export function wireOutputs({
     get encodeRuns() { return parts.encodeRuns; },
     get keyframeTables() { return parts.keyframeTables; },
     get machineBudget() { return parts.machineBudget; },
+    releasePlaybackStorageDemand: (key, consumerId) => parts.playbackStorageDemand.release(key, consumerId),
     get outputTimes() { return parts.outputTimes; },
     get outputs() { return parts.outputs; },
     get returns() { return parts.returns; },
@@ -629,7 +631,13 @@ export function wireOutputs({
     viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
     minimumBufferSecondsFor: (output) => minimumBufferSecondsOf(output),
     // What this proxy may keep of downloaded pieces on disk.
-    sourceStorageBytes: () => parts.machineBudget?.allowedFor("spilled pieces") ?? null,
+    sourceStorageBytes: outputKey => {
+      const capacity = parts.machineBudget?.storageBytes();
+      return Number.isFinite(capacity)
+        ? Math.max(0, capacity - parts.playbackStorageDemand.bytesExcept(outputKey))
+        : null;
+    },
+    notePlaybackStorageDemand: (key, consumerId, bytes) => parts.playbackStorageDemand.note(key, consumerId, bytes),
     getSourceStats: (...args) => parts.getSourceStats?.(...args) ?? null,
     disposeSession: (...args) => parts.lifecycle.disposeSession(...args),
     planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
@@ -1173,6 +1181,11 @@ export function wireOutputs({
   // one term of the keeping period that is guessed rather than measured, and
   // the only place it can be measured from.
   parts.returns = new Returns();
+  parts.playbackStorageDemand = new PlaybackStorageDemand(() => {
+    if (parts.machineBudget) {
+      void parts.machineBudget.revise(parts.machineBudget.storageResource, "playback stock");
+    }
+  });
   parts.encodeInputs = encodeInputs ?? (typeof resolveEncodeInput === "function" ? new EncodeInputs({
     resolve: resolveEncodeInput,
     readRanges: readEncodeRanges,
@@ -1221,6 +1234,7 @@ export function wireOutputs({
     // FFmpeg's cache keeps its file in /tmp, or where FFmpeg runs on a build
     // without `mkstemp` — an output directory of the segments.
     inputCaches: { held: () => parts.encodeRuns?.inputCacheBytes() ?? 0, root: inputCacheRoot() },
+    playbackStorage: parts.playbackStorageDemand,
     policy: parts.budgetPolicy ?? undefined,
     readFree: freeBytesFor,
     logger

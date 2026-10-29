@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Reserve the playback forecast's required disk stock before dividing remaining storage, count shared output demand once, and release it when viewers leave.
+
 ## 2.107.48
 
 - **Chore**: Retain browser append and media-fragment parse samples for the playback forecast.

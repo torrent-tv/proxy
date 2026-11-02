@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bandOf, WaitLedger } from "../../services/server/WaitLedger.js";
+import { bandOf, WaitLedger } from "../../services/encode/OutputWaitLedger.js";
 import { SegmentDemand } from "../../services/encode/SegmentDemand.js";
 
 test("the top rank is its own band, and the rest fall behind it", () => {
@@ -61,6 +61,27 @@ test("waits of two outputs do not mix", () => {
 
   assert.match(ledger.describe("out:1080"), /now 1 wait\(s\) median 5000ms/);
   assert.match(ledger.describe("out:480"), /now 1 wait\(s\) median 10ms/);
+});
+
+test("a released output lifetime rejects late waits after the key is reopened", () => {
+  const ledger = new WaitLedger();
+  const first = {};
+  const reopened = {};
+  ledger.open("out:1080", first);
+  ledger.note("out:1080", 40, 100, 100, first);
+  assert.match(ledger.describe("out:1080"), /now 1 wait\(s\)/);
+
+  ledger.forget("out:1080", first);
+  ledger.forget("unknown", {});
+  ledger.open("out:1080", reopened);
+  ledger.note("out:1080", 900, 100, 100, first);
+  assert.equal(ledger.describe("out:1080"), null, "the old completion cannot write into the new lifetime");
+  ledger.note("out:1080", 12, 100, 100, reopened);
+  assert.match(ledger.describe("out:1080"), /now 1 wait\(s\) median 12ms/);
+  assert.equal(ledger.forget("out:1080", first), false, "old cleanup cannot erase reopened history");
+  assert.match(ledger.describe("out:1080"), /median 12ms/);
+  ledger.clear();
+  assert.equal(ledger.describe("out:1080"), null);
 });
 
 test("the map answers what it says about one segment, and about itself", () => {

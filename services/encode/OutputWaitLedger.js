@@ -58,6 +58,23 @@ export class WaitLedger {
   /** @type {Map<string, Map<string, number>>} */
   #counts = new Map();
 
+  /** @type {Map<string, object>} */
+  #owners = new Map();
+
+  /**
+   * Begin a live output-key lifetime. Reopening a key starts a clean history;
+   * the returned identity lets a held response prove that it still belongs to
+   * this lifetime when it eventually completes.
+   *
+   * @param {string} key
+   * @param {object} identity
+   */
+  open(key, identity) {
+    if (!key || !identity || this.#owners.get(key) === identity) return;
+    this.forget(key);
+    this.#owners.set(key, identity);
+  }
+
   /**
    * Somebody waited this long for something the map ranked this highly.
    *
@@ -66,11 +83,13 @@ export class WaitLedger {
    * @param {number} rank - The map's rank for the thing waited for.
    * @param {number} topRank - The highest rank the map states, so the rank can
    *   be read as a position rather than as an absolute number.
+   * @param {object} [identity] - The output-key lifetime that started this wait.
    */
-  note(key, waitedMs, rank, topRank) {
+  note(key, waitedMs, rank, topRank, identity = undefined) {
     if (!key || !Number.isFinite(waitedMs) || waitedMs < 0) {
       return;
     }
+    if (identity !== undefined && this.#owners.get(key) !== identity) return;
     const band = bandOf(rank, topRank);
     let byBand = this.#waits.get(key);
     if (!byBand) {
@@ -128,15 +147,26 @@ export class WaitLedger {
 
   /**
    * @param {string} key
+   * @param {object} [identity] - Ignore release from an older output lifetime.
    */
-  forget(key) {
+  forget(key, identity = undefined) {
+    if (identity !== undefined && this.#owners.get(key) !== identity) return false;
     this.#waits.delete(key);
     this.#counts.delete(key);
+    if (identity === undefined || this.#owners.get(key) === identity) this.#owners.delete(key);
+    return true;
+  }
+
+  /** Release every record owned by this proxy before its shutdown completes. */
+  clear() {
+    this.#waits.clear();
+    this.#counts.clear();
+    this.#owners.clear();
+  }
+
+  /** Number of output keys with retained measurements. */
+  get size() {
+    return this.#waits.size;
   }
 }
 
-/**
- * One ledger for the process, because the question is asked in two layers and
- * the answer is comparable only if the scale is the same.
- */
-export const waits = new WaitLedger();

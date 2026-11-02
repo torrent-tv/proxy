@@ -37,3 +37,30 @@ test("removal deletes both the output and its lifetime", () => {
   assert.equal(registry.startedAt(output), null);
   assert.equal(registry.touch(output, 200), false);
 });
+
+test("wait history identity is shared until the last session of an output ends", () => {
+  const started = [];
+  const ended = [];
+  const registry = new OutputCatalog({
+    waitIdentityStarted: (address, identity) => started.push([address, identity]),
+    waitIdentityEnded: (address, identity) => ended.push([address, identity])
+  });
+  const one = { id: "one", outputKey: "out:1080" };
+  const two = { id: "two", outputKey: "out:1080" };
+  registry.set(one.id, one);
+  const identity = registry.waitIdentity(one.id);
+  registry.set(two.id, two);
+  assert.equal(registry.waitIdentity(two.id), identity);
+  assert.equal(started.length, 1);
+
+  registry.delete(one.id);
+  assert.equal(ended.length, 0, "another live session still owns the output identity");
+  registry.delete(two.id);
+  assert.deepEqual(ended, [["out:1080", identity]]);
+
+  const reopened = { id: "reopened", outputKey: "out:1080" };
+  registry.set(reopened.id, reopened);
+  assert.notEqual(registry.waitIdentity(reopened.id), identity);
+  registry.clear();
+  assert.equal(ended.length, 2, "clear releases the remaining active identity");
+});

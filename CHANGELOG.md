@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Release wait measurements when their last live output ends. Shared sessions keep one output-key history until the final session is disposed; delayed responses from a disposed lifetime cannot recreate or overwrite the history of an output reopened under the same key.
+
 ## 2.107.49
 
 - **Fix**: Reserve the playback forecast's required disk stock before dividing remaining storage, count shared output demand once, and release it when viewers leave.

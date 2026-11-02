@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { waitForSessionFile, waitForRequestedFile } from "../../services/server/transcode-session-files.js";
+import { serveSessionFile, waitForSessionFile, waitForRequestedFile } from "../../services/server/transcode-session-files.js";
+import { bandOf, WaitLedger } from "../../services/encode/OutputWaitLedger.js";
 
 function servingState() {
   const listeners = new Set();
@@ -110,4 +111,63 @@ test("a held segment given to another output ends its wait as reassigned", async
   assert.equal((await pending).kind, "reassigned");
   assert.equal(serving.reads, 1, "not read again from the output it left");
   assert.equal(serving.waiting, 0);
+});
+
+test("a held response from a disposed output cannot record into its reopened lifetime", async () => {
+  const ledger = new WaitLedger();
+  const oldIdentity = {};
+  const newIdentity = {};
+  ledger.open("out:shared", oldIdentity);
+  const listeners = new Set();
+  let reads = 0;
+  const serving = {
+    waitIdentity: () => oldIdentity,
+    waitBandOf: bandOf,
+    noteWait: (ranked, waitedMs, identity) => ledger.note(
+      ranked.address, waitedMs, ranked.rank, ranked.topRank, identity
+    ),
+    seekEpoch: () => 0,
+    subscribeFileChange() {
+      let wake;
+      const changed = new Promise(resolve => { wake = resolve; });
+      listeners.add(wake);
+      return { changed, release: () => listeners.delete(wake) };
+    },
+    async getFileStream() {
+      reads += 1;
+      if (reads === 1) {
+        return { kind: "warming-up", ranked: { address: "out:shared", rank: 100, topRank: 100 } };
+      }
+      return {
+        kind: "ok",
+        isPlaylist: false,
+        stream: {},
+        contentType: "video/mp4",
+        ranked: { address: "out:shared", rank: 100, topRank: 100 }
+      };
+    }
+  };
+  const req = { id: "held", query: {}, raw: new EventEmitter() };
+  const reply = {
+    raw: new EventEmitter(),
+    header() { return this; },
+    send(value) { return value; }
+  };
+  const pending = serveSessionFile(req, reply, {
+    serving,
+    viewerRequests: { holdResponse: () => () => {} },
+    sessionId: "session",
+    fileName: "segment-00001.mp4"
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 1);
+
+  ledger.forget("out:shared", oldIdentity);
+  ledger.open("out:shared", newIdentity);
+  for (const wake of listeners) wake();
+  await pending;
+
+  assert.equal(ledger.describe("out:shared"), null, "the old response cannot repopulate the reopened key");
+  ledger.note("out:shared", 12, 100, 100, newIdentity);
+  assert.match(ledger.describe("out:shared"), /median 12ms/);
 });

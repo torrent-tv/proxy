@@ -26,7 +26,11 @@ export class OutputCatalog {
 
   #byId = new Map();
   #lifetime = new Map();
+  /** @type {Map<string, object>} */
+  #waitIdentities = new Map();
   #now;
+  #waitIdentityStarted;
+  #waitIdentityEnded;
 
   /**
    * @param {object} [params]
@@ -35,11 +39,15 @@ export class OutputCatalog {
    *   source file is, which the torrent reports.
    * @param {(address: string) => { index: number, size: number }} [params.largestPieceOf]
    *   The biggest piece an output has made, which the disk knows.
+   * @param {(address: string, identity: object) => void} [params.waitIdentityStarted]
+   * @param {(address: string, identity: object) => void} [params.waitIdentityEnded]
    */
   constructor({
     now = Date.now,
     fileLengthOf = () => 0,
-    largestPieceOf = () => ({ index: -1, size: 0 })
+    largestPieceOf = () => ({ index: -1, size: 0 }),
+    waitIdentityStarted = () => {},
+    waitIdentityEnded = () => {}
   } = {}) {
     this.#now = now;
     // Two facts this catalog needs and does not own, taken as plain functions
@@ -48,15 +56,22 @@ export class OutputCatalog {
     // it is part of the output itself (`OutputSpec`).
     this.fileLengthOf = fileLengthOf;
     this.largestPieceOf = largestPieceOf;
+    this.#waitIdentityStarted = waitIdentityStarted;
+    this.#waitIdentityEnded = waitIdentityEnded;
   }
 
   set(id, output) {
     const known = this.#byId.get(id);
+    const oldAddress = known?.outputKey;
     this.#byId.set(id, output);
     if (known !== output) {
       const at = this.#now();
       this.#lifetime.set(id, { startedAt: at, lastAccessedAt: at });
     }
+    if (known !== output && oldAddress !== output?.outputKey) {
+      this.#forgetWaitIdentityIfUnused(oldAddress);
+    }
+    this.#openWaitIdentity(output?.outputKey);
     return this;
   }
 
@@ -69,13 +84,42 @@ export class OutputCatalog {
   }
 
   delete(id) {
+    const output = this.#byId.get(id);
     this.#lifetime.delete(id);
-    return this.#byId.delete(id);
+    const deleted = this.#byId.delete(id);
+    if (deleted) this.#forgetWaitIdentityIfUnused(output?.outputKey);
+    return deleted;
   }
 
   clear() {
+    const addresses = new Set([...this.#byId.values()].map(output => output?.outputKey).filter(Boolean));
     this.#lifetime.clear();
     this.#byId.clear();
+    for (const address of addresses) this.#forgetWaitIdentityIfUnused(address);
+  }
+
+  /** The shared active lifetime for the output addressed by a live session. */
+  waitIdentity(id) {
+    const output = this.#byId.get(id);
+    return output ? this.#waitIdentities.get(output.outputKey) ?? null : null;
+  }
+
+  #openWaitIdentity(address) {
+    if (typeof address !== "string" || !address || this.#waitIdentities.has(address)) return;
+    const identity = {};
+    this.#waitIdentities.set(address, identity);
+    this.#waitIdentityStarted(address, identity);
+  }
+
+  #forgetWaitIdentityIfUnused(address) {
+    if (typeof address !== "string" || !address) return;
+    for (const output of this.#byId.values()) {
+      if (output?.outputKey === address) return;
+    }
+    const identity = this.#waitIdentities.get(address);
+    if (!identity) return;
+    this.#waitIdentities.delete(address);
+    this.#waitIdentityEnded(address, identity);
   }
 
   touch(outputOrId, at = this.#now()) {

@@ -10,7 +10,7 @@
 
 import { logger } from "../../utils/logger.js";
 import { KeyframeTables } from "../media/KeyframeTables.js";
-import { waits } from "./WaitLedger.js";
+import { bandOf, WaitLedger } from "../encode/OutputWaitLedger.js";
 import { readEndedChildrenCpuSeconds, readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "../encode/host-load.js";
 import { minimumBufferFrom } from "../torrent/supply-margin.js";
 import { PriorityOrchestrator } from "../viewer/PriorityOrchestrator.js";
@@ -244,6 +244,9 @@ export function wireOutputs({
     // Told when an encoder starts or ends: the room this host has for one more
     // encode changes with it, and the server chooses proxies by that room.
     onEncodersChanged = null}) {
+  // Long-lived wait diagnostics belong to this wired output graph: each live
+  // output key owns its record, and the graph releases it at the last session.
+  const waits = new WaitLedger();
   const parts = {};
   const audioDescriptionOf = (output) => (getCachedAudioTracks?.({
     sourceKey: output.file.sourceKey, fileIndex: output.spec.grid?.fileIndex ?? output.file.fileIndex
@@ -552,6 +555,9 @@ export function wireOutputs({
     get lookaheadSeconds() { return parts.lookaheadSeconds; },
     get outputTimes() { return parts.outputTimes; },
     get outputs() { return parts.outputs; },
+    noteWait: (ranked, waitedMs, identity) =>
+      waits.note(ranked.address, waitedMs, ranked.rank, ranked.topRank, identity),
+    waitBandOf: bandOf,
     get segmentStore() { return parts.segmentStore; },
     get startupWaitMs() { return parts.startupWaitMs; },
     get viewers() { return parts.viewers; },
@@ -565,6 +571,7 @@ export function wireOutputs({
     outputReading: key => parts.segmentStore.isReading(key) || parts.viewers.responsesHold(key),
     planEncodersSoon: () => parts.encodeRuns.planEncodersSoon(),
     invalidateWaits: (output) => parts.serving.invalidateWaits(output),
+    clearWaits: () => waits.clear(),
     segmentFormatOfKey,
     // Where the viewers of one output stand, in its segments: what the store
     // the output retention policy reads to give disk back in the right order.
@@ -960,7 +967,9 @@ export function wireOutputs({
   // belongs to, the steps, the soundtracks, the height a step is named by.
   parts.outputs = new OutputCatalog({
     fileLengthOf: (session) => parts.hostLoad.fileLengthByKey.get(session.file.key) ?? 0,
-    largestPieceOf: (address) => parts.segmentStore.largestPiece(address)
+    largestPieceOf: (address) => parts.segmentStore.largestPiece(address),
+    waitIdentityStarted: (address, identity) => waits.open(address, identity),
+    waitIdentityEnded: (address, identity) => waits.forget(address, identity)
   });
   // Where produced segments live, addressed by WHAT they are rather than by
   // which session's encoder wrote them. Two sessions of one output — two

@@ -55,7 +55,7 @@ export class OutputLifecycle {
   #host;
 
   /**
-   * @param {object} host - `retention`, `outputNeeded`, `outputWriting`, `outputReading`, `planEncodersSoon`, `now`, `invalidateWaits`, `segmentFormatOfKey`, `viewerSegmentsOn`, `budgetTimer`, `cleanupTimer`, `encodeRuns`, `keyframeTables`, `machineBudget`, `outputTimes`, `outputs`, `returns`, `segmentStore`, `sessionTtlMs`, `sourceFiles`, `timelines`, `viewers`
+   * @param {object} host - `retention`, `outputNeeded`, `outputWriting`, `outputReading`, `planEncodersSoon`, `now`, `invalidateWaits`, `clearWaits`, `segmentFormatOfKey`, `viewerSegmentsOn`, `budgetTimer`, `cleanupTimer`, `encodeRuns`, `keyframeTables`, `machineBudget`, `outputTimes`, `outputs`, `returns`, `segmentStore`, `sessionTtlMs`, `sourceFiles`, `timelines`, `viewers`
    */
   constructor(host) {
     this.#host = host;
@@ -267,6 +267,7 @@ export class OutputLifecycle {
     for (const sessionId of activeIds) {
       await this.disposeSession(sessionId);
     }
+    this.#host.clearWaits?.();
     // Everything this process owns, root included. See SegmentStore.dropAll.
     this.#host.segmentStore.dropAll("the proxy is shutting down");
   }

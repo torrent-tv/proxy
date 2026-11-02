@@ -78,6 +78,20 @@ export class SegmentServing {
     state.waitListeners.clear();
   }
 
+  /** Identity of the live output-key lifetime named by this session. */
+  waitIdentity(sessionId) {
+    return this.#host.outputs.waitIdentity(sessionId);
+  }
+
+  /** Record a completed wait through the ledger operation wired by the server. */
+  noteWait(ranked, waitedMs, identity) {
+    this.#host.noteWait?.(ranked, waitedMs, identity);
+  }
+
+  waitBandOf(rank, topRank) {
+    return this.#host.waitBandOf?.(rank, topRank) ?? "later";
+  }
+
   /** Observe storage and lifecycle before a request checks file availability. */
   subscribeFileChange(sessionId) {
     const output = isOutputName(sessionId) ? this.#host.outputs.get(sessionId) : null;

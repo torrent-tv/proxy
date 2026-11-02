@@ -1,6 +1,4 @@
 import { logger } from "../../utils/logger.js";
-import { bandOf, waits } from "./WaitLedger.js";
-
 /**
  * Which viewer is asking, or an empty string where the transport names nobody.
  *
@@ -84,6 +82,12 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
   // a plain HTTP transport, where no loader of ours builds the URL, and then
   // the single shared position decides as it always did.
   const consumerId = consumerOf(req);
+  // Hold the output-key lifetime that this request entered. Disposal followed
+  // by reopening the same key must not let its old completion write into the
+  // new output's measurements.
+  const waitIdentity = typeof serving.waitIdentity === "function"
+    ? serving.waitIdentity(sessionId)
+    : undefined;
   // Readiness or a terminal state ends the wait. A caller leaving cancels it;
   // elapsed time is not evidence that media preparation failed.
   const holdStartedAt = Date.now();
@@ -132,11 +136,12 @@ export async function serveSessionFile(req, reply, { serving, viewerRequests, se
     // like, and without them the table would hold only the failures.
     const ranked = result.ranked ?? null;
     if (ranked) {
-      waits.note(ranked.address, heldMs, ranked.rank, ranked.topRank);
+      serving.noteWait?.(ranked, heldMs, waitIdentity);
     }
     logger.info(
       `[hold] ${fileName} ${outcome} after ${heldMs}ms` +
-      (ranked ? ` (the map wants it ${bandOf(ranked.rank, ranked.topRank)}, rank ${ranked.rank} of ${ranked.topRank})` : "")
+      (ranked ? ` (the map wants it ${serving.waitBandOf?.(ranked.rank, ranked.topRank) ?? "later"}, ` +
+        `rank ${ranked.rank} of ${ranked.topRank})` : "")
     );
   }
 

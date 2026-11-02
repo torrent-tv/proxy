@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.49
 
 - **Fix**: Reserve the playback forecast's required disk stock before dividing remaining storage, count shared output demand once, and release it when viewers leave.
 

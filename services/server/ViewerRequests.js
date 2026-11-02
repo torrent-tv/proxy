@@ -1027,7 +1027,7 @@ export class ViewerRequests {
       viewer.subtitle.fileIndex === session.file.fileIndex ? viewer.subtitle : null;
     const startedAt = performance.now();
     const predicted = this.#host.playbackReadiness.predict(input);
-    if (consumerId && Number.isFinite(predicted.cushionBytes)) {
+    if (consumerId && viewer && this.#host.viewers.get(consumerId) === viewer && Number.isFinite(predicted.cushionBytes)) {
       this.#host.notePlaybackStorageDemand?.(session.outputKey ?? session.id, consumerId, predicted.cushionBytes);
     }
     const predictMs = performance.now() - startedAt;

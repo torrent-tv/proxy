@@ -117,8 +117,9 @@ test("a viewer the start forecast holds for an encoder's piece is told to whoeve
   // A viewer at the start over a fast link; nothing is made; the encoder is
   // predicted at 0.5x and each piece reads its own 10 MB of a file still
   // downloading at 50 MB/s.
-  parts.viewers.get = () => ({ linkReading: () => ({ linkSampleMbps: 100, linkSampleMeasuredAt: Date.now(),
-    positionSeconds: 0, bufferedAheadSec: 0 }) });
+  const viewer = { linkReading: () => ({ linkSampleMbps: 100, linkSampleMeasuredAt: Date.now(),
+    positionSeconds: 0, bufferedAheadSec: 0 }) };
+  parts.viewers.get = () => viewer;
   parts.encodeCost.projectedSpeedOf = () => 0.5;
   parts.sourceInputsFor = (_output, index) => [{ sourceId: "torrent:abc:0", ranges: [{ start: index * 1e7, end: (index + 1) * 1e7 }] }];
   let complete = false;
@@ -162,8 +163,9 @@ test("the start forecast includes an unread segment ending within the seek toler
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
   };
   parts.outputs.set(session.id, session);
-  parts.viewers.get = () => ({ linkReading: () => ({ linkSampleMbps: 100, linkSampleMeasuredAt: Date.now(),
-    positionSeconds: 8.033, bufferedAheadSec: 0 }) });
+  const viewer = { linkReading: () => ({ linkSampleMbps: 100, linkSampleMeasuredAt: Date.now(),
+    positionSeconds: 8.033, bufferedAheadSec: 0 }) };
+  parts.viewers.get = () => viewer;
   parts.encodeCost.projectedSpeedOf = () => 0.5;
   parts.sourceInputsFor = (_output, index) => [{ sourceId: "torrent:abc:0",
     ranges: [{ start: index * 1e7, end: (index + 1) * 1e7 }] }];

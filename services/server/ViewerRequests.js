@@ -628,7 +628,7 @@ export class ViewerRequests {
     const session = this.#host.activeOutputFor({ base: named, consumerId, outputs: this.#host.outputs });
     this.#host.outputs.touch(session);
     const viewer = consumerId ? this.#host.viewers.get(consumerId) : null;
-    const stillOwnsProgress = () => this.#stillOwnsProgress(session, consumerId, viewer);
+    const stillOwnsProgress = () => this.#stillOwnsProgress(named, session, consumerId, viewer);
     const audio = this.#host.renditions.servesAudioSeparately(session)
       ? this.#host.renditions.playbackAudioOutputFor(session, consumerId) : null;
     const failed = [session, audio].find(output => output && this.#host.encodeRuns.wireStateOf(output) === "failed");
@@ -737,11 +737,11 @@ export class ViewerRequests {
     };
   }
 
-  #stillOwnsProgress(session, consumerId, viewer) {
-    if (this.#host.outputs.get(session.id) !== session) return false;
+  #stillOwnsProgress(named, session, consumerId, viewer) {
+    if (this.#host.outputs.get(named.id) !== named || this.#host.outputs.get(session.id) !== session) return false;
     if (!viewer) return !consumerId || !this.#host.viewers.get(consumerId);
     return this.#host.viewers.get(consumerId) === viewer &&
-      this.#host.viewers.getForOutput(session, consumerId) === viewer;
+      (!(viewer.outputs instanceof Set) || viewer.outputs.has(named.id));
   }
 
   async #playbackReadinessFor(session, consumerId, progress, outputMbps, viewer, stillOwnsProgress) {

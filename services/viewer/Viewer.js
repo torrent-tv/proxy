@@ -428,6 +428,22 @@ export class Viewer {
   }
 
   /**
+   * Place this viewer at the position supplied by their first output opening.
+   * An opening that reuses an output must not reset a position already stated
+   * by this viewer. Initial placement has none of the buffer or pause effects
+   * of an explicit seek.
+   *
+   * @param {number} seconds
+   * @param {number} [now]
+   * @returns {boolean} Whether this call placed the viewer.
+   */
+  placeInitially(seconds, now = Date.now()) {
+    if (this.position !== null) return false;
+    this.#place(Number.isFinite(seconds) && seconds > 0 ? seconds : 0, now);
+    return true;
+  }
+
+  /**
    * Where they are, stated — without anything a move to another place means.
    *
    * @param {number} seconds

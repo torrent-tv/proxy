@@ -96,8 +96,24 @@ export function audioChoiceOf(viewers, output, consumerId) {
  * @returns {void}
  */
 export function chooseAudioTrack(viewers, output, consumerId, choice) {
+  if (!choice) return;
   const viewer = viewers.join(output, consumerId);
   if (viewer) viewer.audio = { trackIndex: choice.trackIndex, transcode: choice.transcode === true };
+}
+
+/**
+ * Place a viewer at the initial position named by an output opening.
+ *
+ * @param {object} viewers
+ * @param {object} output
+ * @param {string} consumerId
+ * @param {number} seconds
+ * @param {number} [now]
+ * @returns {boolean} Whether this call placed the viewer.
+ */
+export function placeInitially(viewers, output, consumerId, seconds, now = Date.now()) {
+  const viewer = viewers.join(output, consumerId, now);
+  return viewer?.placeInitially(seconds, now) ?? false;
 }
 
 /**

@@ -6,6 +6,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EncodeAdmission } from "../../services/encode/EncodeAdmission.js";
 import { ViewerRequests } from "../../services/server/ViewerRequests.js";
+import { chooseAudioTrack, placeInitially } from "../../services/viewer/choices.js";
+import { Viewers } from "../../services/viewer/Viewers.js";
 
 test("the first opening holds capacity before a concurrent opening is admitted", async () => {
   const records = new Map();
@@ -78,7 +80,13 @@ test("the first opening holds capacity before a concurrent opening is admitted",
     opening,
     viewers,
     admitsWatching: (output) => admission.admitsWatching(output.outputKey),
-    outputTimes: { segmentIndexForTime: (_output, seconds) => Math.floor(seconds / 4) },
+    placeViewerOn: (_output, _consumerId, seconds) => {
+      const viewer = viewers.get(_consumerId);
+      if (!viewer || viewer.position !== null) return false;
+      viewer.position = { seconds, at: Date.now() };
+      return true;
+    },
+    chooseAudioTrack: () => {},
     planEncodersSoon: () => {},
     outputs: { touch: () => {} },
     noteServingVerdict: () => {},
@@ -121,7 +129,8 @@ test("returns an allocated output without waiting for its first playlist", async
     },
     viewers,
     admitsWatching: () => ({ admitted: true, reason: "", speedX: 1 }),
-    outputTimes: { segmentIndexForTime: () => 0 },
+    placeViewerOn: () => true,
+    chooseAudioTrack: () => {},
     planEncodersSoon: () => {},
     outputs: { touch: () => {} },
     noteServingVerdict: () => {},
@@ -133,4 +142,44 @@ test("returns an allocated output without waiting for its first playlist", async
   assert.equal(result, output);
   assert.equal(waitUntilReadyCalls, 0,
     "the player must receive its session so it can poll the live forecast while segments are being prepared");
+});
+
+test("opening places once through viewer operations and copies the accepted audio choice", async () => {
+  const viewers = new Viewers();
+  const outputs = new Map();
+  const requests = new ViewerRequests({
+    opening: {
+      async open({ sourceKey, claim }) {
+        const output = outputs.get(sourceKey) ?? { id: sourceKey, outputKey: sourceKey };
+        outputs.set(sourceKey, output);
+        claim(output);
+        return {
+          output,
+          existed: true,
+          audio: { trackIndex: sourceKey === "first" ? 1 : 2, transcode: sourceKey === "second" },
+          verdict: null
+        };
+      }
+    },
+    viewers,
+    admitsWatching: () => ({ admitted: true, reason: "", speedX: 1 }),
+    placeViewerOn: (output, consumerId, seconds, now) => placeInitially(viewers, output, consumerId, seconds, now),
+    chooseAudioTrack: (output, consumerId, choice) => chooseAudioTrack(viewers, output, consumerId, choice),
+    planEncodersSoon: () => {},
+    outputs: { touch: () => {} },
+    noteServingVerdict: () => {}
+  });
+
+  const first = await requests.createOrGetSession({ sourceKey: "first", consumerId: "viewer", startPositionSeconds: 84 });
+  const initialPosition = { ...viewers.get("viewer").position };
+  const second = await requests.createOrGetSession({ sourceKey: "second", consumerId: "viewer", startPositionSeconds: 0 });
+
+  const viewer = viewers.get("viewer");
+  assert.equal(first.id, "first");
+  assert.equal(second.id, "second");
+  assert.deepEqual(viewer.position, initialPosition);
+  assert.equal(viewer.position.seconds, 84);
+  assert.deepEqual(viewer.audio, { trackIndex: 2, transcode: true });
+  assert.equal(viewer.outputs.has("first"), true);
+  assert.equal(viewer.outputs.has("second"), true);
 });

@@ -18,8 +18,8 @@ import { Viewers } from "../../services/viewer/Viewers.js";
 const AT = 1_000_000;
 
 function reportCapture({ clockEpoch = performance.timeOrigin, epoch = "page-one",
-  epochStartedAt = clockEpoch + 10, revision = 1, startedAt = clockEpoch + 20,
-  completedAt = clockEpoch + 30, generation = 0, sessionId = "session-one" } = {}) {
+  epochStartedAt = clockEpoch + 10, revision = 1, startedAt = epochStartedAt + 10,
+  completedAt = startedAt + 10, generation = 0, sessionId = "session-one" } = {}) {
   return {
     appendSessionId: sessionId,
     captureClockEpoch: clockEpoch,
@@ -107,11 +107,13 @@ test("a report without a link measurement still states everything about the view
 
 test("append service accepts advancing cumulative counters once and rejects stale counters", () => {
   const viewer = new Viewer("one", AT);
+  let nextCaptureRevision = 0;
   const report = (bytes, serviceMs, operations, epoch = "page-one", epochStartedAt = AT,
-    snapshotAt = epoch === "page-one" ? AT + bytes : epochStartedAt) => {
+    snapshotAt = epoch === "page-one" ? AT + bytes : epochStartedAt,
+    captureRevision = ++nextCaptureRevision) => {
     const captureEpochStartedAtBrowser = performance.timeOrigin + (epoch === "page-two" ? 100 : 10);
     return { ...reportCapture({ epoch, epochStartedAt: captureEpochStartedAtBrowser,
-      revision: Math.max(1, operations), startedAt: captureEpochStartedAtBrowser + 10,
+      revision: captureRevision, startedAt: captureEpochStartedAtBrowser + 10,
       completedAt: captureEpochStartedAtBrowser + 20 }),
     appendSessionId: "session-one",
     appendEpoch: epoch,
@@ -250,18 +252,18 @@ test("a new browser clock epoch cannot keep a link sample from the old epoch", (
 
 test("old epochs and duplicate or reordered reports cannot replace a newer buffer", () => {
   const viewer = new Viewer("one", AT);
-  viewer.report({ ...reportCapture({ epoch: "page-two", epochStartedAt: AT + 200, revision: 2 }),
+  viewer.report({ ...reportCapture({ epoch: "page-two", epochStartedAt: performance.timeOrigin + 200, revision: 2 }),
     bufferedAheadSec: 22 }, AT);
   const accepted = viewer.linkReading().bufferCapture;
-  viewer.report({ ...reportCapture({ epoch: "page-one", epochStartedAt: AT + 100, revision: 99 }),
+  viewer.report({ ...reportCapture({ epoch: "page-one", epochStartedAt: performance.timeOrigin + 100, revision: 99 }),
     bufferedAheadSec: 11 }, AT + 100);
   assert.deepEqual(viewer.linkReading().bufferCapture, accepted);
   assert.equal(viewer.linkReading().bufferedAheadSec, 22);
 
-  viewer.report({ ...reportCapture({ epoch: "page-two", epochStartedAt: AT + 200, revision: 1 }),
+  viewer.report({ ...reportCapture({ epoch: "page-two", epochStartedAt: performance.timeOrigin + 200, revision: 1 }),
     bufferedAheadSec: 10 }, AT + 200);
   assert.deepEqual(viewer.linkReading().bufferCapture, accepted, "a reordered revision cannot replace the snapshot");
-  viewer.report({ ...reportCapture({ epoch: "page-two", epochStartedAt: AT + 200, revision: 2 }),
+  viewer.report({ ...reportCapture({ epoch: "page-two", epochStartedAt: performance.timeOrigin + 200, revision: 2 }),
     bufferedAheadSec: 10 }, AT + 300);
   assert.deepEqual(viewer.linkReading().bufferCapture, accepted, "a duplicate revision cannot replace the snapshot");
   assert.equal(viewer.linkReading().bufferedAheadSec, 22);

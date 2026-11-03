@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { performance } from "node:perf_hooks";
 import { RunProgress } from "../../services/encode/RunProgress.js";
 import { EncodeOrchestrator } from "../../services/encode/EncodeOrchestrator.js";
 
@@ -14,8 +15,11 @@ function orchestrator() {
 
 test("a run rebases ffmpeg's relative clock onto its own source position", () => {
   let now = 10;
-  const progress = new RunProgress({ startSeconds: 600, totalSeconds: 1000, now: () => now });
+  let monotonic = 100;
+  const progress = new RunProgress({ startSeconds: 600, totalSeconds: 1000, now: () => now,
+    monotonicNow: () => monotonic });
   now = 20;
+  monotonic = 125;
   progress.note({ processedSeconds: 12.5 });
 
   assert.deepEqual(progress.snapshot(), {
@@ -24,7 +28,9 @@ test("a run rebases ffmpeg's relative clock onto its own source position", () =>
     totalSeconds: 1000,
     percent: 3.125,
     remainingSeconds: 387.5,
-    updatedAt: 20
+    updatedAt: 20,
+    updatedAtMonotonic: 125,
+    clockEpoch: performance.timeOrigin
   });
 });
 

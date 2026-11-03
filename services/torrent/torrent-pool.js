@@ -25,14 +25,15 @@ import { deadlineOfMapZone, levelOfMapZone, priorityOfMapZone } from "./map-zone
 import { deriveSourceKey } from "../../utils/torrent-source-key.js";
 import { noteTorrentDestroyed } from "./destroyed-torrents.js";
 import { PieceTimings, describePieceTiming } from "./piece-timing.js";
-import { TailRepeat } from "./worker/tail-repeat.js";
+import { TailRepeat } from "./download/TailRepeat.js";
+import { WebTorrentTailRepeatAdapter } from "./worker/WebTorrentTailRepeatAdapter.js";
 import { tracePieceStorePut } from "./worker/trace-piece-store-put.js";
 import { beginSwarmLifecycleTrace, noteSwarmDiscovery, noteSwarmMetadata, noteSwarmPeer } from "./worker/trace-swarm-lifecycle.js";
 
 /**
  * The second-peer requests for the last blocks of a piece somebody waits for,
  * one per torrent, made when the torrent is first watched and stopped when it
- * is forgotten (`worker/tail-repeat.js`).
+ * is forgotten (`download/TailRepeat.js`).
  *
  * @type {WeakMap<object, TailRepeat>}
  */
@@ -1901,7 +1902,8 @@ export class TorrentPool {
     // per piece: a 2.3 GB film is 563.
     const timings = new PieceTimings();
     const waitTracePieceStarts = new Map();
-    tailRepeats.set(torrent, new TailRepeat({ torrent, requiredPieces: () => demandFor(torrent).selection.requiredPieces(),
+    tailRepeats.set(torrent, new TailRepeat({ adapter: new WebTorrentTailRepeatAdapter(torrent),
+      requiredPieces: () => demandFor(torrent).selection.requiredPieces(),
       log: (line) => logger.info(`download ${label()} ${line}`) }));
     torrent.on("wire", (wire) => {
       // WebTorrent asks a wire for a block by calling `request` and states
@@ -1922,7 +1924,7 @@ export class TorrentPool {
             trace("W8", "begin", { piece: index, startedAt, firstOffset: offset, blockLength: length });
           }
           // When this wire was asked for the block: how long it has held it is
-          // what decides whether a second peer is asked (`duplicateTailFor`).
+          // what decides whether a second peer is asked (download/TailRepeat).
           this.requests.at(-1).askedAt = now;
         }
         return answer;

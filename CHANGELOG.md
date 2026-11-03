@@ -1,6 +1,6 @@
 ## Unreleased
 
-- **Fix**: Keep late-tail repetition within the current urgent download class and isolate WebTorrent's private reservation access behind a bounded adapter, preserving the existing age, tail-size and copy limits.
+- **Fix**: Keep late-tail repetition within the current urgent download class and isolate WebTorrent's private reservation access behind a bounded adapter. Count every missing block covered by an in-flight range and exclude WebSeeds as repeat targets because their requests span a piece suffix; preserve the existing age, tail-size and copy limits.
 
 ## 2.107.51
 

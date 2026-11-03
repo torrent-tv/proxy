@@ -95,6 +95,32 @@ Zero service, missing media facts and a genuine timestamp gap remain explicit
 noncomputable states. The UI reports their causes instead of an estimating
 placeholder or a fabricated duration.
 
+## Input capture contract — ttv-254
+
+The proxy carries provenance beside forecast values. Capture intervals use the
+owner's monotonic `performance.now()` clock and are interpreted only when the
+owner epoch matches. Browser marks are serialized as
+`performance.timeOrigin + performance.now()` so a browser can bound their age
+through a later response on that same clock; proxy and worker marks remain
+relative to `performance.now()`. A missing, malformed, superseded or cancelled
+input stays unknown or invalid; calculation time never stands in for its
+capture time.
+
+| Input family | Owner and units | Capture interval and epoch | Action, generation and revision | Validity and unknown reason |
+|---|---|---|---|---|
+| Source | Torrent worker; byte ranges and arrival times in milliseconds on the proxy host | `sourceCapture.startedAt..completedAt` bounds file stats; `downloadForecast.capture.startedAt..completedAt` separately bounds arrival-range calculation. Rate histories retain each reading or their aggregate capture interval. All use the worker thread's `performance.timeOrigin` | The proxy adds the active wait action and viewer generation; worker revision advances for each snapshot | Valid only when the owner returns complete ordered intervals and current source facts. No source handle, failed stats, unavailable arrival forecast, old epoch or malformed interval stays unknown with a reason. |
+| Link | Browser; raw delivery rate in Mbit/s, converted to byte/s for the forecast | `linkSampleStartedAtBrowser..linkSampleCompletedAtBrowser` bounds the transfer that produced the rate; the browser's `performance.timeOrigin` is `clockEpoch` | Link sample action and generation are retained when the transfer belongs to an active session; its revision advances only for a new transfer. The report separately carries its own reporter epoch, generation and increasing revision | Valid only when rate, sample interval, age and clock epoch agree. No transfer remains unknown; a newer invalid marked sample clears the prior forecast sample. |
+| Encoder | Proxy encoder owner; media seconds per active second and processed media seconds | Each speed reading carries its own monotonic capture interval; proxy process `performance.timeOrigin` is the epoch. Run progress carries its monotonic update point | The proxy attaches `waitId`, viewer generation and the ordered rate-reading revision | Valid only when the contributing samples have complete intervals in one epoch. No measured rate, missing owner mark or mixed epoch remains unknown. |
+| Browser buffer | Browser; seconds and media-time ranges | `captureStartedAtBrowser..captureCompletedAtBrowser` bounds the report's viewer and buffer reads; the browser page's `performance.timeOrigin` is the epoch | Browser reporter epoch, session id, seek generation and increasing report revision accompany the snapshot | Valid only for the active session and generation. Missing/invalid capture, an older/duplicate report, a seek-replaced generation or a cancelled output cannot supply fresh ranges. |
+
+The progress response preserves each family's capture record and returns age
+bounds for browser-owned facts on the browser clock and proxy-owned facts
+through the same progress request's monotonic transport bounds. The bounds keep
+the measured inbound/outbound asymmetry: no half-RTT assumption and no
+cross-host clock subtraction. A fact whose epoch or capture marks cannot be
+reconciled has an unknown age. These records do not enable numeric first-frame
+ETA; that ETA remains unavailable.
+
 The forecast is answered on every progress poll of a waiting viewer, on the
 proxy's main thread, so it avoids repeating work (torrent-tv/meta#178). A piece
 already played that was never read and is not made is left out before anything

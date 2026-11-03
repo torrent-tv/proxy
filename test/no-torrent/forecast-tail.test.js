@@ -259,7 +259,7 @@ test("the rest of the film is not taken as held because the first piece reads th
 });
 
 /** A twelve-second film whose third piece needs ten times the other source bytes. */
-function variableDensityFilm({ lookaheadSeconds = 3, trackCount = 1, mapTail = true } = {}) {
+function variableDensityFilm({ lookaheadSeconds = 3, trackCount = 1, mapTail = true, identifySource = true } = {}) {
   const now = 1_000_000;
   const lengths = [1_000, 1_000, 10_000, 1_000];
   let offset = 0;
@@ -274,7 +274,8 @@ function variableDensityFilm({ lookaheadSeconds = 3, trackCount = 1, mapTail = t
     sources: [{ id: "source", complete: false, fileOffset: 0, fileLength: offset, pieceLength: 1_000,
       residence: [], downloadForecast: { ranges: [] }, downloadRateReadings: summaryOf(1_000, now) }],
     tracks: Array.from({ length: trackCount }, (_, index) => ({
-      id: `track-${index}`, sourceIds: ["source"], processedSeconds: 0, startupRemainingSeconds: 0, openSeconds: 0,
+      id: `track-${index}`, sourceIds: identifySource ? ["source"] : [], processedSeconds: 0,
+      startupRemainingSeconds: 0, openSeconds: 0,
       bitsPerMediaSecond: 1_000, readings: summaryOf(1_000_000, now),
       segments: lengths.map((_, segmentIndex) => ({
         index: segmentIndex, startSeconds: segmentIndex * 3, endSeconds: (segmentIndex + 1) * 3,
@@ -309,9 +310,20 @@ test("source bytes shared by two tracks are charged once in the exact tail", () 
 test("unmapped tail addresses retain an explicit aggregate work estimate", () => {
   const answer = predictPlaybackReadiness(variableDensityFilm({ mapTail: false }));
   const source = answer.tail.find(part => part.sourceId === "source");
+  assert.equal(answer.reason, "tail-source-addresses-unavailable");
+  assert.equal(answer.delaySeconds, null, "the unbounded estimate cannot be presented as a full-film delay");
+  assert.ok(Number.isFinite(answer.diagnosticDelaySeconds), "the density result remains available for diagnostics");
+  assert.deepEqual(answer.unavailableTailSources, ["source"]);
   assert.equal(source.addressed, false);
   assert.equal(source.estimatedAddress, "file-density");
   assert.ok(source.missingBytes > 0, "unmapped work remains in the tail");
+});
+
+test("a tail without source identities stays explicitly unavailable", () => {
+  const answer = predictPlaybackReadiness(variableDensityFilm({ identifySource: false }));
+  assert.equal(answer.reason, "tail-source-addresses-unavailable");
+  assert.equal(answer.delaySeconds, null);
+  assert.deepEqual(answer.unavailableTailTracks, ["track-0"]);
 });
 
 test("the near-tail boundary neither repeats nor drops the next mapped source pieces", () => {

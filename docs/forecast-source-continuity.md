@@ -47,8 +47,13 @@ the remaining media duration. That cannot bound arbitrary local density
 changes: without a map for a segment, a large byte burst may occur before a
 deadline even when the file-wide average predicts otherwise. The forecast does
 not label this estimate exact and has no finite relative-error bound for that
-case. Exact mapped source pieces add intermediate source deadlines, but the
-tail's processing and delivery are still duration-level estimates.
+case. It retains the density result as `diagnosticDelaySeconds` and marks the
+full-film result `tail-source-addresses-unavailable`; it does not publish the
+estimate as `delaySeconds` or a predicted start time. Missing source identities
+are reported by track under `unavailableTailTracks`. Exact mapped source pieces
+add intermediate source deadlines, but the tail's processing and delivery are
+still duration-level estimates and are conditional on measured service rates
+continuing.
 
 ## Small schedule checks
 

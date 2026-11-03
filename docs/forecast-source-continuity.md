@@ -48,12 +48,16 @@ changes: without a map for a segment, a large byte burst may occur before a
 deadline even when the file-wide average predicts otherwise. The forecast does
 not label this estimate exact and has no finite relative-error bound for that
 case. It retains the density result as `diagnosticDelaySeconds` and marks the
-full-film result `tail-source-addresses-unavailable`; it does not publish the
-estimate as `delaySeconds` or a predicted start time. Missing source identities
-are reported by track under `unavailableTailTracks`. Exact mapped source pieces
-add intermediate source deadlines, but the tail's processing and delivery are
-still duration-level estimates and are conditional on measured service rates
-continuing.
+full-film result `tail-source-addresses-unavailable` when the caller supplies a
+full-tail profile; it does not publish the estimate as `delaySeconds` or a
+predicted start time. Missing source identities are reported by track under
+`unavailableTailTracks`. An input with no `tailSegments` profile still follows
+the legacy aggregate estimate for now. `ViewerRequests` does not yet supply the
+full-tail profile; that live projection is pending integration in
+`OutputForecastGeometry`, so this partial branch is not complete. Exact mapped
+source pieces add intermediate source deadlines, but the tail's processing and
+delivery are still duration-level estimates and are conditional on measured
+service rates continuing.
 
 ## Small schedule checks
 

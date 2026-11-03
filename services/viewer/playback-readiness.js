@@ -287,7 +287,9 @@ export function predictPlaybackReadiness(input = {}) {
   const horizonEnd = lookahead > 0 ? finiteNonNegative(input.positionSeconds) + lookahead : Number.POSITIVE_INFINITY;
   const tracks = (Array.isArray(input.tracks) ? input.tracks : []).map((track) => {
     if (!Array.isArray(track.segments)) return track;
+    const tailProfileProvided = Array.isArray(track.tailSegments);
     return { ...track, segmentCount: track.segmentCount ?? track.segments.length,
+      tailProfileProvided,
       // Keep exact future source maps separately from the bounded near-window
       // schedule. Tail source work can then be checked at the segment
       // deadlines without treating the whole suffix as one final deadline.
@@ -1019,10 +1021,11 @@ function scheduleTailSourceRanges({ trackState, sourceState, sourceByteCoverage,
     for (const sourceId of tailSources) referencedSources.add(sourceId);
     const readyTailCount = [...state.ready].reduce((count, index) => count + Number(index >= state.segmentCount - state.tailSegmentCount), 0);
     const unfinishedTailCount = Math.max(0, state.tailSegmentCount - readyTailCount);
-    if (unfinishedTailCount > 0 && tailSources.size === 0) {
+    if (state.track.tailProfileProvided === true && unfinishedTailCount > 0 && tailSources.size === 0) {
       unmappedTracks.add(state.track.id ?? `track-${trackIndex}`);
     }
-    if (tailSegments.filter(segment => !state.ready.has(segment.index)).length < unfinishedTailCount && tailSources.size > 0) {
+    if (state.track.tailProfileProvided === true &&
+        tailSegments.filter(segment => !state.ready.has(segment.index)).length < unfinishedTailCount && tailSources.size > 0) {
       for (const sourceId of tailSources) {
         if (sourceState.get(sourceId)?.source.complete !== true) unmappedSources.add(sourceId);
       }

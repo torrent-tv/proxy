@@ -119,6 +119,10 @@ test("an exact tail queue arrival holds the segment whose mapped source pieces i
   const piece = 6, count = 100, duration = piece * count;
   const bytesPerSecond = 1_000_000;
   const byteAt = (seconds) => Math.round(seconds * bytesPerSecond);
+  const segments = Array.from({ length: count }, (_, place) => ({
+    index: place, startSeconds: place * piece, endSeconds: (place + 1) * piece,
+    sourceInputs: [{ sourceId: "source", ranges: [{ start: byteAt(place * piece), end: byteAt((place + 1) * piece) }] }]
+  }));
   const input = (ranges, rate) => ({
     now, positionSeconds: 0, durationSeconds: duration, bufferedAheadSeconds: 0, reserveSeconds: 0,
     lookaheadSeconds: 120,
@@ -126,11 +130,8 @@ test("an exact tail queue arrival holds the segment whose mapped source pieces i
       residence: [], downloadForecast: { ranges }, downloadRateReadings: summaryOf(rate, now) }],
     tracks: [{
       id: "video", sourceIds: ["source"], processedSeconds: 0, startupRemainingSeconds: 0, openSeconds: 0,
-      bitsPerMediaSecond: 8_000_000, readings: summaryOf(50, now),
-      segments: Array.from({ length: count }, (_, place) => ({
-        index: place, startSeconds: place * piece, endSeconds: (place + 1) * piece,
-        sourceInputs: [{ sourceId: "source", ranges: [{ start: byteAt(place * piece), end: byteAt((place + 1) * piece) }] }]
-      })),
+      bitsPerMediaSecond: 8_000_000, readings: summaryOf(50, now), segments,
+      tailSegments: segments.filter(segment => segment.startSeconds >= 120),
       readySegmentIndices: [], segmentSizesBytes: new Map()
     }],
     linkReadings: summaryOf(1_000_000_000, now)

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { performance } from "node:perf_hooks";
 import { handleApiSourceStatsGet } from "../../routes/api/sources/stats/get.js";
 import { ViewerRequests } from "../../services/server/ViewerRequests.js";
 import { Viewers } from "../../services/viewer/Viewers.js";
@@ -64,7 +65,13 @@ test("source statistics record viewer facts only for a stated generation", async
   const result = await handleApiSourceStatsGet({ params: { sourceKey: "source" },
     query: { fileIndex: "0", consumer: "viewer", generation: "3", linkMbps: "18.5", linkSampleAgeMs: "120" } }, reply, {
     sourceRegistry: { get: () => ({ sourceType: "magnet", source: "unused" }) },
-    torrentPool: { knownTorrent: () => torrent, getFileStats: async () => stats },
+    torrentPool: { knownTorrent: () => torrent, getFileStats: async () => {
+      const startedAt = performance.now();
+      Object.assign(stats, { sourceCapture: { owner: "torrent-worker", clock: "performance",
+        clockEpoch: performance.timeOrigin, startedAt, completedAt: performance.now(), revision: 1,
+        validity: "valid", unknownReason: null } });
+      return stats;
+    } },
     viewerRequests: { noteWaitSourceSnapshot: input => calls.push(input) }
   });
 
@@ -73,6 +80,8 @@ test("source statistics record viewer facts only for a stated generation", async
   assert.equal(Object.hasOwn(result, "waitEstimate"), false);
   assert.equal(result.downloadSpeed, 20);
   const timing = result.sourceSnapshotTransport;
+  assert.equal(timing.clockEpoch, performance.timeOrigin);
+  assert.equal(timing.snapshotClockEpoch, performance.timeOrigin);
   assert.ok(Number.isFinite(timing.requestReceivedAtProxyMs));
   assert.ok(Number.isFinite(timing.snapshotStartedAtProxyMs));
   assert.ok(Number.isFinite(timing.snapshotCompletedAtProxyMs));

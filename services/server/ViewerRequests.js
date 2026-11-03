@@ -87,6 +87,59 @@ function forecastInputIdentity(state) {
   return state && JSON.stringify([state.sourceId, state.trackId, state.segmentIndex, state.phase]);
 }
 
+function unknownCapture(owner, actionId, generation, reason) {
+  return { owner, clock: "performance", clockEpoch: null, startedAt: null, completedAt: null,
+    actionId: actionId ?? null, generation: Number.isSafeInteger(generation) ? generation : null,
+    revision: null, validity: "unknown", unknownReason: reason };
+}
+
+function sourceCaptureOf(stats, actionId, generation) {
+  const source = stats?.sourceCapture;
+  if (!source || source.owner !== "torrent-worker" || source.clock !== "performance" ||
+      source.validity !== "valid" || !Number.isFinite(source.clockEpoch) ||
+      source.clockEpoch !== performance.timeOrigin ||
+      !Number.isFinite(source.startedAt) || !Number.isFinite(source.completedAt) ||
+      source.completedAt < source.startedAt || !Number.isSafeInteger(source.revision)) {
+    return { ...unknownCapture("torrent-worker", actionId, generation,
+      source?.unknownReason ?? "source-capture-unavailable"),
+      ...(Number.isFinite(source?.clockEpoch) ? { clockEpoch: source.clockEpoch } : {}),
+      ...(Number.isSafeInteger(source?.revision) ? { revision: source.revision } : {}) };
+  }
+  return { ...source, actionId: actionId ?? null, generation: Number.isSafeInteger(generation) ? generation : null };
+}
+
+function encoderCaptureOf(readings, liveRuns, actionId, generation) {
+  const samples = Array.isArray(readings) ? readings : [];
+  const sampleCaptures = samples.map(sample => ({ owner: sample.captureOwner, clock: sample.captureClock,
+    clockEpoch: sample.captureClockEpoch, startedAt: sample.captureStartedAtMonotonic,
+    completedAt: sample.captureCompletedAtMonotonic, revision: sample.at,
+    validity: sample.captureOwner && sample.captureClock === "performance" &&
+      Number.isFinite(sample.captureClockEpoch) && Number.isFinite(sample.captureStartedAtMonotonic) &&
+      Number.isFinite(sample.captureCompletedAtMonotonic) && sample.captureCompletedAtMonotonic >= sample.captureStartedAtMonotonic
+      ? "valid" : "unknown", unknownReason: sample.captureOwner && sample.captureClock === "performance" &&
+        Number.isFinite(sample.captureClockEpoch) && Number.isFinite(sample.captureStartedAtMonotonic) &&
+        Number.isFinite(sample.captureCompletedAtMonotonic) && sample.captureCompletedAtMonotonic >= sample.captureStartedAtMonotonic
+        ? null : "encoder-sample-capture-unavailable" }));
+  const runCaptures = (liveRuns ?? []).map(run => ({ owner: "proxy-encoder", clock: "performance",
+    clockEpoch: run.progress?.clockEpoch, startedAt: run.progress?.updatedAtMonotonic,
+    completedAt: run.progress?.updatedAtMonotonic, revision: run.progress?.updatedAtMonotonic,
+    validity: Number.isFinite(run.progress?.clockEpoch) && Number.isFinite(run.progress?.updatedAtMonotonic)
+      ? "valid" : "unknown", unknownReason: Number.isFinite(run.progress?.clockEpoch) &&
+        Number.isFinite(run.progress?.updatedAtMonotonic) ? null : "encoder-progress-capture-unavailable" }));
+  const captures = [...sampleCaptures, ...runCaptures];
+  const epoch = captures[0]?.clockEpoch;
+  const valid = captures.length > 0 && epoch === performance.timeOrigin && captures.every(capture =>
+    capture.owner === "proxy-encoder" && capture.clock === "performance" &&
+    Number.isFinite(capture.clockEpoch) && capture.clockEpoch === epoch && Number.isFinite(capture.startedAt) &&
+    Number.isFinite(capture.completedAt) && capture.completedAt >= capture.startedAt);
+  if (!valid) return unknownCapture("proxy-encoder", actionId, generation, "encoder-capture-unavailable");
+  return { owner: "proxy-encoder", clock: "performance", clockEpoch: epoch,
+    startedAt: Math.min(...captures.map(capture => capture.startedAt)),
+    completedAt: Math.max(...captures.map(capture => capture.completedAt)), actionId: actionId ?? null,
+    generation: Number.isSafeInteger(generation) ? generation : null,
+    revision: captures.at(-1).revision ?? null, samples: captures, validity: "valid", unknownReason: null };
+}
+
 function observeForecastInput(observeWait, sourceKey, state, event) {
   if (!state) return;
   observeWait?.(sourceKey, "process", {
@@ -612,7 +665,7 @@ export class ViewerRequests {
     return this.#host.viewerSecondsOn(session, consumerId);
   }
 
-  async getSessionProgress(sessionId, consumerId = "") {
+  async getSessionProgress(sessionId, consumerId = "", statedGeneration = Number.NaN) {
     if (!isOutputName(sessionId)) {
       return null;
     }
@@ -628,6 +681,12 @@ export class ViewerRequests {
     const session = this.#host.activeOutputFor({ base: named, consumerId, outputs: this.#host.outputs });
     this.#host.outputs.touch(session);
     const viewer = consumerId ? this.#host.viewers.get(consumerId) : null;
+    const requestGeneration = consumerId && viewer?.assignments
+      ? this.#host.generationOfRequest(consumerId) : null;
+    const requestGenerationIsStated = Number.isSafeInteger(statedGeneration);
+    if (requestGenerationIsStated && requestGeneration !== statedGeneration) return { superseded: true };
+    const requestGenerationIsCurrent = () => !Number.isSafeInteger(requestGeneration) ||
+      this.#host.generationOfRequest(consumerId) === requestGeneration;
     const stillOwnsProgress = () => this.#stillOwnsProgress(named, session, consumerId, viewer);
     const audio = this.#host.renditions.servesAudioSeparately(session)
       ? this.#host.renditions.playbackAudioOutputFor(session, consumerId) : null;
@@ -648,10 +707,12 @@ export class ViewerRequests {
     // Observed output bitrate (Mbit/s) from recently completed segments. The
     // proxy uses it for the viewer-link budget and the readiness forecast.
     const outputMbps = await this.#host.quality.observedStreamMbps(session);
+    if (!requestGenerationIsCurrent()) return requestGenerationIsStated ? { superseded: true } : null;
     if (!stillOwnsProgress()) return null;
     const progress = this.#host.encodeRuns.progressOf(session);
     const playbackReadiness = await this.#playbackReadinessFor(session, consumerId, progress, outputMbps,
       viewer, stillOwnsProgress);
+    if (!requestGenerationIsCurrent()) return requestGenerationIsStated ? { superseded: true } : null;
     if (!stillOwnsProgress()) return null;
     return {
       // The id the caller asked about, not the variant it was answered from —
@@ -758,13 +819,31 @@ export class ViewerRequests {
     // the answer crossed the connection in 21 ms (r50, torrent-tv/meta#178).
     const parts = { enteredAt: performance.now(), statsMs: 0, workerForecastMs: 0, qualityMs: 0 };
     const viewerReading = viewer?.linkReading() ?? null;
+    const generation = consumerId && viewer?.assignments
+      ? this.#host.generationOfRequest(consumerId) : null;
+    const actionIsCurrent = () => !Number.isSafeInteger(generation) ||
+      this.#host.generationOfRequest(consumerId) === generation;
+    const actionId = Number.isSafeInteger(generation)
+      ? `${session.file.sourceKey}:${session.file.fileIndex}:${generation}` : null;
     const measurement = viewer
       ? this.#host.viewerPlaybackState.rateState(viewer, session, this.#host.playbackReadiness, this.#host.lookaheadSeconds)
       : { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), sources: new Map() };
-    const linkAt = Number(viewerReading?.linkSampleMeasuredAt);
-    if (Number.isFinite(viewerReading?.linkSampleMbps) && viewerReading.linkSampleMbps > 0 && Number.isFinite(linkAt)) {
-      this.#host.viewerPlaybackState.addLinkReading(measurement, linkAt, viewerReading.linkSampleMbps);
+    const existingLinkCaptures = measurement.link.captureSnapshot();
+    if (viewer && (viewerReading?.linkCapture?.validity !== "valid" || existingLinkCaptures.some(capture =>
+      !capture || capture.clockEpoch !== viewerReading.linkCapture.clockEpoch))) {
+      this.#host.viewerPlaybackState.forgetLinkReadings(measurement, this.#host.playbackReadiness,
+        this.#host.lookaheadSeconds);
     }
+    const linkAt = Number(viewerReading?.linkSampleMeasuredAt);
+    if (viewerReading?.linkCapture?.validity === "valid" && Number.isFinite(viewerReading?.linkSampleMbps) &&
+        viewerReading.linkSampleMbps > 0 && Number.isFinite(linkAt)) {
+      this.#host.viewerPlaybackState.addLinkReading(measurement, linkAt, viewerReading.linkSampleMbps,
+        viewerReading.linkCapture);
+    }
+    const rawBufferCapture = viewerReading?.bufferCapture ?? unknownCapture("browser", actionId, generation,
+      "browser-buffer-capture-unavailable");
+    const bufferCaptureValid = rawBufferCapture.validity === "valid" && rawBufferCapture.actionId === session.id &&
+      rawBufferCapture.generation === generation;
 
     const outputs = [session];
     const requiresSeparateAudio = this.#host.renditions.servesAudioSeparately(session);
@@ -780,7 +859,7 @@ export class ViewerRequests {
     let primarySourceStats = null;
     const tracks = [];
     for (const output of outputs) {
-      if (!stillOwnsProgress() || this.#host.outputs.get(output.id) !== output) return null;
+      if (!stillOwnsProgress() || !actionIsCurrent() || this.#host.outputs.get(output.id) !== output) return null;
       const trackProgress = output === session ? progress : this.#host.encodeRuns.progressOf(output);
       const trackRates = this.#trackRateReadings(output, now);
       const trackName = output === session ? "video" : "audio";
@@ -788,13 +867,15 @@ export class ViewerRequests {
       // init it applied it to is the session's. Until both are known, the
       // pieces stay on their own presentation timeline: there is nothing yet
       // to place them by.
-      const playerOffset = viewerReading?.timestampOffsets?.[trackName];
+      const playerOffset = bufferCaptureValid ? viewerReading?.timestampOffsets?.[trackName] : null;
+      const reportedPosition = bufferCaptureValid && Number.isFinite(viewerReading?.positionSeconds)
+        ? viewerReading.positionSeconds : null;
       const servedInit = Number.isFinite(playerOffset) ? this.#host.segmentStore.initOf(output.outputKey) : null;
       const placedByPlayer = Boolean(servedInit?.length);
       const sessionInit = placedByPlayer ? servedInit : null;
       const inventory = this.#host.segmentStore.sizesOf(output.outputKey);
-      const segments = this.#host.outputForecastGeometry.segmentsOf(output, sessionInit, inventory, Number.isFinite(viewerReading?.positionSeconds)
-        ? viewerReading.positionSeconds : this.#host.viewerSecondsOn(session, consumerId, now));
+      const segments = this.#host.outputForecastGeometry.segmentsOf(output, sessionInit, inventory,
+        Number.isFinite(reportedPosition) ? reportedPosition : this.#host.viewerSecondsOn(session, consumerId, now));
       const sourceIndexes = [...output.spec.sourceFileIndexes];
       if (sourceIndexes.length === 0) {
         sourceIndexes.push(output.file.fileIndex);
@@ -814,36 +895,62 @@ export class ViewerRequests {
         } catch {
           stats = null;
         }
-        if (!stillOwnsProgress() || this.#host.outputs.get(output.id) !== output) return null;
+        if (!stillOwnsProgress() || !actionIsCurrent() || this.#host.outputs.get(output.id) !== output) return null;
         if (output === session && fileIndex === session.file.fileIndex) primarySourceStats = stats;
         parts.statsMs += performance.now() - statsAt;
         parts.workerForecastMs += Number(stats?.forecastMs) || 0;
+        const sourceCapture = sourceCaptureOf(stats, actionId, generation);
         if (!sourceForecasts.has(output.file.sourceKey)) sourceForecasts.set(output.file.sourceKey, stats?.downloadForecast ?? { ranges: [] });
         const sharedForecast = sourceForecasts.get(output.file.sourceKey);
-        const downloadForecast = sharedForecast.global ? { measuredAt: sharedForecast.measuredAt,
+        const capturedForecast = sourceCaptureOf({ sourceCapture: sharedForecast?.capture }, actionId, generation);
+        const forecastCapture = sharedForecast?.global === true && !Array.isArray(sharedForecast.ranges)
+          ? { ...capturedForecast, validity: "unknown", unknownReason: "source-arrival-ranges-unavailable" }
+          : capturedForecast;
+        const downloadForecast = sourceCapture.validity !== "valid" || forecastCapture.validity !== "valid"
+          ? { ranges: [] } : sharedForecast.global ? { measuredAt: sharedForecast.measuredAt,
           ranges: !stats ? [] : sharedForecast.ranges.map(range => ({ ...range,
             start: Math.max(0, range.start - stats.fileOffset),
             end: Math.min(stats.fileLength, range.end - stats.fileOffset)
           })).filter(range => range.end > range.start) } : sharedForecast;
+        const sourceFactsValid = sourceCapture.validity === "valid";
+        const ownsSourceState = viewer && this.#host.viewerPlaybackState.owns(viewer, session, measurement);
+        const sourceReadingsValid = sourceFactsValid && Number.isFinite(stats?.downloadSpeed) && stats.downloadSpeed >= 0;
+        const existingSourceCaptures = ownsSourceState
+          ? this.#host.viewerPlaybackState.sourceCaptureSnapshot(measurement, output.file.sourceKey) : null;
+        const sourceEpochChanged = sourceReadingsValid && existingSourceCaptures &&
+          [existingSourceCaptures.recent?.delivered, existingSourceCaptures.recent?.free,
+            existingSourceCaptures.tail?.delivered, existingSourceCaptures.tail?.free].some(capture =>
+            capture?.validity === "valid" && capture.clockEpoch !== sourceCapture.clockEpoch);
+        if (ownsSourceState && (!sourceReadingsValid || sourceEpochChanged)) {
+          this.#host.viewerPlaybackState.forgetSourceReadings(measurement, output.file.sourceKey);
+        }
+        const downloadRateReadings = ownsSourceState && sourceReadingsValid
+          ? this.#host.viewerPlaybackState.sourceRateReadings(measurement, output.file.sourceKey, stats, now,
+            this.#host.playbackReadiness, this.#host.lookaheadSeconds, sourceCapture) : null;
+        const tailRateReadings = ownsSourceState && sourceReadingsValid
+          ? this.#host.viewerPlaybackState.sourceTailRateReadings(measurement, output.file.sourceKey, now,
+            this.#host.playbackReadiness) : null;
+        const downloadRateSummaries = ownsSourceState && sourceReadingsValid
+          ? this.#host.viewerPlaybackState.sourceRateSummaries(measurement, output.file.sourceKey) : null;
+        const rateCapture = ownsSourceState && sourceReadingsValid
+          ? this.#host.viewerPlaybackState.sourceCaptureSnapshot(measurement, output.file.sourceKey) : null;
         sourceMeasurements.set(sourceId, {
           id: sourceId,
           serviceKey: output.file.sourceKey,
-          complete: stats?.fileAvailable === true,
-          residence: stats?.residence,
-          fileOffset: stats?.fileOffset,
-          fileLength: stats?.fileLength,
-          bytesPerMediaSecond: Number.isFinite(stats?.fileLength) && stats.fileLength > 0 &&
+          complete: sourceFactsValid ? stats?.fileAvailable === true : null,
+          residence: sourceFactsValid ? stats?.residence : null,
+          fileOffset: sourceFactsValid ? stats?.fileOffset : null,
+          fileLength: sourceFactsValid ? stats?.fileLength : null,
+          bytesPerMediaSecond: sourceFactsValid && Number.isFinite(stats?.fileLength) && stats.fileLength > 0 &&
             Number.isFinite(session.file.durationSeconds) && session.file.durationSeconds > 0
             ? stats.fileLength / session.file.durationSeconds : null,
-          pieceLength: stats?.pieceLength,
-          downloadRateReadings: viewer && this.#host.viewerPlaybackState.owns(viewer, session, measurement)
-            ? this.#host.viewerPlaybackState.sourceRateReadings(measurement, output.file.sourceKey, stats, now,
-              this.#host.playbackReadiness, this.#host.lookaheadSeconds) : null,
-          tailRateReadings: viewer && this.#host.viewerPlaybackState.owns(viewer, session, measurement)
-            ? this.#host.viewerPlaybackState.sourceTailRateReadings(measurement, output.file.sourceKey, now,
-              this.#host.playbackReadiness) : null,
-          downloadRateSummaries: viewer && this.#host.viewerPlaybackState.owns(viewer, session, measurement)
-            ? this.#host.viewerPlaybackState.sourceRateSummaries(measurement, output.file.sourceKey) : null,
+          pieceLength: sourceFactsValid ? stats?.pieceLength : null,
+          downloadRateReadings,
+          tailRateReadings,
+          downloadRateSummaries,
+          capture: { ...sourceCapture, rateReadings: rateCapture ?? {
+            validity: "unknown", unknownReason: "source-rate-capture-unavailable" },
+          downloadForecast: forecastCapture },
           downloadForecast,
         });
       }
@@ -852,36 +959,38 @@ export class ViewerRequests {
       const observedMbps = output === session
         ? outputMbps
         : await this.#host.quality.observedStreamMbps(output);
-      if (!stillOwnsProgress() || this.#host.outputs.get(output.id) !== output) return null;
+      if (!stillOwnsProgress() || !actionIsCurrent() || this.#host.outputs.get(output.id) !== output) return null;
       parts.qualityMs += performance.now() - qualityAt;
       const liveRuns = this.#host.encodeRuns.liveRunsOf?.(output) ?? [];
+      const encoderCapture = encoderCaptureOf(trackRates, liveRuns, actionId, generation);
+      const encoderCaptureValid = encoderCapture.validity === "valid";
       const processingStarted = liveRuns.some(({ progress }) => progress.processedSeconds > progress.startPositionSeconds);
       const startedAt = liveRuns.find(({ startedAt }) => startedAt > 0)?.startedAt ?? now;
       tracks.push({
         id: output.outputKey,
         clockOffsetSeconds: placedByPlayer ? playerOffset : 0,
-        clientRanges: viewerReading?.bufferedRanges?.[output === session ? "video" : "audio"] ??
-          viewerReading?.bufferedRanges?.media,
+        clientRanges: bufferCaptureValid ? viewerReading?.bufferedRanges?.[output === session ? "video" : "audio"] ??
+          viewerReading?.bufferedRanges?.media : null,
         // Browser-observed append and fragment-parse samples are retained for
         // the full model's service schedule; they are not yet used as numeric
         // predecessors in the partial continuity calculation.
-        appendService: viewerReading?.appendSessionId === session.id && viewerReading?.appendService?.[trackName]
+        appendService: bufferCaptureValid && viewerReading?.appendSessionId === session.id && viewerReading?.appendService?.[trackName]
           ? { ...viewerReading.appendService[trackName], epoch: viewerReading.appendEpoch,
             epochStartedAt: viewerReading.appendEpochStartedAt, snapshotAt: viewerReading.appendSnapshotAt,
             receivedAt: viewerReading.appendServiceReceivedAt }
           : null,
-        fragmentService: viewerReading?.appendSessionId === session.id && viewerReading?.fragmentService?.[trackName]
+        fragmentService: bufferCaptureValid && viewerReading?.appendSessionId === session.id && viewerReading?.fragmentService?.[trackName]
           ? { ...viewerReading.fragmentService[trackName], epoch: viewerReading.appendEpoch,
             epochStartedAt: viewerReading.appendEpochStartedAt, snapshotAt: viewerReading.appendSnapshotAt,
             receivedAt: viewerReading.appendServiceReceivedAt }
           : null,
         sourceIds,
-        processedSeconds: trackProgress?.processedSeconds,
-        startupRemainingSeconds: processingStarted ? 0 : Math.max(0,
+        processedSeconds: encoderCaptureValid ? trackProgress?.processedSeconds : null,
+        startupRemainingSeconds: !encoderCaptureValid ? null : processingStarted ? 0 : Math.max(0,
           (this.#host.processingStartupSecondsOf?.(output) ?? 0) - Math.max(0, (now - startedAt) / 1000)),
-        processingRanges: liveRuns.map(({ progress }) => ({
+        processingRanges: encoderCaptureValid ? liveRuns.map(({ progress }) => ({
           start: progress.startPositionSeconds, end: progress.processedSeconds
-        })),
+        })) : [],
         // What a run's start costs this output, and the stretches its live
         // runs were given: the forecast starts a run wherever production meets
         // bytes that were not held when the run before was admitted.
@@ -894,7 +1003,8 @@ export class ViewerRequests {
           this.#host.initialOutputBitsPerMediaSecondOf?.(output) ?? 0,
         durationSeconds: output.timeline?.publishedStartOf(output.timeline.segmentCount) ?? session.file.durationSeconds,
         segmentCount: output.timeline?.segmentCount ?? segments.length,
-        readings: trackRates,
+        readings: encoderCaptureValid ? trackRates : [],
+        capture: encoderCapture,
         segments,
         geometry: this.#host.outputForecastGeometry.get(output)?.geometry,
         readySegmentIndices: [...inventory.keys()],
@@ -902,10 +1012,10 @@ export class ViewerRequests {
       });
     }
 
-    if (!stillOwnsProgress()) return null;
+    if (!stillOwnsProgress() || !actionIsCurrent()) return null;
 
-    const bufferedAheadSeconds = Number(viewerReading?.bufferedAheadSec);
-    const positionSeconds = Number.isFinite(viewerReading?.positionSeconds)
+    const bufferedAheadSeconds = bufferCaptureValid ? Number(viewerReading?.bufferedAheadSec) : null;
+    const positionSeconds = bufferCaptureValid && Number.isFinite(viewerReading?.positionSeconds)
       ? viewerReading.positionSeconds
       : this.#host.viewerSecondsOn(session, consumerId, now);
     // Both separately delivered tracks can run short independently. Use the
@@ -932,7 +1042,7 @@ export class ViewerRequests {
       positionSeconds,
       durationSeconds: session.file.durationSeconds,
       bufferedAheadSeconds,
-      bufferLimitSeconds: viewerReading?.bufferLimitSeconds,
+      bufferLimitSeconds: bufferCaptureValid ? viewerReading?.bufferLimitSeconds : null,
       reserveSeconds,
       lookaheadSeconds: this.#host.lookaheadSeconds,
       // Disk room remaining after stock reserved for other active outputs.
@@ -940,7 +1050,7 @@ export class ViewerRequests {
       requiredAudio: requiresSeparateAudio,
       sources: [...sourceMeasurements.values()],
       tracks,
-      linkReadings: measurement.link.snapshot()
+      linkReadings: viewerReading?.linkCapture?.validity === "valid" ? measurement.link.snapshot() : null
     };
     // A subtitle track chosen inside THIS file is the last input the forecast
     // waits for. A subtitle FILE beside it is named by its own index and is
@@ -960,6 +1070,18 @@ export class ViewerRequests {
     const forecast = withSubtitleReadiness(predicted, subtitle,
       subtitle ? this.#host.subtitleReadyFor?.(viewer) !== false : true);
     forecast.snapshotAtProxyMs = startedAt;
+    forecast.snapshotClockEpoch = performance.timeOrigin;
+    forecast.inputCaptures = {
+      source: [...sourceMeasurements].map(([id, source]) => ({ id, capture: source.capture })),
+      link: { ...(viewerReading?.linkCapture ?? unknownCapture("browser", actionId, generation,
+        "link-capture-unavailable")), rateReadings: measurement.link.captureSnapshot() },
+      encoder: tracks.map(track => ({ id: track.id, capture: track.capture })),
+      buffer: bufferCaptureValid || rawBufferCapture.validity === "unknown" ? rawBufferCapture : {
+        ...rawBufferCapture, validity: "invalid",
+        unknownReason: rawBufferCapture.generation !== generation ? "seek-generation-replaced" :
+          rawBufferCapture.actionId !== session.id ? "viewer-session-replaced" : "viewer-output-cancelled"
+      }
+    };
     forecast.operations = outputs.flatMap((output, index) => {
       const common = { speed: this.#host.playbackReadiness.forecastRate(tracks[index].readings, now, 0, "piece"),
         processedSeconds: tracks[index].processedSeconds,
@@ -976,8 +1098,6 @@ export class ViewerRequests {
           outputCodec: output.spec.audio.transcode ? "aac" : null }] : [])
       ];
     });
-    const generation = consumerId && viewer?.assignments
-      ? this.#host.generationOfRequest(consumerId) : null;
     const earlyWaitId = Number.isSafeInteger(generation)
       ? `${session.file.sourceKey}:${session.file.fileIndex}:${generation}` : null;
     if (earlyWaitId && this.#host.viewerPlaybackState.hasWait(viewer, earlyWaitId) && primarySourceStats) {

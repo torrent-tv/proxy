@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
 import os from "node:os";
+import { performance } from "node:perf_hooks";
 
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
@@ -52,8 +53,13 @@ async function forecastProjection(t) {
   manager.encodeCost.projectedSpeedOf = () => 0.5;
   manager.sourceInputsFor = (_output, index) => [{ sourceId: "torrent:abc:0",
     ranges: [{ start: index * 10_000_000, end: (index + 1) * 10_000_000 }] }];
-  manager.getSourceStats = async () => ({ fileAvailable: false, downloadSpeed: 50_000_000,
-    fileOffset: 0, fileLength: 100_000_000, pieceLength: 1 << 20 });
+  manager.getSourceStats = async () => {
+    const startedAt = performance.now();
+    return { fileAvailable: false, downloadSpeed: 50_000_000,
+      fileOffset: 0, fileLength: 100_000_000, pieceLength: 1 << 20,
+      sourceCapture: { owner: "torrent-worker", clock: "performance", clockEpoch: performance.timeOrigin,
+        startedAt, completedAt: performance.now(), revision: 1, validity: "valid", unknownReason: null } };
+  };
 
   let progress;
   await handleApiTranscodeSessionsProgressGet({ params: { sessionId: session.id }, query: { consumer: "viewer" } },
@@ -167,8 +173,13 @@ test("a late separate-audio answer cannot restore geometry after that output is 
   manager.viewers.of(audio, "viewer");
   manager.renditions.servesAudioSeparately = () => true;
   manager.renditions.playbackAudioOutputFor = () => audio;
-  manager.getSourceStats = async () => ({ fileAvailable: true, downloadSpeed: 10_000_000,
-    fileOffset: 0, fileLength: 100_000_000, pieceLength: 1 << 20 });
+  manager.getSourceStats = async () => {
+    const startedAt = performance.now();
+    return { fileAvailable: true, downloadSpeed: 10_000_000,
+      fileOffset: 0, fileLength: 100_000_000, pieceLength: 1 << 20,
+      sourceCapture: { owner: "torrent-worker", clock: "performance", clockEpoch: performance.timeOrigin,
+        startedAt, completedAt: performance.now(), revision: 1, validity: "valid", unknownReason: null } };
+  };
   let resolveAudioQuality;
   let audioQualityStarted;
   const started = new Promise(resolve => { audioQualityStarted = resolve; });
@@ -223,4 +234,47 @@ test("a pending answer cannot recreate an old variant after the viewer selects a
   assert.equal(await pending, null);
   assert.equal(manager.viewerPlaybackState.viewerCount(), 0);
   assert.equal(manager.outputForecastGeometry.get(oldVariant), null);
+});
+
+test("a seek that replaces the forecast generation cancels its pending source snapshot", async t => {
+  const { manager, cleanup } = managerWithOwnStore();
+  t.after(cleanup);
+  const session = fakeSession();
+  manager.outputs.set(session.id, session);
+  const viewer = manager.viewers.of(session, "viewer");
+
+  let resolveStats;
+  let statsStarted;
+  const started = new Promise(resolve => { statsStarted = resolve; });
+  const stats = new Promise(resolve => { resolveStats = resolve; });
+  manager.getSourceStats = () => { statsStarted(); return stats; };
+
+  const pending = manager.viewerRequests.getSessionProgress(session.id, "viewer", 0);
+  await started;
+  viewer.assignments.statedGeneration(1, Date.now());
+  resolveStats({ fileAvailable: false, downloadSpeed: 10_000_000, fileOffset: 0,
+    fileLength: 100_000_000, pieceLength: 1 << 20 });
+
+  assert.deepEqual(await pending, { superseded: true }, "a response assembled for the old seek cannot become current");
+});
+
+test("a seek that happens during the initial rate lookup cancels the progress response", async t => {
+  const { manager, cleanup } = managerWithOwnStore();
+  t.after(cleanup);
+  const session = fakeSession();
+  manager.outputs.set(session.id, session);
+  const viewer = manager.viewers.of(session, "viewer");
+
+  let resolveRate;
+  let rateStarted;
+  const started = new Promise(resolve => { rateStarted = resolve; });
+  const rate = new Promise(resolve => { resolveRate = resolve; });
+  manager.quality.observedStreamMbps = () => { rateStarted(); return rate; };
+
+  const pending = manager.viewerRequests.getSessionProgress(session.id, "viewer", 0);
+  await started;
+  viewer.assignments.statedGeneration(1, Date.now());
+  resolveRate(5);
+
+  assert.deepEqual(await pending, { superseded: true }, "a pre-seek request cannot be restamped with the new generation");
 });

@@ -1,5 +1,6 @@
 ## Unreleased
 
+- **Fix**: Preserve clock epoch, capture interval, action, revision and validity for source, link, encoder and browser-buffer forecast inputs; clear newer invalid captures while keeping first-frame ETA unavailable.
 - **Fix**: Keep playback forecast history with live viewer and output owners, and release viewer samples, wait observations and cached geometry when those owners end.
 
 ## 2.107.51

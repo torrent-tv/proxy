@@ -37,6 +37,8 @@
  * owns the output. This carries a decision out and reports what happened.
  */
 
+import { performance } from "node:perf_hooks";
+
 import { ENCODE_RUN_EVENT, ENCODE_RUN_STATE, INITIAL_RUN_STATE, nextState } from "./encode-run-state.js";
 import { classifyEncodeExit, ENCODE_EXIT } from "./encode-exit.js";
 import { workDeltaBetween } from "./encoder-readings.js";
@@ -228,6 +230,7 @@ export class EncodeRun {
    * @param {(args: string[]) => import("node:child_process").ChildProcess} params.spawn
    * @param {{ info: (line: string) => void, warn: (line: string) => void, error?: (line: string) => void }} params.logger
    * @param {() => number} [params.now]
+   * @param {() => number} [params.monotonicNow]
    * @param {(ended: RunEnded) => void} [params.onEnded]
    * @param {(reading: { speed: number, at: number, workSeconds: number, workingSeconds: number }) => void} [params.onSpeedMeasured] -
    *   Told each time this run has measured its processing speed, once per
@@ -291,6 +294,7 @@ export class EncodeRun {
     indexOfName,
     startSeconds = 0,
     totalSeconds = null,
+    monotonicNow,
     because = "no reason was given"
   }) {
     this.address = address;
@@ -302,10 +306,11 @@ export class EncodeRun {
     this.spawnProcess = spawn;
     this.logger = logger;
     this.now = typeof now === "function" ? now : Date.now;
-    this.progress = new RunProgress({ startSeconds, totalSeconds, now: this.now });
+    this.monotonicNow = typeof monotonicNow === "function" ? monotonicNow : () => performance.now();
+    this.progress = new RunProgress({ startSeconds, totalSeconds, now: this.now, monotonicNow: this.monotonicNow });
     /** Where this run's time went: its own work, or waiting, or stopped. */
     this.clock = new RunClock({ now: this.now });
-    this.#pieceSample = { at: this.now(), producedSeconds: 0, workingMs: 0 };
+    this.#pieceSample = { at: this.now(), monotonicAt: this.monotonicNow(), producedSeconds: 0, workingMs: 0 };
     this.onEnded = typeof onEnded === "function" ? onEnded : () => {};
     this.onProgress = typeof onProgress === "function" ? onProgress : () => {};
     this.onProduced = typeof onProduced === "function" ? onProduced : () => {};
@@ -463,6 +468,7 @@ export class EncodeRun {
       this.#pieceSample = {
         ...this.#workSample,
         at: this.now(),
+        monotonicAt: this.monotonicNow(),
         workingMs: this.clock.workingMs()
       };
     }
@@ -600,6 +606,7 @@ export class EncodeRun {
       const at = this.now();
       this.#workSample = {
         at,
+        monotonicAt: this.progress.updatedAtMonotonic,
         producedSeconds: Math.max(0, this.progress.processedSeconds - this.progress.startPositionSeconds),
         workingMs: this.clock.workingMs(at)
       };
@@ -766,7 +773,10 @@ export class EncodeRun {
     }
     const work = workDeltaBetween(this.#pieceSample, sample);
     if (work !== null) {
-      this.#speedReading = { speed: work.workSeconds / work.workingSeconds, at: sample.at, ...work };
+      this.#speedReading = { speed: work.workSeconds / work.workingSeconds, at: sample.at, ...work,
+        captureOwner: "proxy-encoder", captureClock: "performance", captureClockEpoch: performance.timeOrigin,
+        captureStartedAtMonotonic: this.#pieceSample.monotonicAt,
+        captureCompletedAtMonotonic: sample.monotonicAt };
       this.#pieceSample = sample;
       this.#speedMeasurementPending = false;
       this.onSpeedMeasured(this.speedReading);

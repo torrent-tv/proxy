@@ -14,7 +14,9 @@
  */
 
 export class SpeedReadings {
-  /** @type {WeakMap<object, Array<{ speed: number, at: number, workSeconds?: number, workingSeconds?: number }>>} */
+  /** @type {WeakMap<object, Array<{ speed: number, at: number, workSeconds?: number, workingSeconds?: number,
+   * captureOwner?: string, captureClock?: string, captureClockEpoch?: number,
+   * captureStartedAtMonotonic?: number, captureCompletedAtMonotonic?: number }>>} */
   #byOutput = new WeakMap();
   #keepMs;
 
@@ -25,7 +27,9 @@ export class SpeedReadings {
 
   /**
    * @param {object} output
-   * @param {{ speed: number, at: number, workSeconds?: number, workingSeconds?: number } | null} reading
+   * @param {{ speed: number, at: number, workSeconds?: number, workingSeconds?: number,
+   * captureOwner?: string, captureClock?: string, captureClockEpoch?: number,
+   * captureStartedAtMonotonic?: number, captureCompletedAtMonotonic?: number } | null} reading
    */
   note(output, reading) {
     if (!output || !(reading?.speed > 0) || !Number.isFinite(reading.at)) return;
@@ -34,6 +38,10 @@ export class SpeedReadings {
     let place = readings.length;
     while (place > 0 && readings[place - 1].at > reading.at) place -= 1;
     const sample = { speed: reading.speed, at: reading.at };
+    for (const key of ["captureOwner", "captureClock", "captureClockEpoch", "captureStartedAtMonotonic",
+      "captureCompletedAtMonotonic"]) {
+      if (reading[key] !== undefined) sample[key] = reading[key];
+    }
     if (Number.isFinite(reading.workSeconds) && reading.workSeconds > 0 &&
         Number.isFinite(reading.workingSeconds) && reading.workingSeconds > 0) {
       Object.assign(sample, { workSeconds: reading.workSeconds, workingSeconds: reading.workingSeconds });

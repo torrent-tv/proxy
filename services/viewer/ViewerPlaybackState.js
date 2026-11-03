@@ -46,11 +46,15 @@ export class ViewerPlaybackState {
     return removed;
   }
 
-  addLinkReading(state, at, mbps) {
-    state.link.add(at, mbps * 1_000_000);
+  addLinkReading(state, at, mbps, capture = null) {
+    state.link.add(at, mbps * 1_000_000, capture);
   }
 
-  sourceRateReadings(state, id, stats, now, playbackReadiness, lookaheadSeconds) {
+  forgetLinkReadings(state, playbackReadiness, lookaheadSeconds) {
+    if (state) state.link = new playbackReadiness.RateTrend(lookaheadSeconds);
+  }
+
+  sourceRateReadings(state, id, stats, now, playbackReadiness, lookaheadSeconds, capture = null) {
     let source = state.sources.get(id);
     if (!source) {
       const { RateTrend, SessionRate } = playbackReadiness;
@@ -58,15 +62,16 @@ export class ViewerPlaybackState {
         deliveredAll: new SessionRate(), freeAll: new SessionRate(), limit: null };
       state.sources.set(id, source);
     }
+    const readingCapture = capture ?? stats?.sourceCapture ?? null;
     if (Number.isFinite(stats?.downloadSpeed) && stats.downloadSpeed >= 0) {
-      source.delivered.add(now, stats.downloadSpeed);
-      source.deliveredAll.add(now, stats.downloadSpeed);
+      source.delivered.add(now, stats.downloadSpeed, readingCapture);
+      source.deliveredAll.add(now, stats.downloadSpeed, readingCapture);
     }
     const limit = stats?.selectionLimit;
     if (limit && source.limit && limit.freeMs > source.limit.freeMs) {
       const free = Math.max(0, limit.freeBytes - source.limit.freeBytes) * 1000 / (limit.freeMs - source.limit.freeMs);
-      source.free.add(now, free);
-      source.freeAll.add(now, free);
+      source.free.add(now, free, readingCapture);
+      source.freeAll.add(now, free, readingCapture);
     }
     if (limit) source.limit = limit;
     return sourceService(source.free.snapshot(), source.delivered.snapshot(),
@@ -83,6 +88,19 @@ export class ViewerPlaybackState {
   sourceRateSummaries(state, id) {
     const source = state.sources.get(id);
     return source ? { free: source.free.snapshot(), delivered: source.delivered.snapshot() } : null;
+  }
+
+  sourceCaptureSnapshot(state, id) {
+    const source = state.sources.get(id);
+    if (!source) return null;
+    return {
+      recent: { delivered: source.delivered.captureSnapshot(), free: source.free.captureSnapshot() },
+      tail: { delivered: source.deliveredAll.captureSnapshot(), free: source.freeAll.captureSnapshot() }
+    };
+  }
+
+  forgetSourceReadings(state, id) {
+    state?.sources.delete(id);
   }
 
   getWait(viewer, waitId) {

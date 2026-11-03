@@ -117,12 +117,30 @@ export async function handleApiTranscodeSessionNetReportPost(req, reply,
       linkMbps: Number.isFinite(linkMbps) && linkMbps > 0 ? linkMbps : undefined,
       linkSampleMbps: Number.isFinite(linkSampleMbps) && linkSampleMbps > 0 ? linkSampleMbps : undefined,
       linkSampleAt: Number.isFinite(linkSampleAt) && linkSampleAt > 0 ? linkSampleAt : undefined,
+      linkSampleAgeMs: Number.isFinite(body.linkSampleAgeMs) && body.linkSampleAgeMs >= 0
+        ? body.linkSampleAgeMs : undefined,
       appendSessionId: sessionId,
       appendEpoch: typeof body.appendEpoch === "string" ? body.appendEpoch : undefined,
       appendEpochStartedAt: Number.isFinite(body.appendEpochStartedAt) && body.appendEpochStartedAt > 0
         ? body.appendEpochStartedAt : undefined,
       appendSnapshotAt: Number.isFinite(body.appendSnapshotAt) && body.appendSnapshotAt > 0
         ? body.appendSnapshotAt : undefined,
+      captureClockEpoch: Number.isFinite(body.captureClockEpoch) ? body.captureClockEpoch : undefined,
+      captureEpoch: typeof body.captureEpoch === "string" ? body.captureEpoch : undefined,
+      captureEpochStartedAtBrowser: Number.isFinite(body.captureEpochStartedAtBrowser)
+        ? body.captureEpochStartedAtBrowser : undefined,
+      captureRevision: Number.isSafeInteger(body.captureRevision) ? body.captureRevision : undefined,
+      captureStartedAtBrowser: Number.isFinite(body.captureStartedAtBrowser) ? body.captureStartedAtBrowser : undefined,
+      captureCompletedAtBrowser: Number.isFinite(body.captureCompletedAtBrowser)
+        ? body.captureCompletedAtBrowser : undefined,
+      linkSampleStartedAtBrowser: Number.isFinite(body.linkSampleStartedAtBrowser)
+        ? body.linkSampleStartedAtBrowser : undefined,
+      linkSampleCompletedAtBrowser: Number.isFinite(body.linkSampleCompletedAtBrowser)
+        ? body.linkSampleCompletedAtBrowser : undefined,
+      linkSampleActionId: typeof body.linkSampleActionId === "string" ? body.linkSampleActionId : undefined,
+      linkSampleGeneration: Number.isSafeInteger(body.linkSampleGeneration) ? body.linkSampleGeneration : undefined,
+      linkSampleClockEpoch: Number.isFinite(body.linkSampleClockEpoch) ? body.linkSampleClockEpoch : undefined,
+      linkSampleRevision: Number.isSafeInteger(body.linkSampleRevision) ? body.linkSampleRevision : undefined,
       appendService: body.appendService && typeof body.appendService === "object" ? body.appendService : undefined,
       fragmentService: body.fragmentService && typeof body.fragmentService === "object" ? body.fragmentService : undefined,
       bufferedAheadSec,

@@ -19,13 +19,21 @@ export async function handleApiTranscodeSessionsProgressGet(req, reply, { viewer
   // quality change the stream on screen is another session — a different one
   // for each viewer who changed.
   const consumerId = typeof req.query?.consumer === "string" ? req.query.consumer : "";
-  const progress = await viewerRequests.getSessionProgress(sessionId, consumerId);
+  const stated = Number(req.query?.generation);
+  const generation = Number.isSafeInteger(stated) && stated >= 0 ? stated : Number.NaN;
+  const progress = await viewerRequests.getSessionProgress(sessionId, consumerId, generation);
+  if (progress?.superseded === true) {
+    return reply.code(409).send({ error: "Viewer action was superseded." });
+  }
   if (!progress) {
     return reply.code(404).send({ error: "Transcode session was not found." });
   }
 
   const responsePreparedAtProxyMs = performance.now();
   progress.snapshotTransport = {
+    clockEpoch: performance.timeOrigin,
+    snapshotClockEpoch: progress.playbackReadiness?.snapshotClockEpoch ?? null,
+    generation: Number.isSafeInteger(generation) ? generation : null,
     requestReceivedAtProxyMs,
     snapshotAtProxyMs: progress.playbackReadiness?.snapshotAtProxyMs ?? null,
     responsePreparedAtProxyMs

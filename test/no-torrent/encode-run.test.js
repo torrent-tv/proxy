@@ -10,6 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { performance } from "node:perf_hooks";
 import { EncodeRun } from "../../services/encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../../services/encode/encode-exit.js";
 import { SoftwareEncoder } from "../../services/encode/SoftwareEncoder.js";
@@ -172,6 +173,7 @@ test("a process that could not be started ends like any other failure", () => {
 
 test("its speed is film made over its own working time, including for a one-piece run", () => {
   const clock = { at: 1000 };
+  let monotonic = 100;
   const process_ = new FakeProcess();
   process_.stdout = new EventEmitter();
   process_.stdio = [null, process_.stdout, null, new EventEmitter()];
@@ -186,6 +188,7 @@ test("its speed is film made over its own working time, including for a one-piec
     spawn: () => process_,
     logger: { info() {}, warn() {} },
     now: () => clock.at,
+    monotonicNow: () => monotonic,
     publishesAlone: true,
     onSpeedMeasured: (reading) => readings.push(reading),
     onClosed: (name, following) => { closedPairs.push([name, following]); return name; }
@@ -196,15 +199,24 @@ test("its speed is film made over its own working time, including for a one-piec
   // The input waits for the swarm for 30 s; that is not the run's work.
   run.inputWaitBegins();
   clock.at += 30_000;
+  monotonic = 150;
   report(0.5);
   run.inputWaitEnds();
   clock.at += 1000;
+  monotonic = 250;
   report(4);
   closed("a");
   assert.equal(run.speedX, 3.5, "3.5 s of film over 1 s of work, excluding the input wait");
   assert.deepEqual(closedPairs, [["a", null]], "a completed piece is published on its own");
-  assert.deepEqual(readings, [{ speed: 3.5, at: 32_000, workSeconds: 3.5, workingSeconds: 1 }],
-    "the measured media and active time reach the forecast with their measurement time");
+  assert.deepEqual(readings.map(({ speed, at, workSeconds, workingSeconds }) =>
+    ({ speed, at, workSeconds, workingSeconds })),
+  [{ speed: 3.5, at: 32_000, workSeconds: 3.5, workingSeconds: 1 }],
+  "the measured media and active time reach the forecast with their measurement time");
+  assert.equal(readings[0].captureOwner, "proxy-encoder");
+  assert.equal(readings[0].captureClock, "performance");
+  assert.equal(readings[0].captureClockEpoch, performance.timeOrigin);
+  assert.equal(readings[0].captureStartedAtMonotonic, 150);
+  assert.equal(readings[0].captureCompletedAtMonotonic, 250);
 });
 
 test("one positive progress report measures a one-piece run after its input wait", () => {
@@ -231,7 +243,8 @@ test("one positive progress report measures a one-piece run after its input wait
   report(4);
   assert.equal(run.speedX, 2, "4 s of film over 2 s of active encoder work");
   assert.deepEqual(closed, ["segment-00000.mp4"]);
-  assert.deepEqual(readings, [{ speed: 2, at: 33_000, workSeconds: 4, workingSeconds: 2 }]);
+  assert.deepEqual(readings.map(({ speed, at, workSeconds, workingSeconds }) =>
+    ({ speed, at, workSeconds, workingSeconds })), [{ speed: 2, at: 33_000, workSeconds: 4, workingSeconds: 2 }]);
 });
 
 test("a segment number behind its own start is not its to claim", () => {

@@ -64,6 +64,22 @@ test("disposing an output drops cached geometry and its viewer samples; reusing 
   assert.notEqual(reopened, history);
 });
 
+test("a newer invalid source or link capture clears retained forecast readings", () => {
+  const state = new ViewerPlaybackState();
+  const output = { id: "output" };
+  const viewer = {};
+  const history = state.rateState(viewer, output, playbackReadiness, 20);
+  state.addLinkReading(history, 100, 8_000_000);
+  assert.notEqual(history.link.snapshot(), null);
+  state.forgetLinkReadings(history, playbackReadiness, 20);
+  assert.equal(history.link.snapshot(), null);
+
+  state.sourceRateReadings(history, "source", { downloadSpeed: 500_000 }, 200, playbackReadiness, 20);
+  assert.notEqual(state.sourceRateSummaries(history, "source"), null);
+  state.forgetSourceReadings(history, "source");
+  assert.equal(state.sourceRateSummaries(history, "source"), null);
+});
+
 test("OutputLifecycle releases forecast owners before removing a session", async () => {
   const state = new ViewerPlaybackState();
   const geometry = new OutputForecastGeometry({

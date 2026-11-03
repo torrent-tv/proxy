@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 /**
  * @file Progress reported by one encoder run, placed on the source timeline.
  *
@@ -22,15 +24,18 @@ function parseTimestamp(value) {
 }
 
 export class RunProgress {
-  constructor({ startSeconds = 0, totalSeconds = null, now = Date.now } = {}) {
+  constructor({ startSeconds = 0, totalSeconds = null, now = Date.now, monotonicNow = () => performance.now() } = {}) {
     this.startPositionSeconds = Number.isFinite(startSeconds) ? Math.max(0, startSeconds) : 0;
     this.processedSeconds = this.startPositionSeconds;
     this.totalSeconds = Number.isFinite(totalSeconds) && totalSeconds > 0 ? totalSeconds : null;
     this.percent = null;
     this.remainingSeconds = this.totalSeconds;
     this.updatedAt = now();
+    this.updatedAtMonotonic = monotonicNow();
+    this.clockEpoch = performance.timeOrigin;
     this.lastLoggedAt = 0;
     this.now = now;
+    this.monotonicNow = monotonicNow;
     this.#derive();
   }
 
@@ -42,6 +47,7 @@ export class RunProgress {
       this.processedSeconds = this.startPositionSeconds + Math.max(0, relative);
     }
     this.updatedAt = this.now();
+    this.updatedAtMonotonic = this.monotonicNow();
     this.#derive();
     return this.snapshot();
   }
@@ -61,7 +67,9 @@ export class RunProgress {
       totalSeconds: this.totalSeconds,
       percent: this.percent,
       remainingSeconds: this.remainingSeconds,
-      updatedAt: this.updatedAt
+      updatedAt: this.updatedAt,
+      updatedAtMonotonic: this.updatedAtMonotonic,
+      clockEpoch: this.clockEpoch
     };
   }
 
@@ -77,3 +85,4 @@ export class RunProgress {
     this.remainingSeconds = Math.max(0, this.totalSeconds - this.processedSeconds);
   }
 }
+

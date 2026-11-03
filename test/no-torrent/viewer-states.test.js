@@ -108,7 +108,11 @@ test("a report without a link measurement still states everything about the view
 test("append service accepts advancing cumulative counters once and rejects stale counters", () => {
   const viewer = new Viewer("one", AT);
   const report = (bytes, serviceMs, operations, epoch = "page-one", epochStartedAt = AT,
-    snapshotAt = epoch === "page-one" ? AT + bytes : epochStartedAt) => ({
+    snapshotAt = epoch === "page-one" ? AT + bytes : epochStartedAt) => {
+    const captureEpochStartedAtBrowser = performance.timeOrigin + (epoch === "page-two" ? 100 : 10);
+    return { ...reportCapture({ epoch, epochStartedAt: captureEpochStartedAtBrowser,
+      revision: Math.max(1, operations), startedAt: captureEpochStartedAtBrowser + 10,
+      completedAt: captureEpochStartedAtBrowser + 20 }),
     appendSessionId: "session-one",
     appendEpoch: epoch,
     appendEpochStartedAt: epochStartedAt,
@@ -140,7 +144,8 @@ test("append service accepts advancing cumulative counters once and rejects stal
         media: { bytes: 0, elapsedMs: 0, operations: 0, samples: [] } }
     },
     bufferedAheadSec: 0
-  });
+  };
+  };
 
   viewer.report(report(200, 40, 2), AT);
   assert.deepEqual(viewer.netReport.appendService.video.media.samples,

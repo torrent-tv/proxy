@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { predictPlaybackReadiness, RateTrend, SessionRate } from "../../services/viewer/playback-readiness.js";
+import { OutputForecastGeometry } from "../../services/viewer/OutputForecastGeometry.js";
 
 /** A deterministic sequence in [0, 1). */
 function randomFrom(seed) {
@@ -21,6 +22,27 @@ function summaryOf(value, now) {
   trend.add(now, value);
   return trend.snapshot();
 }
+
+test("live output geometry projects every remaining segment and preserves missing source maps", () => {
+  let mapped = false;
+  const geometry = new OutputForecastGeometry({
+    lookaheadSeconds: 8,
+    sourceInputsFor: (_output, index) => mapped && index === 3
+      ? [{ sourceId: "source", ranges: [{ start: 30, end: 40 }] }]
+      : index === 2 || index === 4 ? [{ sourceId: "source", ranges: [{ start: index * 10, end: index * 10 + 10 }] }]
+        : null
+  });
+  const output = { timeline: { segmentCount: 5, publishedStartOf: index => index * 4 } };
+  geometry.segmentsOf(output, null, new Map(), 0);
+  const first = geometry.get(output).tailSegments;
+  assert.deepEqual(first.map(segment => segment.index), [2, 3, 4]);
+  assert.equal(first[0].sourceInputs[0].ranges[0].start, 20);
+  assert.equal(Object.hasOwn(first[1], "sourceInputs"), true);
+  assert.equal(first[1].sourceInputs, undefined, "an unknown map remains explicit");
+  mapped = true;
+  geometry.segmentsOf(output, null, new Map(), 0);
+  assert.equal(geometry.get(output).tailSegments[1].sourceInputs[0].ranges[0].start, 30);
+});
 
 /**
  * A film of evenly cut pieces read from one source in byte order, with held

@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Keep playback forecast history with live viewer and output owners, and release viewer samples, wait observations and cached geometry when those owners end.
+
 ## 2.107.52
 
 - **Fix**: Keep late-tail repetition within the current urgent download class and isolate WebTorrent's private reservation access behind a bounded adapter. Count every missing block covered by an in-flight range and exclude WebSeeds as repeat targets because their requests span a piece suffix; preserve the existing age, tail-size and copy limits.

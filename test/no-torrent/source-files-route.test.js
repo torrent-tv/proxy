@@ -16,6 +16,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { handleApiSourceFilesGet } from "../../routes/api/sources/files/get.js";
+import { ViewerRequests } from "../../services/server/ViewerRequests.js";
+import { Viewers } from "../../services/viewer/Viewers.js";
+import { ViewerPlaybackState } from "../../services/viewer/ViewerPlaybackState.js";
 
 test("a cancelled metadata request removes its subscription without sending a file list", async () => {
   const { req, reply, sent, deps } = harness([]);
@@ -112,6 +115,36 @@ test("source facts are recorded without attaching a first-frame estimate", async
   assert.equal(sent.body.files.find(file => file.kind === "subtitle").waitEstimate, undefined);
   assert.deepEqual(calls[0], { consumerId: "viewer", generation: 0, sourceKey: "key", fileIndex: 0,
     fileName: "Film/episode.mkv", fileLength: 900, linkMbps: 18.5, linkSampleAgeMs: 120 });
+});
+
+test("late file listing cannot attach old facts to a reused viewer id", async () => {
+  let resolveTorrent;
+  let torrentStarted;
+  const started = new Promise(resolve => { torrentStarted = resolve; });
+  const torrentWait = new Promise(resolve => { resolveTorrent = resolve; });
+  const viewers = new Viewers();
+  const original = viewers.selectsFile("reused", "old-source", 0);
+  original.report({ linkMbps: 99, linkSampleMbps: 99, linkSampleAgeMs: 0 });
+  const playbackState = new ViewerPlaybackState();
+  const viewerRequests = new ViewerRequests({ viewers, viewerPlaybackState: playbackState });
+  const { req, reply, deps } = harness([]);
+  req.params.sourceKey = "old-source";
+  req.query = { consumerId: "reused", generation: "0", linkMbps: "99", linkSampleAgeMs: "0" };
+  deps.sourceRegistry.get = () => ({ sourceType: "magnet", source: "unused" });
+  deps.torrentPool.getTorrent = () => { torrentStarted(); return torrentWait; };
+  deps.viewers = viewers;
+  deps.viewerRequests = viewerRequests;
+  const pending = handleApiSourceFilesGet(req, reply, deps);
+  await started;
+
+  viewers.hasGone("reused");
+  const replacement = viewers.selectsFile("reused", "new-source", 1);
+  replacement.report({ linkMbps: 3, linkSampleMbps: 3, linkSampleAgeMs: 0 });
+  resolveTorrent({ name: "Old", infoHash: "abc", files: [{ path: "Old.mkv", length: 100 }] });
+  await pending;
+
+  assert.equal(playbackState.waitCount(replacement), 0);
+  assert.equal(playbackState.viewerCount(), 0);
 });
 
 test("each picture is named with what belongs to it, by index", () => {

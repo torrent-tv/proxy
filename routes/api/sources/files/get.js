@@ -33,6 +33,11 @@ export async function handleApiSourceFilesGet(req, reply, { sourceRegistry, torr
     return reply.code(404).send({ error: "Source key was not found." });
   }
 
+  const consumerId = typeof req.query?.consumerId === "string" ? req.query.consumerId.trim() : "";
+  const generationRaw = typeof req.query?.generation === "string" ? req.query.generation : "";
+  const generation = generationRaw !== "" && /^\d+$/.test(generationRaw) ? Number(generationRaw) : null;
+  const viewerToken = viewerRequests?.viewerTokenOf?.(consumerId) ?? null;
+
   let cancelled;
   const waitPromise = new Promise(resolve => { cancelled = () => resolve(CANCELLED); });
   reply.raw?.once?.("close", cancelled);
@@ -71,10 +76,7 @@ export async function handleApiSourceFilesGet(req, reply, { sourceRegistry, torr
     if (file.excludedReason) logger.info(`contents request=${req.id ?? "unstated"} source=${sourceKey} ` +
       `file=${file.fileIndex} name=${JSON.stringify(file.relativePath)} bytes=${file.length} excluded=${file.excludedReason}`);
   }
-  const consumerId = typeof req.query?.consumerId === "string" ? req.query.consumerId.trim() : "";
   if (consumerId) viewers?.visibleFiles(consumerId, sourceKey, contents.items.map(item => item.fileIndex));
-  const generationRaw = typeof req.query?.generation === "string" ? req.query.generation : "";
-  const generation = generationRaw !== "" && /^\d+$/.test(generationRaw) ? Number(generationRaw) : null;
   const linkMbps = Number(req.query?.linkMbps);
   const linkSampleAgeMs = Number(req.query?.linkSampleAgeMs);
   const earlyLink = Number.isFinite(linkMbps) && linkMbps > 0
@@ -84,7 +86,7 @@ export async function handleApiSourceFilesGet(req, reply, { sourceRegistry, torr
     if (!consumerId || !Number.isSafeInteger(generation) || file.kind !== "video" || file.excludedReason) return file;
     viewerRequests?.noteWaitFileSnapshot?.({ consumerId, generation, sourceKey,
       fileIndex: file.fileIndex, fileName: file.relativePath ?? file.name, fileLength: file.length,
-      ...earlyLink });
+      ...earlyLink, ...(viewerToken ? { viewerToken } : {}) });
     return file;
   });
   return reply.send({

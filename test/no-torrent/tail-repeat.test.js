@@ -1,10 +1,5 @@
 /**
- * @file The last blocks of a piece somebody waits for, asked of a second peer
- * (torrent-tv/meta#178).
- *
- * Driven against a stub torrent with the real `torrent-piece` and a `_request`
- * that checks what WebTorrent 2.8.5's does, in its order: the piece is not held
- * yet, the wire's queue has room, a block can be reserved.
+ * @file Late-tail policy and WebTorrent adapter against fake torrents only.
  */
 
 import test from "node:test";
@@ -12,8 +7,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import Piece from "torrent-piece";
 
-import { duplicateTailFor } from "../../services/torrent/worker/fastest-wires.js";
-import { TailRepeat } from "../../services/torrent/worker/tail-repeat.js";
+import { TailRepeat } from "../../services/torrent/download/TailRepeat.js";
+import { WebTorrentTailRepeatAdapter } from "../../services/torrent/worker/WebTorrentTailRepeatAdapter.js";
 import { DemandRegister } from "../../services/torrent/demand/DemandRegister.js";
 import { Urgency } from "../../services/torrent/demand/Urgency.js";
 import { SwarmSelection } from "../../services/torrent/download/SwarmSelection.js";
@@ -21,10 +16,10 @@ import { SwarmSelection } from "../../services/torrent/download/SwarmSelection.j
 const BLOCK = Piece.BLOCK_LENGTH;
 const BLOCKS = 128;
 
-function wire(name, { speed = 100_000, queue = 20, pieces = [0, 1, 2, 3] } = {}) {
+function wire(name, { speed = 100_000, queue = 20, pieces = [0, 1, 2, 3], type } = {}) {
   const one = new EventEmitter();
   return Object.assign(one, {
-    name, requests: [], queue, peerChoking: false, destroyed: false,
+    name, type, requests: [], queue, peerChoking: false, destroyed: false,
     peerPieces: { get: (index) => pieces.includes(index) },
     downloadSpeed: () => speed
   });
@@ -40,97 +35,159 @@ function torrent(wires) {
     _request(target, index) {
       if (this.bitfield.get(index)) return false;
       if (target.requests.length >= target.queue) return false;
-      const block = this.pieces[index].reserve();
+      const block = target.type === "webSeed" ? this.pieces[index].reserveRemaining() : this.pieces[index].reserve();
       if (block === -1) return false;
-      target.requests.push({ piece: index, offset: block * BLOCK, length: BLOCK });
+      const length = target.type === "webSeed" ? this.pieces[index].length - block * BLOCK : BLOCK;
+      target.requests.push({ piece: index, offset: block * BLOCK, length });
       return true;
     }
   });
 }
 
 /** Piece `index` with every block arrived but `missing`, those in flight on `holder`. */
-function tail(one, index, holder, missing) {
+function tail(one, index, holder, missing, askedAt = null) {
   const piece = one.pieces[index];
   for (let block = 0; block < BLOCKS; block += 1) {
     assert.equal(piece.reserve(), block);
-    if (missing.includes(block)) holder.requests.push({ piece: index, offset: block * BLOCK, length: BLOCK });
-    else piece.set(block, new Uint8Array(BLOCK), holder);
+    if (missing.includes(block)) {
+      const request = { piece: index, offset: block * BLOCK, length: BLOCK };
+      if (askedAt !== null) request.askedAt = askedAt;
+      holder.requests.push(request);
+    } else piece.set(block, new Uint8Array(BLOCK), holder);
   }
 }
 
-test("a block held by one slow peer is asked of another, and never of a third however often it is looked at", () => {
+function repeat(one, requiredPieces, options = {}) {
+  const pending = [];
+  const wakes = [];
+  const lines = [];
+  const adapter = new WebTorrentTailRepeatAdapter(one);
+  const subject = new TailRepeat({ adapter, requiredPieces, schedule: (work) => pending.push(work),
+    wake: (work, ms) => { wakes.push({ work, ms }); return wakes.length; }, clear() {},
+    log: (line) => lines.push(line), ...options });
+  return {
+    subject, adapter, pending, wakes, lines,
+    run() { while (pending.length) pending.shift()(); }
+  };
+}
+
+test("the urgent tail is repeated once to a second peer and never to a third", () => {
   const slow = wire("slow", { speed: 1_000 }), fast = wire("fast"), other = wire("other", { speed: 50_000 });
   const one = torrent([slow, fast, other]);
   tail(one, 0, slow, [126, 127]);
-  assert.deepEqual(duplicateTailFor(one, 0), { duplicated: 2, missing: 2, wires: 3, unplaced: 0, dueAt: null });
-  assert.deepEqual(fast.requests.map(request => request.offset / BLOCK).sort(), [126, 127], "the fastest peer, which held neither");
-  for (let look = 0; look < 5; look += 1) assert.equal(duplicateTailFor(one, 0).duplicated, 0, "two copies in flight are enough");
-  assert.equal(other.requests.length, 0);
+  const state = repeat(one, () => [{ from: 0, to: 0 }]);
+  state.run();
+  assert.deepEqual(fast.requests.map(request => request.offset / BLOCK).sort(), [126, 127]);
+  assert.equal(state.subject.totals.duplicated, 2);
+  for (let look = 0; look < 5; look += 1) { state.subject.poke(); state.run(); }
+  assert.equal(other.requests.length, 0, "two copies in flight are the existing limit");
+  state.subject.dispose();
 });
 
-test("a peer with a full queue is passed over, and the block freed for it is taken back", () => {
+test("a webseed is not used when its request would cover the rest of a piece", () => {
+  const slow = wire("slow", { speed: 1_000 });
+  const webseed = wire("webseed", { speed: 2_000_000, type: "webSeed" });
+  const fast = wire("fast", { speed: 100_000 });
+  const one = torrent([slow, webseed, fast]);
+  tail(one, 0, slow, [20, 21], 0);
+  slow.requests[1].askedAt = 9_500;
+  const state = repeat(one, () => [{ from: 0, to: 0 }], { now: () => 10_000 });
+  state.run();
+  assert.deepEqual(webseed.requests, [], "reserveRemaining/chunkLengthRemaining would request more than one block");
+  assert.deepEqual(fast.requests, [{ piece: 0, offset: 20 * BLOCK, length: BLOCK }]);
+  assert.equal(slow.requests[1].askedAt, 9_500, "the next block is not yet one queue old");
+  state.subject.dispose();
+});
+
+test("an existing webseed range counts as a copy for every missing block it covers", () => {
+  const slow = wire("slow", { speed: 1_000 });
+  const webseed = wire("webseed", { speed: 2_000_000, type: "webSeed" });
+  const fast = wire("fast", { speed: 100_000 });
+  const one = torrent([slow, webseed, fast]);
+  tail(one, 0, slow, [20, 21], 10_000);
+  webseed.requests.push({ piece: 0, offset: 20 * BLOCK, length: 2 * BLOCK, askedAt: 10_000 });
+
+  const adapter = new WebTorrentTailRepeatAdapter(one);
+  assert.deepEqual(adapter.observe(0, 16).blocks.map(({ index, copies }) => ({ index, copies })),
+    [{ index: 20, copies: 2 }, { index: 21, copies: 2 }]);
+  const state = repeat(one, () => [{ from: 0, to: 0 }], { now: () => 20_000 });
+  state.run();
+  assert.deepEqual(fast.requests, [], "a third copy would exceed the per-block cap");
+  state.subject.dispose();
+});
+
+test("a full peer queue is passed over and its freed reservation is restored", () => {
   const slow = wire("slow", { speed: 1_000 }), full = wire("full", { queue: 0 }), spare = wire("spare", { speed: 50_000 });
   const one = torrent([slow, full, spare]);
   tail(one, 1, slow, [127]);
-  assert.equal(duplicateTailFor(one, 1).duplicated, 1);
+  const state = repeat(one, () => [{ from: 1, to: 1 }]);
+  state.run();
   assert.deepEqual(spare.requests, [{ piece: 1, offset: 127 * BLOCK, length: BLOCK }]);
-  assert.equal(one.pieces[1].reserve(), -1, "no freed block is left for the library to hand out once more");
+  assert.equal(one.pieces[1].reserve(), -1, "no freed reservation is left for an uncounted copy");
+  state.subject.dispose();
 });
 
-test("nobody else to ask leaves the block unplaced, and a tail too long or a block nobody holds is not asked", () => {
-  const slow = wire("slow", { speed: 1_000 });
-  const one = torrent([slow]);
-  tail(one, 2, slow, [127]);
-  assert.deepEqual(duplicateTailFor(one, 2), { duplicated: 0, missing: 1, wires: 1, unplaced: 1, dueAt: null });
+test("when every alternative queue refuses, the original reservation remains accounted for", () => {
+  const slow = wire("slow", { speed: 1_000 }), full = wire("full", { queue: 0 });
+  const one = torrent([slow, full]);
+  tail(one, 1, slow, [127]);
+  const state = repeat(one, () => [{ from: 1, to: 1 }]);
+  state.run();
+  assert.deepEqual(full.requests, []);
+  assert.equal(one.pieces[1].reserve(), -1, "the refused ask returned its reservation to the piece");
+  state.subject.dispose();
+});
 
-  const fast = wire("fast");
-  const two = torrent([slow, fast]);
-  tail(two, 0, slow, Array.from({ length: 17 }, (_, at) => 111 + at));
-  assert.equal(duplicateTailFor(two, 0).duplicated, 0, "17 blocks missing is a piece still arriving");
-  const piece = two.pieces[3];
+test("long tails, unrequested blocks and pieces outside requiredPieces stay with the picker", () => {
+  const slow = wire("slow", { speed: 1_000 }), fast = wire("fast");
+  const one = torrent([slow, fast]);
+  tail(one, 0, slow, Array.from({ length: 17 }, (_, at) => 111 + at));
+  tail(one, 1, slow, [127]);
+  const piece = one.pieces[2];
   for (let block = 0; block < BLOCKS - 1; block += 1) piece.set(piece.reserve(), new Uint8Array(BLOCK), slow);
-  assert.equal(duplicateTailFor(two, 3).duplicated, 0, "a block nobody was asked for is the library's to ask");
+  const state = repeat(one, () => [{ from: 0, to: 0 }]);
+  state.run();
+  assert.equal(fast.requests.length, 0, "only a selected required piece can be repeated");
+  state.subject.dispose();
 });
 
-test("the tails are looked at on the events that change them, once a turn, and only for the pieces somebody waits for", () => {
+test("events are coalesced, only the current urgent class is repeated, and completion is counted", () => {
   const slow = wire("slow", { speed: 1_000 }), fast = wire("fast");
   const one = torrent([slow]);
   tail(one, 0, slow, [127]);
   tail(one, 1, slow, [127]);
-  const pending = [], wakes = [], lines = [];
   let required = [{ from: 1, to: 1 }];
-  const repeat = new TailRepeat({ torrent: one, requiredPieces: () => required,
-    schedule: (work) => pending.push(work), wake: (work, ms) => { wakes.push({ work, ms }); return wakes.length; }, clear() {},
-    log: (line) => lines.push(line) });
-  const run = () => { while (pending.length) pending.shift()(); };
-  run();
-  assert.equal(wakes.length, 1, "no second peer yet: looked at once more after a wire's queue time");
-  assert.equal(wakes[0].ms, 1000);
+  const state = repeat(one, () => required);
+  state.run();
+  assert.deepEqual(state.wakes.map(({ ms }) => ms), [1000]);
 
   one.wires.push(fast);
   one.emit("wire", fast);
   slow.emit("have", 3);
   slow.emit("unchoke");
-  assert.equal(pending.length, 1, "several events in one turn are one look");
-  run();
-  assert.deepEqual(fast.requests, [{ piece: 1, offset: 127 * BLOCK, length: BLOCK }], "piece 0 is not waited for, so it is not asked");
-  assert.equal(repeat.totals.duplicated, 1);
-  assert.match(lines.at(-1), /piece:blocks\/missing 1:1\/1; 1 block copies asked so far/);
+  assert.equal(state.pending.length, 1, "several events in one turn are one look");
+  state.run();
+  assert.deepEqual(fast.requests, [{ piece: 1, offset: 127 * BLOCK, length: BLOCK }]);
+  assert.equal(state.subject.totals.duplicated, 1);
 
   one.pieces[1].set(127, new Uint8Array(BLOCK), fast);
   one.bitfield.set(1);
   slow.emit("piece", 1, 127 * BLOCK);
-  slow.emit("have", 1);
-  assert.equal(repeat.totals.lateBlocks, 1, "the copy that came second, and not a peer saying it has the piece");
+  assert.equal(state.subject.totals.lateBlocks, 1);
+  const firstArrival = one.pieces[1]._buffer[127];
+  one.pieces[1].set(127, new Uint8Array(BLOCK).fill(7), slow);
+  assert.equal(one.pieces[1]._buffer[127], firstArrival, "a duplicate block cannot overwrite the first arrival");
 
   required = [];
-  run();
-  repeat.dispose();
+  state.subject.poke();
+  state.run();
+  assert.equal(fast.requests.length, 1, "withdrawal prevents later repeats");
+  state.subject.dispose();
   slow.emit("piece", 0, 0);
-  assert.equal(pending.length, 0, "nothing is watched once it is disposed");
+  assert.equal(state.pending.length, 0, "dispose removes event listeners");
 });
 
-test("the pieces somebody waits for are the urgent first class, and none while it is conditional", () => {
+test("the selected pieces are the urgent first class and none while it is conditional", () => {
   const stub = { pieceLength: 1024, files: [{ offset: 0, length: 10 * 1024 }], bitfield: { get: () => false },
     _selections: { _items: [] }, select() {}, deselect() {} };
   const register = new DemandRegister();
@@ -146,32 +203,46 @@ test("the pieces somebody waits for are the urgent first class, and none while i
   assert.deepEqual(selection.requiredPieces(), []);
 });
 
-test("a completed piece, or one no peer can give, is left alone", () => {
-  assert.deepEqual(duplicateTailFor({ pieces: [null], wires: [wire("any")], _request: () => true }, 0),
-    { duplicated: 0, missing: 0, wires: 0, unplaced: 0, dueAt: null });
-  const slow = wire("slow", { speed: 1_000 }), lacking = wire("lacking", { pieces: [] });
-  const one = torrent([slow, lacking]);
-  tail(one, 0, slow, [127]);
-  slow.peerChoking = true;
-  assert.equal(duplicateTailFor(one, 0).duplicated, 0, "a choking peer and one without the piece cannot be asked");
-});
-
-test("a block is asked of a second peer only once its request has been out a queue time, and is looked at again then", () => {
+test("no repeat happens before a request is one queue old, then it is tried at that boundary", () => {
   const slow = wire("slow", { speed: 1_000 }), fast = wire("fast");
   const one = torrent([slow, fast]);
-  tail(one, 1, slow, [127]);
-  slow.requests[0].askedAt = 10_000;
-  assert.deepEqual(duplicateTailFor(one, 1, { now: 10_400 }), { duplicated: 0, missing: 1, wires: 2, unplaced: 0, dueAt: 11_000 },
-    "out 0.4 s: not late yet");
+  tail(one, 1, slow, [127], 10_000);
+  let now = 10_400;
+  const state = repeat(one, () => [{ from: 1, to: 1 }], { now: () => now });
+  state.run();
   assert.equal(fast.requests.length, 0);
-  assert.equal(duplicateTailFor(one, 1, { now: 11_000 }).duplicated, 1, "out 1 s: late, asked of the other peer");
+  assert.deepEqual(state.wakes.map(({ ms }) => ms), [600]);
+  now = 11_000;
+  state.wakes[0].work();
+  state.run();
+  assert.equal(fast.requests.length, 1);
+  state.subject.dispose();
+});
 
-  const pending = [], wakes = [];
-  const two = torrent([slow, fast]);
-  tail(two, 2, slow, [127]);
-  slow.requests.at(-1).askedAt = 20_000;
-  new TailRepeat({ torrent: two, requiredPieces: () => [{ from: 2, to: 2 }], now: () => 20_300,
-    schedule: (work) => pending.push(work), wake: (work, ms) => { wakes.push(ms); return wakes.length; }, clear() {} });
-  while (pending.length) pending.shift()();
-  assert.deepEqual(wakes, [700], "one look armed for the moment the block becomes late");
+test("withdrawal before an already scheduled look and disposal after it suppress both", () => {
+  const slow = wire("slow", { speed: 1_000 }), fast = wire("fast");
+  const one = torrent([slow, fast]);
+  tail(one, 0, slow, [127]);
+  let required = [{ from: 0, to: 0 }];
+  const state = repeat(one, () => required);
+  required = [];
+  state.run();
+  assert.equal(fast.requests.length, 0, "the map is read when work runs");
+
+  required = [{ from: 0, to: 0 }];
+  state.subject.poke();
+  state.subject.dispose();
+  state.run();
+  assert.equal(fast.requests.length, 0, "disposed work cannot issue a repeat");
+});
+
+test("missing private APIs fall back to ordinary picking with one bounded diagnostic", () => {
+  const lines = [];
+  const adapter = new WebTorrentTailRepeatAdapter({ pieces: [{ _buffer: [], _chunks: 1 }], wires: [] });
+  const state = new TailRepeat({ adapter, requiredPieces: () => [{ from: 0, to: 0 }],
+    schedule: (work) => work(), log: (line) => lines.push(line) });
+  state.poke();
+  state.poke();
+  assert.deepEqual(lines, ["tail: bounded repeat unavailable; using WebTorrent's ordinary picker"]);
+  state.dispose();
 });

@@ -320,7 +320,7 @@ test("unmapped tail addresses retain an explicit aggregate work estimate", () =>
 });
 
 test("a tail without source identities stays explicitly unavailable", () => {
-  const answer = predictPlaybackReadiness(variableDensityFilm({ identifySource: false }));
+  const answer = predictPlaybackReadiness(variableDensityFilm({ identifySource: false, mapTail: false }));
   assert.equal(answer.reason, "tail-source-addresses-unavailable");
   assert.equal(answer.delaySeconds, null);
   assert.deepEqual(answer.unavailableTailTracks, ["track-0"]);

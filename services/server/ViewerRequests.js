@@ -108,7 +108,7 @@ function sourceCaptureOf(stats, actionId, generation) {
   return { ...source, actionId: actionId ?? null, generation: Number.isSafeInteger(generation) ? generation : null };
 }
 
-function encoderCaptureOf(sampleCaptures, liveRuns, actionId, generation) {
+export function encoderCaptureOf(sampleCaptures, liveRuns, actionId, generation) {
   const runCaptures = (liveRuns ?? []).map(run => ({ owner: "proxy-encoder", clock: "performance",
     clockEpoch: run.progress?.clockEpoch, startedAt: run.progress?.updatedAtMonotonic,
     completedAt: run.progress?.updatedAtMonotonic, revision: run.progress?.updatedAtMonotonic,
@@ -117,17 +117,54 @@ function encoderCaptureOf(sampleCaptures, liveRuns, actionId, generation) {
         Number.isFinite(run.progress?.updatedAtMonotonic) ? null : "encoder-progress-capture-unavailable" }));
   const captures = [...(Array.isArray(sampleCaptures) ? sampleCaptures : []), ...runCaptures];
   const epoch = captures[0]?.clockEpoch;
-  const valid = captures.length > 0 && epoch === performance.timeOrigin && captures.every(capture =>
-    capture.owner === "proxy-encoder" && capture.clock === "performance" &&
+  const samplesOrdered = (Array.isArray(sampleCaptures) ? sampleCaptures : []).every((capture, index, samples) =>
+    index === 0 || capture.revision >= samples[index - 1].revision);
+  const valid = captures.length > 0 && samplesOrdered && epoch === performance.timeOrigin && captures.every(capture =>
+    capture.owner === "proxy-encoder" && capture.clock === "performance" && capture.validity === "valid" &&
     Number.isFinite(capture.clockEpoch) && capture.clockEpoch === epoch && Number.isFinite(capture.startedAt) &&
     Number.isFinite(capture.completedAt) && capture.completedAt >= capture.startedAt &&
     Number.isFinite(capture.revision));
-  if (!valid) return unknownCapture("proxy-encoder", actionId, generation, "encoder-capture-unavailable");
+  if (!valid) {
+    const projected = captures.find(capture => capture.provenance === "projected");
+    return { ...unknownCapture("proxy-encoder", actionId, generation,
+      projected?.unknownReason ?? "encoder-capture-unavailable"),
+    samples: captures, ...(projected ? { provenance: projected.provenance, projectionSource: projected.source } : {}) };
+  }
   return { owner: "proxy-encoder", clock: "performance", clockEpoch: epoch,
     startedAt: Math.min(...captures.map(capture => capture.startedAt)),
     completedAt: Math.max(...captures.map(capture => capture.completedAt)), actionId: actionId ?? null,
-    generation: Number.isSafeInteger(generation) ? generation : null,
+    generation: Number.isSafeInteger(generation) ? generation : null, provenance: "measured",
     revision: captures.at(-1).revision ?? null, samples: captures, validity: "valid", unknownReason: null };
+}
+
+export function trackRateReadings(readings, { predicted, projected }, now, playbackReadiness) {
+  const measured = (readings ?? []).filter(reading => reading.at <= now);
+  const summary = measured.length > 0 ? playbackReadiness.rateSummaryOf(measured) : null;
+  if (summary) return { summary, captures: measured.map(reading => ({ owner: reading.captureOwner,
+    clock: reading.captureClock, clockEpoch: reading.captureClockEpoch,
+    startedAt: reading.captureStartedAtMonotonic, completedAt: reading.captureCompletedAtMonotonic,
+    revision: reading.at,
+    validity: reading.captureOwner === "proxy-encoder" && reading.captureClock === "performance" &&
+      Number.isFinite(reading.captureClockEpoch) && Number.isFinite(reading.captureStartedAtMonotonic) &&
+      Number.isFinite(reading.captureCompletedAtMonotonic) && Number.isFinite(reading.at) &&
+      reading.captureCompletedAtMonotonic >= reading.captureStartedAtMonotonic
+      ? "valid" : "unknown",
+    unknownReason: reading.captureOwner === "proxy-encoder" && reading.captureClock === "performance" &&
+      Number.isFinite(reading.captureClockEpoch) && Number.isFinite(reading.captureStartedAtMonotonic) &&
+      Number.isFinite(reading.captureCompletedAtMonotonic) && Number.isFinite(reading.at) &&
+      reading.captureCompletedAtMonotonic >= reading.captureStartedAtMonotonic
+      ? null : "encoder-sample-capture-unavailable" })) };
+  const rate = Number(predicted ?? projected);
+  if (Number.isFinite(rate) && rate > 0) {
+    const seed = new playbackReadiness.RateTrend();
+    seed.add(now, rate);
+    const source = predicted === null || predicted === undefined
+      ? "current-cost-projection" : "stored-encode-prediction";
+    return { summary: seed.snapshot(), captures: [{ owner: "proxy-encoder", clock: "performance",
+      clockEpoch: null, startedAt: null, completedAt: null, revision: null, provenance: "projected", source,
+      validity: "unknown", unknownReason: "projected-encoder-speed-has-no-capture" }] };
+  }
+  return null;
 }
 
 function observeForecastInput(observeWait, sourceKey, state, event) {
@@ -956,6 +993,8 @@ export class ViewerRequests {
       const liveRuns = this.#host.encodeRuns.liveRunsOf?.(output) ?? [];
       const encoderCapture = encoderCaptureOf(trackRate?.captures, liveRuns, actionId, generation);
       const encoderCaptureValid = encoderCapture.validity === "valid";
+      const projectedRateCanSeedForecast = trackRate?.captures?.length > 0 &&
+        trackRate.captures.every(capture => capture.provenance === "projected");
       const processingStarted = liveRuns.some(({ progress }) => progress.processedSeconds > progress.startPositionSeconds);
       const startedAt = liveRuns.find(({ startedAt }) => startedAt > 0)?.startedAt ?? now;
       tracks.push({
@@ -995,7 +1034,10 @@ export class ViewerRequests {
           this.#host.initialOutputBitsPerMediaSecondOf?.(output) ?? 0,
         durationSeconds: output.timeline?.publishedStartOf(output.timeline.segmentCount) ?? session.file.durationSeconds,
         segmentCount: output.timeline?.segmentCount ?? segments.length,
-        readings: encoderCaptureValid ? trackRates : [],
+        // A projection is explicitly not a measured capture, but remains the
+        // numeric seed it was before capture provenance was carried here.
+        // Other invalid measured captures stay out of the forecast.
+        readings: encoderCaptureValid || projectedRateCanSeedForecast ? trackRates : [],
         capture: encoderCapture,
         segments,
         tailSegments: forecastGeometry?.tailSegments ?? [],
@@ -1247,39 +1289,16 @@ export class ViewerRequests {
    * would drop the later-told, earlier-taken one (torrent-tv/meta#178).
    */
   #trackRateReadings(output, now) {
-    const readings = (this.#host.encodeSpeedReadingsOf?.(output) ?? []).filter(reading => reading.at <= now);
-    const summary = readings.length > 0 ? this.#host.playbackReadiness.rateSummaryOf(readings) : null;
-    if (summary) return { summary, captures: readings.map(reading => ({ owner: reading.captureOwner,
-      clock: reading.captureClock, clockEpoch: reading.captureClockEpoch,
-      startedAt: reading.captureStartedAtMonotonic, completedAt: reading.captureCompletedAtMonotonic,
-      revision: reading.at,
-      validity: reading.captureOwner === "proxy-encoder" && reading.captureClock === "performance" &&
-        Number.isFinite(reading.captureClockEpoch) && Number.isFinite(reading.captureStartedAtMonotonic) &&
-        Number.isFinite(reading.captureCompletedAtMonotonic) && Number.isFinite(reading.at) &&
-        reading.captureCompletedAtMonotonic >= reading.captureStartedAtMonotonic
-        ? "valid" : "unknown",
-      unknownReason: reading.captureOwner === "proxy-encoder" && reading.captureClock === "performance" &&
-        Number.isFinite(reading.captureClockEpoch) && Number.isFinite(reading.captureStartedAtMonotonic) &&
-        Number.isFinite(reading.captureCompletedAtMonotonic) && Number.isFinite(reading.at) &&
-        reading.captureCompletedAtMonotonic >= reading.captureStartedAtMonotonic
-        ? null : "encoder-sample-capture-unavailable" })) };
+    const readings = this.#host.encodeSpeedReadingsOf?.(output) ?? [];
     // ONLY UNTIL A PIECE IS MEASURED does the prediction stand for the
     // encoder, and it is not kept among the readings. Added on every poll
     // between runs, it put the machine's share of that moment — 1 % at a
     // cold start — on the whole film, and the forecast read 0.03x
     // (torrent-tv/meta#178).
-    const projected = Number(this.#host.predictedEncodeSpeedOf?.(output) ?? this.#host.projectedEncodeSpeedOf?.(output));
-    if (Number.isFinite(projected) && projected > 0) {
-      const seed = new this.#host.playbackReadiness.RateTrend();
-      seed.add(now, projected);
-      return { summary: seed.snapshot(), captures: [{ owner: "proxy-encoder", clock: "performance",
-        clockEpoch: performance.timeOrigin, startedAt: now, completedAt: now, revision: now,
-        validity: "valid", unknownReason: null }] };
-    }
-    // Progress over wall time includes source waits, which the forecast prices
-    // separately. Keep the rate unknown until a measured or calibrated
-    // processing rate exists; single-piece runs now publish their own rate.
-    return null;
+    return trackRateReadings(readings, {
+      predicted: this.#host.predictedEncodeSpeedOf?.(output),
+      projected: this.#host.projectedEncodeSpeedOf?.(output)
+    }, now, this.#host.playbackReadiness);
   }
 
 }

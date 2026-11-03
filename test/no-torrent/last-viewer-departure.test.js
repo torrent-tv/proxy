@@ -8,7 +8,7 @@ import { ViewerRequests } from "../../services/server/ViewerRequests.js";
 import { OutputLifecycle } from "../../services/server/OutputLifecycle.js";
 import { handleApiSourcesPost } from "../../routes/api/sources/post.js";
 import { chooseAudioTrack, noteStepOnScreen, noteStepBeingWarmed, noteAudioBeingWarmed,
-  watches, placeOn } from "../../services/viewer/choices.js";
+  placeInitially, watches, placeOn } from "../../services/viewer/choices.js";
 
 function viewing() {
   const base = { id: "picture", outputKey: "picture-key",
@@ -63,7 +63,8 @@ test("source registration completing after departure does not restore presence",
 
 test("an audio opening completing after departure cannot register a new viewer", async () => {
   const { base, audio, viewers, published, priority, publish } = viewing();
-  const requests = new ViewerRequests({ viewers, planEncodersSoon() {} });
+  const requests = new ViewerRequests({ viewers, planEncodersSoon() {},
+    placeViewerOn: (...args) => placeInitially(viewers, ...args), chooseAudioTrack: (...args) => chooseAudioTrack(viewers, ...args) });
   let complete;
   const opening = new Promise(resolve => { complete = resolve; });
   const pending = opening.then(output => requests.placeViewerOn(output, "person", 100));
@@ -99,7 +100,8 @@ test("late rendition choices do not recreate a departed viewer", () => {
 
 test("a present viewer can join audio, and another viewer keeps the file wanted", () => {
   const { base, audio, viewers, published, publish } = viewing();
-  const requests = new ViewerRequests({ viewers, planEncodersSoon() {} });
+  const requests = new ViewerRequests({ viewers, planEncodersSoon() {},
+    placeViewerOn: (...args) => placeInitially(viewers, ...args), chooseAudioTrack: (...args) => chooseAudioTrack(viewers, ...args) });
   viewers.of(base, "other").moveTo(200);
   requests.placeViewerOn(audio, "person", 100);
   assert.equal(viewers.forOutput(audio).has("person"), true);
@@ -133,6 +135,8 @@ for (const initiallyKnown of [true, false]) {
     const pending = new Promise(resolve => { complete = resolve; });
     const requests = new ViewerRequests({ viewers, planEncodersSoon() {},
       admitsWatching: () => ({ admitted: true }),
+      placeViewerOn: (...args) => placeInitially(viewers, ...args),
+      chooseAudioTrack: (...args) => chooseAudioTrack(viewers, ...args),
       opening: { open: ({ claim }) => { claim(base); return pending; } }
     });
     const opening = requests.createOrGetSession({ consumerId: "person" });

@@ -16,6 +16,7 @@ import path from "node:path";
 import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { Viewer } from "../../services/viewer/Viewer.js";
 import { Viewers } from "../../services/viewer/Viewers.js";
+import { chooseAudioTrack, placeInitially as placeViewerInitially } from "../../services/viewer/choices.js";
 import { outputSpec } from "./helpers/output-spec.js";
 
 const SESSION_ID = "aaaaaaaabbbbcccc";
@@ -75,6 +76,31 @@ test("position is one fact with one writer, and a function of time", () => {
   );
 });
 
+test("initial placement is idempotent and does not run seek side effects", () => {
+  const viewer = new Viewer("someone");
+  viewer.bufferReadings = [{ at: 1_000, seconds: 12 }];
+  viewer.bufferedSeconds = 18;
+  viewer.pausedAt = 900;
+
+  assert.equal(viewer.placeInitially(120, 2_000), true);
+  assert.deepEqual(viewer.position, { seconds: 120, at: 2_000 });
+  assert.equal(viewer.placeInitially(0, 3_000), false, "a later open cannot reset the existing position");
+  assert.deepEqual(viewer.position, { seconds: 120, at: 2_000 });
+  assert.deepEqual(viewer.bufferReadings, [{ at: 1_000, seconds: 12 }]);
+  assert.equal(viewer.bufferedSeconds, 18);
+  assert.equal(viewer.pausedAt, 900);
+
+  viewer.moveTo(240, 4_000);
+  assert.deepEqual(viewer.position, { seconds: 240, at: 4_000 });
+  assert.deepEqual(viewer.bufferReadings, [], "an explicit seek still clears prior buffer history");
+  assert.equal(viewer.bufferedSeconds, 0);
+  assert.equal(viewer.pausedAt, 4_000);
+
+  const invalidRequest = new Viewer("invalid-request");
+  assert.equal(invalidRequest.placeInitially(Number.NaN, 5_000), true);
+  assert.deepEqual(invalidRequest.position, { seconds: 0, at: 5_000 });
+});
+
 test("a viewer who has stated nothing has a position and does not drift from it", () => {
   const viewer = new Viewer("someone");
   viewer.moveTo(0, 1_000_000);
@@ -97,6 +123,26 @@ test("asking for a viewer twice is the same viewer", () => {
   assert.equal(viewers.of(session, "one").audio.trackIndex, 3);
   assert.notEqual(viewers.of(session, "two"), first);
   assert.equal(viewers.forOutput(session).size, 2);
+});
+
+test("viewer operations take names and values and keep shared-output choices independent", () => {
+  const output = { id: "picture" };
+  const otherOutput = { id: "other-picture" };
+  const viewers = new Viewers();
+  viewers.of(output, "first");
+  viewers.of(output, "second");
+
+  assert.equal(placeViewerInitially(viewers, output, "first", 120, 1_000), true);
+  assert.equal(placeViewerInitially(viewers, output, "first", 0, 2_000), false);
+  assert.equal(placeViewerInitially(viewers, output, "second", 300, 1_500), true);
+  chooseAudioTrack(viewers, output, "first", { trackIndex: 1, transcode: true });
+  chooseAudioTrack(viewers, output, "second", { trackIndex: 2, transcode: false });
+
+  assert.deepEqual(viewers.getForOutput(output, "first").position, { seconds: 120, at: 1_000 });
+  assert.deepEqual(viewers.getForOutput(output, "second").position, { seconds: 300, at: 1_500 });
+  assert.deepEqual(viewers.getForOutput(output, "first").audio, { trackIndex: 1, transcode: true });
+  assert.deepEqual(viewers.getForOutput(output, "second").audio, { trackIndex: 2, transcode: false });
+  assert.equal(viewers.getForOutput(otherOutput, "first"), null, "placement does not change output identity");
 });
 
 test("releasing a consumer forgets everything that was true of them alone", async (t) => {

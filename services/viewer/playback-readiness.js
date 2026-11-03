@@ -1018,14 +1018,16 @@ function scheduleTailSourceRanges({ trackState, sourceState, sourceByteCoverage,
         if (typeof input?.sourceId === "string") tailSources.add(input.sourceId);
       }
     }
-    for (const sourceId of tailSources) referencedSources.add(sourceId);
+    if (state.track.tailProfileProvided === true) {
+      for (const sourceId of tailSources) referencedSources.add(sourceId);
+    }
     const readyTailCount = [...state.ready].reduce((count, index) => count + Number(index >= state.segmentCount - state.tailSegmentCount), 0);
     const unfinishedTailCount = Math.max(0, state.tailSegmentCount - readyTailCount);
-    if (state.track.tailProfileProvided === true && unfinishedTailCount > 0 && tailSources.size === 0) {
+    if (state.track.tailProfileProvided !== true) continue;
+    if (unfinishedTailCount > 0 && tailSources.size === 0) {
       unmappedTracks.add(state.track.id ?? `track-${trackIndex}`);
     }
-    if (state.track.tailProfileProvided === true &&
-        tailSegments.filter(segment => !state.ready.has(segment.index)).length < unfinishedTailCount && tailSources.size > 0) {
+    if (tailSegments.filter(segment => !state.ready.has(segment.index)).length < unfinishedTailCount && tailSources.size > 0) {
       for (const sourceId of tailSources) {
         if (sourceState.get(sourceId)?.source.complete !== true) unmappedSources.add(sourceId);
       }

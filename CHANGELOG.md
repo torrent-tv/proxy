@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.56
 
 - **Fix**: Keep projected encoder speed available to playback readiness while reporting its capture as unknown and preserving its prediction source, without assigning the progress poll's time as a measurement.
 

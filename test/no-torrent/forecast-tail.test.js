@@ -114,7 +114,7 @@ test("the aggregate suffix uses measured source service without tracing its segm
   assert.ok(answer.delaySeconds < duration, `${answer.delaySeconds} against ${duration}`);
 });
 
-test("an exact queue arrival beyond the near window does not replace the aggregate estimate", () => {
+test("an exact tail queue arrival holds the segment whose mapped source pieces it names", () => {
   const now = 1_000_000;
   const piece = 6, count = 100, duration = piece * count;
   const bytesPerSecond = 1_000_000;
@@ -135,17 +135,20 @@ test("an exact queue arrival beyond the near window does not replace the aggrega
     }],
     linkReadings: summaryOf(1_000_000_000, now)
   });
-  // The piece at 300 s is beyond the exact near window. Its individual queue
-  // arrival is not used as the suffix estimate.
-  const queued = predictPlaybackReadiness(input([{ start: byteAt(300), end: byteAt(306), availableAt: now + 5_000_000 }],
+  // The mapped source pieces at 300 s are beyond the exact near window, but
+  // their explicit queue arrival still has a 306 s media deadline.
+  const plannedStart = Math.floor(byteAt(300) / PIECE_BYTES) * PIECE_BYTES;
+  const plannedEnd = Math.ceil(byteAt(306) / PIECE_BYTES) * PIECE_BYTES;
+  const queued = predictPlaybackReadiness(input([{ start: plannedStart, end: plannedEnd, availableAt: now + 5_000_000 }],
     bytesPerSecond * 4));
-  assert.ok(queued.delaySeconds < 5000, `${queued.delaySeconds} seconds`);
-  assert.notEqual(queued.holdingBy?.segment, 50);
-  assert.notEqual(queued.holdingBy?.sourcePlanned, true);
-  // A slower aggregate rate still increases the estimated delay.
+  assert.ok(queued.delaySeconds > 4_600 && queued.delaySeconds < 5_000, `${queued.delaySeconds} seconds`);
+  assert.equal(queued.holdingBy?.segment, 50);
+  assert.equal(queued.holdingBy?.sourcePlanned, true);
+  // Without the extreme queue arrival, the lower measured rate still has a
+  // finite source schedule over the whole remaining film.
   const measured = predictPlaybackReadiness(input([], bytesPerSecond / 2));
   assert.ok(Number.isFinite(measured.delaySeconds));
-  assert.ok(measured.delaySeconds > queued.delaySeconds,
+  assert.ok(measured.delaySeconds < queued.delaySeconds,
     `${measured.delaySeconds} against ${queued.delaySeconds}`);
 });
 
@@ -253,4 +256,94 @@ test("the rest of the film is not taken as held because the first piece reads th
   const answer = predictPlaybackReadiness(despicableMe3({ readsIndex: true }));
   assert.ok(Math.abs(answer.delaySeconds - 25_998) < 150, `${answer.delaySeconds} s`);
   assert.ok(answer.tail.every(part => !part.skipped), JSON.stringify(answer.tail));
+});
+
+/** A twelve-second film whose third piece needs ten times the other source bytes. */
+function variableDensityFilm({ lookaheadSeconds = 3, trackCount = 1, mapTail = true } = {}) {
+  const now = 1_000_000;
+  const lengths = [1_000, 1_000, 10_000, 1_000];
+  let offset = 0;
+  const sourceInputs = lengths.map(length => {
+    const ranges = [{ start: offset, end: offset + length }];
+    offset += length;
+    return ranges;
+  });
+  return {
+    now, positionSeconds: 0, durationSeconds: 12, bufferedAheadSeconds: 0, reserveSeconds: 0,
+    lookaheadSeconds, requiredAudio: trackCount === 2,
+    sources: [{ id: "source", complete: false, fileOffset: 0, fileLength: offset, pieceLength: 1_000,
+      residence: [], downloadForecast: { ranges: [] }, downloadRateReadings: summaryOf(1_000, now) }],
+    tracks: Array.from({ length: trackCount }, (_, index) => ({
+      id: `track-${index}`, sourceIds: ["source"], processedSeconds: 0, startupRemainingSeconds: 0, openSeconds: 0,
+      bitsPerMediaSecond: 1_000, readings: summaryOf(1_000_000, now),
+      segments: lengths.map((_, segmentIndex) => ({
+        index: segmentIndex, startSeconds: segmentIndex * 3, endSeconds: (segmentIndex + 1) * 3,
+        ...(mapTail || segmentIndex === 0 ? { sourceInputs: [{ sourceId: "source", ranges: sourceInputs[segmentIndex] }] } : {})
+      })),
+      readySegmentIndices: [], segmentSizesBytes: new Map()
+    })),
+    linkReadings: summaryOf(1_000_000_000, now)
+  };
+}
+
+test("mapped tail source bytes meet each intermediate piece deadline, including variable density", () => {
+  const answer = predictPlaybackReadiness(variableDensityFilm());
+  assert.equal(answer.reason, "minimum-safe-delay");
+  // The 10 KB third piece takes 10 s after the first 2 KB. It is due at 9 s,
+  // so the viewer needs a 3 s start delay even though the whole suffix ends
+  // close to the film's 12 s completion deadline.
+  assert.ok(Math.abs(answer.delaySeconds - 3) < 1e-6, `${answer.delaySeconds} s`);
+  const tailSource = answer.tail.filter(part => part.sourceId === "source");
+  assert.equal(tailSource.length, 1);
+  assert.equal(tailSource[0].uniquePieces, 12);
+  assert.ok(tailSource.every(part => part.addressed === true));
+});
+
+test("source bytes shared by two tracks are charged once in the exact tail", () => {
+  const answer = predictPlaybackReadiness(variableDensityFilm({ trackCount: 2 }));
+  const tailSource = answer.tail.filter(part => part.sourceId === "source");
+  assert.equal(tailSource.reduce((sum, part) => sum + part.totalBytes, 0), 12_000);
+  assert.equal(tailSource.reduce((sum, part) => sum + part.uniquePieces, 0), 12);
+});
+
+test("unmapped tail addresses retain an explicit aggregate work estimate", () => {
+  const answer = predictPlaybackReadiness(variableDensityFilm({ mapTail: false }));
+  const source = answer.tail.find(part => part.sourceId === "source");
+  assert.equal(source.addressed, false);
+  assert.equal(source.estimatedAddress, "file-density");
+  assert.ok(source.missingBytes > 0, "unmapped work remains in the tail");
+});
+
+test("the near-tail boundary neither repeats nor drops the next mapped source pieces", () => {
+  const answer = predictPlaybackReadiness(variableDensityFilm({ lookaheadSeconds: 6 }));
+  const tailSource = answer.tail.filter(part => part.sourceId === "source");
+  assert.equal(tailSource.reduce((sum, part) => sum + part.totalBytes, 0), 11_000);
+  assert.ok(tailSource.every(part => part.start >= 2_000));
+});
+
+test("the exact schedule covers the entire remaining film when the horizon reaches its end", () => {
+  const answer = predictPlaybackReadiness(variableDensityFilm({ lookaheadSeconds: 12 }));
+  assert.equal(answer.tail.length, 0);
+  assert.equal(answer.reason, "minimum-safe-delay");
+  assert.ok(Number.isFinite(answer.delaySeconds));
+});
+
+test("the saved 3,600-second suffix counterexample stays at the first-piece completion", () => {
+  const now = 1_000_000, piece = 4, duration = 3_600, count = duration / piece;
+  const answer = predictPlaybackReadiness({
+    now, positionSeconds: 0, durationSeconds: duration, bufferedAheadSeconds: 0, reserveSeconds: 0,
+    lookaheadSeconds: 120,
+    sources: [{ id: "source", complete: true, fileOffset: 0, fileLength: 1, pieceLength: PIECE_BYTES,
+      residence: [], downloadForecast: { ranges: [] } }],
+    tracks: [{
+      id: "video", sourceIds: ["source"], processedSeconds: 0, startupRemainingSeconds: 0, openSeconds: 0,
+      bitsPerMediaSecond: 8_000_000, readings: summaryOf(1.5, now),
+      segments: Array.from({ length: count }, (_, index) => ({ index, startSeconds: index * piece,
+        endSeconds: (index + 1) * piece })),
+      readySegmentIndices: [], segmentSizesBytes: new Map()
+    }],
+    linkReadings: summaryOf(12_000_000, now)
+  });
+  assert.equal(answer.reason, "minimum-safe-delay");
+  assert.ok(Math.abs(answer.delaySeconds - 5.333333333333333) < 1e-9, `${answer.delaySeconds} s`);
 });

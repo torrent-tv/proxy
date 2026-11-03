@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Keep playback forecast history with live viewer and output owners, and release viewer samples, wait observations and cached geometry when those owners end.
+
 ## 2.107.51
 
 - **Fix**: Keep initial viewer placement and audio selection in the viewer layer. Reopening or joining an output preserves an already placed position, while an explicit seek keeps its buffer and pause handling.

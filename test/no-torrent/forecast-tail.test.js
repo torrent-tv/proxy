@@ -27,6 +27,7 @@ test("live output geometry projects every remaining segment and preserves missin
   let mapped = false;
   const geometry = new OutputForecastGeometry({
     lookaheadSeconds: 8,
+    endsWithinPlayerSeekTolerance: () => false,
     sourceInputsFor: (_output, index) => mapped && index === 3
       ? [{ sourceId: "source", ranges: [{ start: 30, end: 40 }] }]
       : index === 2 || index === 4 ? [{ sourceId: "source", ranges: [{ start: index * 10, end: index * 10 + 10 }] }]
@@ -158,14 +159,15 @@ test("an exact tail queue arrival holds the segment whose mapped source pieces i
     }],
     linkReadings: summaryOf(1_000_000_000, now)
   });
-  // The mapped source pieces at 300 s are beyond the exact near window, but
-  // their explicit queue arrival still has a 306 s media deadline.
+  // The torrent piece containing the source bytes at 300 s begins just before
+  // that segment boundary, so it is also required by segment 49 and takes that
+  // earlier 300 s deadline.
   const plannedStart = Math.floor(byteAt(300) / PIECE_BYTES) * PIECE_BYTES;
   const plannedEnd = Math.ceil(byteAt(306) / PIECE_BYTES) * PIECE_BYTES;
   const queued = predictPlaybackReadiness(input([{ start: plannedStart, end: plannedEnd, availableAt: now + 5_000_000 }],
     bytesPerSecond * 4));
   assert.ok(queued.delaySeconds > 4_600 && queued.delaySeconds < 5_000, `${queued.delaySeconds} seconds`);
-  assert.equal(queued.holdingBy?.segment, 50);
+  assert.equal(queued.holdingBy?.segment, 49);
   assert.equal(queued.holdingBy?.sourcePlanned, true);
   // Without the extreme queue arrival, the lower measured rate still has a
   // finite source schedule over the whole remaining film.

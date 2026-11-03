@@ -38,7 +38,11 @@ are recorded in `docs/browser-proxy-contract.md`.
   - `torrent/download/` — `SwarmSelection`, the ONLY thing that calls `select`,
     `deselect` or `critical`, and `registry.js`, which holds one per torrent and
     owns the cross-torrent rule that withholds the speculative levels while
-    anything urgent is missing anywhere. See `docs/download-architecture.md`.
+    anything urgent is missing anywhere. `TailRepeat` owns the bounded late-tail
+    decision for `requiredPieces()`; it uses the worker-side
+    `WebTorrentTailRepeatAdapter`, the only live code that reads private piece
+    buffers or wire request queues or changes reservations for this exception.
+    See `docs/download-architecture.md`.
   - `encode/output/` — domain layer: `OutputSpec`, `VideoOutput`, `AudioOutput`,
     `CutGrid`. What a session PRODUCES — which tracks, in what form, cut how,
     packaged how — and therefore its identity: two outputs whose parameters

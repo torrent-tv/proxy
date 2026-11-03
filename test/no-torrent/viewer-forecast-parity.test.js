@@ -39,11 +39,12 @@ function fakeSession({ id = SESSION_ID, outputKey = "parity:fmt=fmp4:grid=kf@0:v
   };
 }
 
-async function forecastProjection(t) {
+async function forecastProjection(t, { lookaheadSeconds = 120, missingMapAt = null } = {}) {
   const previousNow = Date.now;
   Date.now = () => 1_800_000_000_000;
   const { manager, cleanup } = managerWithOwnStore();
   t.after(() => { Date.now = previousNow; cleanup(); });
+  manager.lookaheadSeconds = lookaheadSeconds;
   const session = fakeSession();
   manager.outputs.set(session.id, session);
   const viewer = manager.viewers.selectsFile("viewer", "torrent:abc", 0);
@@ -58,7 +59,7 @@ async function forecastProjection(t) {
     appendSessionId: session.id, positionSeconds: 0, bufferedAheadSec: 0, bufferLimitSeconds: 30,
     waiting: true, playing: false });
   manager.encodeCost.projectedSpeedOf = () => 0.5;
-  manager.sourceInputsFor = (_output, index) => [{ sourceId: "torrent:abc:0",
+  manager.sourceInputsFor = (_output, index) => index === missingMapAt ? null : [{ sourceId: "torrent:abc:0",
     ranges: [{ start: index * 10_000_000, end: (index + 1) * 10_000_000 }] }];
   manager.getSourceStats = async () => {
     const startedAt = performance.now();
@@ -97,7 +98,8 @@ async function forecastProjection(t) {
       reason: readiness.reason,
       delaySeconds: readiness.delaySeconds,
       firstRequiredSegmentsSeconds: readiness.firstRequiredSegmentsSeconds,
-      holdingBy: readiness.holdingBy
+      holdingBy: readiness.holdingBy,
+      ...(readiness.unavailableTailSources ? { unavailableTailSources: readiness.unavailableTailSources } : {})
     }
   };
 }
@@ -141,6 +143,13 @@ test("forecast and HTTP progress fields match the recorded pre-refactor result",
       }
     }
   });
+});
+
+test("the live ViewerRequests forecast withholds ETA when a tail source map is missing", async t => {
+  const projection = await forecastProjection(t, { lookaheadSeconds: 8, missingMapAt: 4 });
+  assert.equal(projection.playbackReadiness.reason, "tail-source-addresses-unavailable");
+  assert.equal(projection.playbackReadiness.delaySeconds, null);
+  assert.deepEqual(projection.playbackReadiness.unavailableTailSources, ["torrent:abc:0"]);
 });
 
 test("a disposed session's pending progress request cannot create viewer or geometry state", async t => {

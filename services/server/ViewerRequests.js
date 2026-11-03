@@ -867,6 +867,7 @@ export class ViewerRequests {
       const inventory = this.#host.segmentStore.sizesOf(output.outputKey);
       const segments = this.#host.outputForecastGeometry.segmentsOf(output, sessionInit, inventory,
         Number.isFinite(reportedPosition) ? reportedPosition : this.#host.viewerSecondsOn(session, consumerId, now));
+      const forecastGeometry = this.#host.outputForecastGeometry.get(output);
       const sourceIndexes = [...output.spec.sourceFileIndexes];
       if (sourceIndexes.length === 0) {
         sourceIndexes.push(output.file.fileIndex);
@@ -997,7 +998,8 @@ export class ViewerRequests {
         readings: encoderCaptureValid ? trackRates : [],
         capture: encoderCapture,
         segments,
-        geometry: this.#host.outputForecastGeometry.get(output)?.geometry,
+        tailSegments: forecastGeometry?.tailSegments ?? [],
+        geometry: forecastGeometry?.geometry,
         readySegmentIndices: [...inventory.keys()],
         segmentSizesBytes: inventory
       });

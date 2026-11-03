@@ -27,10 +27,11 @@ export class OutputForecastGeometry {
     const count = timeline?.segmentCount ?? 0;
     let forecast = this.#byOutput.get(output);
     if (!forecast) {
-      forecast = { pieces: [], geometry: {} };
+      forecast = { pieces: [], tailPieces: [], tailSegments: [], geometry: {} };
       this.#byOutput.set(output, forecast);
     }
     const kept = forecast.pieces;
+    const keptTail = forecast.tailPieces;
     const segments = [];
     const lookahead = Number(this.#host.lookaheadSeconds);
     const start = Number.isFinite(positionSeconds) ? Math.max(0, positionSeconds) : 0;
@@ -50,6 +51,23 @@ export class OutputForecastGeometry {
       else high = middle;
     }
     const last = low;
+    const tailSegments = [];
+    for (let index = last; index < count; index += 1) {
+      const startSeconds = timeline.publishedStartOf(index);
+      const endSeconds = timeline.publishedStartOf(index + 1);
+      const sourceInputs = this.#host.sourceInputsFor?.(output, index) ?? undefined;
+      const previous = keptTail[index];
+      if (previous && previous.startSeconds === startSeconds && previous.endSeconds === endSeconds &&
+        sameInputs(previous.sourceInputs, sourceInputs)) {
+        tailSegments.push(previous);
+        continue;
+      }
+      const segment = { index, startSeconds, endSeconds, sourceInputs };
+      keptTail[index] = segment;
+      tailSegments.push(segment);
+    }
+    if (keptTail.length > count) keptTail.length = count;
+    forecast.tailSegments = tailSegments;
     const indexes = new Set([0]);
     for (let index = first; index < last; index++) indexes.add(index);
     for (const index of indexes) {

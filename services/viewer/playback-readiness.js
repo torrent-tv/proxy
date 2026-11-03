@@ -785,7 +785,7 @@ export function predictPlaybackReadiness(input = {}) {
     const stop = scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArrivals, runStarts, trackFinish,
       link, position, buffered, reserve, transferFinish, constrain, duration, stock: tailStock,
       cushionStock: tailCushionStock });
-    if (stop) {
+    if (stop?.reason) {
       return { ...result(false, null, buffered, reserve, null, stop.reason, preparedSegments),
         ...(stop.unavailableSource ? { unavailableSource: stop.unavailableSource } : {}) };
     }

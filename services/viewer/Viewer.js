@@ -61,7 +61,8 @@ function browserCaptureOf(report, sessionId) {
     Number.isFinite(report.captureEpochStartedAtBrowser) && Number.isFinite(report.captureRevision) &&
     Number.isSafeInteger(report.captureRevision) && report.captureRevision > 0 &&
     Number.isFinite(clockEpoch) && Number.isFinite(startedAt) && Number.isFinite(completedAt) &&
-    report.captureEpochStartedAtBrowser <= startedAt && completedAt >= startedAt &&
+    report.captureEpochStartedAtBrowser >= clockEpoch && startedAt >= report.captureEpochStartedAtBrowser &&
+    completedAt >= startedAt &&
     Number.isSafeInteger(report.generation) && report.generation >= 0;
   return {
     owner: "browser",
@@ -672,7 +673,7 @@ export class Viewer {
       epoch: null, epochStartedAt: null, revision: null, validity: "unknown",
       unknownReason: "missing-link-sample-capture"
     };
-    const useCapture = !stale && !staleCapture && newerCapture;
+    const useCapture = !stale && !staleCapture && newerCapture && browserCapture.validity === "valid";
     this.netReport = {
       linkMbps: lastLinkMbps,
       linkMeasuredAt,

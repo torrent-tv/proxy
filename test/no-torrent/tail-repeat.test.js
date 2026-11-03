@@ -16,10 +16,10 @@ import { SwarmSelection } from "../../services/torrent/download/SwarmSelection.j
 const BLOCK = Piece.BLOCK_LENGTH;
 const BLOCKS = 128;
 
-function wire(name, { speed = 100_000, queue = 20, pieces = [0, 1, 2, 3] } = {}) {
+function wire(name, { speed = 100_000, queue = 20, pieces = [0, 1, 2, 3], type } = {}) {
   const one = new EventEmitter();
   return Object.assign(one, {
-    name, requests: [], queue, peerChoking: false, destroyed: false,
+    name, type, requests: [], queue, peerChoking: false, destroyed: false,
     peerPieces: { get: (index) => pieces.includes(index) },
     downloadSpeed: () => speed
   });
@@ -35,9 +35,10 @@ function torrent(wires) {
     _request(target, index) {
       if (this.bitfield.get(index)) return false;
       if (target.requests.length >= target.queue) return false;
-      const block = this.pieces[index].reserve();
+      const block = target.type === "webSeed" ? this.pieces[index].reserveRemaining() : this.pieces[index].reserve();
       if (block === -1) return false;
-      target.requests.push({ piece: index, offset: block * BLOCK, length: BLOCK });
+      const length = target.type === "webSeed" ? this.pieces[index].length - block * BLOCK : BLOCK;
+      target.requests.push({ piece: index, offset: block * BLOCK, length });
       return true;
     }
   });
@@ -80,6 +81,36 @@ test("the urgent tail is repeated once to a second peer and never to a third", (
   assert.equal(state.subject.totals.duplicated, 2);
   for (let look = 0; look < 5; look += 1) { state.subject.poke(); state.run(); }
   assert.equal(other.requests.length, 0, "two copies in flight are the existing limit");
+  state.subject.dispose();
+});
+
+test("a webseed is not used when its request would cover the rest of a piece", () => {
+  const slow = wire("slow", { speed: 1_000 });
+  const webseed = wire("webseed", { speed: 2_000_000, type: "webSeed" });
+  const fast = wire("fast", { speed: 100_000 });
+  const one = torrent([slow, webseed, fast]);
+  tail(one, 0, slow, [20]);
+  const state = repeat(one, () => [{ from: 0, to: 0 }]);
+  state.run();
+  assert.deepEqual(webseed.requests, [], "reserveRemaining/chunkLengthRemaining would request more than one block");
+  assert.deepEqual(fast.requests, [{ piece: 0, offset: 20 * BLOCK, length: BLOCK }]);
+  state.subject.dispose();
+});
+
+test("an existing webseed range counts as a copy for every missing block it covers", () => {
+  const slow = wire("slow", { speed: 1_000 });
+  const webseed = wire("webseed", { speed: 2_000_000, type: "webSeed" });
+  const fast = wire("fast", { speed: 100_000 });
+  const one = torrent([slow, webseed, fast]);
+  tail(one, 0, slow, [20, 21], 10_000);
+  webseed.requests.push({ piece: 0, offset: 20 * BLOCK, length: 2 * BLOCK, askedAt: 10_000 });
+
+  const adapter = new WebTorrentTailRepeatAdapter(one);
+  assert.deepEqual(adapter.observe(0, 16).blocks.map(({ index, copies }) => ({ index, copies })),
+    [{ index: 20, copies: 2 }, { index: 21, copies: 2 }]);
+  const state = repeat(one, () => [{ from: 0, to: 0 }], { now: () => 20_000 });
+  state.run();
+  assert.deepEqual(fast.requests, [], "a third copy would exceed the per-block cap");
   state.subject.dispose();
 });
 

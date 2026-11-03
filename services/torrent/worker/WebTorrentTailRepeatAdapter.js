@@ -21,13 +21,26 @@ function speedOf(wire) {
 function usableWires(torrent, pieceIndex) {
   const wires = Array.isArray(torrent?.wires) ? torrent.wires : [];
   return wires.filter((wire) => {
-    if (!wire || wire.destroyed || wire.peerChoking) return false;
+    // WebTorrent's _request uses reserveRemaining/chunkLengthRemaining for a
+    // webseed, which requests the piece suffix rather than one bounded block.
+    if (!wire || wire.type === "webSeed" || wire.destroyed || wire.peerChoking) return false;
     try {
       return wire.peerPieces?.get?.(pieceIndex) === true;
     } catch {
       return false;
     }
   }).sort((left, right) => speedOf(right) - speedOf(left));
+}
+
+function requestCoversBlock(request, pieceIndex, blockIndex, chunks) {
+  if (request?.piece !== pieceIndex || !Number.isFinite(request.offset) || request.offset < 0) return false;
+  const firstBlock = Math.floor(request.offset / BLOCK_BYTES);
+  // A request without a length is an incompatible observation. Count it
+  // conservatively through the piece's end rather than allowing extra copies.
+  const lastBlock = Number.isFinite(request.length) && request.length > 0
+    ? Math.min(chunks - 1, Math.ceil((request.offset + request.length) / BLOCK_BYTES) - 1)
+    : chunks - 1;
+  return blockIndex >= firstBlock && blockIndex <= lastBlock;
 }
 
 /**
@@ -83,15 +96,14 @@ export class WebTorrentTailRepeatAdapter {
       if (buffer[index]) continue;
       blocks.push({ index, copies: 0, firstAskedAt: null });
     }
-    const byIndex = new Map(blocks.map((block) => [block.index, block]));
     for (const wire of Array.isArray(torrent.wires) ? torrent.wires : []) {
       for (const request of Array.isArray(wire?.requests) ? wire.requests : []) {
-        if (request?.piece !== pieceIndex) continue;
-        const block = byIndex.get(Math.floor(request.offset / BLOCK_BYTES));
-        if (!block) continue;
-        block.copies += 1;
-        const askedAt = Number.isFinite(request.askedAt) ? request.askedAt : Number.NEGATIVE_INFINITY;
-        block.firstAskedAt = block.firstAskedAt === null ? askedAt : Math.min(block.firstAskedAt, askedAt);
+        for (const block of blocks) {
+          if (!requestCoversBlock(request, pieceIndex, block.index, chunks)) continue;
+          block.copies += 1;
+          const askedAt = Number.isFinite(request.askedAt) ? request.askedAt : Number.NEGATIVE_INFINITY;
+          block.firstAskedAt = block.firstAskedAt === null ? askedAt : Math.min(block.firstAskedAt, askedAt);
+        }
       }
     }
     return { available: true, missingCount, blocks };
@@ -116,11 +128,11 @@ export class WebTorrentTailRepeatAdapter {
     }
 
     const candidates = usableWires(torrent, pieceIndex);
+    const chunks = Number.isFinite(piece._chunks) ? piece._chunks : buffer.length;
     if (candidates.length === 0) return "refused";
 
     for (const wire of candidates) {
-      if ((wire.requests ?? []).some((request) => request?.piece === pieceIndex &&
-          Math.floor(request.offset / BLOCK_BYTES) === blockIndex)) continue;
+      if ((wire.requests ?? []).some((request) => requestCoversBlock(request, pieceIndex, blockIndex, chunks))) continue;
 
       try {
         piece.cancel(blockIndex);

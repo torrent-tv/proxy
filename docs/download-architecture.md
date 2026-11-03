@@ -75,6 +75,11 @@ disposal removes its listeners and timer. WebTorrent's ordinary queue-capacity
 check still runs for every repeat. A refused request restores the freed
 reservation; a missing or incompatible private entry disables repetition and
 logs one bounded diagnostic, leaving the ordinary picker in charge.
+WebSeeds are never repeat targets: WebTorrent's private request path asks a
+webseed for the remainder of a piece from a block offset, which would exceed
+the one-block copy bound. Existing in-flight requests are counted for every
+missing block their byte range covers, including a webseed range. The ordinary
+picker may still use webseeds.
 
 `worker/WebTorrentTailRepeatAdapter` is the only live code allowed to inspect
 WebTorrent's private piece buffer and wire requests or call `Piece.cancel()`,

@@ -325,7 +325,7 @@ export class HostLoad {
    * What the swarm can give every torrent, in bytes per second: the median of
    * what it carried while our selection held no connection back, but never
    * less than the median of what it carried in all — the same choice the
-   * start forecast makes for one source (`ViewerRequests` `sourceService`).
+   * start forecast makes for one source (`ViewerPlaybackState` `sourceService`).
    * Time our selection held a connection back measures our asking, not the
    * swarm, so holding the speculative levels back does not lower it
    * (torrent-tv/meta#180). Null before any interval was read.

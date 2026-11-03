@@ -73,6 +73,7 @@ export class OutputLifecycle {
       return;
     }
     this.#host.invalidateWaits(session);
+    this.#host.forgetForecastOutput?.(session);
     this.#host.outputs.delete(sessionId);
     this.#host.outputTimes.logIndexAccuracy(session);
 
@@ -406,7 +407,9 @@ export class OutputLifecycle {
     }
     // Presence ends synchronously, before disposal waits for a child process.
     // Late reports and preparations must not rejoin this viewer meanwhile.
+    const viewer = this.#host.viewers.get(consumerId);
     const outputs = this.#host.viewers.hasGone(consumerId);
+    this.#host.viewerDeparted?.(viewer);
     for (const outputId of outputs) {
       await this.releaseSessionConsumer(outputId, consumerId, because);
     }
@@ -428,11 +431,14 @@ export class OutputLifecycle {
     if (!output) {
       return false;
     }
+    const viewer = this.#host.viewers.get(consumerId);
     this.#host.releasePlaybackStorageDemand?.(output.outputKey ?? "", consumerId);
     // Nothing to release in the encoding: it holds one map per output, built
     // from where the viewers are, and the map that arrives next simply does not
     // have this one in it. A name to release was the last place a viewer
     // appeared inside the encoding at all.
-    return this.#host.viewers.leaves(output, consumerId);
+    const removed = this.#host.viewers.leaves(output, consumerId);
+    if (removed) this.#host.outputViewerDeparted?.(viewer, output);
+    return removed;
   }
 }

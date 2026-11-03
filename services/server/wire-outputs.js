@@ -107,6 +107,9 @@ import { describeProcessor, processorBetween, sampleProcessor } from "../storage
 import { ProcessorBudget } from "../encode/ProcessorBudget.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode/encode-run-state.js";
 import { secondsUntilClosed } from "../encode/piece-close-time.js";
+import { ViewerPlaybackState } from "../viewer/ViewerPlaybackState.js";
+import { OutputForecastGeometry } from "../viewer/OutputForecastGeometry.js";
+import { ForecastDiagnostics } from "./ForecastDiagnostics.js";
 
 // Where a variant and an audio rendition live under a session — `v/<height>/…`
 // and `a/<track>/…` — is stated in `encode/output/playlists.js`, beside the lines that
@@ -249,6 +252,14 @@ export function wireOutputs({
   // output key owns its record, and the graph releases it at the last session.
   const waits = new WaitLedger();
   const parts = {};
+  parts.viewerPlaybackState = new ViewerPlaybackState();
+  parts.outputForecastGeometry = new OutputForecastGeometry({
+    lookaheadSeconds: LOOKAHEAD_PAUSE_SECONDS,
+    finishedMediaRangesOf: (output, index) => parts.encodeRuns.finishedMediaRangesOf(output, index),
+    sourceInputsFor: (output, index) => parts.sourceInputsFor?.(output, index),
+    endsWithinPlayerSeekTolerance
+  });
+  parts.forecastDiagnostics = new ForecastDiagnostics({ logger });
   const audioDescriptionOf = (output) => (getCachedAudioTracks?.({
     sourceKey: output.file.sourceKey, fileIndex: output.spec.grid?.fileIndex ?? output.file.fileIndex
   }) ?? []).find((track) => track.fileIndex === output.spec.audio?.fileIndex &&
@@ -573,6 +584,9 @@ export function wireOutputs({
     planEncodersSoon: () => parts.encodeRuns.planEncodersSoon(),
     invalidateWaits: (output) => parts.serving.invalidateWaits(output),
     clearWaits: () => waits.clear(),
+    forgetForecastOutput: (output) => parts.viewerRequests.outputDisposed(output),
+    viewerDeparted: (viewer) => parts.viewerRequests.viewerDeparted(viewer),
+    outputViewerDeparted: (viewer, output) => parts.viewerRequests.outputViewerDeparted(viewer, output),
     segmentFormatOfKey,
     // Where the viewers of one output stand, in its segments: what the store
     // the output retention policy reads to give disk back in the right order.
@@ -632,6 +646,9 @@ export function wireOutputs({
   // What a viewer asks for: an output of a file, a position, a report of progress.
   parts.viewerRequests = new ViewerRequests({
     observeWait,
+    viewerPlaybackState: parts.viewerPlaybackState,
+    outputForecastGeometry: parts.outputForecastGeometry,
+    noteForecast: (...args) => parts.forecastDiagnostics.note(...args),
     // Whether this machine has a place for one more viewer on this output —
     // asked in the same synchronous stretch as they are put on it.
     admitsWatching: (output) => parts.admission.admitsWatching(output?.outputKey ?? ""),

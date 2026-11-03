@@ -34,6 +34,7 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   const fileIndexRaw = typeof req.query.fileIndex === "string" ? req.query.fileIndex : "";
   const fileIndex = fileIndexRaw !== "" && /^\d+$/.test(fileIndexRaw) ? Number(fileIndexRaw) : null;
   const consumerId = typeof req.query.consumer === "string" ? req.query.consumer : "";
+  const viewerToken = viewerRequests?.viewerTokenOf?.(consumerId) ?? null;
   const generationRaw = typeof req.query.generation === "string" ? req.query.generation : "";
   const generation = generationRaw !== "" && /^\d+$/.test(generationRaw) ? Number(generationRaw) : null;
   const requestedFileName = typeof req.query.fileName === "string" ? req.query.fileName : "";
@@ -47,7 +48,8 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   const noteInitialSnapshot = () => {
     if (consumerId && Number.isSafeInteger(generation) && Number.isSafeInteger(fileIndex)) {
       viewerRequests?.noteWaitFileSnapshot?.({ consumerId, generation, sourceKey, fileIndex,
-        fileName: requestedFileName, fileLength: requestedFileLength, ...earlyLink });
+        fileName: requestedFileName, fileLength: requestedFileLength, ...earlyLink,
+        ...(viewerToken ? { viewerToken } : {}) });
     }
   };
 
@@ -155,7 +157,7 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   if (consumerId && Number.isSafeInteger(generation)) {
     viewerRequests?.noteWaitSourceSnapshot?.({ consumerId, generation, sourceKey, fileIndex,
       fileName: torrent.files?.[fileIndex]?.name ?? requestedFileName, fileLength: requestedFileLength,
-      stats, ...earlyLink });
+      stats, ...earlyLink, ...(viewerToken ? { viewerToken } : {}) });
   }
   const responsePreparedAtProxyMs = performance.now();
   return reply.send({ ...stats, sourceSnapshotTransport: {

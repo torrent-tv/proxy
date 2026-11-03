@@ -35,12 +35,6 @@ export function sourceFileIndexesForOutput(output) {
  * @param {Array<{ sourceId: string, ranges: object[] }> | undefined} right
  * @returns {boolean}
  */
-function sameInputs(left, right) {
-  if (left === right) return true;
-  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
-  return left.every((input, index) => input.sourceId === right[index].sourceId && input.ranges === right[index].ranges);
-}
-
 function browserServiceSummary(value) {
   if (!value || typeof value !== "object") return null;
   return Object.fromEntries(["init", "media"].filter(kind => value[kind]).map(kind => [kind, value[kind]]).map(([kind, service]) => [kind, {
@@ -119,40 +113,6 @@ function segmentAddressOf(output, fileName) {
 export class ViewerRequests {
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
-  /** @type {WeakMap<object, Map<string, object>>} */
-  #rateStateBySession = new WeakMap();
-  /** @type {Map<string, { consumerId: string, generation: number, fileIndex: number | null, waitId: string, features: object, updatedAt: number, observedWaits: Set<number> }>} */
-  #waitObservations = new Map();
-  /**
-   * What the start forecasts cost, said once a minute: how many there were,
-   * their time on the main thread, and for each track whether the times of its
-   * pieces were kept from the last poll or why they were worked out again. In
-   * r37 the forecast took 19.2 s of Home Assistant's main thread in 15 minutes
-   * and the times were mostly worked out again (torrent-tv/meta#178).
-   */
-  #forecastCosts = { since: Date.now(), polls: 0, ms: 0, maxMs: 0, times: new Map() };
-
-  #noteForecast(ms, reasons) {
-    const costs = this.#forecastCosts;
-    costs.polls += 1; costs.ms += ms; costs.maxMs = Math.max(costs.maxMs, ms);
-    for (const reason of reasons) costs.times.set(reason, (costs.times.get(reason) ?? 0) + 1);
-    const now = Date.now();
-    if (now - costs.since < 60_000) return;
-    logger.info(`start forecasts in ${((now - costs.since) / 1000).toFixed(1)}s: ${costs.polls}, ` +
-      `${Math.round(costs.ms)}ms in all, ${(costs.ms / costs.polls).toFixed(1)}ms each, longest ${Math.round(costs.maxMs)}ms; ` +
-      `times of a track's pieces: ${[...costs.times].map(([reason, count]) => `${reason} ${count}`).join(", ")}`);
-    Object.assign(costs, { since: now, polls: 0, ms: 0, maxMs: 0, times: new Map() });
-  }
-
-  /**
-   * The pieces of each output as the start forecast read them last (see
-   * `#segmentsOf`), and what the forecast keeps of their time geometry while
-   * they stand (`playback-readiness.js` `timescaleOfPieces`).
-   *
-   * @type {WeakMap<object, { pieces: object[], geometry: object }>}
-   */
-  #forecastPieces = new WeakMap();
-
   /**
    * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `planEncodersSoon`, `encodeRuns`, `encodeSpeedReadingsOf`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `placeViewerOn`, `chooseAudioTrack`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
    */
@@ -160,12 +120,36 @@ export class ViewerRequests {
     this.#host = host;
   }
 
+  viewerDeparted(viewer) {
+    if (viewer) this.#host.viewerPlaybackState.forgetViewer(viewer);
+  }
+
+  viewerTokenOf(consumerId) {
+    return consumerId ? this.#host.viewers.get(consumerId) : null;
+  }
+
+  outputViewerDeparted(viewer, output) {
+    if (!viewer || !output) return;
+    if (this.#host.viewers.get(viewer.id) === viewer) {
+      this.#host.viewerPlaybackState.forgetViewerOutput(viewer, output);
+    } else {
+      this.#host.viewerPlaybackState.forgetViewer(viewer);
+    }
+  }
+
+  outputDisposed(output) {
+    this.#host.viewerPlaybackState.forgetOutput(output);
+    this.#host.outputForecastGeometry.forget(output);
+  }
+
   /** Record the facts known while listing a source, without producing an ETA. */
-  noteWaitFileSnapshot({ consumerId, generation, sourceKey, fileIndex, fileName, fileLength, linkMbps, linkSampleAgeMs }) {
+  noteWaitFileSnapshot({ consumerId, generation, sourceKey, fileIndex, fileName, fileLength, linkMbps, linkSampleAgeMs,
+    viewerToken }) {
     if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string" ||
         !Number.isSafeInteger(fileIndex) || fileIndex < 0) return;
     const waitId = `${sourceKey}:${fileIndex}:${generation}`;
-    const key = `${consumerId}:${waitId}`;
+    const viewer = this.#currentViewerToken(consumerId, viewerToken);
+    if (!viewer) return;
     const extension = typeof fileName === "string" ? fileName.split(".").at(-1)?.toLowerCase() ?? "" : "";
     const link = linkMeasurementOf(this.#host.viewers.get(consumerId), linkMbps, linkSampleAgeMs);
     const features = {
@@ -179,10 +163,8 @@ export class ViewerRequests {
       headerRemaining: null,
       peers: null
     };
-    const current = this.#waitObservations.get(key);
-    const context = this.#setWaitObservation({ consumerId, generation, sourceKey, fileIndex, waitId, features, current });
-    this.#recordWaitSnapshot(context);
-    this.#pruneWaitObservations();
+    this.#host.viewerPlaybackState.recordWaitSnapshot({ viewer, consumerId, generation, sourceKey, fileIndex, waitId, features });
+    this.#host.viewerPlaybackState.pruneWaits();
   }
 
   /**
@@ -194,10 +176,11 @@ export class ViewerRequests {
    * @returns {object | null}
    */
   noteWaitSourceSnapshot({ consumerId, generation, sourceKey, fileIndex, fileName = "", fileLength = null,
-    stats = {}, linkMbps, linkSampleAgeMs, processing = {} }) {
+    stats = {}, linkMbps, linkSampleAgeMs, processing = {}, viewerToken }) {
     if (!consumerId || !Number.isSafeInteger(generation) || typeof sourceKey !== "string") return;
     const waitId = `${sourceKey}:${fileIndex ?? "all"}:${generation}`;
-    const key = `${consumerId}:${waitId}`;
+    const viewer = this.#currentViewerToken(consumerId, viewerToken);
+    if (!viewer) return;
     const extension = typeof fileName === "string" ? fileName.split(".").at(-1)?.toLowerCase() ?? "" : "";
     const link = linkMeasurementOf(this.#host.viewers.get(consumerId), linkMbps, linkSampleAgeMs);
     const features = {
@@ -218,10 +201,8 @@ export class ViewerRequests {
       videoSpeedX: processing.videoSpeedX ?? null,
       audioSpeedX: processing.audioSpeedX ?? null
     };
-    const current = this.#waitObservations.get(key);
-    const context = this.#setWaitObservation({ consumerId, generation, sourceKey, fileIndex, waitId, features, current });
-    this.#recordWaitSnapshot(context);
-    this.#pruneWaitObservations();
+    this.#host.viewerPlaybackState.recordWaitSnapshot({ viewer, consumerId, generation, sourceKey, fileIndex, waitId, features });
+    this.#host.viewerPlaybackState.pruneWaits();
   }
 
   /**
@@ -235,49 +216,14 @@ export class ViewerRequests {
    * @returns {void}
    */
   noteFirstFrameObservation({ consumerId, generation, waitId, wait, elapsedMs, stages = null }) {
-    const key = `${consumerId}:${waitId}`;
-    const observation = this.#waitObservations.get(key);
-    if (!observation || observation.generation !== generation || !Number.isSafeInteger(wait) || wait < 0 || observation.observedWaits.has(wait) ||
-        !Number.isFinite(elapsedMs) || elapsedMs < 0) return;
-    const initialFeatures = observation.snapshots[0];
-    if (initialFeatures) {
-      this.#host.noteFirstFrame?.({ seconds: elapsedMs / 1000, features: initialFeatures,
-        featureSnapshots: observation.snapshots.slice(1), stages });
-    }
-    observation.observedWaits.add(wait);
-    observation.updatedAt = Date.now();
+    const viewer = this.#host.viewers.get(consumerId);
+    if (!viewer) return;
+    this.#host.viewerPlaybackState.noteFirstFrame({ viewer, generation, waitId, wait, elapsedMs, stages,
+      record: observation => this.#host.noteFirstFrame?.({ ...observation, stages }) });
   }
 
-  #setWaitObservation({ consumerId, generation, sourceKey, fileIndex, waitId, features, current }) {
-    const sameWait = current?.waitId === waitId;
-    const context = sameWait ? current : {
-      consumerId,
-      generation,
-      sourceKey,
-      fileIndex,
-      waitId,
-      snapshots: [],
-      observedWaits: new Set()
-    };
-    const measuredAt = performance.now();
-    const ageElapsedMs = Number.isFinite(context.featuresMeasuredAt)
-      ? Math.max(0, measuredAt - context.featuresMeasuredAt)
-      : 0;
-    const mergedFeatures = mergeWaitFeatures(context.features, features, ageElapsedMs);
-    Object.assign(context, { consumerId, generation, sourceKey, fileIndex, waitId, features: mergedFeatures,
-      featuresMeasuredAt: measuredAt, updatedAt: Date.now() });
-    this.#waitObservations.set(`${consumerId}:${waitId}`, context);
-    return context;
-  }
-
-  #recordWaitSnapshot(context) {
-    const features = context.features;
-    const previous = context.snapshots.at(-1);
-    if (previous && JSON.stringify(previous) === JSON.stringify(features)) return false;
-    const snapshot = { ...features };
-    if (context.snapshots.length < 2) context.snapshots.push(snapshot);
-    else context.snapshots[1] = snapshot;
-    return true;
+  #currentViewerToken(consumerId, viewerToken) {
+    return viewerToken && this.#host.viewers.get(consumerId) === viewerToken ? viewerToken : null;
   }
 
   #preparedOutputBytes(sourceKey, fileIndex) {
@@ -305,14 +251,6 @@ export class ViewerRequests {
       }
     }
     return bytes;
-  }
-
-  #pruneWaitObservations() {
-    const cutoff = Date.now() - 30 * 60_000;
-    for (const [key, value] of this.#waitObservations) {
-      if (value.updatedAt < cutoff) this.#waitObservations.delete(key);
-    }
-    while (this.#waitObservations.size > 1000) this.#waitObservations.delete(this.#waitObservations.keys().next().value);
   }
 
   /**
@@ -548,10 +486,10 @@ export class ViewerRequests {
     if (!Number.isSafeInteger(generation) || !file || typeof file.sourceKey !== "string" ||
         !Number.isSafeInteger(file.fileIndex) || file.fileIndex < 0) return;
     const waitId = `${file.sourceKey}:${file.fileIndex}:${generation}`;
-    const key = `${consumerId}:${waitId}`;
     const fileName = file.relativePath ?? file.name ?? "";
     const extension = typeof fileName === "string" ? fileName.split(".").at(-1)?.toLowerCase() ?? "" : "";
     const viewer = this.#host.viewers.get(consumerId);
+    if (!viewer) return;
     const link = linkMeasurementOf(viewer);
     const features = {
       extension,
@@ -570,10 +508,9 @@ export class ViewerRequests {
     };
     // A seek is a new observation group even when a caller repeats the same
     // generation; its source facts must not join observations from the prior wait.
-    this.#waitObservations.delete(key);
-    const context = this.#setWaitObservation({ consumerId, generation, sourceKey: file.sourceKey,
-      fileIndex: file.fileIndex, waitId, features, current: null });
-    this.#recordWaitSnapshot(context);
+    this.#host.viewerPlaybackState.deleteWait(viewer, waitId);
+    this.#host.viewerPlaybackState.recordWaitSnapshot({ viewer, consumerId, generation, sourceKey: file.sourceKey,
+      fileIndex: file.fileIndex, waitId, features });
   }
 
   /**
@@ -690,6 +627,8 @@ export class ViewerRequests {
     // without this the base session would idle out from under its own variants.
     const session = this.#host.activeOutputFor({ base: named, consumerId, outputs: this.#host.outputs });
     this.#host.outputs.touch(session);
+    const viewer = consumerId ? this.#host.viewers.get(consumerId) : null;
+    const stillOwnsProgress = () => this.#stillOwnsProgress(named, session, consumerId, viewer);
     const audio = this.#host.renditions.servesAudioSeparately(session)
       ? this.#host.renditions.playbackAudioOutputFor(session, consumerId) : null;
     const failed = [session, audio].find(output => output && this.#host.encodeRuns.wireStateOf(output) === "failed");
@@ -709,8 +648,11 @@ export class ViewerRequests {
     // Observed output bitrate (Mbit/s) from recently completed segments. The
     // proxy uses it for the viewer-link budget and the readiness forecast.
     const outputMbps = await this.#host.quality.observedStreamMbps(session);
+    if (!stillOwnsProgress()) return null;
     const progress = this.#host.encodeRuns.progressOf(session);
-    const playbackReadiness = await this.#playbackReadinessFor(session, consumerId, progress, outputMbps);
+    const playbackReadiness = await this.#playbackReadinessFor(session, consumerId, progress, outputMbps,
+      viewer, stillOwnsProgress);
+    if (!stillOwnsProgress()) return null;
     return {
       // The id the caller asked about, not the variant it was answered from —
       // the browser tracks its sessions by the id it was given.
@@ -795,7 +737,16 @@ export class ViewerRequests {
     };
   }
 
-  async #playbackReadinessFor(session, consumerId, progress, outputMbps) {
+  #stillOwnsProgress(named, session, consumerId, viewer) {
+    if (this.#host.outputs.get(named.id) !== named || this.#host.outputs.get(session.id) !== session) return false;
+    if (!viewer) return !consumerId || !this.#host.viewers.get(consumerId);
+    return this.#host.viewers.get(consumerId) === viewer &&
+      (!(viewer.outputs instanceof Set) || viewer.outputs.has(named.id)) &&
+      this.#host.activeOutputFor({ base: named, consumerId, outputs: this.#host.outputs }) === session;
+  }
+
+  async #playbackReadinessFor(session, consumerId, progress, outputMbps, viewer, stillOwnsProgress) {
+    if (!stillOwnsProgress()) return null;
     const waitStartedAt = performance.now();
     const waitFields = { process: "P14", sessionId: session.id, consumerId };
     this.#host.observeWait?.(session.file.sourceKey, "process", { ...waitFields, phase: "begin", at: waitStartedAt });
@@ -806,12 +757,13 @@ export class ViewerRequests {
     // held viewer's answer took 11.2 s while its forecast took 0.1-0.4 s and
     // the answer crossed the connection in 21 ms (r50, torrent-tv/meta#178).
     const parts = { enteredAt: performance.now(), statsMs: 0, workerForecastMs: 0, qualityMs: 0 };
-    const viewer = consumerId ? this.#host.viewers.get(consumerId) : null;
     const viewerReading = viewer?.linkReading() ?? null;
-    const measurement = this.#rateStateFor(session, consumerId);
+    const measurement = viewer
+      ? this.#host.viewerPlaybackState.rateState(viewer, session, this.#host.playbackReadiness, this.#host.lookaheadSeconds)
+      : { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), sources: new Map() };
     const linkAt = Number(viewerReading?.linkSampleMeasuredAt);
     if (Number.isFinite(viewerReading?.linkSampleMbps) && viewerReading.linkSampleMbps > 0 && Number.isFinite(linkAt)) {
-      measurement.link.add(linkAt, viewerReading.linkSampleMbps * 1_000_000);
+      this.#host.viewerPlaybackState.addLinkReading(measurement, linkAt, viewerReading.linkSampleMbps);
     }
 
     const outputs = [session];
@@ -828,6 +780,7 @@ export class ViewerRequests {
     let primarySourceStats = null;
     const tracks = [];
     for (const output of outputs) {
+      if (!stillOwnsProgress() || this.#host.outputs.get(output.id) !== output) return null;
       const trackProgress = output === session ? progress : this.#host.encodeRuns.progressOf(output);
       const trackRates = this.#trackRateReadings(output, now);
       const trackName = output === session ? "video" : "audio";
@@ -840,7 +793,7 @@ export class ViewerRequests {
       const placedByPlayer = Boolean(servedInit?.length);
       const sessionInit = placedByPlayer ? servedInit : null;
       const inventory = this.#host.segmentStore.sizesOf(output.outputKey);
-      const segments = this.#segmentsOf(output, sessionInit, inventory, Number.isFinite(viewerReading?.positionSeconds)
+      const segments = this.#host.outputForecastGeometry.segmentsOf(output, sessionInit, inventory, Number.isFinite(viewerReading?.positionSeconds)
         ? viewerReading.positionSeconds : this.#host.viewerSecondsOn(session, consumerId, now));
       const sourceIndexes = [...output.spec.sourceFileIndexes];
       if (sourceIndexes.length === 0) {
@@ -861,6 +814,7 @@ export class ViewerRequests {
         } catch {
           stats = null;
         }
+        if (!stillOwnsProgress() || this.#host.outputs.get(output.id) !== output) return null;
         if (output === session && fileIndex === session.file.fileIndex) primarySourceStats = stats;
         parts.statsMs += performance.now() - statsAt;
         parts.workerForecastMs += Number(stats?.forecastMs) || 0;
@@ -882,9 +836,14 @@ export class ViewerRequests {
             Number.isFinite(session.file.durationSeconds) && session.file.durationSeconds > 0
             ? stats.fileLength / session.file.durationSeconds : null,
           pieceLength: stats?.pieceLength,
-          downloadRateReadings: this.#sourceRateReadings(measurement, output.file.sourceKey, stats, now),
-          tailRateReadings: this.#sourceTailRateReadings(measurement, output.file.sourceKey, now),
-          downloadRateSummaries: this.#sourceRateSummaries(measurement, output.file.sourceKey),
+          downloadRateReadings: viewer && this.#host.viewerPlaybackState.owns(viewer, session, measurement)
+            ? this.#host.viewerPlaybackState.sourceRateReadings(measurement, output.file.sourceKey, stats, now,
+              this.#host.playbackReadiness, this.#host.lookaheadSeconds) : null,
+          tailRateReadings: viewer && this.#host.viewerPlaybackState.owns(viewer, session, measurement)
+            ? this.#host.viewerPlaybackState.sourceTailRateReadings(measurement, output.file.sourceKey, now,
+              this.#host.playbackReadiness) : null,
+          downloadRateSummaries: viewer && this.#host.viewerPlaybackState.owns(viewer, session, measurement)
+            ? this.#host.viewerPlaybackState.sourceRateSummaries(measurement, output.file.sourceKey) : null,
           downloadForecast,
         });
       }
@@ -893,6 +852,7 @@ export class ViewerRequests {
       const observedMbps = output === session
         ? outputMbps
         : await this.#host.quality.observedStreamMbps(output);
+      if (!stillOwnsProgress() || this.#host.outputs.get(output.id) !== output) return null;
       parts.qualityMs += performance.now() - qualityAt;
       const liveRuns = this.#host.encodeRuns.liveRunsOf?.(output) ?? [];
       const processingStarted = liveRuns.some(({ progress }) => progress.processedSeconds > progress.startPositionSeconds);
@@ -936,11 +896,13 @@ export class ViewerRequests {
         segmentCount: output.timeline?.segmentCount ?? segments.length,
         readings: trackRates,
         segments,
-        geometry: this.#forecastPieces.get(output)?.geometry,
+        geometry: this.#host.outputForecastGeometry.get(output)?.geometry,
         readySegmentIndices: [...inventory.keys()],
         segmentSizesBytes: inventory
       });
     }
+
+    if (!stillOwnsProgress()) return null;
 
     const bufferedAheadSeconds = Number(viewerReading?.bufferedAheadSec);
     const positionSeconds = Number.isFinite(viewerReading?.positionSeconds)
@@ -991,7 +953,7 @@ export class ViewerRequests {
       this.#host.notePlaybackStorageDemand?.(session.outputKey ?? session.id, consumerId, predicted.cushionBytes);
     }
     const predictMs = performance.now() - startedAt;
-    this.#noteForecast(predictMs, tracks.map(track => track.geometry?.reason ?? "none"));
+    this.#host.noteForecast(predictMs, tracks.map(track => track.geometry?.reason ?? "none"));
     logger.info(`readiness parts ${session.id} consumer=${consumerId}: source stats ${Math.round(parts.statsMs)}ms ` +
       `(the torrent thread's arrival forecast ${Math.round(parts.workerForecastMs)}ms), stream rate ${Math.round(parts.qualityMs)}ms, ` +
       `start forecast ${Math.round(predictMs)}ms, in all ${Math.round(performance.now() - parts.enteredAt)}ms`);
@@ -1018,7 +980,7 @@ export class ViewerRequests {
       ? this.#host.generationOfRequest(consumerId) : null;
     const earlyWaitId = Number.isSafeInteger(generation)
       ? `${session.file.sourceKey}:${session.file.fileIndex}:${generation}` : null;
-    if (earlyWaitId && this.#waitObservations.has(`${consumerId}:${earlyWaitId}`) && primarySourceStats) {
+    if (earlyWaitId && this.#host.viewerPlaybackState.hasWait(viewer, earlyWaitId) && primarySourceStats) {
       const linkMeasuredAt = Number(viewerReading?.linkMeasuredAt);
       const videoOperation = forecast.operations.find(operation => operation.track === "video");
       const audioOperation = forecast.operations.find(operation => operation.track === "audio");
@@ -1026,6 +988,7 @@ export class ViewerRequests {
         sourceKey: session.file.sourceKey, fileIndex: session.file.fileIndex,
         fileName: session.file.relativePath ?? session.file.name ?? "",
         fileLength: primarySourceStats.fileLength, stats: primarySourceStats,
+        viewerToken: viewer,
         linkMbps: viewerReading?.linkMbps,
         linkSampleAgeMs: Number.isFinite(linkMeasuredAt) ? Math.max(0, Date.now() - linkMeasuredAt) : undefined,
         processing: {
@@ -1163,85 +1126,6 @@ export class ViewerRequests {
    * @param {number} positionSeconds
    * @returns {object[]}
    */
-  #segmentsOf(output, sessionInit, inventory, positionSeconds) {
-    const timeline = output.timeline;
-    const count = timeline?.segmentCount ?? 0;
-    let forecast = this.#forecastPieces.get(output);
-    if (!forecast) {
-      forecast = { pieces: [], geometry: {} };
-      this.#forecastPieces.set(output, forecast);
-    }
-    const kept = forecast.pieces;
-    const segments = [];
-    const lookahead = Number(this.#host.lookaheadSeconds);
-    const start = Number.isFinite(positionSeconds) ? Math.max(0, positionSeconds) : 0;
-    const end = Number.isFinite(lookahead) && lookahead > 0 ? start + lookahead : Number.POSITIVE_INFINITY;
-    let low = 0, high = count;
-    while (low < high) {
-      const middle = (low + high) >>> 1;
-      if (timeline.publishedStartOf(middle + 1) <= start) low = middle + 1;
-      else high = middle;
-    }
-    const first = Math.max(0, low - 1);
-    low = first;
-    high = count;
-    while (low < high) {
-      const middle = (low + high) >>> 1;
-      if (timeline.publishedStartOf(middle) < end) low = middle + 1;
-      else high = middle;
-    }
-    const last = low;
-    const indexes = new Set([0]);
-    for (let index = first; index < last; index++) indexes.add(index);
-    for (const index of indexes) {
-      const endSeconds = timeline.publishedStartOf(index + 1);
-      // Only a made piece has media intervals to read. Asked of every piece,
-      // each one not made cost a `stat` of its file in the store's safety net
-      // for a missed directory event: 1327 per poll per output, 12.6 s of 300 s
-      // of the main thread at a cold start on Home Assistant (r61,
-      // torrent-tv/meta#178), while requests waited behind it.
-      const ranges = inventory.has(index) ? this.#host.encodeRuns.finishedMediaRangesOf(output, index) : undefined;
-      const mediaRanges = ranges && output.segmentFormat?.servedMediaRanges ?
-        output.segmentFormat.servedMediaRanges(ranges, { initBytes: sessionInit }) : undefined;
-      // The player can request a fragment whose media timestamps extend a few
-      // frames past its nominal playlist end while seeking to the next piece.
-      if (index !== 0 && mediaRanges === undefined && !inventory.has(index) &&
-        Number.isFinite(endSeconds) && Number.isFinite(positionSeconds) &&
-        !this.#host.playbackReadiness.endsWithinPlayerSeekTolerance(endSeconds, positionSeconds) &&
-        endSeconds < positionSeconds) {
-        continue;
-      }
-      const startSeconds = timeline.publishedStartOf(index);
-      const sourceInputs = this.#host.sourceInputsFor?.(output, index) ?? undefined;
-      const previous = kept[index];
-      if (previous && previous.startSeconds === startSeconds && previous.endSeconds === endSeconds &&
-        previous.mediaRanges === mediaRanges && sameInputs(previous.sourceInputs, sourceInputs)) {
-        segments.push(previous);
-        continue;
-      }
-      const segment = { index, startSeconds, endSeconds, sourceInputs, mediaRanges };
-      kept[index] = segment;
-      segments.push(segment);
-    }
-    if (kept.length > count) kept.length = count;
-    return segments;
-  }
-
-  #rateStateFor(session, consumerId) {
-    let byViewer = this.#rateStateBySession.get(session);
-    if (!byViewer) {
-      byViewer = new Map();
-      this.#rateStateBySession.set(session, byViewer);
-    }
-    const id = typeof consumerId === "string" ? consumerId : "";
-    let state = byViewer.get(id);
-    if (!state) {
-      state = { link: new this.#host.playbackReadiness.RateTrend(this.#host.lookaheadSeconds), sources: new Map() };
-      byViewer.set(id, state);
-    }
-    return state;
-  }
-
   /**
    * The encoder's rate for the forecast: the output's whole window of readings,
    * summarized again on each poll. A run that ended between two polls took its
@@ -1270,93 +1154,6 @@ export class ViewerRequests {
     return null;
   }
 
-  /**
-   * What the swarm can give this source. A rate measured while our own
-   * selection held a connection back measures our asking: on a cold Matroska
-   * it read 0.4-1.3 MB/s while the same swarm later gave 12-14 MB/s, and the
-   * forecast swung from 0.9 s to 19 075 s (torrent-tv/meta#178). So it is read
-   * from the time no connection was held back (`SelectionLimit`), and a later
-   * such reading lowers it as readily as it raises it. Until there is one, the
-   * rate delivered stands, which is the least the swarm can give.
-   */
-  #sourceRateReadings(state, id, stats, now) {
-    let source = state.sources.get(id);
-    if (!source) {
-      const { RateTrend, SessionRate } = this.#host.playbackReadiness;
-      source = { delivered: new RateTrend(this.#host.lookaheadSeconds), free: new RateTrend(this.#host.lookaheadSeconds),
-        // The same readings over the whole session, which the rest of the film is priced by.
-        deliveredAll: new SessionRate(), freeAll: new SessionRate(), limit: null };
-      state.sources.set(id, source);
-    }
-    if (Number.isFinite(stats?.downloadSpeed) && stats.downloadSpeed >= 0) {
-      source.delivered.add(now, stats.downloadSpeed);
-      source.deliveredAll.add(now, stats.downloadSpeed);
-    }
-    const limit = stats?.selectionLimit;
-    if (limit && source.limit && limit.freeMs > source.limit.freeMs) {
-      const free = Math.max(0, limit.freeBytes - source.limit.freeBytes) * 1000 / (limit.freeMs - source.limit.freeMs);
-      source.free.add(now, free);
-      source.freeAll.add(now, free);
-    }
-    // Totals that went back belong to a torrent added again: read on from them.
-    if (limit) source.limit = limit;
-    return sourceService(source.free.snapshot(), source.delivered.snapshot(),
-      (summary) => this.#host.playbackReadiness.forecastRate(summary, now, 0, "time"));
-  }
-
-  /** The source's service over the whole session, chosen by the same rule as the recent one. */
-  #sourceTailRateReadings(state, id, now) {
-    const source = state.sources.get(id);
-    if (!source) return null;
-    return sourceService(source.freeAll.snapshot(), source.deliveredAll.snapshot(),
-      (summary) => this.#host.playbackReadiness.forecastRate(summary, now, 0, "time"));
-  }
-
-  /** Both summaries a source's service was chosen from, for the forecast's log line. */
-  #sourceRateSummaries(state, id) {
-    const source = state.sources.get(id);
-    return source ? { free: source.free.snapshot(), delivered: source.delivered.snapshot() } : null;
-  }
-}
-
-/**
- * Keep a wait's measurements when a later response omits a field. Zero is a
- * measurement for rates, peers and byte counts; only null or an invalid value
- * means that this response did not measure the field.
- *
- * @param {object | null | undefined} previous
- * @param {object} incoming
- * @param {number} ageElapsedMs
- * @returns {object}
- */
-function mergeWaitFeatures(previous, incoming, ageElapsedMs) {
-  const merged = { ...(previous ?? {}) };
-  for (const [key, value] of Object.entries(incoming ?? {})) {
-    if (value === null || value === undefined) {
-      if (!Object.hasOwn(merged, key)) merged[key] = null;
-      continue;
-    }
-    if (key === "extension") {
-      if (typeof value === "string" && value.length > 0) merged[key] = value;
-      continue;
-    }
-    if (key === "fileAvailable") {
-      if (typeof value === "boolean") merged[key] = value;
-      continue;
-    }
-    if (key === "videoOperation" || key === "audioOperation") {
-      if (value === "copy" || value === "encode") merged[key] = value;
-      continue;
-    }
-    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 ||
-        ((key === "fileLength" || key === "linkMbps") && value === 0)) continue;
-    merged[key] = value;
-  }
-  const hasIncomingAge = Number.isFinite(incoming?.linkSampleAgeMs) && incoming.linkSampleAgeMs >= 0;
-  if (Number.isFinite(merged.linkSampleAgeMs) && !hasIncomingAge) {
-    merged.linkSampleAgeMs += Number.isFinite(ageElapsedMs) ? Math.max(0, ageElapsedMs) : 0;
-  }
-  return merged;
 }
 
 /**
@@ -1399,8 +1196,3 @@ function linkMeasurementOf(viewer, reportedMbps, reportedAgeMs) {
  * @param {(summary: object) => number | null} rateOf - The rate the forecast reads from a summary.
  * @returns {object | null}
  */
-export function sourceService(free, delivered, rateOf) {
-  if (!free) return delivered;
-  if (!delivered) return free;
-  return (rateOf(delivered) ?? 0) > (rateOf(free) ?? 0) ? delivered : free;
-}

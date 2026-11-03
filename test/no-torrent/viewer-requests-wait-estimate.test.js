@@ -19,11 +19,11 @@ test("partial source and start-gate facts do not become a first-frame ETA", () =
   try {
     const early = requests.noteWaitFileSnapshot({ consumerId: "viewer", generation: 2,
       sourceKey: "torrent:hash", fileIndex: 4, fileName: "Film.mkv", fileLength: 4_000_000,
-      linkMbps: 24, linkSampleAgeMs: 130 });
+      linkMbps: 24, linkSampleAgeMs: 130, viewerToken: viewer });
     const current = requests.noteWaitSourceSnapshot({ consumerId: "viewer", generation: 2,
       sourceKey: "torrent:hash", fileIndex: 4, fileName: "Film.mkv",
       stats: { fileLength: 4_000_000, downloadSpeed: 1_200_000, headerBytes: 600,
-        headerDownloadedBytes: 100, connectedPeers: 8, fileAvailable: false },
+        headerDownloadedBytes: 100, connectedPeers: 8, fileAvailable: false }, viewerToken: viewer,
       processing: { firstRequiredSegmentsSeconds: 0, startGateSeconds: 43_200 } });
 
     assert.equal(early, undefined);
@@ -44,10 +44,10 @@ test("first-frame outcomes remain evaluation observations, not forecast inputs",
     noteFirstFrame: value => noted.push(value)
   });
   requests.noteWaitFileSnapshot({ consumerId: "viewer", generation: 2, sourceKey: "torrent:hash",
-    fileIndex: 4, fileName: "Film.mkv", fileLength: 4_000_000, linkMbps: 20, linkSampleAgeMs: 80 });
+    fileIndex: 4, fileName: "Film.mkv", fileLength: 4_000_000, linkMbps: 20, linkSampleAgeMs: 80, viewerToken: viewer });
   requests.noteWaitSourceSnapshot({ consumerId: "viewer", generation: 2, sourceKey: "torrent:hash",
     fileIndex: 4, fileName: "Film.mkv",
-    stats: { downloadSpeed: 100, fileLength: 4_000_000, connectedPeers: 4 } });
+    stats: { downloadSpeed: 100, fileLength: 4_000_000, connectedPeers: 4 }, viewerToken: viewer });
 
   requests.noteFirstFrameObservation({ consumerId: "viewer", generation: 2, waitId: "torrent:hash:4:2",
     wait: 4, elapsedMs: 10_000 });
@@ -81,7 +81,7 @@ test("a seek starts a new evaluation group before the next source snapshot", () 
   assert.equal(requests.noteWaitSourceSnapshot({ consumerId: "viewer", generation: 3,
     sourceKey: "source", fileIndex: 2, fileName: "Film.avi",
     stats: { fileLength: 800, downloadSpeed: 100, fileAvailable: true },
-    processing: { firstRequiredSegmentsSeconds: 9 } }), undefined);
+    processing: { firstRequiredSegmentsSeconds: 9 }, viewerToken: viewer }), undefined);
   requests.noteFirstFrameObservation({ consumerId: "viewer", generation: 3, waitId: "source:2:3",
     wait: 0, elapsedMs: 4_000 });
 

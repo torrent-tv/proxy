@@ -178,7 +178,7 @@ export class ViewerPlaybackState {
   }
 }
 
-function sourceService(free, delivered, rateOf) {
+export function sourceService(free, delivered, rateOf) {
   if (!free) return delivered;
   if (!delivered) return free;
   return (rateOf(delivered) ?? 0) > (rateOf(free) ?? 0) ? delivered : free;

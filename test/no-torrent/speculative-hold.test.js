@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
@@ -40,6 +41,15 @@ function wired(t) {
 }
 
 const SHORT = { address: "picture", speed: { middle: 1.0, scatter: 0.1 }, seconds: 5 };
+
+function viewerReading(actionId, positionSeconds) {
+  const at = performance.timeOrigin + performance.now();
+  const capture = { owner: "browser", clock: "performance", clockEpoch: performance.timeOrigin,
+    startedAt: at, completedAt: at, actionId, generation: null, revision: 1,
+    epoch: "speculative-hold", epochStartedAt: performance.timeOrigin, validity: "valid", unknownReason: null };
+  return { linkMbps: 100, linkSampleMbps: 100, linkSampleMeasuredAt: Date.now(), positionSeconds,
+    bufferedAheadSec: 0, linkCapture: capture, bufferCapture: capture };
+}
 
 test("short of the processor with a viewer waiting, and a swarm faster than the film: held", (t) => {
   const { parts, told } = wired(t);
@@ -117,14 +127,22 @@ test("a viewer the start forecast holds for an encoder's piece is told to whoeve
   // A viewer at the start over a fast link; nothing is made; the encoder is
   // predicted at 0.5x and each piece reads its own 10 MB of a file still
   // downloading at 50 MB/s.
-  const viewer = { linkReading: () => ({ linkSampleMbps: 100, linkSampleMeasuredAt: Date.now(),
-    positionSeconds: 0, bufferedAheadSec: 0 }) };
+  const viewer = { linkReading: () => viewerReading(session.id, 0) };
   parts.viewers.get = () => viewer;
   parts.encodeCost.projectedSpeedOf = () => 0.5;
   parts.sourceInputsFor = (_output, index) => [{ sourceId: "torrent:abc:0", ranges: [{ start: index * 1e7, end: (index + 1) * 1e7 }] }];
   let complete = false;
-  parts.getSourceStats = async () => ({ fileAvailable: complete, downloadSpeed: 50e6, fileOffset: 0, fileLength: 1e8,
-    pieceLength: 1 << 20 });
+  let sourceRevision = 0;
+  parts.getSourceStats = async () => {
+    const startedAt = performance.now();
+    const capture = { owner: "torrent-worker", clock: "performance", clockEpoch: performance.timeOrigin,
+      startedAt, completedAt: performance.now(), revision: ++sourceRevision, validity: "valid", unknownReason: null };
+    return { fileAvailable: complete, downloadSpeed: 50e6, fileOffset: 0, fileLength: 1e8,
+      pieceLength: 1 << 20, sourceCapture: capture,
+      downloadForecast: { measuredAt: Date.now(), global: true,
+        ranges: [{ start: 0, end: 1e8, availableAt: complete ? Date.now() : Date.now() + 200 }],
+        capture: { ...capture, startedAt: performance.now(), completedAt: performance.now() } } };
+  };
   const waits = [];
   parts.encodeOrchestrator.noteViewerWaiting = (viewer, wait) => { waits.push({ viewer, wait }); };
   const held = (await parts.viewerRequests.getSessionProgress(session.id, "viewer-one")).playbackReadiness.holdingBy;
@@ -163,14 +181,21 @@ test("the start forecast includes an unread segment ending within the seek toler
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
   };
   parts.outputs.set(session.id, session);
-  const viewer = { linkReading: () => ({ linkSampleMbps: 100, linkSampleMeasuredAt: Date.now(),
-    positionSeconds: 8.033, bufferedAheadSec: 0 }) };
+  const viewer = { linkReading: () => viewerReading(session.id, 8.033) };
   parts.viewers.get = () => viewer;
   parts.encodeCost.projectedSpeedOf = () => 0.5;
   parts.sourceInputsFor = (_output, index) => [{ sourceId: "torrent:abc:0",
     ranges: [{ start: index * 1e7, end: (index + 1) * 1e7 }] }];
-  parts.getSourceStats = async () => ({ fileAvailable: true, downloadSpeed: 50e6, fileOffset: 0,
-    fileLength: 1e8, pieceLength: 1 << 20 });
+  parts.getSourceStats = async () => {
+    const startedAt = performance.now();
+    const capture = { owner: "torrent-worker", clock: "performance", clockEpoch: performance.timeOrigin,
+      startedAt, completedAt: performance.now(), revision: 1, validity: "valid", unknownReason: null };
+    return { fileAvailable: true, downloadSpeed: 50e6, fileOffset: 0, fileLength: 1e8,
+      pieceLength: 1 << 20, sourceCapture: capture,
+      downloadForecast: { measuredAt: Date.now(), global: true,
+        ranges: [{ start: 0, end: 1e8, availableAt: Date.now() }],
+        capture: { ...capture, startedAt: performance.now(), completedAt: performance.now() } } };
+  };
 
   const readiness = (await parts.viewerRequests.getSessionProgress(session.id, "viewer-one")).playbackReadiness;
 

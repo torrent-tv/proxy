@@ -48,8 +48,15 @@ async function forecastProjection(t) {
   manager.outputs.set(session.id, session);
   const viewer = manager.viewers.selectsFile("viewer", "torrent:abc", 0);
   manager.viewers.of(session, "viewer");
-  viewer.report({ linkMbps: 100, linkSampleMbps: 100, linkSampleAt: 1_800_000_000_000,
-    linkSampleAgeMs: 0, positionSeconds: 0, bufferedAheadSec: 0, bufferLimitSeconds: 30, waiting: true, playing: false });
+  const captureAt = performance.timeOrigin + performance.now();
+  viewer.report({ linkMbps: 100, linkSampleMbps: 100, linkSampleAt: captureAt,
+    linkSampleAgeMs: 0, linkSampleStartedAtBrowser: captureAt, linkSampleCompletedAtBrowser: captureAt,
+    linkSampleActionId: session.id, linkSampleGeneration: 0, linkSampleClockEpoch: performance.timeOrigin,
+    linkSampleRevision: 1, captureClockEpoch: performance.timeOrigin, captureEpoch: String(performance.timeOrigin),
+    captureEpochStartedAtBrowser: performance.timeOrigin, captureRevision: 1,
+    captureStartedAtBrowser: captureAt, captureCompletedAtBrowser: captureAt, generation: 0,
+    appendSessionId: session.id, positionSeconds: 0, bufferedAheadSec: 0, bufferLimitSeconds: 30,
+    waiting: true, playing: false });
   manager.encodeCost.projectedSpeedOf = () => 0.5;
   manager.sourceInputsFor = (_output, index) => [{ sourceId: "torrent:abc:0",
     ranges: [{ start: index * 10_000_000, end: (index + 1) * 10_000_000 }] }];
@@ -58,7 +65,10 @@ async function forecastProjection(t) {
     return { fileAvailable: false, downloadSpeed: 50_000_000,
       fileOffset: 0, fileLength: 100_000_000, pieceLength: 1 << 20,
       sourceCapture: { owner: "torrent-worker", clock: "performance", clockEpoch: performance.timeOrigin,
-        startedAt, completedAt: performance.now(), revision: 1, validity: "valid", unknownReason: null } };
+        startedAt, completedAt: performance.now(), revision: 1, validity: "valid", unknownReason: null },
+      downloadForecast: { ranges: [], capture: { owner: "torrent-worker", clock: "performance",
+        clockEpoch: performance.timeOrigin, startedAt, completedAt: performance.now(), revision: 1,
+        validity: "valid", unknownReason: null } } };
   };
 
   let progress;

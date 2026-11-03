@@ -89,11 +89,13 @@ test("a webseed is not used when its request would cover the rest of a piece", (
   const webseed = wire("webseed", { speed: 2_000_000, type: "webSeed" });
   const fast = wire("fast", { speed: 100_000 });
   const one = torrent([slow, webseed, fast]);
-  tail(one, 0, slow, [20]);
-  const state = repeat(one, () => [{ from: 0, to: 0 }]);
+  tail(one, 0, slow, [20, 21], 0);
+  slow.requests[1].askedAt = 9_500;
+  const state = repeat(one, () => [{ from: 0, to: 0 }], { now: () => 10_000 });
   state.run();
   assert.deepEqual(webseed.requests, [], "reserveRemaining/chunkLengthRemaining would request more than one block");
   assert.deepEqual(fast.requests, [{ piece: 0, offset: 20 * BLOCK, length: BLOCK }]);
+  assert.equal(slow.requests[1].askedAt, 9_500, "the next block is not yet one queue old");
   state.subject.dispose();
 });
 

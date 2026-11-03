@@ -448,15 +448,15 @@ export class ViewerRequests {
    * @param {object} output
    * @param {string} consumerId
    * @param {number} positionSeconds
-   * @returns {void}
+   * @returns {boolean} Whether the viewer layer placed the viewer.
    */
   placeViewerOn(output, consumerId, positionSeconds) {
     if (!output || !consumerId) {
-      return;
+      return false;
     }
-    if (this.#host.placeViewerOn(output, consumerId, positionSeconds)) {
-      this.#host.planEncodersSoon();
-    }
+    const placed = this.#host.placeViewerOn(output, consumerId, positionSeconds) === true;
+    if (placed) this.#host.planEncodersSoon();
+    return placed;
   }
 
   /**

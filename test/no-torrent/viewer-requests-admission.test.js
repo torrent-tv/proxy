@@ -146,6 +146,19 @@ test("returns an allocated output without waiting for its first playlist", async
 
 test("opening places once through viewer operations and copies the accepted audio choice", async () => {
   const viewers = new Viewers();
+  const originalOf = viewers.of.bind(viewers);
+  viewers.of = (...args) => {
+    const viewer = originalOf(...args);
+    if (!viewer.reportedOpeningPositions) {
+      const report = viewer.report.bind(viewer);
+      viewer.reportedOpeningPositions = [];
+      viewer.report = (value, ...rest) => {
+        viewer.reportedOpeningPositions.push(value);
+        return report(value, ...rest);
+      };
+    }
+    return viewer;
+  };
   const outputs = new Map();
   const requests = new ViewerRequests({
     opening: {
@@ -179,6 +192,10 @@ test("opening places once through viewer operations and copies the accepted audi
   assert.equal(second.id, "second");
   assert.deepEqual(viewer.position, initialPosition);
   assert.equal(viewer.position.seconds, 84);
+  assert.equal(viewer.reportedOpeningPositions[0].positionSeconds, 84,
+    "the successful initial placement is included in the opening report");
+  assert.equal(Object.hasOwn(viewer.reportedOpeningPositions[1], "positionSeconds"), false,
+    "opening another output does not report a position that would overwrite the existing one");
   assert.deepEqual(viewer.audio, { trackIndex: 2, transcode: true });
   assert.equal(viewer.outputs.has("first"), true);
   assert.equal(viewer.outputs.has("second"), true);

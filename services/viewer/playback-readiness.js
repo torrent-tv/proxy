@@ -777,6 +777,8 @@ export function predictPlaybackReadiness(input = {}) {
   }
   const tailStock = [];
   const tailCushionStock = [];
+  let tailUnmappedSources = new Set();
+  let tailUnmappedTracks = new Set();
   if (trackState.some(({ tailEndSeconds }) => Number.isFinite(tailEndSeconds))) {
     const stop = scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArrivals, runStarts, trackFinish,
       link, position, buffered, reserve, transferFinish, constrain, duration, stock: tailStock,
@@ -785,6 +787,8 @@ export function predictPlaybackReadiness(input = {}) {
       return { ...result(false, null, buffered, reserve, null, stop.reason, preparedSegments),
         ...(stop.unavailableSource ? { unavailableSource: stop.unavailableSource } : {}) };
     }
+    tailUnmappedSources = stop?.unmappedSources ?? tailUnmappedSources;
+    tailUnmappedTracks = stop?.unmappedTracks ?? tailUnmappedTracks;
   }
   const firstRequiredStages = trackState.slice(0, requiredTracks).map((state, trackIndex) => {
     const first = state.segments.find(segment => segment.endSeconds > position);
@@ -873,6 +877,15 @@ export function predictPlaybackReadiness(input = {}) {
   const firstRequiredSegmentsSeconds = firstRequiredTrackSeconds.every(Number.isFinite)
     ? Math.max(0, ...firstRequiredTrackSeconds) : null;
   const delay = Math.max(0, ...constraints);
+  if (tailUnmappedSources.size > 0 || tailUnmappedTracks.size > 0) {
+    return { ...result(false, null, buffered, reserve, null, "tail-source-addresses-unavailable", preparedSegments),
+      diagnosticDelaySeconds: Number.isFinite(delay) ? delay : null,
+      unavailableTailSources: [...tailUnmappedSources].sort(),
+      unavailableTailTracks: [...tailUnmappedTracks].sort(),
+      tail: tailStock,
+      firstRequiredSegmentsSeconds,
+      firstRequiredStages };
+  }
   // THE STOCK THE START ASKS FOR HAS TO FIT. Starting without a stop while the
   // source comes slower than the film plays means holding, at the start, what
   // is already here and everything that arrives before it. Where that is more
@@ -988,6 +1001,7 @@ function scheduleTailSourceRanges({ trackState, sourceState, sourceByteCoverage,
   position, reserve, constrain, stock, cushionStock }) {
   const pieceRequests = new Map();
   const unmappedSources = new Set();
+  const unmappedTracks = new Set();
   const referencedSources = new Set();
   const completeSources = new Set();
 
@@ -1005,8 +1019,13 @@ function scheduleTailSourceRanges({ trackState, sourceState, sourceByteCoverage,
     for (const sourceId of tailSources) referencedSources.add(sourceId);
     const readyTailCount = [...state.ready].reduce((count, index) => count + Number(index >= state.segmentCount - state.tailSegmentCount), 0);
     const unfinishedTailCount = Math.max(0, state.tailSegmentCount - readyTailCount);
+    if (unfinishedTailCount > 0 && tailSources.size === 0) {
+      unmappedTracks.add(state.track.id ?? `track-${trackIndex}`);
+    }
     if (tailSegments.filter(segment => !state.ready.has(segment.index)).length < unfinishedTailCount && tailSources.size > 0) {
-      for (const sourceId of tailSources) unmappedSources.add(sourceId);
+      for (const sourceId of tailSources) {
+        if (sourceState.get(sourceId)?.source.complete !== true) unmappedSources.add(sourceId);
+      }
     }
 
     for (const segment of tailSegments) {
@@ -1124,7 +1143,7 @@ function scheduleTailSourceRanges({ trackState, sourceState, sourceByteCoverage,
 
   stock?.push(...stockBySource.values());
 
-  return { latestArrival: tailLatestArrival, referencedSources, unmappedSources };
+  return { latestArrival: tailLatestArrival, referencedSources, unmappedSources, unmappedTracks };
 }
 
 /**
@@ -1254,7 +1273,8 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArriv
     constrain(completedAt - Math.max(0, ahead - reserve), "delivery", 0,
       trackState[0]?.segments.at(-1)?.index ?? 0, completedAt, ahead, false, sourceArrivalAt, false);
   }
-  return null;
+  return { unmappedSources: exactSources?.unmappedSources ?? new Set(),
+    unmappedTracks: exactSources?.unmappedTracks ?? new Set() };
 }
 
 /**

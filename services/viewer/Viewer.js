@@ -630,6 +630,7 @@ export class Viewer {
           (!previous?.appendService || appendServiceIsMonotonic(incomingAppendService, previous.appendService)) &&
           (!previous?.fragmentService || fragmentServiceIsMonotonic(incomingFragmentService, previous.fragmentService))
         : appendEpochStartedAt > (previous?.appendEpochStartedAt ?? 0));
+    const preserveBrowserService = sameAppendEpoch && incomingAppendService && incomingFragmentService;
     const hasPlaybackSample = Number.isFinite(sampleMbps) && sampleMbps > 0 &&
       Number.isFinite(sampleAt) && sampleAt > 0 && Number.isFinite(captureClockEpoch) &&
       Number.isFinite(linkSampleClockEpoch) && linkSampleClockEpoch === captureClockEpoch &&
@@ -687,12 +688,16 @@ export class Viewer {
         unknownReason: browserCapture.unknownReason ?? "missing-or-invalid-browser-capture"
       },
       appendSessionId: useBrowserService ? appendSessionId : previous?.appendSessionId ?? null,
-      appendEpoch: useCapture && useBrowserService ? appendEpoch : useCapture ? null : previous?.appendEpoch ?? null,
+      appendEpoch: useBrowserService ? appendEpoch : preserveBrowserService ? previous?.appendEpoch ?? null
+        : useCapture ? null : previous?.appendEpoch ?? null,
       appendEpochStartedAt: useBrowserService ? appendEpochStartedAt : previous?.appendEpochStartedAt ?? null,
       appendSnapshotAt: useBrowserService ? appendSnapshotAt : previous?.appendSnapshotAt ?? null,
-      appendService: useCapture && useBrowserService ? incomingAppendService : useCapture ? null : previous?.appendService ?? null,
-      fragmentService: useCapture && useBrowserService ? incomingFragmentService : useCapture ? null : previous?.fragmentService ?? null,
-      appendServiceReceivedAt: useCapture && useBrowserService ? now : useCapture ? null : previous?.appendServiceReceivedAt ?? null,
+      appendService: useBrowserService ? incomingAppendService : preserveBrowserService ? previous?.appendService ?? null
+        : useCapture ? null : previous?.appendService ?? null,
+      fragmentService: useBrowserService ? incomingFragmentService : preserveBrowserService ? previous?.fragmentService ?? null
+        : useCapture ? null : previous?.fragmentService ?? null,
+      appendServiceReceivedAt: useBrowserService ? now : preserveBrowserService ? previous?.appendServiceReceivedAt ?? null
+        : useCapture ? null : previous?.appendServiceReceivedAt ?? null,
       bufferedAheadSec: preserveCapture ? previous?.bufferedAheadSec ?? 0 : useCapture ? held : 0,
       timestampOffsets: Object.fromEntries(["video", "audio"].filter((key) =>
         Number.isFinite(timestampOffsets?.[key])).map((key) => [key, timestampOffsets[key]])),

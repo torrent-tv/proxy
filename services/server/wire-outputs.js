@@ -51,6 +51,7 @@ import {
   noteStepBeingWarmed,
   noteStepOnScreen,
   outputsBeingPrepared,
+  placeInitially,
   placeOn,
   presentOn,
   qualityModeOf,
@@ -682,8 +683,11 @@ export function wireOutputs({
       return video + audio;
     },
     get opening() { return parts.opening; },
-    get outputTimes() { return parts.outputTimes; },
     get outputs() { return parts.outputs; },
+    placeViewerOn: (output, consumerId, seconds, now) =>
+      placeInitially(parts.viewers, output, consumerId, seconds, now),
+    chooseAudioTrack: (output, consumerId, choice) =>
+      chooseAudioTrack(parts.viewers, output, consumerId, choice),
     get lookaheadSeconds() { return parts.lookaheadSeconds; },
     get quality() { return parts.quality; },
     get qualityOffer() { return parts.qualityOffer; },

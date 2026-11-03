@@ -154,7 +154,7 @@ export class ViewerRequests {
   #forecastPieces = new WeakMap();
 
   /**
-   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `planEncodersSoon`, `encodeRuns`, `encodeSpeedReadingsOf`, `outputTimes`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
+   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `planEncodersSoon`, `encodeRuns`, `encodeSpeedReadingsOf`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `placeViewerOn`, `chooseAudioTrack`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
    */
   constructor(host) {
     this.#host = host;
@@ -351,6 +351,7 @@ export class ViewerRequests {
     // Whether they were already on the output this request lands on, read at
     // the moment they are put on it.
     let alreadyOn = false;
+    let placedHere = false;
     // THE PLACE ON THIS MACHINE, AND THE VIEWER IN IT, in one synchronous call
     // the opening makes the moment it has the output (roadmap item 97, step 14).
     // Asked and placed together, so the next viewer to open anything is asked
@@ -367,7 +368,7 @@ export class ViewerRequests {
             : this.#host.admitsWatching(candidate);
           if (answer.admitted) {
             known = this.#host.viewers.of(candidate, consumerId);
-            this.placeViewer(candidate, known, startPositionSeconds);
+            placedHere = this.placeViewerOn(candidate, consumerId, startPositionSeconds) === true;
           }
           return answer;
         }
@@ -385,7 +386,7 @@ export class ViewerRequests {
       // browser may need a track re-encoded that the first viewer's could
       // decode as it stands.
       const viewer = this.#host.viewers.of(output, consumerId);
-      viewer.audio = audio;
+      this.#host.chooseAudioTrack(output, consumerId, audio);
       // The picture as their page sees it, which bounds the height made for
       // them from here on (roadmap item 98).
       viewer.noteVisiblePicture(request.visiblePicture);
@@ -400,7 +401,7 @@ export class ViewerRequests {
             : null,
           bufferedAheadSec: request.bufferedAheadSec,
           bufferLimitSeconds: request.bufferLimitSeconds,
-          positionSeconds: startPositionSeconds,
+          ...(placedHere ? { positionSeconds: startPositionSeconds } : {}),
           waiting: true,
           playing: false,
           visiblePicture: request.visiblePicture
@@ -438,34 +439,11 @@ export class ViewerRequests {
   }
 
   /**
-   * Put a viewer where their own request says they are.
+   * Ask the viewer layer to place this viewer at their initial position.
    *
-   * A viewer arrives by asking for a POSITION — zero, or the time an address
-   * bar carried — so "we do not know where they are" is not a state a viewer
-   * can be in. Before 2026-09-05 it was: position was written only by a segment
-   * request, so a viewer counted as placeless until they had asked for a
-   * segment, and an output whose viewers were all placeless had every encoder
-   * on it stopped for having nobody. The soundtrack that failed that day could
-   * not have asked: the segment it would have asked for needed an `init.mp4`
-   * that the stopped encoder was going to make.
-   *
-   * Only ever places a viewer who has none. A viewer already placed is being
-   * kept current by their own requests and seeks, and a fresh create request
-   * carries a default of zero that must not drag them back to the beginning.
-   *
-   * @param {HlsSession} session
-   * @param {import("../viewer/Viewer.js").Viewer} viewer
-   * @param {number} positionSeconds
-   * @returns {void}
-   */
-  /**
-   * Put a viewer named by id onto this output, where they have no position yet.
-   *
-   * The same operation as {@link placeViewer}, addressed the way another
-   * component may address it: by name. Encoding asks for this when a request
-   * for any file of an output is the first sign of the person behind it, and it
-   * must not be handed the viewer to do it — a viewer's record has one writer,
-   * and that is the viewer layer.
+   * Encoding asks for this when a request for any file of an output is the
+   * first sign of the person behind it. The operation takes the viewer's name
+   * and position; the viewer layer owns the record and its idempotency rule.
    *
    * @param {object} output
    * @param {string} consumerId
@@ -476,27 +454,9 @@ export class ViewerRequests {
     if (!output || !consumerId) {
       return;
     }
-    const viewer = this.#host.viewers.join(output, consumerId);
-    if (viewer) this.placeViewer(output, viewer, positionSeconds);
-  }
-
-  placeViewer(session, viewer, positionSeconds) {
-    if (viewer.position !== null) {
-      return;
+    if (this.#host.placeViewerOn(output, consumerId, positionSeconds)) {
+      this.#host.planEncodersSoon();
     }
-    const seconds = Number.isFinite(positionSeconds) && positionSeconds > 0 ? positionSeconds : 0;
-    let segment = 0;
-    try {
-      const index = this.#host.outputTimes.segmentIndexForTime(session, seconds);
-      if (Number.isInteger(index) && index >= 0) {
-        segment = index;
-      }
-    } catch {
-      // A session whose cut table is not built yet places its viewer at the
-      // beginning, which is where the run starts anyway.
-    }
-    viewer.position = { segment, seconds, at: Date.now(), seeked: null };
-    this.#host.planEncodersSoon();
   }
 
   /**

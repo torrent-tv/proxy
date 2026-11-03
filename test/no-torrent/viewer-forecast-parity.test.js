@@ -192,3 +192,35 @@ test("a late separate-audio answer cannot restore geometry after that output is 
   assert.equal(manager.outputForecastGeometry.size(), 1);
   assert.equal(manager.outputForecastGeometry.get(audio), null);
 });
+
+test("a pending answer cannot recreate an old variant after the viewer selects another live variant", async t => {
+  const { manager, cleanup } = managerWithOwnStore();
+  t.after(cleanup);
+  const base = fakeSession();
+  const oldVariant = fakeSession({ id: "bbbbbbbbccccdddd", outputKey: "old-variant" });
+  const newVariant = fakeSession({ id: "ccccccccddddeeee", outputKey: "new-variant" });
+  manager.outputs.set(base.id, base);
+  manager.outputs.set(oldVariant.id, oldVariant);
+  manager.outputs.set(newVariant.id, newVariant);
+  manager.viewers.of(base, "viewer");
+  const viewer = manager.viewers.of(oldVariant, "viewer");
+  manager.viewers.of(newVariant, "viewer");
+  viewer.activeVariantId = oldVariant.id;
+
+  let resolveQuality;
+  let qualityStarted;
+  const started = new Promise(resolve => { qualityStarted = resolve; });
+  const quality = new Promise(resolve => { resolveQuality = resolve; });
+  manager.quality.observedStreamMbps = () => { qualityStarted(); return quality; };
+
+  const pending = manager.viewerRequests.getSessionProgress(base.id, "viewer");
+  await started;
+  viewer.activeVariantId = newVariant.id;
+  assert.equal(await manager.lifecycle.viewerLeaves(oldVariant, "viewer"), true);
+  assert.equal(manager.outputs.get(oldVariant.id), oldVariant, "other viewers can still use the old variant");
+  resolveQuality(5);
+
+  assert.equal(await pending, null);
+  assert.equal(manager.viewerPlaybackState.viewerCount(), 0);
+  assert.equal(manager.outputForecastGeometry.get(oldVariant), null);
+});

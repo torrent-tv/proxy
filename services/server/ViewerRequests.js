@@ -741,7 +741,8 @@ export class ViewerRequests {
     if (this.#host.outputs.get(named.id) !== named || this.#host.outputs.get(session.id) !== session) return false;
     if (!viewer) return !consumerId || !this.#host.viewers.get(consumerId);
     return this.#host.viewers.get(consumerId) === viewer &&
-      (!(viewer.outputs instanceof Set) || viewer.outputs.has(named.id));
+      (!(viewer.outputs instanceof Set) || viewer.outputs.has(named.id)) &&
+      this.#host.activeOutputFor({ base: named, consumerId, outputs: this.#host.outputs }) === session;
   }
 
   async #playbackReadinessFor(session, consumerId, progress, outputMbps, viewer, stillOwnsProgress) {

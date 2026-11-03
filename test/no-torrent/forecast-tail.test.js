@@ -268,6 +268,10 @@ function variableDensityFilm({ lookaheadSeconds = 3, trackCount = 1, mapTail = t
     offset += length;
     return ranges;
   });
+  const segments = lengths.map((_, segmentIndex) => ({
+    index: segmentIndex, startSeconds: segmentIndex * 3, endSeconds: (segmentIndex + 1) * 3,
+    ...(mapTail || segmentIndex === 0 ? { sourceInputs: [{ sourceId: "source", ranges: sourceInputs[segmentIndex] }] } : {})
+  }));
   return {
     now, positionSeconds: 0, durationSeconds: 12, bufferedAheadSeconds: 0, reserveSeconds: 0,
     lookaheadSeconds, requiredAudio: trackCount === 2,
@@ -277,10 +281,8 @@ function variableDensityFilm({ lookaheadSeconds = 3, trackCount = 1, mapTail = t
       id: `track-${index}`, sourceIds: identifySource ? ["source"] : [], processedSeconds: 0,
       startupRemainingSeconds: 0, openSeconds: 0,
       bitsPerMediaSecond: 1_000, readings: summaryOf(1_000_000, now),
-      segments: lengths.map((_, segmentIndex) => ({
-        index: segmentIndex, startSeconds: segmentIndex * 3, endSeconds: (segmentIndex + 1) * 3,
-        ...(mapTail || segmentIndex === 0 ? { sourceInputs: [{ sourceId: "source", ranges: sourceInputs[segmentIndex] }] } : {})
-      })),
+      segments,
+      tailSegments: segments.filter(segment => segment.startSeconds >= lookaheadSeconds),
       readySegmentIndices: [], segmentSizesBytes: new Map()
     })),
     linkReadings: summaryOf(1_000_000_000, now)

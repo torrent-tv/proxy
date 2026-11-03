@@ -255,7 +255,10 @@ function mergeCaptureSummary(previous, capture) {
  *   clockOffsetSeconds?: number, clientRanges?: Array<{ start: number, end: number }>,
  *   appendService?: object, fragmentService?: object,
  *   segments: Array<{ index: number, startSeconds: number, endSeconds: number,
+ *     sourceInputs?: Array<{ sourceId: string, ranges: Array<{ start: number, end: number }> }>,
  *     mediaRanges?: { timescale: bigint | null, ranges: Array<{ start: bigint, end: bigint, frame: bigint }> } }>,
+ *   tailSegments?: Array<{ index: number, startSeconds: number, endSeconds: number,
+ *     sourceInputs?: Array<{ sourceId: string, ranges: Array<{ start: number, end: number }> }> }>,
  *   readySegmentIndices: number[], segmentSizesBytes: Map<number, number> | object }>} input.tracks
  *   `mediaRanges` are a read piece's ranges on its served timeline, in ticks;
  *   `clockOffsetSeconds` is the `timestampOffset` the page's player applied to
@@ -277,13 +280,23 @@ export function predictPlaybackReadiness(input = {}) {
   // THE NEAR WINDOW AND THE SUFFIX. The look-ahead is scheduled with exact
   // segment times and source ranges when known. Missing range metadata is priced
   // from aggregate file density and measured download service without claiming
-  // an address or byte. Beyond the look-ahead, {@link scheduleTail} estimates
-  // remaining source, encoder and delivery work without visiting every segment.
+  // an address or byte. Beyond the look-ahead, {@link scheduleTail} checks
+  // mapped source-piece deadlines and estimates unmapped source, encoder and
+  // delivery work from aggregate service.
   const lookahead = finiteNonNegative(input.lookaheadSeconds);
   const horizonEnd = lookahead > 0 ? finiteNonNegative(input.positionSeconds) + lookahead : Number.POSITIVE_INFINITY;
-  const tracks = (Array.isArray(input.tracks) ? input.tracks : []).map((track) =>
-    Array.isArray(track.segments) ? { ...track, segmentCount: track.segmentCount ?? track.segments.length,
-      segments: piecesThatMatter(track, finiteNonNegative(input.positionSeconds), horizonEnd) } : track);
+  const tracks = (Array.isArray(input.tracks) ? input.tracks : []).map((track) => {
+    if (!Array.isArray(track.segments)) return track;
+    const tailProfileProvided = Array.isArray(track.tailSegments);
+    return { ...track, segmentCount: track.segmentCount ?? track.segments.length,
+      tailProfileProvided,
+      // Keep exact future source maps separately from the bounded near-window
+      // schedule. Tail source work can then be checked at the segment
+      // deadlines without treating the whole suffix as one final deadline.
+      tailSegments: (Array.isArray(track.tailSegments) ? track.tailSegments : track.segments)
+        .filter(segment => isPiece(segment) && segment.startSeconds >= horizonEnd),
+      segments: piecesThatMatter(track, finiteNonNegative(input.positionSeconds), horizonEnd) };
+  });
   const duration = finiteNonNegative(input.durationSeconds);
   // Each track's served ticks are placed on the clock the page reports by the
   // offset its player applied (`timestampOffset`).
@@ -765,13 +778,19 @@ export function predictPlaybackReadiness(input = {}) {
     }
   }
   const tailStock = [];
+  const tailCushionStock = [];
+  let tailUnmappedSources = new Set();
+  let tailUnmappedTracks = new Set();
   if (trackState.some(({ tailEndSeconds }) => Number.isFinite(tailEndSeconds))) {
-    const stop = scheduleTail({ trackState, sourceState, runStarts, trackFinish,
-      link, position, buffered, reserve, transferFinish, constrain, duration, stock: tailStock });
-    if (stop) {
+    const stop = scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArrivals, runStarts, trackFinish,
+      link, position, buffered, reserve, transferFinish, constrain, duration, stock: tailStock,
+      cushionStock: tailCushionStock });
+    if (stop?.reason) {
       return { ...result(false, null, buffered, reserve, null, stop.reason, preparedSegments),
         ...(stop.unavailableSource ? { unavailableSource: stop.unavailableSource } : {}) };
     }
+    tailUnmappedSources = stop?.unmappedSources ?? tailUnmappedSources;
+    tailUnmappedTracks = stop?.unmappedTracks ?? tailUnmappedTracks;
   }
   const firstRequiredStages = trackState.slice(0, requiredTracks).map((state, trackIndex) => {
     const first = state.segments.find(segment => segment.endSeconds > position);
@@ -860,6 +879,15 @@ export function predictPlaybackReadiness(input = {}) {
   const firstRequiredSegmentsSeconds = firstRequiredTrackSeconds.every(Number.isFinite)
     ? Math.max(0, ...firstRequiredTrackSeconds) : null;
   const delay = Math.max(0, ...constraints);
+  if (tailUnmappedSources.size > 0 || tailUnmappedTracks.size > 0) {
+    return { ...result(false, null, buffered, reserve, null, "tail-source-addresses-unavailable", preparedSegments),
+      diagnosticDelaySeconds: Number.isFinite(delay) ? delay : null,
+      unavailableTailSources: [...tailUnmappedSources].sort(),
+      unavailableTailTracks: [...tailUnmappedTracks].sort(),
+      tail: tailStock,
+      firstRequiredSegmentsSeconds,
+      firstRequiredStages };
+  }
   // THE STOCK THE START ASKS FOR HAS TO FIT. Starting without a stop while the
   // source comes slower than the film plays means holding, at the start, what
   // is already here and everything that arrives before it. Where that is more
@@ -870,10 +898,11 @@ export function predictPlaybackReadiness(input = {}) {
   // share (Home Assistant 2026-10-26, torrent-tv/meta#239). Said as such, and
   // the viewer keeps waiting rather than starting into stops.
   const storageBytes = Number(input.sourceStorageBytes);
-  const tailParts = tailStock.filter(part => !part.skipped);
+  const tailParts = tailCushionStock.filter(part => !part.skipped);
   const cushionBytes = Number.isFinite(delay) && tailParts.length > 0
     ? tailParts.reduce((sum, part) => sum + Math.max(0, part.totalBytes - part.missingBytes) +
-      Math.max(0, part.missingBytes - part.bytesPerSecond * Math.max(0, part.finish - delay)), 0)
+      Math.max(0, part.missingBytes - (part.planned ? (part.finish > delay ? part.missingBytes : 0)
+        : part.bytesPerSecond * Math.max(0, part.finish - delay))), 0)
     : null;
   if (Number.isFinite(delay) && Number.isFinite(storageBytes) && storageBytes >= 0 && tailParts.length > 0) {
     if (cushionBytes > storageBytes) {
@@ -963,20 +992,182 @@ function scheduleTransfers(jobs, link) {
 }
 
 /**
- * A duration-level estimate of the suffix after the exact near window. Source
- * work uses each file's aggregate byte density and measured download service;
- * processing uses each track's measured rate; delivery uses output bitrates and
- * measured link service. Held source bytes and made segments reduce the
- * estimate. This conditional forecast does not assert exact source ranges or
- * individual frame timing. Its work is bounded by sources and tracks, not by
- * the film's segment count.
+ * Schedule exact tail source ranges at the deadlines of the output pieces that
+ * need them. A source piece used by multiple tracks is assigned to its earliest
+ * deadline once. When a tail range is absent, the aggregate density estimate
+ * remains in force and is labelled as an unmapped estimate in `stock`.
+ *
+ * @returns {{ reason: string, unavailableSource?: object } | null}
+ */
+function scheduleTailSourceRanges({ trackState, sourceState, sourceByteCoverage, sourceArrivals,
+  position, reserve, constrain, stock, cushionStock }) {
+  const pieceRequests = new Map();
+  const unmappedSources = new Set();
+  const unmappedTracks = new Set();
+  const referencedSources = new Set();
+  const completeSources = new Set();
+
+  for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
+    const state = trackState[trackIndex];
+    if (!(state.tailSegmentCount > 0)) continue;
+    const tailSegments = (Array.isArray(state.track.tailSegments) ? state.track.tailSegments : [])
+      .filter(segment => segment.startSeconds < state.tailEndSeconds);
+    const tailSources = new Set(state.track.sourceIds ?? []);
+    for (const segment of tailSegments) {
+      for (const input of segment.sourceInputs ?? []) {
+        if (typeof input?.sourceId === "string") tailSources.add(input.sourceId);
+      }
+    }
+    if (state.track.tailProfileProvided === true) {
+      for (const sourceId of tailSources) referencedSources.add(sourceId);
+    }
+    const readyTailCount = [...state.ready].reduce((count, index) => count + Number(index >= state.segmentCount - state.tailSegmentCount), 0);
+    const unfinishedTailCount = Math.max(0, state.tailSegmentCount - readyTailCount);
+    if (state.track.tailProfileProvided !== true) continue;
+    if (unfinishedTailCount > 0 && tailSources.size === 0) {
+      unmappedTracks.add(state.track.id ?? `track-${trackIndex}`);
+    }
+    if (tailSegments.filter(segment => !state.ready.has(segment.index)).length < unfinishedTailCount && tailSources.size > 0) {
+      for (const sourceId of tailSources) {
+        if (sourceState.get(sourceId)?.source.complete !== true) unmappedSources.add(sourceId);
+      }
+    }
+
+    for (const segment of tailSegments) {
+      if (state.ready.has(segment.index)) continue;
+      const exactInputs = Array.isArray(segment.sourceInputs) ? segment.sourceInputs : null;
+      for (const sourceId of tailSources) {
+        const source = sourceState.get(sourceId);
+        if (!source) return { reason: "source-measurement-unavailable",
+          unavailableSource: { sourceId, trackId: state.track.id, segmentIndex: segment.index, phase: "tail" } };
+        if (source.source.complete === true) {
+          if (!completeSources.has(sourceId)) stock?.push({ sourceId, skipped: "complete" });
+          completeSources.add(sourceId);
+          continue;
+        }
+        const ranges = exactInputs === null ? null : inputRangesOf(exactInputs, sourceId);
+        if (ranges === null || ranges.some(range => range.end > source.source.fileLength) ||
+            !Number.isSafeInteger(source.source.pieceLength) || source.source.pieceLength <= 0 ||
+            !Number.isSafeInteger(source.source.fileOffset) || !Number.isSafeInteger(source.source.fileLength) ||
+            source.source.fileLength <= 0) {
+          unmappedSources.add(sourceId);
+          continue;
+        }
+        let requests = pieceRequests.get(sourceId);
+        if (!requests) {
+          requests = new Map();
+          pieceRequests.set(sourceId, requests);
+        }
+        for (const range of ranges) {
+          for (const piece of sourcePiecesFor([range], source.source)) {
+            const first = Math.floor((source.source.fileOffset + piece.start) / source.source.pieceLength);
+            const last = Math.ceil((source.source.fileOffset + piece.end) / source.source.pieceLength) - 1;
+            for (let pieceIndex = first; pieceIndex <= last; pieceIndex += 1) {
+              const start = Math.max(0, pieceIndex * source.source.pieceLength - source.source.fileOffset);
+              const end = Math.min(source.source.fileLength, (pieceIndex + 1) * source.source.pieceLength - source.source.fileOffset);
+              if (!(end > start)) continue;
+              const current = requests.get(pieceIndex);
+              const deadlineSeconds = segment.endSeconds;
+              if (!current || deadlineSeconds < current.deadlineSeconds) {
+                requests.set(pieceIndex, { sourceId, pieceIndex, start, end, deadlineSeconds,
+                  trackIndex, segmentIndex: segment.index, addressed: true });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // A partially mapped source falls back as a whole to density estimation so
+  // exact pieces and guessed bytes cannot both charge the same suffix work.
+  for (const sourceId of unmappedSources) pieceRequests.delete(sourceId);
+  const requests = [...pieceRequests.values()].flatMap(byPiece => [...byPiece.values()])
+    .sort((left, right) => left.deadlineSeconds - right.deadlineSeconds ||
+      left.sourceId.localeCompare(right.sourceId) || left.pieceIndex - right.pieceIndex);
+  let tailLatestArrival = 0;
+  const stockBySource = new Map();
+  for (const request of requests) {
+    const source = sourceState.get(request.sourceId);
+    const { service } = source;
+    const piece = { start: request.start, end: request.end };
+    const coverage = sourceByteCoverage.get(request.sourceId) ?? [];
+    const missing = uncoveredIntervals(piece, coverage);
+    const heldRanges = numericCoverage((Array.isArray(source.source.residence) ? source.source.residence : [])
+      .filter(range => range?.location !== "missing" &&
+      Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.end > range.start));
+    const heldBytes = heldRanges.reduce((sum, range) => sum + Math.max(0,
+      Math.min(piece.end, range.end) - Math.max(piece.start, range.start)), 0);
+    const plan = { finish: 0 };
+    let arrivalAt = latestArrival(piece, sourceArrivals.get(request.sourceId), plan);
+    let sourcePlanned = arrivalAt > 0 && plan.finish >= arrivalAt;
+    const rate = service.tailRate ?? service.rate;
+    if (missing.length > 0) {
+      if (!rate || !(rate.rateAt(0) > 0)) return { reason: rate ? "service-not-advancing" : "download-rate-unavailable",
+        unavailableSource: { sourceId: request.sourceId, pieceIndex: request.pieceIndex,
+          estimatedBytes: missing.reduce((sum, range) => sum + range.end - range.start, 0), phase: "tail" } };
+      const missingBytes = missing.reduce((sum, range) => sum + range.end - range.start, 0);
+      arrivalAt = rate.finish(missingBytes, Math.max(service.finish, arrivalAt));
+      sourcePlanned = arrivalAt > 0 && plan.finish >= arrivalAt;
+      service.finish = arrivalAt;
+      const arrival = { start: piece.start, end: piece.end, begin: arrivalAt, finish: arrivalAt };
+      sourceByteCoverage.set(request.sourceId, withCoverage(coverage, arrival));
+      const arrivals = sourceArrivals.get(request.sourceId) ?? [];
+      sourceArrivals.set(request.sourceId, withArrival(arrivals, arrival, [...arrivals, arrival]));
+    } else {
+      service.finish = Math.max(service.finish, arrivalAt);
+    }
+    tailLatestArrival = Math.max(tailLatestArrival, arrivalAt);
+    const ahead = Math.max(0, request.deadlineSeconds - position);
+    constrain(arrivalAt - Math.max(0, ahead - reserve), "source", request.trackIndex, request.segmentIndex,
+      arrivalAt, ahead, true, arrivalAt, sourcePlanned);
+    const pieceStock = { sourceId: request.sourceId, pieceIndex: request.pieceIndex,
+      start: request.start, end: request.end, deadlineSeconds: request.deadlineSeconds,
+      addressed: true, totalBytes: request.end - request.start,
+      missingBytes: Math.max(0, request.end - request.start - heldBytes),
+      planned: missing.length === 0 && sourcePlanned,
+      bytesPerSecond: rate?.rateAt(0) ?? 0, finish: arrivalAt };
+    cushionStock?.push(pieceStock);
+    let sourceStock = stockBySource.get(request.sourceId);
+    if (!sourceStock) {
+      sourceStock = { sourceId: request.sourceId, addressed: true, uniquePieces: 0,
+        start: request.start, end: request.end, earliestDeadlineSeconds: request.deadlineSeconds,
+        latestDeadlineSeconds: request.deadlineSeconds, totalBytes: 0, missingBytes: 0,
+        bytesPerSecond: pieceStock.bytesPerSecond, finish: 0 };
+      stockBySource.set(request.sourceId, sourceStock);
+    }
+    sourceStock.uniquePieces += 1;
+    sourceStock.start = Math.min(sourceStock.start, request.start);
+    sourceStock.end = Math.max(sourceStock.end, request.end);
+    sourceStock.earliestDeadlineSeconds = Math.min(sourceStock.earliestDeadlineSeconds, request.deadlineSeconds);
+    sourceStock.latestDeadlineSeconds = Math.max(sourceStock.latestDeadlineSeconds, request.deadlineSeconds);
+    sourceStock.totalBytes += pieceStock.totalBytes;
+    sourceStock.missingBytes += pieceStock.missingBytes;
+    sourceStock.finish = Math.max(sourceStock.finish, arrivalAt);
+  }
+
+  stock?.push(...stockBySource.values());
+
+  return { latestArrival: tailLatestArrival, referencedSources, unmappedSources, unmappedTracks };
+}
+
+/**
+ * Estimate the suffix after the exact near window. Mapped tail source ranges
+ * receive individual piece deadlines; missing ranges retain the aggregate
+ * density estimate, which is explicitly unaddressed. Processing and delivery
+ * remain duration-level estimates. The schedule is conditional on measured
+ * services continuing and does not claim exact frame timing.
  *
  * @returns {{ reason: string, unavailableSource?: object } | null} Why there is no answer, or null.
  */
-function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
-  position, buffered, reserve, transferFinish, constrain, duration, stock = null }) {
+function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArrivals, runStarts, trackFinish, link,
+  position, buffered, reserve, transferFinish, constrain, duration, stock = null, cushionStock = null }) {
   const tailStart = Math.max(position, ...trackState.map(state => state.tailStartSeconds));
   if (!Number.isFinite(tailStart)) return null;
+  const exactSources = scheduleTailSourceRanges({ trackState, sourceState, sourceByteCoverage, sourceArrivals,
+    position, reserve, constrain, stock, cushionStock });
+  if (exactSources?.reason) return exactSources;
+  let sourceArrivalAt = exactSources?.latestArrival ?? 0;
   const sourceDurations = new Map();
   for (const state of trackState) {
     const seconds = Math.max(0, state.tailEndSeconds - tailStart) * state.tailWorkFraction;
@@ -985,12 +1176,15 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
         workFraction: state.tailWorkFraction, tailSegments: state.tailSegmentCount });
       continue;
     }
-    for (const sourceId of new Set(state.track.sourceIds ?? [])) {
+    const sourceIds = new Set([...(state.track.sourceIds ?? []), ...(state.track.tailSegments ?? [])
+      .filter(segment => segment.startSeconds < state.tailEndSeconds)
+      .flatMap(segment => (segment.sourceInputs ?? []).map(item => item.sourceId))]);
+    for (const sourceId of sourceIds) {
+      if (exactSources?.referencedSources.has(sourceId) && !exactSources.unmappedSources.has(sourceId)) continue;
       sourceDurations.set(sourceId, Math.max(sourceDurations.get(sourceId) ?? 0, seconds));
     }
   }
 
-  let sourceArrivalAt = 0;
   for (const [sourceId, seconds] of sourceDurations) {
     const source = sourceState.get(sourceId);
     if (!source) return { reason: "source-measurement-unavailable" };
@@ -1027,8 +1221,11 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
     sourceArrivalAt = Math.max(sourceArrivalAt, service.finish);
     // What this stretch weighs and what it still lacks: the stock the start
     // asks to hold is read from these once the start's delay is known.
-    stock?.push({ sourceId, seconds, windowEnd, totalBytes:estimateUnmappedSourceBytes(source.source, seconds, duration, []) ?? bytes,
-      missingBytes: bytes, bytesPerSecond: rate.rateAt(0), finish: service.finish });
+    const sourceStock = { sourceId, seconds, windowEnd, addressed: false, estimatedAddress: "file-density",
+      totalBytes: estimateUnmappedSourceBytes(source.source, seconds, duration, []) ?? bytes,
+      missingBytes: bytes, bytesPerSecond: rate.rateAt(0), finish: service.finish };
+    stock?.push(sourceStock);
+    cushionStock?.push(sourceStock);
     const state = trackState.find(candidate => candidate.track.sourceIds?.includes(sourceId));
     const index = state?.segments.at(-1)?.index ?? 0;
     const ahead = Math.max(0, (state?.tailEndSeconds ?? tailStart) - position);
@@ -1081,7 +1278,8 @@ function scheduleTail({ trackState, sourceState, runStarts, trackFinish, link,
     constrain(completedAt - Math.max(0, ahead - reserve), "delivery", 0,
       trackState[0]?.segments.at(-1)?.index ?? 0, completedAt, ahead, false, sourceArrivalAt, false);
   }
-  return null;
+  return { unmappedSources: exactSources?.unmappedSources ?? new Set(),
+    unmappedTracks: exactSources?.unmappedTracks ?? new Set() };
 }
 
 /**
@@ -1209,11 +1407,12 @@ function withSeekStartTolerance(ranges, position, unit) {
  * before `horizonEnd`, the first piece, every piece that has been read and
  * every piece that is made. A piece ending just before a seek target is kept
  * as a prerequisite because its media timestamps can extend past its nominal
- * playlist boundary. A piece
- * that is none of these changes no exact answer: after the near window it is
- * scheduled in seconds, it is not where the track starts, no unread piece is
- * placed by it (only read pieces are), it lends no frame to what the page
- * holds, and it has no size to measure the output's rate by.
+ * playlist boundary. A piece that is none of these changes no near-window
+ * answer: its source map may still contribute an intermediate tail deadline.
+ * Its media ranges are not placed in the exact browser-time schedule, it is
+ * not where the track starts, no unread near-window piece is placed by it
+ * (only read pieces are), it lends no frame to what the page holds, and it has
+ * no size to measure the output's rate by.
  *
  * @param {{ segments: object[], readySegmentIndices?: number[] }} track
  * @param {number} position - Seconds.

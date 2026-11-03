@@ -37,10 +37,13 @@ usable source map, the source keeps the aggregate estimate for the whole tail
 instead of mixing an exact subset with a guessed remainder. The returned tail
 entry states `addressed: false` and `estimatedAddress: "file-density"`; its
 `missingBytes` and completion time remain visible. Missing addresses never
-mean zero work. `ViewerRequests` currently supplies the active look-ahead and
-piece 0, so the ordinary response uses this explicit aggregate fallback for
-the distant suffix; the mapped deadline path applies when those segment maps
-are present in the forecast input.
+mean zero work. `ViewerRequests` now gets every remaining segment from
+`OutputForecastGeometry`; that profile reads each segment's current source map
+from `SegmentInputTable`. A segment whose source ranges have not been resolved
+stays present with no `sourceInputs`, so it cannot disappear from the schedule.
+The whole-film delay remains unavailable until every unfinished source segment
+has a usable map. Source-complete inputs need no map because they require no
+remaining download work.
 
 The fallback assumes the source file's measured byte density is spread over
 the remaining media duration. That cannot bound arbitrary local density
@@ -48,14 +51,12 @@ changes: without a map for a segment, a large byte burst may occur before a
 deadline even when the file-wide average predicts otherwise. The forecast does
 not label this estimate exact and has no finite relative-error bound for that
 case. It retains the density result as `diagnosticDelaySeconds` and marks the
-full-film result `tail-source-addresses-unavailable` when the caller supplies a
-full-tail profile; it does not publish the estimate as `delaySeconds` or a
-predicted start time. Missing source identities are reported by track under
-`unavailableTailTracks`. An input with no `tailSegments` profile still follows
-the legacy aggregate estimate for now. `ViewerRequests` does not yet supply the
-full-tail profile; that live projection is pending integration in
-`OutputForecastGeometry`, so this partial branch is not complete. Exact mapped
-source pieces add intermediate source deadlines, but the tail's processing and
+full-film result `tail-source-addresses-unavailable`; it does not publish the
+estimate as `delaySeconds` or a predicted start time. Missing source identities
+are reported by track under `unavailableTailTracks`. Legacy callers without a
+`tailSegments` profile retain the aggregate estimate, but the live
+`ViewerRequests` path always supplies the complete profile. Exact mapped source
+pieces add intermediate source deadlines, but the tail's processing and
 delivery are still duration-level estimates and are conditional on measured
 service rates continuing.
 

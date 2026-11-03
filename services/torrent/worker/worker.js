@@ -42,6 +42,9 @@ import { startMemoryReport, WORKER_MEMORY_SAMPLE_MS } from "../../storage/memory
 import { profileThisThread } from "../../storage/cpu-profile.js";
 import { forwardLogsTo, logger } from "../../../utils/logger.js";
 
+const WORKER_CLOCK_EPOCH = performance.timeOrigin;
+let sourceSnapshotRevision = 0;
+
 /**
  * Everything this thread logs goes to the main thread, which owns the file.
  *
@@ -492,6 +495,8 @@ async function runCommand(command, params, id) {
 
     case Command.FILE_STATS: {
       const statsStartedAt = performance.now();
+      const sourceCaptureStartedAt = statsStartedAt;
+      const sourceRevision = ++sourceSnapshotRevision;
       emitWaitTrace(params.sourceKey, "W10", "begin", { startedAt: statsStartedAt,
         fileIndex: params.fileIndex, forecast: params.forecast === true });
       const finishStatsTrace = (outcome, fields = {}) => {
@@ -504,7 +509,14 @@ async function runCommand(command, params, id) {
         if (!torrent) {
           const whole = wholeSources.fileOf(params.sourceKey, params.fileIndex);
           finishStatsTrace(whole ? "whole-file" : "pending");
-          return whole ? wholeFileStats(whole.length) : { pending: true };
+          return {
+            ...(whole ? wholeFileStats(whole.length) : { pending: true }),
+            sourceCapture: {
+              owner: "torrent-worker", clock: "performance", clockEpoch: WORKER_CLOCK_EPOCH,
+              startedAt: sourceCaptureStartedAt, completedAt: performance.now(), revision: sourceRevision,
+              validity: whole ? "valid" : "unknown", unknownReason: whole ? null : "source-not-ready"
+            }
+          };
         }
         // What this file's own interruptions demand, measured by the reader in
         // this thread. It travels with the stats because the caller asking for
@@ -515,7 +527,8 @@ async function runCommand(command, params, id) {
         const file = Array.isArray(torrent?.files) ? torrent.files[params.fileIndex] : null;
         const forecastAt = performance.now();
         const forecast = file && params.forecast === true ? downloadForecastOf(torrent) : null;
-        const forecastMs = params.forecast === true ? performance.now() - forecastAt : 0;
+        const forecastCompletedAt = performance.now();
+        const forecastMs = params.forecast === true ? forecastCompletedAt - forecastAt : 0;
         const stats = pool.getFileStats(torrent, params.fileIndex);
         const ranges = [];
         if (forecast) for (const [piece, availableAt] of forecast.arrivals) {
@@ -526,8 +539,19 @@ async function runCommand(command, params, id) {
         finishStatsTrace("ok", { forecast: params.forecast === true });
         return {
           ...stats,
+          sourceCapture: {
+            owner: "torrent-worker", clock: "performance", clockEpoch: WORKER_CLOCK_EPOCH,
+            startedAt: sourceCaptureStartedAt, completedAt: performance.now(), revision: sourceRevision,
+            validity: stats ? "valid" : "unknown", unknownReason: stats ? null : "source-stats-unavailable"
+          },
           ...(params.forecast === true ? { downloadForecast: {
-            measuredAt: forecast?.measuredAt ?? Date.now(), global: true, ranges
+            measuredAt: forecast?.measuredAt ?? Date.now(), global: true, ranges,
+            capture: {
+              owner: "torrent-worker", clock: "performance", clockEpoch: WORKER_CLOCK_EPOCH,
+              startedAt: forecastAt, completedAt: forecastCompletedAt, revision: sourceRevision,
+              validity: forecast ? "valid" : "unknown",
+              unknownReason: forecast ? null : "source-arrival-forecast-unavailable"
+            }
           } } : {}),
           supply: supplyFiguresFor(torrent?.infoHash, file?.name, params.segmentSeconds ?? 4),
           // How long this answer waited for the arrival forecast, which the

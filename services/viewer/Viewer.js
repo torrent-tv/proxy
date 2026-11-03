@@ -53,6 +53,34 @@ function fragmentEventAges(value) {
     Number.isFinite(value?.[name]) && value[name] >= 0 ? value[name] : null]));
 }
 
+function browserCaptureOf(report, sessionId) {
+  const clockEpoch = report.captureClockEpoch;
+  const startedAt = report.captureStartedAtBrowser;
+  const completedAt = report.captureCompletedAtBrowser;
+  const valid = typeof report.captureEpoch === "string" && report.captureEpoch.length > 0 &&
+    Number.isFinite(report.captureEpochStartedAtBrowser) && Number.isFinite(report.captureRevision) &&
+    Number.isSafeInteger(report.captureRevision) && report.captureRevision > 0 &&
+    Number.isFinite(clockEpoch) && Number.isFinite(startedAt) && Number.isFinite(completedAt) &&
+    report.captureEpochStartedAtBrowser >= clockEpoch && startedAt >= report.captureEpochStartedAtBrowser &&
+    completedAt >= startedAt &&
+    Number.isSafeInteger(report.generation) && report.generation >= 0;
+  return {
+    owner: "browser",
+    clock: "performance",
+    clockEpoch: Number.isFinite(clockEpoch) ? clockEpoch : null,
+    startedAt: Number.isFinite(startedAt) ? startedAt : null,
+    completedAt: Number.isFinite(completedAt) ? completedAt : null,
+    actionId: typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null,
+    generation: Number.isSafeInteger(report.generation) ? report.generation : null,
+    revision: Number.isSafeInteger(report.captureRevision) ? report.captureRevision : null,
+    epoch: typeof report.captureEpoch === "string" ? report.captureEpoch : null,
+    epochStartedAt: Number.isFinite(report.captureEpochStartedAtBrowser)
+      ? report.captureEpochStartedAtBrowser : null,
+    validity: valid ? "valid" : "unknown",
+    unknownReason: valid ? null : "missing-or-invalid-browser-capture"
+  };
+}
+
 function appendServiceSnapshot(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const snapshot = {};
@@ -522,6 +550,18 @@ export class Viewer {
       appendEpoch = null,
       appendEpochStartedAt = null,
       appendSnapshotAt = null,
+      captureClockEpoch = null,
+      captureEpoch = null,
+      captureEpochStartedAtBrowser = null,
+      captureRevision = null,
+      captureStartedAtBrowser = null,
+      captureCompletedAtBrowser = null,
+      linkSampleStartedAtBrowser = null,
+      linkSampleCompletedAtBrowser = null,
+      linkSampleActionId = null,
+      linkSampleGeneration = null,
+      linkSampleClockEpoch = null,
+      linkSampleRevision = null,
       appendService: appendServiceReading = null,
       fragmentService: fragmentServiceReading = null,
       bufferedAheadSec,
@@ -564,6 +604,18 @@ export class Viewer {
     const sampleMbps = Number(linkSampleMbps);
     const sampleAt = Number(linkSampleAt);
     const previous = this.netReport;
+    const browserCapture = browserCaptureOf({ captureClockEpoch, captureEpoch, captureEpochStartedAtBrowser,
+      captureRevision, captureStartedAtBrowser, captureCompletedAtBrowser, generation }, appendSessionId);
+    const previousCapture = previous?.bufferCapture ?? null;
+    const captureOrderKnown = browserCapture.clockEpoch !== null && browserCapture.epoch !== null &&
+      browserCapture.epochStartedAt !== null && browserCapture.revision !== null && browserCapture.revision > 0;
+    const sameCaptureClock = captureOrderKnown && browserCapture.clockEpoch === previousCapture?.clockEpoch;
+    const sameCaptureEpoch = sameCaptureClock && browserCapture.epoch === previousCapture?.epoch;
+    const newerCapture = captureOrderKnown && (!previousCapture || !previousCapture.clockEpoch ||
+      !sameCaptureClock && browserCapture.epochStartedAt > (previousCapture.epochStartedAt ?? 0) ||
+      sameCaptureClock && (sameCaptureEpoch && browserCapture.revision > previousCapture.revision ||
+        !sameCaptureEpoch && browserCapture.epochStartedAt > (previousCapture.epochStartedAt ?? 0)));
+    const staleCapture = captureOrderKnown && previousCapture && !newerCapture;
     const incomingAppendService = typeof appendEpoch === "string" && appendEpoch.length > 0
       ? appendServiceSnapshot(appendServiceReading) : null;
     const incomingFragmentService = typeof appendEpoch === "string" && appendEpoch.length > 0
@@ -578,37 +630,85 @@ export class Viewer {
           (!previous?.appendService || appendServiceIsMonotonic(incomingAppendService, previous.appendService)) &&
           (!previous?.fragmentService || fragmentServiceIsMonotonic(incomingFragmentService, previous.fragmentService))
         : appendEpochStartedAt > (previous?.appendEpochStartedAt ?? 0));
+    const preserveBrowserService = sameAppendEpoch && incomingAppendService && incomingFragmentService;
     const hasPlaybackSample = Number.isFinite(sampleMbps) && sampleMbps > 0 &&
-      Number.isFinite(sampleAt) && sampleAt > 0;
-    const newerPlaybackSample = hasPlaybackSample && sampleAt > (this.netReport?.linkSampleAt ?? 0);
+      Number.isFinite(sampleAt) && sampleAt > 0 && Number.isFinite(captureClockEpoch) &&
+      Number.isFinite(linkSampleClockEpoch) && linkSampleClockEpoch === captureClockEpoch &&
+      Number.isSafeInteger(linkSampleRevision) && linkSampleRevision > 0 &&
+      Number.isFinite(linkSampleStartedAtBrowser) && Number.isFinite(linkSampleCompletedAtBrowser) &&
+      linkSampleStartedAtBrowser >= captureClockEpoch && linkSampleCompletedAtBrowser === sampleAt &&
+      linkSampleStartedAtBrowser <= linkSampleCompletedAtBrowser &&
+      Number.isFinite(captureCompletedAtBrowser) && sampleAt <= captureCompletedAtBrowser &&
+      Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0;
+    const oldLinkEpoch = this.netReport?.linkCapture?.epoch !== String(linkSampleClockEpoch) &&
+      Number.isFinite(this.netReport?.linkCapture?.epochStartedAt) &&
+      Number.isFinite(linkSampleClockEpoch) &&
+      linkSampleClockEpoch <= this.netReport.linkCapture.epochStartedAt;
+    const newerPlaybackSample = hasPlaybackSample && !oldLinkEpoch &&
+      (linkSampleClockEpoch !== this.netReport?.linkCapture?.clockEpoch ||
+        linkSampleRevision > (this.netReport?.linkCapture?.revision ?? 0));
+    const linkClockEpochChanged = Number.isFinite(captureClockEpoch) &&
+      Number.isFinite(this.netReport?.linkCapture?.clockEpoch) &&
+      captureClockEpoch !== this.netReport.linkCapture.clockEpoch;
+    const newerInvalidPlaybackSample = !stale && newerCapture && !hasPlaybackSample &&
+      (Number.isSafeInteger(linkSampleRevision) || linkSampleAt !== null && linkSampleAt !== undefined ||
+        linkClockEpochChanged);
+    const preserveCapture = stale || staleCapture;
+    const linkCapture = newerPlaybackSample ? {
+      owner: "browser", clock: "performance", clockEpoch: linkSampleClockEpoch,
+      startedAt: linkSampleStartedAtBrowser, completedAt: linkSampleCompletedAtBrowser,
+      actionId: typeof linkSampleActionId === "string" ? linkSampleActionId : null,
+      generation: Number.isSafeInteger(linkSampleGeneration) ? linkSampleGeneration : null,
+      epoch: String(linkSampleClockEpoch), epochStartedAt: linkSampleClockEpoch,
+      revision: linkSampleRevision, validity: "valid", unknownReason: null
+    } : newerInvalidPlaybackSample ? {
+      owner: "browser", clock: "performance", clockEpoch: Number.isFinite(captureClockEpoch) ? captureClockEpoch : null,
+      startedAt: null, completedAt: null, actionId: appendSessionId,
+      generation: Number.isSafeInteger(generation) ? generation : null,
+      epoch: Number.isFinite(captureClockEpoch) ? String(captureClockEpoch) : null,
+      epochStartedAt: captureClockEpoch,
+      revision: linkSampleRevision, validity: "invalid", unknownReason: "invalid-link-sample-capture"
+    } : this.netReport?.linkCapture ?? {
+      owner: "browser", clock: "performance", clockEpoch: null, startedAt: null, completedAt: null,
+      actionId: appendSessionId, generation: Number.isSafeInteger(generation) ? generation : null,
+      epoch: null, epochStartedAt: null, revision: null, validity: "unknown",
+      unknownReason: "missing-link-sample-capture"
+    };
+    const useCapture = !stale && !staleCapture && newerCapture && browserCapture.validity === "valid";
     this.netReport = {
       linkMbps: lastLinkMbps,
       linkMeasuredAt,
-      linkSampleAt: newerPlaybackSample ? sampleAt : this.netReport?.linkSampleAt ?? null,
-      linkSampleMbps: newerPlaybackSample ? sampleMbps : this.netReport?.linkSampleMbps ?? null,
-      linkSampleMeasuredAt: newerPlaybackSample
-        ? Number.isFinite(linkSampleAgeMs) && linkSampleAgeMs >= 0
-          ? now - linkSampleAgeMs
-          : now
-        : this.netReport?.linkSampleMeasuredAt ?? null,
+      linkSampleAt: newerPlaybackSample ? sampleAt : newerInvalidPlaybackSample ? null : this.netReport?.linkSampleAt ?? null,
+      linkSampleMbps: newerPlaybackSample ? sampleMbps : newerInvalidPlaybackSample ? null : this.netReport?.linkSampleMbps ?? null,
+      linkSampleMeasuredAt: newerPlaybackSample ? now : newerInvalidPlaybackSample ? null : this.netReport?.linkSampleMeasuredAt ?? null,
+      linkCapture,
+      bufferCapture: preserveCapture ? previousCapture ?? browserCapture : useCapture ? browserCapture : {
+        ...browserCapture,
+        validity: "unknown",
+        unknownReason: browserCapture.unknownReason ?? "missing-or-invalid-browser-capture"
+      },
       appendSessionId: useBrowserService ? appendSessionId : previous?.appendSessionId ?? null,
-      appendEpoch: useBrowserService ? appendEpoch : previous?.appendEpoch ?? null,
+      appendEpoch: useBrowserService ? appendEpoch : preserveBrowserService ? previous?.appendEpoch ?? null
+        : useCapture ? null : previous?.appendEpoch ?? null,
       appendEpochStartedAt: useBrowserService ? appendEpochStartedAt : previous?.appendEpochStartedAt ?? null,
       appendSnapshotAt: useBrowserService ? appendSnapshotAt : previous?.appendSnapshotAt ?? null,
-      appendService: useBrowserService ? incomingAppendService : previous?.appendService ?? null,
-      fragmentService: useBrowserService ? incomingFragmentService : previous?.fragmentService ?? null,
-      appendServiceReceivedAt: useBrowserService ? now : previous?.appendServiceReceivedAt ?? null,
-      bufferedAheadSec: held,
+      appendService: useBrowserService ? incomingAppendService : preserveBrowserService ? previous?.appendService ?? null
+        : useCapture ? null : previous?.appendService ?? null,
+      fragmentService: useBrowserService ? incomingFragmentService : preserveBrowserService ? previous?.fragmentService ?? null
+        : useCapture ? null : previous?.fragmentService ?? null,
+      appendServiceReceivedAt: useBrowserService ? now : preserveBrowserService ? previous?.appendServiceReceivedAt ?? null
+        : useCapture ? null : previous?.appendServiceReceivedAt ?? null,
+      bufferedAheadSec: preserveCapture ? previous?.bufferedAheadSec ?? 0 : useCapture ? held : 0,
       timestampOffsets: Object.fromEntries(["video", "audio"].filter((key) =>
         Number.isFinite(timestampOffsets?.[key])).map((key) => [key, timestampOffsets[key]])),
-      bufferedRanges: bufferedRanges && typeof bufferedRanges === "object" ?
+      bufferedRanges: preserveCapture ? previous?.bufferedRanges ?? null : useCapture && bufferedRanges && typeof bufferedRanges === "object" ?
         Object.fromEntries(["video", "audio", "media"].filter((key) => Array.isArray(bufferedRanges[key]))
           .map((key) => [key, bufferedRanges[key].slice(0, 256).filter((range) =>
             Number.isFinite(range?.start) && Number.isFinite(range?.end) && range.start >= 0 && range.end > range.start)
             .map(({ start, end }) => ({ start, end }))])) : null,
-      bufferLimitSeconds: Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0
+      bufferLimitSeconds: preserveCapture ? previous?.bufferLimitSeconds ?? null : useCapture && Number.isFinite(bufferLimitSeconds) && bufferLimitSeconds > 0
         ? bufferLimitSeconds
-        : this.netReport?.bufferLimitSeconds ?? null,
+        : useCapture ? null : this.netReport?.bufferLimitSeconds ?? null,
       positionSeconds:
         Number.isFinite(positionSeconds) && positionSeconds >= 0 ? positionSeconds : null,
       at: now

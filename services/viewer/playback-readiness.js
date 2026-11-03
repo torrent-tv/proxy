@@ -149,14 +149,16 @@ export class SessionRate {
   #inverseSum = 0;
   #zero = false;
   #weighted = 0;
+  #capture = null;
 
-  add(at, value) {
+  add(at, value, capture = null) {
     if (!Number.isFinite(at) || !Number.isFinite(value) || value < 0 || at <= (this.#last?.at ?? Number.NEGATIVE_INFINITY)) {
       return false;
     }
     if (this.#last) this.#weighted += this.#last.value * (at - this.#last.at);
     this.#first ??= { at, value };
     this.#last = { at, value };
+    this.#capture = mergeCaptureSummary(this.#capture, capture);
     this.#count += 1;
     this.#sum += value;
     if (value > 0) this.#inverseSum += 1 / value;
@@ -177,6 +179,10 @@ export class SessionRate {
       spanSeconds: spanMs / 1000
     };
   }
+
+  captureSnapshot() {
+    return this.#capture ? { ...this.#capture } : null;
+  }
 }
 
 /**
@@ -192,12 +198,12 @@ export class RateTrend {
     this.#horizonMs = Math.max(0, horizonSeconds) * 1000;
   }
 
-  add(at, value) {
+  add(at, value, capture = null) {
     if (!Number.isFinite(at) || !Number.isFinite(value) || value < 0 ||
       at <= (this.#readings.at(-1)?.at ?? Number.NEGATIVE_INFINITY)) {
       return false;
     }
-    this.#readings.push({ at, value });
+    this.#readings.push({ at, value, capture: capture ? { ...capture } : null });
     const cutoff = at - this.#horizonMs;
     while (this.#readings.length > 1 && this.#readings[1].at <= cutoff) {
       this.#readings.shift();
@@ -211,6 +217,22 @@ export class RateTrend {
     }
     return summarizeRate(this.#readings);
   }
+
+  captureSnapshot() {
+    return this.#readings.map(reading => reading.capture ? { ...reading.capture } : null);
+  }
+}
+
+function mergeCaptureSummary(previous, capture) {
+  if (!capture || capture.validity !== "valid" || !Number.isFinite(capture.clockEpoch) ||
+      !Number.isFinite(capture.startedAt) || !Number.isFinite(capture.completedAt) ||
+      capture.completedAt < capture.startedAt) return { validity: "unknown", unknownReason: "missing-rate-capture" };
+  if (!previous) return { ...capture };
+  if (previous.validity !== "valid" || previous.clockEpoch !== capture.clockEpoch) {
+    return { validity: "invalid", unknownReason: "rate-capture-epoch-mismatch" };
+  }
+  return { ...previous, startedAt: Math.min(previous.startedAt, capture.startedAt),
+    completedAt: Math.max(previous.completedAt, capture.completedAt), revision: capture.revision };
 }
 
 /**

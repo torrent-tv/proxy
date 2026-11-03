@@ -70,12 +70,10 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   // local lookup. Without the await the reply was the pending promise itself,
   // which serialises to `{}` — the empty stats seen in the field 2026-08-02.
   const statsStartedAt = performance.now();
-  let statsCompletedAt;
   let stats;
   try {
     stats = await torrentPool.getFileStats(torrent, fileIndex);
   } finally {
-    statsCompletedAt = performance.now();
     logger.info(`[stats] ${sourceKey.slice(0, 8)} getFileStatsMs=${(performance.now() - statsStartedAt).toFixed(1)}`);
   }
   if (stats?.pending || !stats) {
@@ -161,9 +159,11 @@ export async function handleApiSourceStatsGet(req, reply, { sourceRegistry, torr
   }
   const responsePreparedAtProxyMs = performance.now();
   return reply.send({ ...stats, sourceSnapshotTransport: {
+    clockEpoch: performance.timeOrigin,
+    snapshotClockEpoch: stats.sourceCapture?.clockEpoch ?? null,
     requestReceivedAtProxyMs,
-    snapshotStartedAtProxyMs: statsStartedAt,
-    snapshotCompletedAtProxyMs: statsCompletedAt,
+    snapshotStartedAtProxyMs: stats.sourceCapture?.validity === "valid" ? stats.sourceCapture.startedAt : null,
+    snapshotCompletedAtProxyMs: stats.sourceCapture?.validity === "valid" ? stats.sourceCapture.completedAt : null,
     responsePreparedAtProxyMs
   } });
 }

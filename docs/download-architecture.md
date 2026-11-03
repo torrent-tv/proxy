@@ -65,6 +65,26 @@ The proxy does not replace its methods. Withdrawn selections cancel obsolete
 requests; selections shared by remaining demand keep their requests. `critical`
 marks missing blocked-read ranges through the public API.
 
+The one bounded exception is late-tail repetition. `download/TailRepeat` may
+ask for a second copy only while a piece is in `SwarmSelection.requiredPieces()`
+— the currently selected urgent class — and only when at most 16 blocks are
+missing, a block has been in flight for at least one WebTorrent wire queue
+(1,000 ms), and fewer than two copies are outstanding. It reads the current
+required-piece map for each look, so withdrawal stops later repeats, and
+disposal removes its listeners and timer. WebTorrent's ordinary queue-capacity
+check still runs for every repeat. A refused request restores the freed
+reservation; a missing or incompatible private entry disables repetition and
+logs one bounded diagnostic, leaving the ordinary picker in charge.
+
+`worker/WebTorrentTailRepeatAdapter` is the only live code allowed to inspect
+WebTorrent's private piece buffer and wire requests or call `Piece.cancel()`,
+`Piece.reserve()` and `Torrent._request()` for this exception. These assumptions
+are pinned to WebTorrent 2.8.5 / `torrent-piece` 3.0.2. Update the adapter and
+its fake-torrent tests before changing that pinned pair. The adapter observes
+tails and attempts one requested block; the download layer owns urgency, age,
+tail-length and copy-count policy. This change preserves the existing policy
+and makes no performance claim.
+
 FutureDownload observes outstanding peer queues and measured peer rates. A
 piece whose every missing block is asked for arrives when its queues say: a
 block is reserved to the wire it was asked of. Every other missing piece is

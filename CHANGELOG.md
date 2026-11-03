@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Keep late-tail repetition within the current urgent download class and isolate WebTorrent's private reservation access behind a bounded adapter, preserving the existing age, tail-size and copy limits.
+
 ## 2.107.51
 
 - **Fix**: Keep initial viewer placement and audio selection in the viewer layer. Reopening or joining an output preserves an already placed position, while an explicit seek keeps its buffer and pause handling.

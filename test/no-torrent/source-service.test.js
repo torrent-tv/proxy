@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sourceService } from "../../services/server/ViewerRequests.js";
+import { sourceService } from "../../services/viewer/ViewerPlaybackState.js";
 import { forecastRate, predictPlaybackReadiness, RateTrend } from "../../services/viewer/playback-readiness.js";
 
 /** A source's rate summary from readings `[at, bytes per second]`, as the trend keeps it. */

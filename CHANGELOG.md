@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Keep projected encoder speed available to playback readiness while reporting its capture as unknown and preserving its prediction source, without assigning the progress poll's time as a measurement.
+
 ## 2.107.55
 
 - **Fix**: Schedule mapped tail source pieces at their earliest output deadlines, reuse shared pieces once, and keep missing source addresses as an explicit aggregate estimate.

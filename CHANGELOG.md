@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.53
 
 - **Fix**: Keep playback forecast history with live viewer and output owners, and release viewer samples, wait observations and cached geometry when those owners end.
 

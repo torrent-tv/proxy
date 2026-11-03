@@ -193,6 +193,24 @@ test("the progress report keeps every figure it carries today", async () => {
   assert.equal(progress.sessionId, SESSION_ID);
 });
 
+test("a projected encoder rate remains numeric while progress marks its capture unknown", async () => {
+  const manager = bareManager();
+  const session = fakeSession();
+  manager.outputs.set(SESSION_ID, session);
+  manager.encodeRuns.speedReadingsOf = () => [];
+  manager.encodeCost.projectedSpeedOf = () => 1.75;
+
+  const progress = await manager.viewerRequests.getSessionProgress(SESSION_ID, "viewer-one");
+  const capture = progress.playbackReadiness.inputCaptures.encoder[0].capture;
+  assert.equal(capture.validity, "unknown");
+  assert.equal(capture.unknownReason, "projected-encoder-speed-has-no-capture");
+  assert.equal(capture.provenance, "projected");
+  assert.equal(capture.projectionSource, "current-cost-projection");
+  assert.equal(capture.startedAt, null);
+  assert.ok(progress.playbackReadiness.operations.some(operation => operation.speed === 1.75),
+    "the same projected rate still reaches the readiness calculation");
+});
+
 test("a failed selected soundtrack fails playback progress even while video remains available", async () => {
   const manager = bareManager();
   const video = fakeSession();

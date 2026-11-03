@@ -110,7 +110,7 @@ capture time.
 |---|---|---|---|---|
 | Source | Torrent worker; byte ranges and arrival times in milliseconds on the proxy host | `sourceCapture.startedAt..completedAt` bounds file stats; `downloadForecast.capture.startedAt..completedAt` separately bounds arrival-range calculation. Rate histories retain each reading or their aggregate capture interval. All use the worker thread's `performance.timeOrigin` | The proxy adds the active wait action and viewer generation; worker revision advances for each snapshot | Valid only when the owner returns complete ordered intervals and current source facts. No source handle, failed stats, unavailable arrival forecast, old epoch or malformed interval stays unknown with a reason. |
 | Link | Browser; raw delivery rate in Mbit/s, converted to byte/s for the forecast | `linkSampleStartedAtBrowser..linkSampleCompletedAtBrowser` bounds the transfer that produced the rate; the browser's `performance.timeOrigin` is `clockEpoch` | Link sample action and generation are retained when the transfer belongs to an active session; its revision advances only for a new transfer. The report separately carries its own reporter epoch, generation and increasing revision | Valid only when rate, sample interval, age and clock epoch agree. No transfer remains unknown; a newer invalid marked sample clears the prior forecast sample. |
-| Encoder | Proxy encoder owner; media seconds per active second and processed media seconds | Each speed reading carries its own monotonic capture interval; proxy process `performance.timeOrigin` is the epoch. Run progress carries its monotonic update point | The proxy attaches `waitId`, viewer generation and the ordered rate-reading revision | Valid only when the contributing samples have complete intervals in one epoch. No measured rate, missing owner mark or mixed epoch remains unknown. |
+| Encoder | Proxy encoder owner; media seconds per active second and processed media seconds | A measured speed reading carries its own monotonic capture interval; proxy process `performance.timeOrigin` is the epoch. Run progress carries its monotonic update point. A projected speed has no capture interval or epoch. | The proxy attaches `waitId`, viewer generation and the ordered measured-rate revision. A projection records its source (`stored-encode-prediction` or `current-cost-projection`) without inventing a revision. | Measured samples are valid only with complete ordered intervals in one epoch. A prediction may still seed the numeric rate trend, but its capture is `unknown` with reason `projected-encoder-speed-has-no-capture`; it contributes no age. Missing owner marks, reordered samples or mixed epochs remain unknown. |
 | Browser buffer | Browser; seconds and media-time ranges | `captureStartedAtBrowser..captureCompletedAtBrowser` bounds the report's viewer and buffer reads; the browser page's `performance.timeOrigin` is the epoch | Browser reporter epoch, session id, seek generation and increasing report revision accompany the snapshot | Valid only for the active session and generation. Missing/invalid capture, an older/duplicate report, a seek-replaced generation or a cancelled output cannot supply fresh ranges. |
 
 The progress response preserves each family's capture record and returns age
@@ -120,6 +120,21 @@ the measured inbound/outbound asymmetry: no half-RTT assumption and no
 cross-host clock subtraction. A fact whose epoch or capture marks cannot be
 reconciled has an unknown age. These records do not enable numeric first-frame
 ETA; that ETA remains unavailable.
+
+The encoder rate trend uses measured speed readings first. While none exists,
+`predictedEncodeSpeedOf` supplies the output's stored encode prediction. At the
+initial offer, `EncodeCost.notePredictionFor` uses the selected mode's startup
+benchmark, the source decode model, already committed family work and machine
+availability. A later encoder-mode switch can replace that value through
+`EncodeCost.notePriceFor`.
+`projectedEncodeSpeedOf` is the fallback: `EncodeCost.projectedSpeedOf` applies
+the current output cost (measured run cost when available, otherwise the
+startup encode or copy calibration), current contention and machine
+availability. These values retain the numeric rate formula, but neither source
+stores the interval, epoch or revision of a capture that produced the estimate.
+The polling time therefore appears only in the trend calculation; it does not
+become an encoder capture mark. A later measured reading replaces the projected
+rate and carries its own original capture marks.
 
 The forecast is answered on every progress poll of a waiting viewer, on the
 proxy's main thread, so it avoids repeating work (torrent-tv/meta#178). A piece

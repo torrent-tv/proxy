@@ -194,7 +194,7 @@ export class ViewerRequests {
   /** What this reads and asks of the rest of the proxy, and nothing else. @type {object} */
   #host;
   /**
-   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `planEncodersSoon`, `encodeRuns`, `encodeSpeedReadingsOf`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `viewers`, `placeViewerOn`, `chooseAudioTrack`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
+   * @param {object} host - `opening`, `activeOutputFor`, `viewerSecondsOn`, `minimumBufferSecondsFor`, `getSourceStats`, `planEncodersSoon`, `encodeRuns`, `encodeSpeedReadingsOf`, `outputs`, `lookaheadSeconds`, `quality`, `qualityOffer`, `renditions`, `segmentDurationSec`, `segmentStore`, `sourceFiles`, `startupWaitMs`, `startupWorkOf`, `viewers`, `placeViewerOn`, `chooseAudioTrack`, `acceptsGeneration`, `generationOfRequest`, `noteGivenOutput`, `holdForResponse`, `noteServingVerdict`, `servingVerdictOf`
    */
   constructor(host) {
     this.#host = host;
@@ -1085,6 +1085,9 @@ export class ViewerRequests {
       requiredAudio: requiresSeparateAudio,
       sources: [...sourceMeasurements.values()],
       tracks,
+      // Read an action-scoped snapshot from its existing owners. ViewerRequests
+      // coordinates the calculation but does not own opening-work state.
+      startupWork: this.#host.startupWorkOf?.({ session, consumerId, generation, now }) ?? null,
       linkReadings: viewerReading?.linkCapture?.validity === "valid" ? measurement.link.snapshot() : null
     };
     // A subtitle track chosen inside THIS file is the last input the forecast
@@ -1215,6 +1218,7 @@ export class ViewerRequests {
     this.#host.noteViewerWaiting?.(consumerId || session.id,
       holding?.kind === "production" ? { address: holding.track, index: holding.segment } : null);
     delete forecast.firstRequiredStages;
+    delete forecast.startupWork;
     waitOutcome = "forecast-ready";
     return forecast;
     } finally {

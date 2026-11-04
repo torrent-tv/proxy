@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { scheduleStartupWork } from "../../services/viewer/startup-work.js";
 
-const service = (key, unit, rate) => ({ key, unit, rate });
+const service = (key, unit, rate, actionId = "open-1") => ({ key, unit, rate,
+  capture: { validity: "valid", actionId, owner: key, clockEpoch: 1,
+    startedAt: 100, completedAt: 200, ageMs: 0 } });
 
 test("a known cache hit contributes zero remaining work", () => {
   const result = scheduleStartupWork([
-    { id: "P2", kind: "work", state: "complete" },
-    { id: "P3", kind: "work", state: "pending", remainingWork: { amount: 4, unit: "plan-fields" },
+    { id: "P2", actionId: "open-1", kind: "work", state: "complete" },
+    { id: "P3", actionId: "open-1", kind: "work", state: "pending", remainingWork: { amount: 4, unit: "plan-fields" },
       service: service("proxy-main", "plan-fields", 2), dependsOn: ["P2"] }
   ]);
 
@@ -18,7 +20,7 @@ test("a known cache hit contributes zero remaining work", () => {
 
 test("missing source bytes use the matching measured byte service", () => {
   const result = scheduleStartupWork([
-    { id: "W8", kind: "work", state: "pending", remainingWork: { amount: 300, unit: "bytes" },
+    { id: "W8", actionId: "open-1", kind: "work", state: "pending", remainingWork: { amount: 300, unit: "bytes" },
       service: service("torrent:source", "bytes", 100) }
   ]);
 
@@ -28,10 +30,10 @@ test("missing source bytes use the matching measured byte service", () => {
 
 test("an inapplicable absent index is skipped while a required unknown index is named", () => {
   const skipped = scheduleStartupWork([
-    { id: "P5", kind: "work", enabled: false, state: "pending" }
+    { id: "P5", actionId: "open-1", kind: "work", enabled: false, state: "pending" }
   ]);
   const required = scheduleStartupWork([
-    { id: "P5", kind: "work", state: "pending", remainingWork: { amount: 1, unit: "index-bytes" } }
+    { id: "P5", actionId: "open-1", kind: "work", state: "pending", remainingWork: { amount: 1, unit: "index-bytes" } }
   ]);
 
   assert.equal(skipped.finishSeconds, 0);
@@ -55,7 +57,7 @@ test("a retry is extra work under the same original action", () => {
 
 test("pending viewer permission is an external wait and has no numeric completion", () => {
   const result = scheduleStartupWork([
-    { id: "A2.4.3", kind: "external-wait", state: "pending" }
+    { id: "A2.4.3", actionId: "open-1", kind: "external-wait", state: "pending" }
   ]);
 
   assert.equal(result.finishSeconds, null);
@@ -65,11 +67,11 @@ test("pending viewer permission is an external wait and has no numeric completio
 
 test("measured matching work and service are scheduled once with true predecessors", () => {
   const result = scheduleStartupWork([
-    { id: "P2", kind: "work", state: "pending", remainingWork: { amount: 1, unit: "read-units" },
+    { id: "P2", actionId: "open-1", kind: "work", state: "pending", remainingWork: { amount: 1, unit: "read-units" },
       service: service("file-read", "read-units", 2) },
-    { id: "P3", kind: "work", state: "pending", remainingWork: { amount: 9, unit: "read-units" },
+    { id: "P3", actionId: "open-1", kind: "work", state: "pending", remainingWork: { amount: 9, unit: "read-units" },
       service: service("file-read", "read-units", 2), dependsOn: ["P2"] },
-    { id: "A12", kind: "envelope", children: ["P2", "P3"] }
+    { id: "A12", actionId: "open-1", kind: "envelope", children: ["P2", "P3"] }
   ]);
 
   assert.equal(result.reason, null);
@@ -79,9 +81,9 @@ test("measured matching work and service are scheduled once with true predecesso
 
 test("one shared service cannot silently mix incompatible rate captures", () => {
   const result = scheduleStartupWork([
-    { id: "P2", kind: "work", state: "pending", remainingWork: { amount: 1, unit: "read-units" },
+    { id: "P2", actionId: "open-1", kind: "work", state: "pending", remainingWork: { amount: 1, unit: "read-units" },
       service: service("file-read", "read-units", 1) },
-    { id: "P3", kind: "work", state: "pending", remainingWork: { amount: 9, unit: "read-units" },
+    { id: "P3", actionId: "open-1", kind: "work", state: "pending", remainingWork: { amount: 9, unit: "read-units" },
       service: service("file-read", "read-units", 3), dependsOn: ["P2"] }
   ]);
 

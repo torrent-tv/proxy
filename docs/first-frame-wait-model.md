@@ -953,8 +953,9 @@ unavailable.
 
 Each row states whether an entry is work, a dependency, an event, an enclosing
 span, or an external wait. A row classified as work needs a remaining quantity,
-its unit, a matching measured service rate, and actual predecessor IDs before
-it can receive a numeric finish. Completion is zero remaining work only when
+its unit, a matching measured service rate with a valid owner clock epoch,
+capture interval, action identity and known age, plus actual predecessor IDs,
+before it can receive a numeric finish. Completion is zero remaining work only when
 the owning operation states completion. Skipped conditional work is marked
 `enabled: false`; a missing byte range, absent required index, retry or pending
 permission prompt is never inferred from elapsed whole-wait time.

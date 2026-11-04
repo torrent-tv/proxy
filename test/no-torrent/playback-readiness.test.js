@@ -64,9 +64,11 @@ test("does not create a completion point from absent or malformed probability su
 
 test("integrates atomic opening work without changing the existing continuity gate", () => {
   const state = input({ startupWork: [
-    { id: "P2", kind: "work", state: "complete" },
-    { id: "P3", kind: "work", state: "pending", remainingWork: { amount: 4, unit: "plan-fields" },
-      service: { key: "proxy-main", unit: "plan-fields", rate: 2 }, dependsOn: ["P2"] }
+    { id: "P2", actionId: "open-1", kind: "work", state: "complete" },
+    { id: "P3", actionId: "open-1", kind: "work", state: "pending", remainingWork: { amount: 4, unit: "plan-fields" },
+      service: { key: "proxy-main", unit: "plan-fields", rate: 2,
+        capture: { validity: "valid", actionId: "open-1", owner: "proxy-main", clockEpoch: 1,
+          startedAt: 100, completedAt: 200, ageMs: 0 } }, dependsOn: ["P2"] }
   ] });
   const withoutOpeningWork = predictPlaybackReadiness(input());
   const withOpeningWork = predictPlaybackReadiness(state);

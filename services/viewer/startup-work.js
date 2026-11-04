@@ -13,8 +13,8 @@ const NON_WORK_KINDS = new Set(["event", "envelope", "dependency"]);
 const OPENING_ATOM_IDS = [
   "A0.0", "A0.1", "A0.2", "A1", "A2.1", "A2.2.1", "A2.2.2", "A2.2.3", "A2.2.4",
   "A2.2.5", "A2.2m", "A2.2c", "A2.3", "A2.4.1", "A2.4.2", "A2.4.3", "A2.4.4",
-  "A2.4.5", "A3", "A4", "A6", "A9", "A10", "A12", "A15", "P1", "W2", "W3", "W4",
-  "W5", "P2", "P3", "P4", "P4.1", "P5", "X1"
+  "A2.4.5", "A3", "A4", "A6", "A9", "A15", "W2", "W3", "W4", "W5", "P2", "P3",
+  "P4", "P5", "X1"
 ];
 
 /**
@@ -33,13 +33,11 @@ export function scheduleStartupWork(records) {
     if (!record || typeof record.id !== "string" || record.id.length === 0 || byId.has(record.id)) {
       return { finishSeconds: null, reason: "startup-work-identity-invalid", atoms: [] };
     }
-    if (record.actionId !== undefined) {
-      if (typeof record.actionId !== "string" || record.actionId.length === 0 ||
-        (actionId !== null && actionId !== record.actionId)) {
-        return { finishSeconds: null, reason: `startup-work-action-mismatch:${record.id}`, atoms: [] };
-      }
-      actionId ??= record.actionId;
+    if (typeof record.actionId !== "string" || record.actionId.length === 0 ||
+      (actionId !== null && actionId !== record.actionId)) {
+      return { finishSeconds: null, reason: `startup-work-action-mismatch:${record.id}`, atoms: [] };
     }
+    actionId ??= record.actionId;
     byId.set(record.id, record);
   }
 
@@ -124,21 +122,29 @@ export function scheduleStartupWork(records) {
         state: "no-remaining-work", finishSeconds: 0 });
       continue;
     }
+    const capture = service?.capture;
     if (!service || typeof service.key !== "string" || service.unit !== unit ||
-      !(Number.isFinite(service.rate) && service.rate > 0)) {
+      !(Number.isFinite(service.rate) && service.rate > 0) || typeof record.actionId !== "string" ||
+      capture?.validity !== "valid" || capture.actionId !== record.actionId ||
+      typeof capture.owner !== "string" || !capture.owner || !Number.isFinite(capture.clockEpoch) ||
+      !Number.isFinite(capture.startedAt) || !Number.isFinite(capture.completedAt) ||
+      capture.completedAt < capture.startedAt || !(Number.isFinite(capture.ageMs) && capture.ageMs >= 0)) {
       reason ??= `startup-work-service-unknown:${id}`;
       atoms.push({ id, ...(record.actionId ? { actionId: record.actionId } : {}), kind,
         state: "unknown-service", finishSeconds: null });
       continue;
     }
     const existingRate = serviceRates.get(service.key);
-    if (existingRate && (existingRate.unit !== unit || existingRate.rate !== service.rate)) {
+    const captureKey = JSON.stringify([capture.owner, capture.clockEpoch, capture.startedAt,
+      capture.completedAt, capture.ageMs, capture.actionId]);
+    if (existingRate && (existingRate.unit !== unit || existingRate.rate !== service.rate ||
+      existingRate.captureKey !== captureKey)) {
       reason ??= `startup-work-service-mismatch:${id}`;
       atoms.push({ id, ...(record.actionId ? { actionId: record.actionId } : {}), kind,
         state: "unknown-service", finishSeconds: null });
       continue;
     }
-    serviceRates.set(service.key, { unit, rate: service.rate });
+    serviceRates.set(service.key, { unit, rate: service.rate, captureKey });
 
     const dependencies = Array.isArray(record.dependsOn) ? record.dependsOn : [];
     let readyAt = 0;
@@ -167,7 +173,7 @@ export function scheduleStartupWork(records) {
     services.set(service.key, finishSeconds);
     finishes.set(id, finishSeconds);
     atoms.push({ id, ...(record.actionId ? { actionId: record.actionId } : {}), kind, state: "scheduled", startsAt, finishSeconds,
-      remainingWork: { amount, unit }, serviceKey: service.key });
+      remainingWork: { amount, unit }, serviceKey: service.key, serviceCapture: { ...capture } });
   }
 
   for (const record of records) {

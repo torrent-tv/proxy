@@ -37,6 +37,7 @@ import {
   toSeconds,
   ZERO
 } from "./media-time.js";
+import { scheduleStartupWork } from "./startup-work.js";
 
 // Match the media element's allowance around a seek target. A fragment's
 // timestamps can extend slightly beyond its nominal playlist boundary.
@@ -266,7 +267,7 @@ function mergeCaptureSummary(previous, capture) {
  * @param {Array<{ at: number, value: number }>} input.linkReadings - Bits/s.
  * @returns {object}
  */
-export function predictPlaybackReadiness(input = {}) {
+function predictPlaybackContinuity(input = {}) {
   const now = Number.isFinite(input.now) ? input.now : Date.now();
   // WHAT IS BEHIND THE VIEWER IS NOT PLANNED AGAIN. The forecast runs on every
   // progress poll of a waiting viewer, and it converted every piece of the film
@@ -941,6 +942,21 @@ export function predictPlaybackReadiness(input = {}) {
       return toSeconds(contiguousEnd(ranges, at));
     })) };
 
+}
+
+/**
+ * Combine the existing media-service calculation with the explicitly supplied
+ * atomic opening work. Opening work is diagnostic until its owners provide
+ * complete current work records; it never turns a missing atom into zero or a
+ * displayed first-frame ETA.
+ *
+ * @param {object} input
+ * @returns {object}
+ */
+export function predictPlaybackReadiness(input = {}) {
+  const readiness = predictPlaybackContinuity(input);
+  const startupWork = input.startupWork === undefined ? null : input.startupWork;
+  return { ...readiness, startupWork: scheduleStartupWork(startupWork) };
 }
 
 /** A playlist piece with an index and a positive span in seconds. */

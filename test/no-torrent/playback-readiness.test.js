@@ -62,6 +62,31 @@ test("does not create a completion point from absent or malformed probability su
   assert.equal(completionPointUnderRelativeLoss([{ completionSeconds: 4, probability: Number.NaN }]), null);
 });
 
+test("integrates atomic opening work without changing the existing continuity gate", () => {
+  const state = input({ startupWork: [
+    { id: "P2", actionId: "open-1", kind: "work", state: "complete" },
+    { id: "P3", actionId: "open-1", kind: "work", state: "pending", remainingWork: { amount: 4, unit: "plan-fields" },
+      service: { key: "proxy-main", unit: "plan-fields", rate: 2,
+        capture: { validity: "valid", actionId: "open-1", owner: "proxy-main", clockEpoch: 1,
+          startedAt: 100, completedAt: 200, ageMs: 0 } }, dependsOn: ["P2"] }
+  ] });
+  const withoutOpeningWork = predictPlaybackReadiness(input());
+  const withOpeningWork = predictPlaybackReadiness(state);
+
+  assert.equal(withOpeningWork.startupWork.finishSeconds, 2);
+  assert.equal(withOpeningWork.delaySeconds, withoutOpeningWork.delaySeconds);
+  assert.equal(withOpeningWork.waitEstimate, undefined);
+});
+
+test("missing opening work stays named unknown and never becomes a first-frame estimate", () => {
+  const forecast = predictPlaybackReadiness(input({ startupWork: null }));
+
+  assert.equal(forecast.startupWork.finishSeconds, null);
+  assert.equal(forecast.startupWork.reason, "startup-work-records-unavailable");
+  assert.ok(forecast.startupWork.unknownAtoms.includes("A2.4.3"));
+  assert.equal(forecast.waitEstimate, undefined);
+});
+
 test("a later prepared piece places the predicted origin on the same clock", () => {
   const state = input();
   state.tracks[0].segments[1].mediaRanges = servedMs([4042, 8042]);

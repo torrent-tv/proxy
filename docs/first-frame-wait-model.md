@@ -939,6 +939,103 @@ Shared browser work and service uncertainty remain outside the numeric
 first-frame estimate.
 See the audit for the target Mermaid graph and step-by-step Luna High plan.
 
+### 8.7 Action-scoped opening work, torrent-tv/meta#255
+
+The current continuity calculation already uses the measured source byte
+service, work-weighted encoder service, run-opening cost and link service for
+media jobs. Those facts remain owned by their existing source, encoder and
+viewer owners. They do not price the earlier opening work below, and the
+completed-wait observations do not supply substitutes. The pure
+`scheduleStartupWork` calculation accepts current atomic records and exposes
+their scheduled finishes in `startupWork`; the caller logs this diagnostic and
+removes it before the HTTP response. The displayed first-frame ETA remains
+unavailable.
+
+Each row states whether an entry is work, a dependency, an event, an enclosing
+span, or an external wait. A row classified as work needs a remaining quantity,
+its unit, a matching measured service rate with a valid owner clock epoch,
+capture interval, action identity and known age, plus actual predecessor IDs,
+before it can receive a numeric finish. Completion is zero remaining work only when
+the owning operation states completion. Skipped conditional work is marked
+`enabled: false`; a missing byte range, absent required index, retry or pending
+permission prompt is never inferred from elapsed whole-wait time.
+
+| ID | Classification | Owner | Current treatment and predecessor rule |
+|---|---|---|---|
+| A0 | Event | Browser | Original action boundary; no duration. |
+| A0.0 | Work | Browser | Address decode when an address contains encoded torrent bytes; otherwise inapplicable. |
+| A0.1 | Work | Browser | Read selected torrent file; completed read has zero remaining work. |
+| A0.2 | Work | Browser | Bencode parse and info-hash derivation, after A0.1. |
+| A1 | Work | Browser | Store parsed source details, after A0.2. |
+| A2 | Envelope | Browser | Joins early connection and current selection; never charged beside its child spans. |
+| A2.1 | Work | Browser/server | Choose-proxy request and response. |
+| A2.2 | Envelope | Browser/server | Signalling parent of A2.2.1–A2.2.5; not extra work. |
+| A2.2.1 | Work | Browser/server | WebSocket assignment, after A2.1. |
+| A2.2.2 | Work | Browser | Offer creation and send; overlaps ICE gathering. |
+| A2.2.3 | Work | Browser | Apply remote description, after the answer arrives. |
+| A2.2.4 | Work | Browser | Apply each arrived remote ICE candidate; per-candidate work. |
+| A2.2.5 | Work | Browser | Gather and send local ICE candidates; parallel with signalling and transport. |
+| A2.2m | Work | Browser | Open media data channel; parallel with A2.2c. |
+| A2.2c | Work | Browser | Open control channel; required for A2.J when separate control is enabled. |
+| A2.J | Dependency | Browser | Join the answer and required open channels; completion is their maximum. |
+| A2.3 | Work | Browser | Control-link ping after A2.J. |
+| A2.4 | Envelope | Browser | Conditional private-candidate retry; contains the permission branch and a second connection attempt. |
+| A2.4.1 | Work | Browser | Read local-network permission state. |
+| A2.4.2 | Work | Browser | Display permission explanation. |
+| A2.4.3 | External wait | Viewer/browser | Viewer click Allow; unbounded until an observed outcome. |
+| A2.4.4 | Work | Browser | Request browser permission after A2.4.3. |
+| A2.4.5 | External wait | Viewer/browser | Wait for viewer to change a denied permission and retry. |
+| A2.5 | Work | Browser | Background media-link probe; service measurement is already a link input, while probe work is not added to startup. |
+| A3 | Work | Browser/server | Choose proxy holding the source, after A2.3. |
+| A3r | Envelope | Browser | Conditional reconnect to a named proxy; its repeated connection children are charged once. |
+| A4 | Work | Browser/proxy | Register source after A3 or A3r; cached registration is zero only when the cache owner confirms it. |
+| A5 | Work | Browser/proxy | Early source estimate is background and not a playback predecessor. |
+| A6 | Work | Browser/proxy | File-list request; waits for P1 when the torrent is not ready. |
+| A7 | External wait | Viewer | File selection establishes a new action boundary; no reaction time is invented. |
+| A8 | Work | Browser/proxy | Warm-up registration; overlaps P1 and is not exclusive A8 work. |
+| A9 | Work | Browser/server/proxy | Filename-capacity request and response. |
+| A9r | Envelope | Browser | Conditional restricted-pool reconnect; not charged beside its connection children. |
+| A10 | Envelope | Browser/proxy | Transport acquisition plus source registration; split into child operations when records exist. |
+| A11 | Work | Browser/proxy/worker | Background stats polls; no separate startup duration. |
+| A12 | Envelope | Browser/proxy | Playback-plan request; its response waits for P3. |
+| A13 | Work | Browser/proxy | Fingerprint, metadata and sidecar requests are non-blocking after A12. |
+| A14 | Work | Browser/proxy | Report opening subtitle selection; C3 may depend on the resulting state. |
+| A15 | Work | Browser | Codec-capability decision after A12. |
+| A16 | Envelope | Browser | Conditional move to another proxy after `cannotServe`; a new attempt retains the original action. |
+| P1 | Envelope | Proxy/worker | Resolve torrent and await ready state; W1–W6 are children inside this wait, so P1 is not added to them. |
+| W1 | Envelope | Torrent worker | Add source and wait for a ready torrent; contains the worker stages below. |
+| W2 | Work | Torrent worker | Start peer discovery after source lookup; tracker/DHT setup is measured only on its worker clock. |
+| W3 | External wait | Torrent swarm | Wait for the first peer after discovery; no finite service is inferred from a completed connection. |
+| W4 | External wait | Torrent swarm | Receive magnet metadata after a peer arrives; skipped for a `.torrent` that already contains metadata. |
+| W5 | Work | Torrent worker | Verify stored pieces when the current add-source path requires verification. |
+| W6 | Event | Torrent worker | Publish the ready state after the required worker startup path. |
+| P2 | Work | Proxy | Read container declarations through the per-file R8 queue; missing bytes is a retryable dependency, not a parsed result. |
+| P3 | Work | Proxy | Build playback plan after required P2 facts; no enclosing HTTP duration is added. |
+| P4 | Work | Proxy | Repeated demand-map pass; service is the proxy main-thread lane, shared with its callers. |
+| P4.1 | Work | Proxy | Per-segment range-resolution substep within P4; its work and R8 read are not added again beside the enclosing pass. |
+| P5 | Conditional work | Proxy | Keyframe index only when the selected output copies video. A cached answered index is zero remaining work; a required absent index needs its own current read work and source-byte predecessor. |
+| X1 | Conditional work | Proxy | Container probe only when the container is unrecognized; skipped otherwise. |
+
+The pure work schedule handles the required clean cases explicitly. A completed
+cache entry contributes zero; missing source bytes require a byte quantity and
+the matching torrent service; a non-applicable index is skipped while a
+required absent index with no read service is named unknown. Each retry is a
+separate attempt ID under the same action ID. An active permission prompt is an
+external wait and returns no numeric finish. An enclosing envelope contributes
+no work beside its children. Service rates are accepted only when their unit
+matches the work quantity; jobs on one service queue in predecessor order and
+distinct services can overlap.
+
+Current release limitation: `ViewerRequests` has not yet received an
+action-scoped producer for these browser, proxy and worker records. It passes
+them as unavailable, so the internal log names the missing atom set and the
+full first-frame ETA stays absent. The existing readiness gate still uses its
+measured source, encoder and link services; the opening-work diagnostic does
+not alter that gate or claim it is a complete ETA. Adding future producers must
+preserve the ownership in #250/#254/#268, host-local clocks, actual branch
+conditions, and the distinction between matching per-operation evidence and
+completed whole waits.
+
 ## 9. Seek, soundtrack and quality change
 
 1. Player controls provide `media-seek-request`, which starts `S0` at the

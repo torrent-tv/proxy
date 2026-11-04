@@ -955,7 +955,8 @@ function predictPlaybackContinuity(input = {}) {
  */
 export function predictPlaybackReadiness(input = {}) {
   const readiness = predictPlaybackContinuity(input);
-  return { ...readiness, startupWork: scheduleStartupWork(input.startupWork ?? []) };
+  const startupWork = input.startupWork === undefined ? null : input.startupWork;
+  return { ...readiness, startupWork: scheduleStartupWork(startupWork) };
 }
 
 /** A playlist piece with an index and a positive span in seconds. */

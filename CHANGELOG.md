@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.57
 
 - **Chore**: Split the proxy composition root into tested owners (segment reading, source byte ranges, playback resolution, media read parameters, encoder input, start order and the rest of its facts) with no behaviour change.
 

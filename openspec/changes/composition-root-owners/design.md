@@ -1076,7 +1076,7 @@ export class SubtitleWalk {
     torrents,       // { knownTorrent(sourceKey), heldRangesOf(torrent, fileIndex), readHeldOf(torrent, fileIndex, start, end) }
     containers,     // { known(sourceKey, fileIndex), containerFor(params) }   — containerOrchestrator
     paramsFor,      // (request) => Promise<Params | null>                    — MediaReadParams#paramsFor (lazy arrow)
-    wantedSeconds,  // (sourceKey, fileIndex) => whatever viewerStartsOn(priority.mapFor(sourceKey, fileIndex)) returns; lazy arrow over the graph
+    wantedSeconds,  // (sourceKey, fileIndex) => number[]   — see "Return shape of wantedSeconds" below; lazy arrow over the graph
     publish,        // (entry) => void                     — onSubtitleCues?.(entry)
     log, warn,
   })
@@ -1085,6 +1085,20 @@ export class SubtitleWalk {
   pushFreshCues(sourceKey, fileIndex)               // the coalescing walk of server.js:470-491, same log lines
 }
 ```
+
+**Return shape of `wantedSeconds`** (read from `server.js:454`,
+`viewerStartsOn` at `PriorityMap.js:507`, `PriorityMap#viewerStarts` at
+`PriorityMap.js:421`, and the consumer `SubtitleCues.js:273-281`). The port is
+called with `(sourceKey, fileIndex)` and returns a plain `number[]`, never a
+promise and never `null`: the start, in whole film seconds and ascending, of
+every stretch of the file's priority map that is more urgent than the one
+before it and above `NOBODY_IS_COMING`, i.e. where each viewer's own need
+begins. It is `[]` when the file has no priority map (`mapFor` gave nothing,
+or the graph is not built yet: `outputParts.priority?.`) or nobody is
+watching. `SubtitleWalk` hands the source a zero-argument arrow
+`() => wantedSeconds(sourceKey, fileIndex)` as `server.js:454` does, and the
+consumer keeps only finite numbers and treats a non-array or a throw as `[]`.
+A fake is `(sourceKey, fileIndex) => [12, 600]`, or `() => []` for no viewer.
 
 `server.js` keeps `const subtitleWalk = new SubtitleWalk({…})` where
 `heldFileFor` was and reads `subtitleWalk.subtitles` and
@@ -1120,13 +1134,33 @@ the known torrent.
 
 ### E. Line budget
 
-From 1805 lines: #271-#275 remove about 520, #276 about 0, A about 140, B
-about 90, C about 105, D about 70 (each net of its wiring) — about 880. If
-`wc -l server.js` is still 900 or more after A-D, #280 moves next, in this
-order and only as far as needed: the chapters wiring (`server.js:405-421`)
-into `services/server/chapter-ports.js`, then the `onPiecesArrived` handler
-(`server.js:262-278`) into `services/server/pieces-arrived.js`. #280 records
-the final count.
+Measured on `1f85031` (`wc -l server.js` = 1805), the lines each move takes
+out of `server.js` before its wiring is put back:
+
+| Move | Blocks (`server.js`) | Lines taken out |
+|---|---|---|
+| A `PreparationReads` | `1381-1391` (11), `1442-1536` (95) | 106 |
+| A `forwarded-response-log` | `157-167` (11), `187-214` (28) | 39 |
+| A `WorkTagsReport` | `1635-1647` | 13 |
+| B `measure-host` | `286-382` | 97 |
+| C `SubtitleWalk` | `393-404` (12), `422-512` (91) | 103 |
+| D `torrent-pool-ports` | `1193-1204` (12), `1228-1260` (33), `1267-1268` (2), `1293-1307` (15), `1333-1348` (16) | 78 |
+| fall-back 1: chapters wiring | `405-421` | 17 |
+| fall-back 2: `onPiecesArrived` | `262-278` | 17 |
+
+`preparedAddresses`/`watchedAddresses` and `watchedFiles` live in
+`wire-outputs.js`, so they do not count. A-D take out 436 lines and put back
+about 30 lines of construction and spreads: a net of about 405. #271-#275 take
+out about 520 (their own estimates, to be re-measured when #276 is on main), so
+1805 - 520 - 405 = about 880. That is the move that brings `server.js` under
+900: A, B, C and D together, none of them optional. #276 changes about 0.
+Re-measure `wc -l server.js` after #276 and before starting A-D; the estimate
+for the two fall-back moves is 25 net lines together (34 out, about 9 of wiring
+back), so they alone cannot make up a miss larger than that: if the count after
+D is 900 or more, move the chapters wiring into
+`services/server/chapter-ports.js`, then the `onPiecesArrived` handler into
+`services/server/pieces-arrived.js`, in that order, and report the shortfall
+rather than close above 900. #280 records the final count.
 
 ### F. Tests
 

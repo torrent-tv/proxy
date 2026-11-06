@@ -43,14 +43,26 @@ before the code exists.
 - **#276** The output graph is built first; `wireOutputs` announces viewer
   changes on `viewerChanges`; `services/server/start-playback.js` subscribes
   the maps and the preparation and only then adopts what an earlier process
-  left. No `outputPartsReady`, no `let sourcePreparation`.
-- **#277** `test/no-torrent/composition-root-states-no-facts.test.js` refuses
+  left, at the place adoption has today. No `outputPartsReady`, no `let
+  sourcePreparation`.
+- **#280** (step 6.5, after #276, before #277): everything the #277 check would
+  refuse, and enough more that `server.js` is under 900 lines, moves to
+  owners, each with a test written first:
+  - `services/server/PreparationReads.js` (the source preparation `inspect`
+    port);
+  - `services/server/forwarded-response-log.js`;
+  - `services/media/WorkTagsReport.js`;
+  - `services/viewer/watched-addresses.js`;
+  - `watchedFiles` in `services/storage/processor-share.js`;
+  - `services/encode/measure-host.js` (the startup host measurements);
+  - `services/media/SubtitleWalk.js` (the subtitle walk wiring);
+  - `services/server/torrent-pool-ports.js` (the torrent-pool adapters of
+    the output graph).
+- **#277** (depends on #276 and #280)
+  `test/no-torrent/composition-root-states-no-facts.test.js` refuses
   collection constructors and closures longer than 40 lines in `server.js` and
-  `wire-outputs.js`. The code it would refuse today moves to owners:
-  `services/server/PreparationReads.js` (the source preparation `inspect` port),
-  `services/server/forwarded-response-log.js`, `services/media/WorkTagsReport.js`,
-  `services/viewer/watched-addresses.js` and `watchedFiles` in
-  `services/storage/processor-share.js`.
+  `wire-outputs.js`. It moves nothing: #280 has already moved what it would
+  refuse.
 - **#278** `AGENTS.md`, `docs/download-architecture.md` and
   `docs/encode-architecture.md` name each owner and its layer; the parent's
   criteria are measured and recorded on torrent-tv/meta#270.
@@ -79,6 +91,11 @@ None. No observable behaviour changes.
 - New: the modules named above and one test file per owner under
   `test/no-torrent/`; a temporary equivalence test for #273, removed after it
   is merged.
+- New with #280: `PreparationReads.js`, `forwarded-response-log.js`,
+  `torrent-pool-ports.js`, `WorkTagsReport.js`, `SubtitleWalk.js`,
+  `measure-host.js` and `watched-addresses.js`, each with its own test.
+- Startup order: unchanged, except that the viewer-change subscription now
+  exists before outputs left behind are adopted. Adoption keeps its place.
 - Changed: `server.js`, `services/server/wire-outputs.js` (`playedOutputsOf`,
   `viewerChanges`, `encodeInputResolution` option replaces `resolveEncodeInput`
   and `stretchCopied`, `onViewerChanged` option removed),
@@ -88,6 +105,9 @@ None. No observable behaviour changes.
   the assembler and imports components by design.
 - Commits are `refactor(proxy)`, `test(proxy)` and `docs(proxy)`; nothing is
   released.
+- The parent's "`server.js` < 900 lines" is in scope through #280 (see
+  design.md §6.5 and "Parent criteria").
+
 
 ## Non-goals
 
@@ -96,8 +116,3 @@ None. No observable behaviour changes.
 - No release, no `CHANGELOG.md` entry (no log line changes).
 - The wait-trace P4.1 schema (event fields, outcomes, method names) and the
   `download map passes … longest Nms` log line stay byte-for-byte as they are.
-- Not in scope: the startup host measurements (`server.js:283-382`), the
-  subtitle walk wiring (`server.js:393-512`) and the torrent-pool claimant
-  adapters passed to `wireOutputs`. Without moving them `server.js` stays at
-  about 1150-1200 lines, above the parent's "< 900" (see design.md, "Parent
-  criteria").

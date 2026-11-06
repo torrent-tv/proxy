@@ -21,9 +21,9 @@ after `lifecycle.observeUse()` and `encodeRuns.planEncodersSoon()`.
 ### Requirement: A viewer change refreshes the preparation and the maps
 
 `services/server/start-playback.js` SHALL export `startPlayback({
-outputParts, downloadMaps, sourcePreparation, onStateChanged, warn })` and
-import nothing. It SHALL subscribe one `"change"` listener that calls
-`sourcePreparation.refresh()`, then `downloadMaps.viewersChanged()`, then
+outputParts, downloadMaps, preparation, onStateChanged, warn })` and import
+nothing. It SHALL subscribe one `"change"` listener that calls
+`preparation().refresh()`, then `downloadMaps.viewersChanged()`, then
 `onStateChanged()`, awaiting none, and warns `download maps after a viewer
 change: ${message}` when the maps reject.
 
@@ -40,7 +40,14 @@ change: ${message}` when the maps reject.
 ### Requirement: Outputs left behind are adopted after the subscription
 
 `startPlayback` SHALL call `outputParts.lifecycle.adoptSegmentsLeftBehind()`
-only after it has subscribed, and return its result.
+only after it has subscribed, return its result, and not call `preparation`.
+The subscription before adoption is the only new ordering constraint:
+adoption keeps its place of today relative to everything else in `server.js`.
+
+#### Scenario: The preparation is read only on a change
+
+- **WHEN** `startPlayback` returns
+- **THEN** the `preparation` getter has not been called
 
 #### Scenario: Subscribed before adoption
 
@@ -75,8 +82,15 @@ start playback through `startPlayback`. It MUST NOT contain
 
 - **WHEN** `server.js` is read after #276
 - **THEN** `wireOutputs(` comes before `new PlaybackResolution(`, which comes
-  before `new DownloadMaps(`, which comes before `new SourcePreparation(`,
-  which comes before `startPlayback(`
+  before `new DownloadMaps(`, which comes before `startPlayback(`, which comes
+  before `new SourcePreparation(`
+
+#### Scenario: Adoption stays where it is today
+
+- **WHEN** `server.js` is read after #276
+- **THEN** `startPlayback(` stands where `adoptSegmentsLeftBehind()` stood:
+  after `startupCpuProfile(` and `startProcessorReport(`, and before
+  `new SourcePreparation(`
 
 #### Scenario: Few reaches into the graph
 
@@ -141,12 +155,31 @@ sourcePreparation` or `encodeMetadataRequests`, or more than 10 matches of
   `let sourcePreparation`, `encodeMetadataRequests` and the `outputParts.`
   count
 
+### Requirement: Step 6.5 leaves nothing for the check to refuse
+
+After #276 and before #277, #280 SHALL move verbatim, every free variable a
+port, each piece of `server.js` and `wire-outputs.js` the check would refuse,
+and enough more of `server.js` that it is under 900 lines. Each owner SHALL
+have its test written, and failing, before its move. #277 SHALL depend on
+#276 and #280 and move nothing itself.
+
+#### Scenario: The check passes after #280
+
+- **WHEN** `composition-root-states-no-facts.test.js` is run on the branch of
+  #280
+- **THEN** it passes
+
+#### Scenario: Under 900 lines
+
+- **WHEN** `wc -l server.js` is run at the end of #280
+- **THEN** it is below 900
+
 ### Requirement: The source preparation's reads have an owner
 
 The source preparation's `inspect` port and native map publication SHALL move
-verbatim to `services/server/PreparationReads.js`: `class PreparationReads`
-with `inspect(work, preparation)` and `publishNative(work, preparation)`, its
-free variables made the ports of design.md §7, importing nothing.
+to `services/server/PreparationReads.js`: `class PreparationReads` with
+`inspect(work, preparation)` and `publishNative(work, preparation)`, its ports
+those of design.md §6.5 A, importing nothing.
 
 #### Scenario: Preparation reads keep their answers
 
@@ -191,13 +224,11 @@ as `class WorkTagsReport` with `note(address, label, result)`.
   `result`
 - **THEN** `log` is called once, for the `result`
 
-### Requirement: The admission's addresses and the share's files have owners
+### Requirement: The admission's addresses have an owner
 
 The admission's prepared and watched addresses SHALL move to
-`services/viewer/watched-addresses.js` (`preparedAddresses(viewers, outputs)`,
-`watchedAddresses(viewers, outputs, finished)`), and the download share's
-grouping by file to `watchedFiles(outputs, { watched, lengthOf, encodeCostOf })`
-in `services/storage/processor-share.js`.
+`services/viewer/watched-addresses.js` as `preparedAddresses(viewers,
+outputs)` and `watchedAddresses(viewers, outputs, finished)`.
 
 #### Scenario: Watched addresses
 
@@ -205,11 +236,93 @@ in `services/storage/processor-share.js`.
   present viewer
 - **THEN** `watchedAddresses` holds that address once
 
+### Requirement: The download share's files have an owner
+
+The share's grouping by file SHALL move to `watchedFiles(outputs, { watched,
+lengthOf, encodeCostOf })` in `services/storage/processor-share.js`. The
+ports SHALL be arrows in `applyDownloadShare`: `watched` reads
+`viewers.forOutput(output).size`, `lengthOf` reads `file.lengthBytes` or
+`hostLoad.fileLengthByKey`, `encodeCostOf` reads
+`encodeCost.loadOfOutput(outputKey).costSec` for a signallable, unsuspended run.
+
 #### Scenario: Watched files
 
 - **WHEN** two watched outputs read one file and `encodeCostOf` returns 2 for
   each
 - **THEN** `watchedFiles` returns one file with `encodeCostSec: 4`
+
+#### Scenario: The first output's length
+
+- **WHEN** two watched outputs of one file give `lengthOf` 1000 and 2000 and
+  the file lasts 10 s
+- **THEN** its `bytesPerFilmSecond` is 100
+
+#### Scenario: An unwatched output
+
+- **WHEN** `watched` is false for the only output of a file
+- **THEN** that file is not returned and `lengthOf` is not asked of it
+
+### Requirement: The startup measurements have an owner
+
+`server.js:286-382` SHALL move to `measureHost({ ffmpegBin, logger,
+transcode, processorCores, measures })` in `services/encode/measure-host.js`,
+resolving `{ videoEncoder, decodeCostModel, contentionPenalties, calibration,
+copySpeedX, audioCalibration, startStopCost, tonemapSupported }` with the same
+awaits in the same order; `measures` defaults to the real functions.
+
+#### Scenario: The order of measures
+
+- **WHEN** `measureHost` runs with fake measures and `transcode: true`
+- **THEN** they are called in the order of `server.js:286-382`
+
+#### Scenario: Software fall-back
+
+- **WHEN** detection gives a device whose calibration has no modes
+- **THEN** `videoEncoder` is the software descriptor and the `calibration:`
+  warning is logged
+
+#### Scenario: Nothing to measure
+
+- **WHEN** `transcode` is false
+- **THEN** no measure is called and the results are `null`, `[]` and `false`
+  as before
+
+### Requirement: The subtitle walk has an owner
+
+`heldFileFor`, `pushFreshCues` and the `SubtitleOrchestrator` construction
+(`server.js:393-404`, `422-512`) SHALL move to `class SubtitleWalk` in
+`services/media/SubtitleWalk.js`, with the ports `torrents`, `containers`,
+`paramsFor`, `wantedSeconds`, `publish`, `log` and `warn`.
+
+#### Scenario: A held file
+
+- **WHEN** the fake pool knows a torrent whose file 0 has 1000 bytes
+- **THEN** `heldFileFor("src", 0)` gives `length: 1000` and reads through the
+  pool; an unknown torrent or an empty file gives `null`
+
+#### Scenario: One walk at a time
+
+- **WHEN** `pushFreshCues` is called three times while a walk runs
+- **THEN** one more walk runs after it, and no other
+
+### Requirement: The torrent-pool ports have an owner
+
+The torrent-pool adapters of the `wireOutputs` call SHALL move to
+`torrentPoolPorts({ torrentPool, sourceRegistry, wholeFilesRoot })` in
+`services/server/torrent-pool-ports.js`, importing nothing, and be spread into
+the `wireOutputs` options.
+
+#### Scenario: Missing claimants
+
+- **WHEN** the pool has no `allowSpillBytes`, `allowWholeFileBytes` or
+  `allowMemoryBytes`
+- **THEN** `spillDisk`, `wholeFiles` and `memoryClaimant` are `null`
+
+#### Scenario: Stats of an unknown source
+
+- **WHEN** `getSourceStats` is asked for a source with no record, or the pool
+  throws
+- **THEN** it resolves `null`
 
 ### Requirement: biome.json is unchanged
 
@@ -218,7 +331,7 @@ Every new file MUST pass its directory's lint rule with no new exception in
 
 #### Scenario: Biome unchanged
 
-- **WHEN** `git diff main -- biome.json` is run at the end of #277
+- **WHEN** `git diff main -- biome.json` is run at the end of #280 and of #277
 - **THEN** it is empty
 
 ### Requirement: The documents name every owner

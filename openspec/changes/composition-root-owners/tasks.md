@@ -1,7 +1,7 @@
 # Tasks: Give the logic in the proxy composition root its owners
 
 One sub-issue, one branch `refactor/ttv-<n>-<slug>`, one PR, in the order
-below. Tests come first and fail until the implementation lands; each
+below (6.5, #ttv-280, comes between 6 and 7). Tests come first and fail until the implementation lands; each
 "Tests first" group is its own `test(proxy): … #ttv-<n>` commit. Code is moved
 verbatim with ports in one `refactor(proxy): … #ttv-<n>` commit, and any
 cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
@@ -168,30 +168,49 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
 - [ ] 6.7 Check that `server.js` has no `outputPartsReady`, `let sourcePreparation`, `onViewerChanged` or `adoptSegmentsLeftBehind`. Count `outputParts.`, which must be at most 10.
 - [ ] 6.8 Run `npm test`.
 
-## 7. The check, and what it moves (#ttv-277)
+## 6.5 The rest of the facts and long closures out of server.js (#ttv-280)
+
+After #276, before #277 (torrent-tv/meta#280). Acceptance: the #277 check passes, `wc -l server.js` < 900, and each moved owner has a test written first.
+
+### Tests first
+
+- [ ] 6.5.1 Write `test/no-torrent/preparation-reads.test.js`: fake ports for each work kind the `inspect` closure handles, and `publishNative` (design §6.5 A).
+- [ ] 6.5.2 Write `test/no-torrent/forwarded-response-log.test.js`: a Fastify `app.inject` with no `listen`, checking the same `[forecast-http]` and `[http-response]` lines, and nothing logged for other requests.
+- [ ] 6.5.3 Write `test/no-torrent/work-tags-report.test.js` (once per file; not for `pending`/`needs-ranges`) and `test/no-torrent/watched-addresses.test.js`.
+- [ ] 6.5.4 Extend `test/no-torrent/processor-share.test.js` with `watchedFiles`: grouping by file, the first output's length, summed cost, unwatched outputs skipped.
+- [ ] 6.5.5 Write `test/no-torrent/measure-host.test.js` with fake `measures`: call order, software fall-back, nothing measured without `transcode`.
+- [ ] 6.5.6 Write `test/no-torrent/subtitle-walk.test.js` (held file, `null` cases, container built once, one walk at a time, `subtitle push` lines) and `test/no-torrent/torrent-pool-ports.test.js` (`null` claimants, `getSourceStats` `null` cases, `fetchWholeFile`, range reads).
+- [ ] 6.5.7 Check that every new test fails because its module is missing.
+
+### Implementation
+
+- [ ] 6.5.8 Move the source preparation `inspect` port (`server.js:1442-1536`) and `publishNative` (`:1381-1391`) to `services/server/PreparationReads.js`.
+- [ ] 6.5.9 Move the forwarded-response hooks and their `WeakMap` (`server.js:157-214`) to `services/server/forwarded-response-log.js`.
+- [ ] 6.5.10 Move `workTagsLogged` (`server.js:1635-1647`) to `services/media/WorkTagsReport.js`.
+- [ ] 6.5.11 Move `preparedAddresses` and `watchedAddresses` (`wire-outputs.js:1127-1156`) to `services/viewer/watched-addresses.js`.
+- [ ] 6.5.12 Move the `applyDownloadShare` grouping (`wire-outputs.js:777-788`) to `watchedFiles` in `services/storage/processor-share.js`, with the `watched`, `lengthOf` and `encodeCostOf` arrows of design §6.5 A.
+- [ ] 6.5.13 Move the startup measurements (`server.js:286-382`) to `measureHost` in `services/encode/measure-host.js`.
+- [ ] 6.5.14 Move `heldFileFor`, `pushFreshCues` and the `SubtitleOrchestrator` construction to `services/media/SubtitleWalk.js`.
+- [ ] 6.5.15 Move the torrent-pool adapters of the `wireOutputs` call to `torrentPoolPorts` in `services/server/torrent-pool-ports.js`.
+- [ ] 6.5.16 Run `wc -l server.js`. If it is 900 or more, continue with the further moves in design §6.5 E, each with its test first, until it is below 900. Record the count in the PR.
+- [ ] 6.5.17 Run the #277 check from a local copy of its test (not committed here) and confirm it passes. Leave `biome.json` unchanged. Run `npm test`.
+
+## 7. The check (#ttv-277)
+
+Depends on #276 and #280. It moves nothing.
 
 ### Tests first
 
 - [ ] 7.1 Write `test/no-torrent/composition-root-states-no-facts.test.js` (design §7, specs/composition-root). It reads both files as text, imports nothing from `services/`, and reports file, line and reason.
-- [ ] 7.2 Run it on the branch after #276. It must refuse exactly what design §7's table lists and nothing else. Record the list in the PR.
-- [ ] 7.3 Write tests for the pieces to be moved:
-  - `preparation-reads.test.js`;
-  - `forwarded-response-log.test.js` (Fastify `app.inject`, no `listen`);
-  - `work-tags-report.test.js`;
-  - `watched-addresses.test.js`;
-  - a `watchedFiles` case in `processor-share.test.js`.
+- [ ] 7.2 Run it against `3473cf3` locally: it must refuse what the "Today's code" scenario lists. Record the list in the PR.
 
 ### Implementation
 
-- [ ] 7.4 Move the source preparation `inspect` port (`server.js:1442-1536`) and `publishNative` (`:1381-1391`) to `services/server/PreparationReads.js`.
-- [ ] 7.5 Move the forwarded-response hooks and their `WeakMap` to `services/server/forwarded-response-log.js`.
-- [ ] 7.6 Move `workTagsLogged` to `services/media/WorkTagsReport.js`.
-- [ ] 7.7 Move `preparedAddresses` and `watchedAddresses` to `services/viewer/watched-addresses.js`.
-- [ ] 7.8 Move the `applyDownloadShare` grouping to `watchedFiles` in `services/storage/processor-share.js`.
-- [ ] 7.9 Prove the check once:
+- [ ] 7.3 Run it on `main` after #280. It must pass with no exception list.
+- [ ] 7.4 Prove the check once:
   - add `const kept = new Map();` to `server.js` and see the test fail, naming that line;
   - revert the change and paste the failure into the PR.
-- [ ] 7.10 Leave `biome.json` unchanged. The `wire-outputs.js` exception stays (design §7). Run `npm test`.
+- [ ] 7.5 Leave `biome.json` unchanged. The `wire-outputs.js` exception stays (design §6.5). Run `npm test`.
 
 ## 8. Documents and the parent's criteria (#ttv-278)
 
@@ -213,5 +232,5 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
   - the collection check;
   - CI.
   
-  Add the Home Assistant figures from 3.11, or a link to where they will be recorded. For "`server.js` < 900 lines", which is not met, open the follow-up issue named in design.md, "Parent criteria".
+  Add the Home Assistant figures from 3.11, or a link to where they will be recorded. "`server.js` < 900 lines" is met by #280; record the count.
 - [ ] 8.7 Archive this change: `openspec archive composition-root-owners`.

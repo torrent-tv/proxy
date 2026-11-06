@@ -21,6 +21,7 @@ import { probePackets } from "./services/media/probe-packets.js";
 import { SegmentInputTable } from "./services/viewer/segment-input-table.js";
 import { SourcePreparation, preparationInterval } from "./services/viewer/SourcePreparation.js";
 import { publishPlaybackBeforePreparationRefresh } from "./services/server/publish-playback-before-preparation-refresh.js";
+import { WorkTagsReport } from "./services/media/WorkTagsReport.js";
 import { MediaReadParams } from "./services/server/MediaReadParams.js";
 import { installForwardedResponseLog } from "./services/server/forwarded-response-log.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
@@ -64,7 +65,7 @@ import { KeyframeTables } from "./services/media/KeyframeTables.js";
 import { contentsOf } from "./services/torrent/Contents.js";
 import { coalescedZones, withoutRepeatedZones } from "./services/torrent/map-zones.js";
 import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
-import { containerOrchestrator, CONTAINER_HEAD_BYTES, describeWorkTags } from "./services/media/ContainerOrchestrator.js";
+import { containerOrchestrator, CONTAINER_HEAD_BYTES } from "./services/media/ContainerOrchestrator.js";
 import { readPlaybackDeclarations } from "./services/media/read-playback-declarations.js";
 import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
 import { nativeSourceMap, nativeOriginalSourceMap } from "./services/viewer/NativeSourceMap.js";
@@ -1064,18 +1065,14 @@ export async function startProxyServer({
   );
   // What the opened file states about the work, and its cover: read only from
   // the edges of the file, which opening it fetches anyway (meta#139).
-  const workTagsLogged = new Set();
+  const workTagsReport = new WorkTagsReport({ log: line => logger.info(line) });
   app.get("/api/sources/:sourceKey/files/:fileIndex/container-metadata", async (req, reply) =>
     handleApiSourceContainerMetadataGet(req, reply, {
       sourceRegistry,
       inspectWorkTags: async (address) => {
         const params = await mediaParams.paramsFor(address);
         const result = params ? await containerOrchestrator.inspect(params, "work-tags") : { kind: "pending" };
-        const key = `${address.sourceKey}:${address.fileIndex}`;
-        if (result.kind !== "pending" && result.kind !== "needs-ranges" && !workTagsLogged.has(key)) {
-          workTagsLogged.add(key);
-          logger.info(`container metadata "${params?.label ?? ""}": ${describeWorkTags(result)}`);
-        }
+        workTagsReport.note(address, params?.label ?? "", result);
         return result;
       }
     })

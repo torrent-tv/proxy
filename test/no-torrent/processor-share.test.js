@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { downloadShare } from "../../services/storage/processor-share.js";
+import { downloadShare, watchedFiles } from "../../services/storage/processor-share.js";
 
 // The AVI of the field check of 2026-10-11 on Home Assistant: 2 362 982 400
 // bytes over 8 136 s of film, re-encoded at 720x400 at 2.49x (the machine's
@@ -51,4 +51,35 @@ test("several films of several torrents advance at one speed, and the download n
   const starved = downloadShare({ ...machine, availableShare: 0.3, files: [avi, second] });
   assert.ok(starved.filmSpeed < 1);
   assert.equal(starved.bytesPerSecond, avi.bytesPerFilmSecond + second.bytesPerFilmSecond);
+});
+
+// watchedFiles: the grouping `applyDownloadShare` did inline (torrent-tv/meta#280).
+const output = (id, key, durationSeconds = 10) => ({ id, file: { key, durationSeconds } });
+
+test("watched outputs of one file are one file whose encode cost is their sum", () => {
+  const outputs = [output("a", "f"), output("b", "f")];
+  const files = watchedFiles(outputs, { watched: () => true, lengthOf: () => 1000, encodeCostOf: () => 2 });
+  assert.deepEqual(files, [{ bytesPerFilmSecond: 100, encodeCostSec: 4 }]);
+});
+
+test("the length of a file is that of its first watched output", () => {
+  const lengths = { a: 1000, b: 2000 };
+  const files = watchedFiles([output("a", "f"), output("b", "f")],
+    { watched: () => true, lengthOf: out => lengths[out.id], encodeCostOf: () => 0 });
+  assert.equal(files[0].bytesPerFilmSecond, 100);
+});
+
+test("an unwatched output does not make a file and its length is not asked", () => {
+  const asked = [];
+  const files = watchedFiles([output("a", "f")], { watched: () => false,
+    lengthOf: out => { asked.push(out.id); return 1; }, encodeCostOf: () => 1 });
+  assert.deepEqual(files, []);
+  assert.deepEqual(asked, []);
+});
+
+test("files come in the order first seen, and one with no finite positive length is dropped", () => {
+  const lengths = { a: 500, b: Number.NaN, c: 300 };
+  const files = watchedFiles([output("a", "f1"), output("b", "f2"), output("c", "f3", 3)],
+    { watched: () => true, lengthOf: out => lengths[out.id], encodeCostOf: out => (out.id === "a" ? 1 : 0) });
+  assert.deepEqual(files, [{ bytesPerFilmSecond: 50, encodeCostSec: 1 }, { bytesPerFilmSecond: 100, encodeCostSec: 0 }]);
 });

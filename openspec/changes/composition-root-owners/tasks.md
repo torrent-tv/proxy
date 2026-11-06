@@ -123,7 +123,7 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
 
 ### Tests first
 
-- [ ] 5.1 Write `test/no-torrent/encode-input-resolution.test.js` with the fakes from design §5. Cover:
+- [x] 5.1 Write `test/no-torrent/encode-input-resolution.test.js` with the fakes from design §5. Cover:
   - an undeclared interval;
   - file order;
   - `needs-source`;
@@ -135,14 +135,14 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
   - the selection index;
   - packets refused memory;
   - the soundtrack walk from the copy, including a soundtrack already carried, a partial `read`, and a failed walk.
-- [ ] 5.2 Check that it fails because the module is missing.
+- [x] 5.2 Check that it fails because the module is missing.
 
 ### Implementation
 
-- [ ] 5.3 Add `services/encode/EncodeInputResolution.js`, moving `server.js:1070-1191` verbatim with ports (design §5).
-- [ ] 5.4 In `wire-outputs.js`, replace the `resolveEncodeInput` and `stretchCopied` options with `encodeInputResolution`. No test passes the old options to `wireOutputs`: the helpers pass `encodeInputs`, and `input-copy-while-open.test.js` constructs `EncodeInputs` itself. Check this again with `grep -rn 'resolveEncodeInput' test`.
-- [ ] 5.5 In `server.js`, construct `encodeInputResolution` and pass it to `wireOutputs`.
-- [ ] 5.6 Run `npm test`. `encode-inputs*.test.js` and `segments-are-shared.test.js` must pass with unchanged assertions.
+- [x] 5.3 Add `services/encode/EncodeInputResolution.js`, moving `server.js:1070-1191` verbatim with ports (design §5).
+- [x] 5.4 In `wire-outputs.js`, replace the `resolveEncodeInput` and `stretchCopied` options with `encodeInputResolution`. No test passes the old options to `wireOutputs`: the helpers pass `encodeInputs`, and `input-copy-while-open.test.js` constructs `EncodeInputs` itself. Check this again with `grep -rn 'resolveEncodeInput' test`.
+- [x] 5.5 In `server.js`, construct `encodeInputResolution` and pass it to `wireOutputs`.
+- [x] 5.6 Run `npm test`. `encode-inputs*.test.js` and `segments-are-shared.test.js` must pass with unchanged assertions.
 
 ## 6. The output graph first; viewer changes as an event (#ttv-276)
 

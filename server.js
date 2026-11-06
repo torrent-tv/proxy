@@ -24,6 +24,7 @@ import { PlaybackProjection } from "./services/torrent/PlaybackProjection.js";
 import { SegmentInputTable } from "./services/viewer/segment-input-table.js";
 import { SourcePreparation, preparationInterval } from "./services/viewer/SourcePreparation.js";
 import { publishPlaybackBeforePreparationRefresh } from "./services/server/publish-playback-before-preparation-refresh.js";
+import { MediaReadParams } from "./services/server/MediaReadParams.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
 import { handleApiLinkProbeGet } from "./routes/api/link-probe/get.js";
@@ -416,7 +417,7 @@ export async function startProxyServer({
       const torrent = torrentPool.knownTorrent(sourceKey);
       const file = torrent?.files?.[fileIndex];
       if (!file) return torrent ? { invalid: true } : null;
-      return containerOver({ sourceKey, fileIndex });
+      return mediaParams.paramsFor({ sourceKey, fileIndex });
     }
   });
   const chapterController = new ChapterController({ sourceRegistry, chapters });
@@ -444,7 +445,7 @@ export async function startProxyServer({
         if (known !== undefined) {
           return known;
         }
-        const params = await containerOver({ sourceKey, fileIndex, tailBytes: CONTAINER_HEAD_BYTES });
+        const params = await mediaParams.paramsFor({ sourceKey, fileIndex, tailBytes: CONTAINER_HEAD_BYTES });
         return params ? containerOrchestrator.containerFor(params) : null;
       },
       heldRanges: () => torrentPool.heldRangesOf(torrent, fileIndex),
@@ -678,7 +679,7 @@ export async function startProxyServer({
         playbackProjections.get(fileKey)?.clear();
         return [];
       }
-      const params = await containerOver(map);
+      const params = await mediaParams.paramsFor(map);
       if (!params || !map.isCurrent()) return [];
       const tracks = await containerOrchestrator.inspect(params, "tracks");
       if (tracks.kind !== "result" || !map.isCurrent()) return [];
@@ -845,7 +846,7 @@ export async function startProxyServer({
             }
           }
           resolution.method = "container-index-fallback";
-          const intervalParams = await containerOver({ ...map, packetInterval: interval,
+          const intervalParams = await mediaParams.paramsFor({ ...map, packetInterval: interval,
             requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
             demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
           if (!map.isCurrent()) {
@@ -921,113 +922,38 @@ export async function startProxyServer({
     reviseBudget: () => { void outputParts.machineBudget.revise("memory", "media metadata").catch(error => logger.warn(`packet index budget: ${error.message}`)); },
     changed: () => { mediaReads.memoryChanged(); probeReads.memoryChanged(); outputParts.encodeInputs?.memoryChanged(); }
   });
-  const encodeMetadataRequests = new WeakMap();
-  const containerOver = async ({ sourceKey, fileIndex, requestId, packetInterval, demand, readPriority, signal }) => {
-    const record = sourceRegistry.get(sourceKey);
-    if (!record) {
-      return null;
-    }
-    const torrent = torrentPool.knownTorrent(sourceKey);
-    const file = torrent?.files?.[fileIndex];
-    if (!file || !(file.length > 0)) {
-      return null;
-    }
-    let metadataTracker = null;
-    let trackersForSignal = null;
-    const trackerKey = `${sourceKey}:${fileIndex}`;
-    if (readPriority?.requestId && signal) {
-      trackersForSignal = encodeMetadataRequests.get(signal);
-      if (!trackersForSignal) encodeMetadataRequests.set(signal, trackersForSignal = new Map());
-      metadataTracker = trackersForSignal.get(trackerKey);
-      if (!metadataTracker) {
-        metadataTracker = { statements: new Set(), abort: null };
-        metadataTracker.abort = () => {
-          for (const statement of metadataTracker.statements) {
-            void downloadMaps.withdrawMetadata(sourceKey, fileIndex, statement).catch(error =>
-              logger.warn(`encode input demand withdrawal failed: ${error.message}`));
-          }
-          metadataTracker.statements.clear();
-          trackersForSignal.delete(trackerKey);
-          if (trackersForSignal.size === 0) encodeMetadataRequests.delete(signal);
-        };
-        trackersForSignal.set(trackerKey, metadataTracker);
-        if (signal.aborted) metadataTracker.abort();
-        else signal.addEventListener("abort", metadataTracker.abort, { once: true });
-      }
-    }
-    const params = {
-      sourceKey,
-      fileIndex,
-      requestId,
-      signal,
-      packetInterval,
-      readPriority,
-      packetMemory: indexMemory.forFile(sourceKey, fileIndex),
-      downloadInterval: demand ? { from: demand.from, to: demand.to } : null,
-      readRange: (start, end) =>
-        torrentPool.readHeldOf(torrent, fileIndex, start, Math.min(end, file.length - 1)),
-      fileSize: file.length,
-      probe: (statement, onRecord) => probeReads.read({ sourceKey, fileIndex, statement: `ffprobe:${statement}`,
-        probe: ({ requestId, signal }) => {
-          const url = new URL("/media", outputParts.localBaseUrl);
-          url.searchParams.set("sourceKey", sourceKey);
-          url.searchParams.set("fileIndex", String(fileIndex));
-          url.searchParams.set("readId", requestId);
-          return probePackets({ url: url.toString(), statement, signal, onRecord });
-        } }),
-      label: String(file.name ?? ""),
-      fileOffset: file.offset,
-      onObserved: fields => {
-        const process = fields.statement === "keyframes" ? "P5"
-          : String(fields.statement).startsWith("ffprobe:") ? "X1" : "P2";
-        const details = { process, fileIndex, requestId, statement: fields.statement, cached: fields.cached,
-          result: fields.result, reason: fields.reason, ranges: fields.ranges,
-          queuedMs: fields.queuedMs, readMs: fields.readMs };
-        waitTrace.source(sourceKey, "process", { ...details, phase: "begin", at: fields.askedAt });
-        waitTrace.source(sourceKey, "process", { ...details, phase: "end", at: fields.endedAt,
-          startedAt: fields.askedAt, endedAt: fields.endedAt });
-      },
-      onTracks: (tracks) => contentsOf(torrent).noteVideo(fileIndex, tracks.some((track) => track.type === "video")),
-      onReadStart: () => ({ storage: mediaReads.revision(sourceKey, fileIndex), memory: mediaReads.memoryRevision(), demand: downloadMaps.epoch(sourceKey, fileIndex) }),
-      onReadResult: async (statement, result, revision) => {
-        if (revision.demand !== downloadMaps.epoch(sourceKey, fileIndex)) return;
-        if (demand && !downloadMaps.wantsInterval(sourceKey, fileIndex, demand)) return;
-        if (statement === "keyframes" && result.kind === "result") {
-          keyframeTables.learn(params, { times: result.value?.times ?? null, tolerance: result.value?.tolerance ?? 0,
-            format: containerOrchestrator.known(sourceKey, fileIndex)?.formatName ?? "unrecognised" });
-        }
-        const finished = mediaReads.record(params, statement, result, revision.storage, revision.memory);
-        if (statement === "chapters" && result.passive) await downloadMaps.withdrawMetadata(sourceKey, fileIndex, statement);
-        else {
-          const metadataStatement = requestId ? `${statement}:${requestId}` : statement;
-          if (metadataTracker && result.kind === "needs-ranges") metadataTracker.statements.add(metadataStatement);
-          if (metadataTracker && result.kind !== "needs-ranges") metadataTracker.statements.delete(metadataStatement);
-          await downloadMaps.metadata({ sourceKey, fileIndex, statement: metadataStatement, result,
-            ...(statement === "chapters" ? { priority: 1, urgent: false, deadlineAt: null } : {}),
-            ...(demand ? { priority: demand.priority, urgent: demand.urgent, deadlineAt: demand.deadlineAt, interval: demand, leadSeconds: demand.leadSeconds ?? 0 } : {}),
-            ...(readPriority?.requestId ? { priority: readPriority.rank, urgent: readPriority.urgent === true,
-              deadlineAt: Number.isFinite(readPriority.deadlineAt) ? readPriority.deadlineAt : Number.POSITIVE_INFINITY,
-              scope: "preparation" } : {}),
-            // Neither a viewer's interval nor an encode input asked for it: the
-            // file read itself, and that read is wanted while the file is.
-            ...(!demand && !readPriority?.requestId ? { owner: "file" } : {}) });
-        }
-        if (finished && result.kind === "result") {
-          void downloadMaps.refresh(sourceKey, fileIndex).catch(error =>
-            logger.warn(`download map source=${sourceKey} file=${fileIndex} metadata refresh failed: ${error?.message ?? error}`));
-        }
-      },
-      portionBytes: Number(torrent.pieceLength) > 0 ? Number(torrent.pieceLength) : undefined
-    };
-    return params;
-  };
+  const mediaParams = new MediaReadParams({
+    heldFile: (sourceKey, fileIndex) => {
+      if (!sourceRegistry.get(sourceKey)) return null;
+      const torrent = torrentPool.knownTorrent(sourceKey);
+      const file = torrent?.files?.[fileIndex];
+      if (!file || !(file.length > 0)) return null;
+      return { length: file.length, name: String(file.name ?? ""), offset: file.offset,
+        portionBytes: Number(torrent.pieceLength) > 0 ? Number(torrent.pieceLength) : undefined,
+        readHeld: (start, end) => torrentPool.readHeldOf(torrent, fileIndex, start, end),
+        noteVideo: hasVideo => contentsOf(torrent).noteVideo(fileIndex, hasVideo) };
+    },
+    packetMemory: (sourceKey, fileIndex) => indexMemory.forFile(sourceKey, fileIndex),
+    readProbe: request => probeReads.read(request),
+    probePackets,
+    baseUrl: () => outputParts.localBaseUrl,
+    observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
+    reads: { revision: (...a) => mediaReads.revision(...a), memoryRevision: () => mediaReads.memoryRevision(),
+      record: (...a) => mediaReads.record(...a) },
+    maps: { epoch: (...a) => downloadMaps.epoch(...a), wantsInterval: (...a) => downloadMaps.wantsInterval(...a),
+      metadata: entry => downloadMaps.metadata(entry), withdrawMetadata: (...a) => downloadMaps.withdrawMetadata(...a),
+      refresh: (...a) => downloadMaps.refresh(...a) },
+    learnKeyframes: (params, table) => keyframeTables.learn(params, table),
+    formatOf: (sourceKey, fileIndex) => containerOrchestrator.known(sourceKey, fileIndex)?.formatName ?? "unrecognised",
+    warn: line => logger.warn(line)
+  });
   const keyframeTables = new KeyframeTables({
     // Read by the same container that answers the track table and the media
     // info, from the same header, and now in the same thread as the session
     // that is waiting for it.
     readTable: async ({ sourceKey, fileIndex }) => {
       // Both edges: the Cues of a Matroska file are at the end.
-      const params = await containerOver({ sourceKey, fileIndex, tailBytes: CONTAINER_HEAD_BYTES });
+      const params = await mediaParams.paramsFor({ sourceKey, fileIndex, tailBytes: CONTAINER_HEAD_BYTES });
       if (!params) {
         return null;
       }
@@ -1085,7 +1011,7 @@ export async function startProxyServer({
       // reassembled packets otherwise.
       const files = [];
       for (const [fileIndex, choices] of selected) {
-        const params = await containerOver({ sourceKey: output.file.sourceKey, fileIndex,
+        const params = await mediaParams.paramsFor({ sourceKey: output.file.sourceKey, fileIndex,
           requestId: readPriority?.requestId, readPriority, signal });
         if (!params) return { kind: "needs-source" };
         if (isCurrent) params.isCurrent = isCurrent;
@@ -1319,7 +1245,7 @@ export async function startProxyServer({
     // bytes, and that read cost 8.1 s of every cold start (field 2026-09-03).
     getContainerMediaInfo: async ({ sourceKey, fileIndex }) => {
       try {
-        const params = await containerOver({ sourceKey, fileIndex });
+        const params = await mediaParams.paramsFor({ sourceKey, fileIndex });
         return params ? await containerOrchestrator.getMediaInfo(params) : null;
       } catch {
         return null;
@@ -1440,7 +1366,7 @@ export async function startProxyServer({
     readyChanged: (work, ready) => logger.info(`source urgent request=${work.requestId} viewer=${work.ownerId} ` +
       `source=${work.sourceKey} file=${work.fileIndex} inputReady=${ready}`),
     inspect: async work => {
-      const params = await containerOver(work);
+      const params = await mediaParams.paramsFor(work);
       if (!params) return { kind: "needs-source" };
       params.isCurrent = () => sourcePreparation.accepts(work);
       const originalContainer = work.statement === "packets" ? await containerOrchestrator.containerFor(params) : null;
@@ -1569,7 +1495,7 @@ export async function startProxyServer({
     torrentPool,
     subscribeSource: (sourceKey, fileIndex, listener) => mediaReads.subscribe(sourceKey, fileIndex, listener),
     readDeclarations: async ({ sourceKey, fileIndex }) => {
-      const params = await containerOver({ sourceKey, fileIndex });
+      const params = await mediaParams.paramsFor({ sourceKey, fileIndex });
       if (!params) return { kind: "terminal", reason: "source-forgotten" };
       return readPlaybackDeclarations(containerOrchestrator, params);
     },
@@ -1580,7 +1506,7 @@ export async function startProxyServer({
     // container on its behalf, in the other thread, with the answer carried
     // back over the channel.
     declaredTracksOf: async ({ sourceKey, fileIndex }) => {
-      const params = await containerOver({ sourceKey, fileIndex });
+      const params = await mediaParams.paramsFor({ sourceKey, fileIndex });
       return params ? await containerOrchestrator.getTracks(params) : [];
     },
     warmKeyframeIndex: (params) => keyframeTables.warm(params),
@@ -1625,7 +1551,7 @@ export async function startProxyServer({
     handleApiSourceFingerprintGet(req, reply, {
       sourceRegistry,
       inspectFingerprint: async (address) => {
-        const params = await containerOver(address);
+        const params = await mediaParams.paramsFor(address);
         return params ? containerOrchestrator.inspect(params, "fingerprint") : { kind: "pending" };
       }
     })
@@ -1637,7 +1563,7 @@ export async function startProxyServer({
     handleApiSourceContainerMetadataGet(req, reply, {
       sourceRegistry,
       inspectWorkTags: async (address) => {
-        const params = await containerOver(address);
+        const params = await mediaParams.paramsFor(address);
         const result = params ? await containerOrchestrator.inspect(params, "work-tags") : { kind: "pending" };
         const key = `${address.sourceKey}:${address.fileIndex}`;
         if (result.kind !== "pending" && result.kind !== "needs-ranges" && !workTagsLogged.has(key)) {
@@ -1652,7 +1578,7 @@ export async function startProxyServer({
     handleApiSourceCoverGet(req, reply, {
       sourceRegistry,
       inspectCover: async (address) => {
-        const params = await containerOver(address);
+        const params = await mediaParams.paramsFor(address);
         return params ? containerOrchestrator.inspect(params, "cover") : { kind: "pending" };
       }
     })

@@ -23,6 +23,7 @@ import { SourcePreparation, preparationInterval } from "./services/viewer/Source
 import { publishPlaybackBeforePreparationRefresh } from "./services/server/publish-playback-before-preparation-refresh.js";
 import { WorkTagsReport } from "./services/media/WorkTagsReport.js";
 import { MediaReadParams } from "./services/server/MediaReadParams.js";
+import { torrentPoolPorts } from "./services/server/torrent-pool-ports.js";
 import { installForwardedResponseLog } from "./services/server/forwarded-response-log.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
@@ -382,18 +383,7 @@ export async function startProxyServer({
     },
     encodeInputResolution,
     repriceEncodeDemand: demand => downloadMaps.repriceRequest(demand.requestId, demand),
-    readEncodeRanges: async (source, ranges, maxBytes) => {
-      const torrent = torrentPool.knownTorrent(source.sourceKey);
-      return torrent ? torrentPool.readHeldRangesOf(torrent, source.fileIndex, ranges, maxBytes) : null;
-    },
-    openEncodeWholeFile: source => torrentPool.acquireWholeFile(source),
-    // Which bytes of a file are downloaded whole now — what an original
-    // input's stretch may extend over. A snapshot: the copy that follows
-    // holds the pieces it reads, and refuses where one has gone since.
-    readEncodeHeldRanges: async (source) => {
-      const torrent = torrentPool.knownTorrent(source.sourceKey);
-      return torrent ? torrentPool.heldRangesOf(torrent, source.fileIndex) : [];
-    },
+    ...torrentPoolPorts({ torrentPool, sourceRegistry, wholeFilesRoot: completedFilesRoot() }),
     enabled: transcodeAudio,
     keyframeTables,
     ffmpegBin,
@@ -414,50 +404,12 @@ export async function startProxyServer({
     // CPU-bound transcode from a download-starved input before downscaling.
     // What every torrent here has moved, so the proxy can price its own
     // downloading, hashing and delivery against the machine (roadmap item 7).
-    // What the spilled pieces weigh on the torrent thread, and how to tell them
-    // their share of the disk. The owner of the disk is on this side, where the
-    // segments are; the pieces are on the other.
-    spillDisk: typeof torrentPool.allowSpillBytes === "function"
-      ? {
-          held: () => torrentPool.spilledBytes ?? 0,
-          allow: (bytes) => torrentPool.allowSpillBytes(bytes)
-        }
-      : null,
-    // Files downloaded whole, kept as files. They live on the torrent thread
-    // too, and until 2026-09-14 they had no bound of any kind — a 2.8 GB film
-    // on a host whose disk is often a 32 GB card.
-    wholeFiles: typeof torrentPool.allowWholeFileBytes === "function"
-      ? {
-          held: () => torrentPool.wholeFileBytes ?? 0,
-          required: () => torrentPool.wholeFileRequiredBytes ?? 0,
-          allow: (bytes) => torrentPool.allowWholeFileBytes(bytes),
-          root: completedFilesRoot()
-        }
-      : null,
-    // The pieces held IN memory, on the torrent thread. Told their share by the
-    // same owner that divides the disk: what does not fit here is spilled
-    // there, so the two cannot be divided apart.
-    memoryClaimant: typeof torrentPool.allowMemoryBytes === "function"
-      ? {
-          held: () => torrentPool.memoryClaim?.held ?? 0,
-          wanted: () => torrentPool.memoryClaim?.wanted ?? 0,
-          allow: (bytes) => torrentPool.allowMemoryBytes(bytes)
-        }
-      : null,
     diagnosticsRoot: stateDir || "",
     budgetPolicy,
-    getTorrentTotals: async () => {
-      if (typeof torrentPool.getTorrentTotals !== "function") {
-        return null;
-      }
-      return torrentPool.getTorrentTotals();
-    },
     // The priority map, on its way to the downloading. It lives in another
     // thread, so the map crosses the worker channel; what it does with it —
     // seconds into bytes, what to ask the swarm for, what to keep in memory —
     // is its own business.
-    setDownloadRate: (bytesPerSecond, because) => torrentPool.setDownloadRate?.(bytesPerSecond, because),
-    setSpeculativeHold: (held, because) => torrentPool.setSpeculativeHold?.(held, because),
     setPriorityMap: async ({ sourceKey, fileIndex, durationSeconds, zones }) => {
       const record = sourceRegistry.get(sourceKey);
       if (!record) {
@@ -482,21 +434,6 @@ export async function startProxyServer({
         logger.warn(`download map source=${sourceKey} file=${fileIndex} publication failed: ${error?.message ?? error}`);
       }
     },
-    getSourceStats: async (sourceKey, fileIndex, options) => {
-      const record = sourceRegistry.get(sourceKey);
-      if (!record) {
-        return null;
-      }
-      try {
-        const torrent = torrentPool.knownTorrent(sourceKey);
-        if (!torrent) return null;
-        // Awaited for the same reason as the stats route: this now crosses a
-        // thread boundary and returns a promise.
-        return await torrentPool.getFileStats(torrent, Number.isInteger(fileIndex) ? fileIndex : null, options);
-      } catch {
-        return null;
-      }
-    },
     // Reuse the media info the planner already probed for this file (same
     // ffmpeg scan) so createSession skips its own probe. Late-bound: invoked
     // only at session-create time, after playbackPlanner is initialised.
@@ -516,27 +453,6 @@ export async function startProxyServer({
       } catch {
         return null;
       }
-    },
-    // Pull one whole file onto the disk. Used for a soundtrack that ships beside
-    // the picture, once the encoder is as far ahead of the viewer as it is
-    // allowed to get — the one moment the swarm's capacity is demonstrably
-    // spare. A bounded read of the file's whole length, NOT `file.select()`:
-    // selecting a file alongside the readers' own windows is what made a seek
-    // wait 93 s while the swarm fetched 2.47 GB in file order (see
-    // `#syncSelections` in `torrent/torrent-pool.js`).
-    fetchWholeFile: async ({ sourceKey, fileIndex }) => {
-      const record = sourceRegistry.get(sourceKey);
-      if (!record) {
-        return;
-      }
-      const torrent = await torrentPool.getTorrent(record.sourceType, record.source);
-      // The same background fill the warm-up starts when a file is chosen, not a
-      // second way of doing it. It is guarded against running twice on one file,
-      // so the two triggers converge instead of putting two readers on the same
-      // soundtrack — and only one of them would have stood aside for the
-      // picture. This trigger remains for the session that never had a warm-up
-      // before it.
-      await torrentPool.fillFileInBackground?.(torrent, fileIndex);
     }
   });
   const { viewers, viewerRequests, outputs, encodeRuns, serving, renditions, encodeInputs, quality,

@@ -225,7 +225,7 @@ Depends on #276 and #280. It moves nothing.
   - the `services/` section: each new module with its layer.
 - [x] 8.3 Update `docs/download-architecture.md`: the segment → bytes projection is `PlaybackResolution` over `SegmentSourceRanges` and `segment-reading.js`; cover `playedOutputsOf` and the start order.
 - [x] 8.4 Update `docs/encode-architecture.md`: the encoder input is `EncodeInputResolution`.
-- [ ] 8.5 Add no `CHANGELOG.md` entry, unless a log line changed in #271-#277 after all; in that case add a `**Chore**` entry under `## Unreleased`.
+- [x] 8.5 Add a `**Chore**` entry under `## Unreleased` (needed so the manual patch release for the Home Assistant check has a changelog entry; no log line changed).
 - [ ] 8.6 Measure the parent's criteria on `main` and record them in a comment on torrent-tv/meta#270:
   - `wc -l server.js`;
   - the `outputParts.` count;

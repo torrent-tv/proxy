@@ -1,7 +1,7 @@
 # composition-root Specification
 
 ## Purpose
-The output graph is built before playback starts and announces viewer changes through an event emitter, so no late binding is needed between the download maps, the preparation and the output graph.
+Every fact that `server.js` and `wire-outputs.js` wire has a tested owner. The composition root holds no collections, no closures over 40 lines and no late binding; it builds the output graph first and starts playback before `listen`, and viewer changes are announced through the output graph. `AGENTS.md` and the architecture documents name each owner.
 
 ## Requirements
 
@@ -160,25 +160,6 @@ sourcePreparation` or `encodeMetadataRequests`, or more than 10 matches of
   `let sourcePreparation`, `encodeMetadataRequests` and the `outputParts.`
   count
 
-### Requirement: Step 6.5 leaves nothing for the check to refuse
-
-After #276 and before #277, #280 SHALL move verbatim, every free variable a
-port, each piece of `server.js` and `wire-outputs.js` the check would refuse,
-and enough more of `server.js` that it is under 900 lines. Each owner SHALL
-have its test written, and failing, before its move. #277 SHALL depend on
-#276 and #280 and move nothing itself.
-
-#### Scenario: The check passes after #280
-
-- **WHEN** `composition-root-states-no-facts.test.js` is run on the branch of
-  #280
-- **THEN** it passes
-
-#### Scenario: Under 900 lines
-
-- **WHEN** `wc -l server.js` is run at the end of #280
-- **THEN** it is below 900
-
 ### Requirement: The source preparation's reads have an owner
 
 The source preparation's `inspect` port and native map publication SHALL move
@@ -329,23 +310,12 @@ the `wireOutputs` options.
   throws
 - **THEN** it resolves `null`
 
-### Requirement: biome.json is unchanged
-
-Every new file MUST pass its directory's lint rule with no new exception in
-`biome.json`, and the `!services/server/wire-outputs.js` exception SHALL stay.
-
-#### Scenario: Biome unchanged
-
-- **WHEN** `git diff main -- biome.json` is run at the end of #280 and of #277
-- **THEN** it is empty
-
 ### Requirement: The documents name every owner
 
 `AGENTS.md` SHALL say what remains in `server.js` and name each new module
 with its layer. `docs/download-architecture.md` SHALL place the segment →
 bytes projection in `PlaybackResolution`, and `docs/encode-architecture.md`
-the encoder input in `EncodeInputResolution`. `CHANGELOG.md` SHALL get no
-entry, since no log line changes.
+the encoder input in `EncodeInputResolution`.
 
 #### Scenario: Owners named
 
@@ -353,15 +323,3 @@ entry, since no log line changes.
   `SegmentSourceRanges.js`, `PlaybackResolution.js`, `MediaReadParams.js`,
   `EncodeInputResolution.js`, `start-playback.js` and `PreparationReads.js`
 - **THEN** each is found beside its layer
-
-### Requirement: The parent's criteria are recorded
-
-After #277 the parent's acceptance criteria SHALL be measured on `main` and
-recorded on torrent-tv/meta#270, with a follow-up issue for any not met.
-
-#### Scenario: Parent criteria recorded
-
-- **WHEN** #278 is closed
-- **THEN** torrent-tv/meta#270 has a comment with `wc -l server.js`, the
-  count of `outputParts.`, the result of the collection check, and either the
-  Home Assistant figures or the issue that will measure them

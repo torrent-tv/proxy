@@ -11,7 +11,6 @@ import fastifyCors from "@fastify/cors";
 import fastifyHelmet from "@fastify/helmet";
 import getPort from "get-port";
 import { createRequire } from "node:module";
-import { performance } from "node:perf_hooks";
 import { SourceWaitTrace } from "./utils/wait-trace.js";
 import { handleHealthGet } from "./routes/health/get.js";
 import { handleMediaGet } from "./routes/media/get.js";
@@ -23,6 +22,7 @@ import { SegmentInputTable } from "./services/viewer/segment-input-table.js";
 import { SourcePreparation, preparationInterval } from "./services/viewer/SourcePreparation.js";
 import { publishPlaybackBeforePreparationRefresh } from "./services/server/publish-playback-before-preparation-refresh.js";
 import { MediaReadParams } from "./services/server/MediaReadParams.js";
+import { installForwardedResponseLog } from "./services/server/forwarded-response-log.js";
 import { handleHealthzGet } from "./routes/healthz/get.js";
 import { handleApiDeliverySinkGet } from "./routes/api/delivery-sink/get.js";
 import { handleApiLinkProbeGet } from "./routes/api/link-probe/get.js";
@@ -154,17 +154,8 @@ export async function startProxyServer({
     // receives torrent source payloads that may be arbitrarily large.
     bodyLimit: 256 * 1024 * 1024 // 256 MB
   });
-  const forwardedSessionResponseStarts = new WeakMap();
   const waitTrace = new SourceWaitTrace({ emit: value => logger.info(`[wait-trace] ${JSON.stringify(value)}`) });
   waitTrace.install(app);
-  const logForwardedSessionResponseStage = (stage, req) => {
-    const startedAt = forwardedSessionResponseStarts.get(req);
-    const requestId = req.headers["x-ttv-forwarded-request-id"];
-    if (startedAt === undefined || typeof requestId !== "string") return;
-    const at = performance.now();
-    logger.info(`[forecast-http] stage=${stage} requestId=${requestId} atMs=${at.toFixed(3)} ` +
-      `elapsedMs=${(at - startedAt).toFixed(3)}`);
-  };
 
   await app.register(fastifyHelmet, {
     // Proxy serves media to a different origin (registry UI), so CORP must allow cross-origin usage.
@@ -184,34 +175,7 @@ export async function startProxyServer({
   app.addHook("onRequest", async (_req, reply) => {
     reply.header("Access-Control-Allow-Private-Network", "true");
   });
-  app.addHook("onRequest", async (req, reply) => {
-    const requestId = req.headers["x-ttv-forwarded-request-id"];
-    if (typeof requestId !== "string" || req.method !== "POST" || req.url !== "/api/transcode-sessions") return;
-    const startedAt = performance.now();
-    forwardedSessionResponseStarts.set(req, startedAt);
-    logForwardedSessionResponseStage("onRequest", req);
-    reply.raw.once("finish", () => {
-      logForwardedSessionResponseStage("finish", req);
-      logger.info(`[http-response] requestId=${requestId} method=${req.method} url=${req.url} ` +
-        `responseMs=${(performance.now() - startedAt).toFixed(1)} status=${reply.statusCode} ` +
-        `contentLength=${reply.raw.getHeader("content-length") ?? "unknown"}`);
-    });
-    reply.raw.once("close", () => {
-      if (!reply.raw.writableFinished) {
-        logForwardedSessionResponseStage("close", req);
-        logger.warn(`[http-response] requestId=${requestId} method=${req.method} url=${req.url} ` +
-          `closedMs=${(performance.now() - startedAt).toFixed(1)} status=${reply.statusCode}`);
-      }
-    });
-  });
-  app.addHook("preSerialization", async (req, _reply, payload) => {
-    logForwardedSessionResponseStage("preSerialization", req);
-    return payload;
-  });
-  app.addHook("onSend", async (req, _reply, payload) => {
-    logForwardedSessionResponseStage("onSend", req);
-    return payload;
-  });
+  installForwardedResponseLog(app, { log: line => logger.info(line), warn: line => logger.warn(line) });
 
   const sourceRegistry = createSourceRegistry(200);
   // The torrent runs on its own thread. Profiling a live seek (2026-08-02)

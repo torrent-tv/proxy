@@ -11,14 +11,14 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
 
 ### Tests first
 
-- [ ] 1.1 Write `test/no-torrent/segment-reading.test.js` with the cases in specs/segment-reading: the first usable picture, picture index ignored, soundtrack by place, absent soundtrack, mode per track, `trackIds`/`modes` and key order in the interval, `endsWithSource` kept, input not changed.
-- [ ] 1.2 Run `node --test test/no-torrent/segment-reading.test.js` and check that it fails because the module is missing.
+- [x] 1.1 Write `test/no-torrent/segment-reading.test.js` with the cases in specs/segment-reading: the first usable picture, picture index ignored, soundtrack by place, absent soundtrack, mode per track, `trackIds`/`modes` and key order in the interval, `endsWithSource` kept, input not changed.
+- [x] 1.2 Run `node --test test/no-torrent/segment-reading.test.js` and check that it fails because the module is missing.
 
 ### Implementation
 
-- [ ] 1.3 Add `services/media/segment-reading.js` with `trackFor`, `selectTracks`, `readingInterval` and `segmentReading` (design §1).
-- [ ] 1.4 In `server.js`, replace the selection in `segmentRecordOf` (`:559-568`) with `segmentReading`, and the selection in `resolveEncodeInput` (`:1110-1124`) with `selectTracks` + `readingInterval`. Keep `selected-track-is-absent` before `media-info`, and keep the `selections` index verbatim.
-- [ ] 1.5 Replace the soundtrack lookup in `stretchCopied` (`:1168`) with `trackFor`.
+- [x] 1.3 Add `services/media/segment-reading.js` with `trackFor`, `selectTracks`, `readingInterval` and `segmentReading` (design §1).
+- [x] 1.4 In `server.js`, replace the selection in `segmentRecordOf` (`:559-568`) with `segmentReading`, and the selection in `resolveEncodeInput` (`:1110-1124`) with `selectTracks` + `readingInterval`. Keep `selected-track-is-absent` before `media-info`, and keep the `selections` index verbatim.
+- [x] 1.5 Replace the soundtrack lookup in `stretchCopied` (`:1168`) with `trackFor`.
 - [ ] 1.6 Check that no `firstUsable(`, `.type === choice.type` or `candidate.type === "audio"` is left in `server.js`. Then run `npm test`, which includes `biome lint` and the no-torrent check.
 
 ## 2. One resolver of a segment's source byte ranges (#ttv-272)

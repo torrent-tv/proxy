@@ -28,6 +28,21 @@ import the viewer layer, name a consumer id or hold a person. What crosses is a
 priority map: zones of segment numbers with a rank and a real time, and nobody's
 name on it.
 
+## Which input an encoder reads
+
+`services/encode/EncodeInputResolution.js` is the one owner of encoder input: for
+an output and a range of its segments, it decides which input a run reads (the
+original file, or packets when the file or its format does not allow the
+original), the tracks it selects and the interval it reads, and the soundtrack
+it walks for in a copy of the input. It is the encoder-side twin of the download side's
+`PlaybackResolution`: both use `services/media/segment-reading.js` for what a
+segment reads and `services/media/SegmentSourceRanges.js` for the source byte
+ranges, so the two sides cannot disagree about a segment. The module imports
+nothing. Files, track lists, the output catalog, `paramsFor` and the logs are
+constructor ports, which lets `test/no-torrent/encode-input-resolution.test.js`
+exercise it with fakes. It decides what an encoder reads, never whether one is
+placed: that stays with `EncodePlan`.
+
 **The rest of `services/encode/` names people, and holds none.** A step and a
 soundtrack are chosen, warmed and left per person, so `Renditions`,
 `QualityController` and `CushionReport` say WHOSE — by consumer id, which is a

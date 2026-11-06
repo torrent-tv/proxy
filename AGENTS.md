@@ -19,11 +19,20 @@ are recorded in `docs/browser-proxy-contract.md`.
 
 - `bin/cli.js` — CLI entry; resolves `ffmpegBin` (uses `--ffmpeg-bin` if given,
   else bundled ffmpeg-static, else PATH `ffmpeg`).
-- `server.js` — the composition root: creates Fastify, initializes process-wide
-  resources, calls `services/server/wire-outputs.js` for the output and encode
-  service graph, registers each route explicitly, and passes its dependencies.
-  `wire-outputs.js` is a subordinate assembler for that graph; it does not
-  create the HTTP server or register routes.
+- `server.js` — the composition root: creates Fastify and its hooks (through
+  `services/server/forwarded-response-log.js`), initializes process-wide
+  resources and the torrent pool, calls `measureHost`
+  (`services/encode/measure-host.js`) and `services/server/wire-outputs.js` for
+  the output and encode service graph, constructs every owner below with its
+  ports, runs the start order in `services/server/start-playback.js`, registers
+  each route explicitly, and calls `listen`. It holds no collection, no closure
+  over 40 lines and no algorithm. `test/no-torrent/composition-root-states-no-facts.test.js`
+  (the #277 check) refuses state, long closures and the `outputParts` count in
+  `server.js` and `wire-outputs.js`. `wire-outputs.js` is a subordinate
+  assembler for that graph; it does not create the HTTP server or register
+  routes. It exposes `parts.viewerChanges` (an event, emitted `"change"` when a
+  viewer changes) and `parts.playedOutputsOf(sourceKey, fileIndex)` (the outputs
+  a present viewer plays, with their timeline, choices and segment sizes).
 - `routes/<path>/<method>.js` — same convention as the server repo.
   - `routes/stream/get.js` — byte-range torrent file streaming (HTTP 206).
   - `routes/api/playback-plan/post.js` — codec/container/duration probe result.
@@ -222,6 +231,36 @@ are recorded in `docs/browser-proxy-contract.md`.
     (`storage/keep.js`); biome checks it. A held request waits for the store's
     publication event, as long as the requester states (`X-Hold-Ms`) and no
     longer than it stays.
+  - **Owners of the logic that left `server.js` (torrent-tv/meta#270), each with
+    its layer.** A module imports only what its layer's biome rule allows; the
+    rest is a constructor port.
+    - media layer, `media/`: `segment-reading.js` (what a segment reads:
+      `trackFor`, `selectTracks`, `readingInterval`, `segmentReading`; pure),
+      `SegmentSourceRanges.js` (the one resolver of a segment's source byte
+      ranges, forgotten with its source), `WorkTagsReport.js` (the work-tags
+      log, once per file), `SubtitleWalk.js` (the held file, the fresh cues,
+      the subtitle orchestrator's construction).
+    - torrent layer, `torrent/`: `PlaybackResolution.js` (the segment → bytes
+      projection of a played file, handed to `DownloadMaps` as
+      `resolvePlayback`; `clear` and `forget` are called by `server.js`). It reads `segment-reading.js` and `SegmentSourceRanges.js`
+      through ports and keeps the order of awaits and the `isCurrent()` checks.
+    - server layer, `server/`: `MediaReadParams.js` (the media read parameters,
+      `paramsFor`), `start-playback.js` (the start order: viewer changes are
+      subscribed before the adoption of segments left behind), `PreparationReads.js`
+      (the source preparation's `inspect` port and `publishNative`),
+      `forwarded-response-log.js` (the `[forecast-http]` and `[http-response]`
+      hooks, and nothing for other requests), `torrent-pool-ports.js` (the
+      torrent-pool adapters of the `wireOutputs` call).
+    - encode layer, `encode/`: `EncodeInputResolution.js` (which input an
+      encoder run reads: the original input or packets, and the soundtrack
+      walk; imports nothing), `measure-host.js` (the startup host measurements,
+      taken only when transcoding is on).
+    - viewer layer, `viewer/`: `watched-addresses.js` (prepared and watched
+      addresses, moved out of `wire-outputs.js`).
+    - storage, `storage/processor-share.js`: `watchedFiles` (the download share
+      grouped by file, the first output's length, the summed encode cost).
+    `test/no-torrent/` holds a test for each, written before it moved, and the
+    composition-root check above.
   - `encode/` beside the orchestrator: `OutputOpening` (which output answers a
     request for a file, made if it is not here yet — without knowing who asked),
     `EncodeRuns` (build a run where the plan places it, follow it, account for

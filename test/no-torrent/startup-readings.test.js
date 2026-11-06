@@ -66,7 +66,7 @@ test("nothing about the machine is asked only of a software encoder", () => {
   // Decoding and contention are properties of the host. Asked only where the
   // encoder was software, a host with a GPU had neither, and the quality offer
   // could not price a re-encode nor a second process.
-  const server = readFileSync(path.join(HERE, "..", "..", "server.js"), "utf8");
+  const server = readFileSync(path.join(HERE, "..", "..", "services", "encode", "measure-host.js"), "utf8");
   for (const call of ["benchmarkDecodeCost", "benchmarkContention"]) {
     const at = server.indexOf(call);
     assert.ok(at > 0, `${call} is not called at startup at all`);
@@ -80,7 +80,7 @@ test("nothing about the machine is asked only of a software encoder", () => {
 });
 
 test("the calibration is given the encoder that will actually run, and software beside it", () => {
-  const server = readFileSync(path.join(HERE, "..", "..", "server.js"), "utf8");
+  const server = readFileSync(path.join(HERE, "..", "..", "services", "encode", "measure-host.js"), "utf8");
   assert.match(
     server,
     /calibrateEncoder\(\{[^}]*encoder: videoEncoder/,
@@ -94,8 +94,9 @@ test("the calibration is given the encoder that will actually run, and software 
 });
 
 test("a start and a stop are measured before any viewer, and reach the plan", () => {
+  const measured = readFileSync(path.join(HERE, "..", "..", "services", "encode", "measure-host.js"), "utf8");
   const server = readFileSync(path.join(HERE, "..", "..", "server.js"), "utf8");
-  assert.match(server, /await measureStartAndStop\(/, "nothing measures a start at startup");
+  assert.match(measured, /await measureStartAndStop\(/, "nothing measures a start at startup");
   assert.match(server, /\n    startStopCost,/, "the reading never reaches the wiring of the encoding");
 
   const manager = readFileSync(path.join(HERE, "..", "..", "services", "server", "wire-outputs.js"), "utf8");

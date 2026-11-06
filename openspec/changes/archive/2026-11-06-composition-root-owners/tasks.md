@@ -19,7 +19,7 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
 - [x] 1.3 Add `services/media/segment-reading.js` with `trackFor`, `selectTracks`, `readingInterval` and `segmentReading` (design §1).
 - [x] 1.4 In `server.js`, replace the selection in `segmentRecordOf` (`:559-568`) with `segmentReading`, and the selection in `resolveEncodeInput` (`:1110-1124`) with `selectTracks` + `readingInterval`. Keep `selected-track-is-absent` before `media-info`, and keep the `selections` index verbatim.
 - [x] 1.5 Replace the soundtrack lookup in `stretchCopied` (`:1168`) with `trackFor`.
-- [ ] 1.6 Check that no `firstUsable(`, `.type === choice.type` or `candidate.type === "audio"` is left in `server.js`. Then run `npm test`, which includes `biome lint` and the no-torrent check.
+- [x] 1.6 Check that no `firstUsable(`, `.type === choice.type` or `candidate.type === "audio"` is left in `server.js`. Then run `npm test`, which includes `biome lint` and the no-torrent check.
 
 ## 2. One resolver of a segment's source byte ranges (#ttv-272)
 
@@ -44,7 +44,7 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
 
   Then remove `segmentSourceRanges` and its loop in `onSourceForgotten` in favour of `sourceRanges.forget(sourceKey)`.
 - [x] 2.5 Check that every P4.1 `method` and `outcome` string is still produced at the same point. Diff the strings in the old and new code.
-- [ ] 2.6 Run `npm test`.
+- [x] 2.6 Run `npm test`.
 
 ## 3. The download-map pass (#ttv-273)
 
@@ -86,7 +86,7 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
   - in `onSourceForgotten`, call `resolution.forget`;
   - keep `segmentInputs` in `server.js`.
 - [x] 3.9 Check that `server.js` has none of `playbackProjections`, `segmentReadings`, `choicesKeys`, `checkedGrids`, `madeRates`, `passCosts` or `refreshAfterTable`.
-- [ ] 3.10 Run `npm test`. The equivalence test must pass on all three files.
+- [x] 3.10 Run `npm test`. The equivalence test must pass on all three files.
 - [ ] 3.11 Once a build containing #273 runs on the Home Assistant host, the field agent records the baseline and after figures (two-hour AVI and MKV, seek, audio switch) on the issue, read from the `/data` logs:
   - `download map passes … longest Nms`;
   - P4.1 outcomes;
@@ -97,7 +97,7 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
 
 ### Tests first
 
-- [ ] 4.1 Write `test/no-torrent/media-read-params.test.js` with the fakes from design §4. Cover:
+- [x] 4.1 Write `test/no-torrent/media-read-params.test.js` with the fakes from design §4. Cover:
   - no file;
   - the parameter fields and their order, and the cut read;
   - the probe URL, `onObserved` (P5/X1/P2), `onTracks` and `onReadStart`;
@@ -111,13 +111,13 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
   - one tracker per signal and file;
   - an aborted signal;
   - no tracker without a request id.
-- [ ] 4.2 Check that it fails because the module is missing.
+- [x] 4.2 Check that it fails because the module is missing.
 
 ### Implementation
 
-- [ ] 4.3 Add `services/server/MediaReadParams.js`, moving `server.js:924-1023` verbatim with ports (design §4).
-- [ ] 4.4 In `server.js`, construct `mediaParams` where `containerOver` was. Give it lazy `maps` and `baseUrl` arrows, and replace every `containerOver(x)` with `mediaParams.paramsFor(x)`. This includes the `paramsFor` port of `PlaybackResolution` and the preparation, chapters and work-tags call sites.
-- [ ] 4.5 Check that no `encodeMetadataRequests` or `containerOver` is left in `server.js`. Run `npm test`.
+- [x] 4.3 Add `services/server/MediaReadParams.js`, moving `server.js:924-1023` verbatim with ports (design §4).
+- [x] 4.4 In `server.js`, construct `mediaParams` where `containerOver` was. Give it lazy `maps` and `baseUrl` arrows, and replace every `containerOver(x)` with `mediaParams.paramsFor(x)`. This includes the `paramsFor` port of `PlaybackResolution` and the preparation, chapters and work-tags call sites.
+- [x] 4.5 Check that no `encodeMetadataRequests` or `containerOver` is left in `server.js`. Run `npm test`.
 
 ## 5. Encoder input (#ttv-275)
 
@@ -166,7 +166,7 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
   - then `startPlayback(…)`;
   - drop `?.` on `sourcePreparation`.
 - [x] 6.7 Check that `server.js` has no `outputPartsReady`, `let sourcePreparation`, `onViewerChanged` or `adoptSegmentsLeftBehind`. Count `outputParts.`, which must be at most 10.
-- [ ] 6.8 Run `npm test`.
+- [x] 6.8 Run `npm test`.
 
 ## 6.5 The rest of the facts and long closures out of server.js (#ttv-280)
 
@@ -174,26 +174,26 @@ After #276, before #277 (torrent-tv/meta#280). Acceptance: the #277 check passes
 
 ### Tests first
 
-- [ ] 6.5.1 Write `test/no-torrent/preparation-reads.test.js`: fake ports for each work kind the `inspect` closure handles, and `publishNative` (design §6.5 A).
-- [ ] 6.5.2 Write `test/no-torrent/forwarded-response-log.test.js`: a Fastify `app.inject` with no `listen`, checking the same `[forecast-http]` and `[http-response]` lines, and nothing logged for other requests.
-- [ ] 6.5.3 Write `test/no-torrent/work-tags-report.test.js` (once per file; not for `pending`/`needs-ranges`) and `test/no-torrent/watched-addresses.test.js`.
-- [ ] 6.5.4 Extend `test/no-torrent/processor-share.test.js` with `watchedFiles`: grouping by file, the first output's length, summed cost, unwatched outputs skipped.
-- [ ] 6.5.5 Write `test/no-torrent/measure-host.test.js` with fake `measures`: call order, software fall-back, nothing measured without `transcode`.
-- [ ] 6.5.6 Write `test/no-torrent/subtitle-walk.test.js` (held file, `null` cases, container built once, one walk at a time, `subtitle push` lines) and `test/no-torrent/torrent-pool-ports.test.js` (`null` claimants, `getSourceStats` `null` cases, `fetchWholeFile`, range reads).
-- [ ] 6.5.7 Check that every new test fails because its module is missing.
+- [x] 6.5.1 Write `test/no-torrent/preparation-reads.test.js`: fake ports for each work kind the `inspect` closure handles, and `publishNative` (design §6.5 A).
+- [x] 6.5.2 Write `test/no-torrent/forwarded-response-log.test.js`: a Fastify `app.inject` with no `listen`, checking the same `[forecast-http]` and `[http-response]` lines, and nothing logged for other requests.
+- [x] 6.5.3 Write `test/no-torrent/work-tags-report.test.js` (once per file; not for `pending`/`needs-ranges`) and `test/no-torrent/watched-addresses.test.js`.
+- [x] 6.5.4 Extend `test/no-torrent/processor-share.test.js` with `watchedFiles`: grouping by file, the first output's length, summed cost, unwatched outputs skipped.
+- [x] 6.5.5 Write `test/no-torrent/measure-host.test.js` with fake `measures`: call order, software fall-back, nothing measured without `transcode`.
+- [x] 6.5.6 Write `test/no-torrent/subtitle-walk.test.js` (held file, `null` cases, container built once, one walk at a time, `subtitle push` lines) and `test/no-torrent/torrent-pool-ports.test.js` (`null` claimants, `getSourceStats` `null` cases, `fetchWholeFile`, range reads).
+- [x] 6.5.7 Check that every new test fails because its module is missing.
 
 ### Implementation
 
-- [ ] 6.5.8 Move the source preparation `inspect` port (`server.js:1442-1536`) and `publishNative` (`:1381-1391`) to `services/server/PreparationReads.js`.
-- [ ] 6.5.9 Move the forwarded-response hooks and their `WeakMap` (`server.js:157-214`) to `services/server/forwarded-response-log.js`.
-- [ ] 6.5.10 Move `workTagsLogged` (`server.js:1635-1647`) to `services/media/WorkTagsReport.js`.
-- [ ] 6.5.11 Move `preparedAddresses` and `watchedAddresses` (`wire-outputs.js:1127-1156`) to `services/viewer/watched-addresses.js`.
-- [ ] 6.5.12 Move the `applyDownloadShare` grouping (`wire-outputs.js:777-788`) to `watchedFiles` in `services/storage/processor-share.js`, with the `watched`, `lengthOf` and `encodeCostOf` arrows of design §6.5 A.
-- [ ] 6.5.13 Move the startup measurements (`server.js:286-382`) to `measureHost` in `services/encode/measure-host.js`.
-- [ ] 6.5.14 Move `heldFileFor`, `pushFreshCues` and the `SubtitleOrchestrator` construction to `services/media/SubtitleWalk.js`.
-- [ ] 6.5.15 Move the torrent-pool adapters of the `wireOutputs` call to `torrentPoolPorts` in `services/server/torrent-pool-ports.js`.
-- [ ] 6.5.16 Run `wc -l server.js`. If it is 900 or more, continue with the further moves in design §6.5 E, each with its test first, until it is below 900. Record the count in the PR.
-- [ ] 6.5.17 Run the #277 check from a local copy of its test (not committed here) and confirm it passes. Leave `biome.json` unchanged. Run `npm test`.
+- [x] 6.5.8 Move the source preparation `inspect` port (`server.js:1442-1536`) and `publishNative` (`:1381-1391`) to `services/server/PreparationReads.js`.
+- [x] 6.5.9 Move the forwarded-response hooks and their `WeakMap` (`server.js:157-214`) to `services/server/forwarded-response-log.js`.
+- [x] 6.5.10 Move `workTagsLogged` (`server.js:1635-1647`) to `services/media/WorkTagsReport.js`.
+- [x] 6.5.11 Move `preparedAddresses` and `watchedAddresses` (`wire-outputs.js:1127-1156`) to `services/viewer/watched-addresses.js`.
+- [x] 6.5.12 Move the `applyDownloadShare` grouping (`wire-outputs.js:777-788`) to `watchedFiles` in `services/storage/processor-share.js`, with the `watched`, `lengthOf` and `encodeCostOf` arrows of design §6.5 A.
+- [x] 6.5.13 Move the startup measurements (`server.js:286-382`) to `measureHost` in `services/encode/measure-host.js`.
+- [x] 6.5.14 Move `heldFileFor`, `pushFreshCues` and the `SubtitleOrchestrator` construction to `services/media/SubtitleWalk.js`.
+- [x] 6.5.15 Move the torrent-pool adapters of the `wireOutputs` call to `torrentPoolPorts` in `services/server/torrent-pool-ports.js`.
+- [x] 6.5.16 Run `wc -l server.js`. If it is 900 or more, continue with the further moves in design §6.5 E, each with its test first, until it is below 900. Record the count in the PR.
+- [x] 6.5.17 Run the #277 check from a local copy of its test (not committed here) and confirm it passes. Leave `biome.json` unchanged. Run `npm test`.
 
 ## 7. The check (#ttv-277)
 
@@ -201,16 +201,16 @@ Depends on #276 and #280. It moves nothing.
 
 ### Tests first
 
-- [ ] 7.1 Write `test/no-torrent/composition-root-states-no-facts.test.js` (design §7, specs/composition-root). It reads both files as text, imports nothing from `services/`, and reports file, line and reason.
-- [ ] 7.2 Run it against `3473cf3` locally: it must refuse what the "Today's code" scenario lists. Record the list in the PR.
+- [x] 7.1 Write `test/no-torrent/composition-root-states-no-facts.test.js` (design §7, specs/composition-root). It reads both files as text, imports nothing from `services/`, and reports file, line and reason.
+- [x] 7.2 Run it against `3473cf3` locally: it must refuse what the "Today's code" scenario lists. Record the list in the PR.
 
 ### Implementation
 
-- [ ] 7.3 Run it on `main` after #280. It must pass with no exception list.
-- [ ] 7.4 Prove the check once:
+- [x] 7.3 Run it on `main` after #280. It must pass with no exception list.
+- [x] 7.4 Prove the check once:
   - add `const kept = new Map();` to `server.js` and see the test fail, naming that line;
   - revert the change and paste the failure into the PR.
-- [ ] 7.5 Leave `biome.json` unchanged. The `wire-outputs.js` exception stays (design §6.5). Run `npm test`.
+- [x] 7.5 Leave `biome.json` unchanged. The `wire-outputs.js` exception stays (design §6.5). Run `npm test`.
 
 ## 8. Documents and the parent's criteria (#ttv-278)
 

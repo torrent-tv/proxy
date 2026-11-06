@@ -1,7 +1,7 @@
 # composition-root Specification
 
 ## Purpose
-TBD - created by archiving change composition-root-owners. Update Purpose after archive.
+The output graph is built before playback starts and announces viewer changes through an event emitter, so no late binding is needed between the download maps, the preparation and the output graph.
 
 ## Requirements
 

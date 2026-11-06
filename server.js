@@ -22,6 +22,7 @@ import { SegmentInputTable } from "./services/viewer/segment-input-table.js";
 import { SourcePreparation, preparationInterval } from "./services/viewer/SourcePreparation.js";
 import { publishPlaybackBeforePreparationRefresh } from "./services/server/publish-playback-before-preparation-refresh.js";
 import { WorkTagsReport } from "./services/media/WorkTagsReport.js";
+import { PreparationReads } from "./services/server/PreparationReads.js";
 import { MediaReadParams } from "./services/server/MediaReadParams.js";
 import { torrentPoolPorts } from "./services/server/torrent-pool-ports.js";
 import { installForwardedResponseLog } from "./services/server/forwarded-response-log.js";
@@ -528,17 +529,20 @@ export async function startProxyServer({
   // the one piece per output that was being written when the process died.
   startPlayback({ outputParts, downloadMaps, preparation: () => sourcePreparation, onStateChanged,
     warn: line => logger.warn(line) });
-  const publishNative = async work => {
-    if (!work.nativeInput || !sourcePreparation.accepts(work)) return Promise.resolve();
-    const watching = viewers.forSource(work.sourceKey)
-      .filter(viewer => viewer.source.selectedFileIndex === work.fileIndex && viewer.outputs.size === 0);
-    const convert = work.nativeInput.container ? nativeOriginalSourceMap : nativeSourceMap;
-    const zones = await convert({ ...work.nativeInput, viewers: watching,
-      allowanceSeconds: segmentDurationSec,
-      urgentReadyFor: viewer => sourcePreparation.urgentReadyFor(viewer) });
-    if (!sourcePreparation.accepts(work)) return;
-    return downloadMaps.native({ sourceKey: work.sourceKey, fileIndex: work.fileIndex, zones });
-  };
+  const preparationReads = new PreparationReads({
+    paramsFor: request => mediaParams.paramsFor(request),
+    containers: containerOrchestrator,
+    subtitles: subtitleWalk.subtitles,
+    fileLengthOf: (sourceKey, fileIndex) => torrentPool.knownTorrent(sourceKey)?.files?.[fileIndex]?.length,
+    viewersOf: sourceKey => viewers.forSource(sourceKey),
+    segmentSeconds: segmentDurationSec,
+    preparationInterval,
+    segmentInputs: input => new SegmentInputs(input),
+    nativeMaps: { packets: input => nativeSourceMap(input), original: input => nativeOriginalSourceMap(input) },
+    maps: downloadMaps,
+    record: (...args) => mediaReads.record(...args),
+    planEncodersSoon: () => encodeRuns.planEncodersSoon()
+  });
   const sourcePreparation = new SourcePreparation({
     viewers,
     candidatesFor: async sourceKey => {
@@ -589,101 +593,7 @@ export async function startProxyServer({
     playbackAppliedFor: (sourceKey, fileIndex) => downloadMaps.hasAppliedPlayback(sourceKey, fileIndex),
     readyChanged: (work, ready) => logger.info(`source urgent request=${work.requestId} viewer=${work.ownerId} ` +
       `source=${work.sourceKey} file=${work.fileIndex} inputReady=${ready}`),
-    inspect: async work => {
-      const params = await mediaParams.paramsFor(work);
-      if (!params) return { kind: "needs-source" };
-      params.isCurrent = () => sourcePreparation.accepts(work);
-      const originalContainer = work.statement === "packets" ? await containerOrchestrator.containerFor(params) : null;
-      const navigation = work.statement === "packets" && work.role !== "subtitle-embedded"
-        ? await containerOrchestrator.inspect(params, "source-navigation") : { kind: "result", value: false };
-      if (navigation.kind !== "result") return navigation;
-      const originalRanges = navigation.value;
-      if (!originalRanges && work.statement === "packets" && work.role === "source-rest" && sourcePreparation.accepts(work)) {
-        const file = torrentPool.knownTorrent(work.sourceKey)?.files?.[work.fileIndex];
-        if (file?.length > 0) {
-          const statement = `${work.statement}:${work.requestId}:input`;
-          await downloadMaps.metadata({ sourceKey: work.sourceKey, fileIndex: work.fileIndex, statement,
-            result: { kind: "needs-ranges", ranges: [[0, file.length - 1]], requestId: statement },
-            scope: "preparation", ...sourcePreparation.demandFor(work) });
-        }
-      }
-      if ((work.statement === "packets" && (work.role !== "source-rest" || originalRanges)) || work.role === "subtitle-embedded" && work.statement === "subtitle-cues") {
-        const info = await containerOrchestrator.inspect({ ...params, onReadResult: undefined }, "media-info");
-        if (info.kind !== "result") return info;
-        const positions = viewers.forSource(work.sourceKey)
-          .filter(viewer => viewer.source.selectedFileIndex === work.fileIndex &&
-            (work.ownerId === undefined || viewer.id === work.ownerId))
-          .map(viewer => viewer.positionSeconds() ?? 0);
-        const from = (positions.length ? Math.min(...positions) : 0) + (Number(info.value?.startTimeSeconds) || 0);
-        params.packetInterval = preparationInterval(work.role, from, segmentDurationSec);
-        if (work.role === "subtitle-embedded") {
-          const tracks = await containerOrchestrator.containerFor(params).then(container => container.readTracks());
-          const track = tracks.find(track => track.type === "subtitle" && track.declaredIndex === work.trackIndex);
-          if (!track || track.isTextBased?.() !== true) return { kind: "terminal", reason: "subtitle-track-not-supported" };
-          params.packetInterval.trackIds = [track.trackNumber];
-          params.subtitleTrackIndex = work.trackIndex;
-        }
-      }
-      params.onReadResult = async (statement, result, revision) => {
-        if (!sourcePreparation.accepts(work)) return;
-        mediaReads.record(params, statement, result, revision.storage, revision.memory);
-        const inputStatement = `${work.statement}:${work.requestId}:input`;
-        if (statement === "source-ranges" && result.kind === "result") {
-          if (work.selected) work.inputRanges = result.value.ranges;
-          if (work.role === "source-rest") {
-            const info = await containerOrchestrator.inspect({ ...params, onReadResult: undefined }, "media-info");
-            if (!sourcePreparation.accepts(work)) return;
-            if (info.kind === "result") {
-              work.nativeInput = { container: originalContainer, durationSeconds: info.value.durationSeconds,
-                startTimeSeconds: info.value.startTimeSeconds ?? 0 };
-              await publishNative(work);
-            }
-          } else {
-            await downloadMaps.metadata({ sourceKey: work.sourceKey, fileIndex: work.fileIndex,
-              statement: inputStatement, result: { kind: "needs-ranges", ranges: result.value.ranges, requestId: inputStatement },
-              scope: "preparation", ...sourcePreparation.demandFor(work) });
-            if (work.selected) await sourcePreparation.bytesChanged(work.sourceKey, work.fileIndex);
-          }
-        }
-        if (statement === "packets" && work.role === "source-rest" && result.kind === "result") {
-          const tracks = await containerOrchestrator.containerFor(params).then(container => container.readTracks());
-          const info = await containerOrchestrator.inspect({ ...params, onReadResult: undefined }, "media-info");
-          if (!sourcePreparation.accepts(work)) return;
-          if (info.kind === "result") {
-            work.nativeInput = { index: result.value, tracks, durationSeconds: info.value.durationSeconds,
-              startTimeSeconds: info.value.startTimeSeconds ?? 0 };
-            await publishNative(work);
-          }
-        }
-        if (statement === "packets" && work.role !== "source-rest" && result.kind === "result" && (work.selected || work.ownerFileIndex !== undefined)) {
-          const tracks = await containerOrchestrator.containerFor(params).then(container => container.readTracks());
-          if (!sourcePreparation.accepts(work)) return;
-          const bounds = tracks.filter(track => ["video", "audio"].includes(track.type))
-            .map(track => result.value.boundsOf(track.trackNumber)).filter(Boolean);
-          const interval = params.packetInterval ?? (bounds.length ? {
-            from: Math.max(0, Math.min(...bounds.map(bound => bound.start))), to: Math.max(...bounds.map(bound => bound.end))
-          } : null);
-          if (interval && interval.to > interval.from) {
-            const input = work.role === "subtitle-embedded"
-              ? result.value.inputFor({ trackId: params.packetInterval.trackIds[0], ...interval })
-              : new SegmentInputs({ index: result.value, tracks }).forInterval(interval);
-            if (work.selected) work.inputRanges = input.kind === "result" ? input.ranges : null;
-            await downloadMaps.metadata({ sourceKey: work.sourceKey, fileIndex: work.fileIndex,
-              statement: inputStatement, result: input.kind === "result" ? { kind: "needs-ranges", ranges: input.ranges, requestId: inputStatement } : input,
-              scope: "preparation", ...sourcePreparation.demandFor(work) });
-            if (work.selected) await sourcePreparation.bytesChanged(work.sourceKey, work.fileIndex);
-          }
-        }
-        if (!sourcePreparation.accepts(work)) return;
-        await downloadMaps.metadata({ sourceKey: work.sourceKey, fileIndex: work.fileIndex,
-          statement: `${work.statement}:${work.requestId}`, result, scope: "preparation", ...sourcePreparation.demandFor(work) });
-        sourcePreparation.result(work, result);
-        if (["subtitle-file", "subtitle-cues"].includes(statement)) encodeRuns.planEncodersSoon();
-      };
-      return work.statement === "subtitle-file"
-        ? subtitleWalk.subtitles.inspectFile(params) : work.statement === "subtitle-cues"
-          ? subtitleWalk.subtitles.inspectPackets(params) : containerOrchestrator.inspect(params, originalRanges ? "source-ranges" : work.statement);
-    },
+    inspect: work => preparationReads.inspect(work, sourcePreparation),
     withdraw: work => {
       if (work.role === "source-rest" && work.statement === "packets") {
         void downloadMaps.native({ sourceKey: work.sourceKey, fileIndex: work.fileIndex, zones: [] })
@@ -701,7 +611,7 @@ export async function startProxyServer({
       }
     },
     reprice: (work, demand) => {
-      if (work.nativeInput) void publishNative(work)
+      if (work.nativeInput) void preparationReads.publishNative(work, sourcePreparation)
         .catch(error => logger.warn(`native source map repricing failed: ${error.message}`));
       void downloadMaps.repriceMetadata(work.sourceKey, work.fileIndex, `${work.statement}:${work.requestId}`, demand)
         .catch(error => logger.warn(`source preparation request=${work.requestId} repricing failed: ${error.message}`));

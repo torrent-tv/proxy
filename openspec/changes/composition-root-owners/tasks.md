@@ -50,14 +50,14 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
 
 ### Tests first
 
-- [ ] 3.1 Write `test/no-torrent/played-outputs-of.test.js` on `managerWithOwnStore()`. Cover:
+- [x] 3.1 Write `test/no-torrent/played-outputs-of.test.js` on `managerWithOwnStore()`. Cover:
   - a watched output;
   - no present consumer;
   - another file;
   - the slowest link;
   - `timeline` identity;
   - `sizes()` read from the store.
-- [ ] 3.2 Write `test/no-torrent/playback-resolution.test.js` with the fakes from design §3, a real `SegmentSourceRanges`, the real `segmentReading` and a real `Timeline`. Cover every scenario in specs/playback-resolution:
+- [x] 3.2 Write `test/no-torrent/playback-resolution.test.js` with the fakes from design §3, a real `SegmentSourceRanges`, the real `segmentReading` and a real `Timeline`. Cover every scenario in specs/playback-resolution:
   - order and staleness (flip `isCurrent` at each await);
   - direct and fallback;
   - pending → held → one `refresh`;
@@ -69,23 +69,23 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
   - identity caches;
   - P4.1 fields, including `error`;
   - the minute line.
-- [ ] 3.3 Copy `server.js:526-904` from `origin/main` verbatim into `test/no-torrent/support/resolve-playback-before-270.js`, as `resolvePlaybackBefore270({ … })` (design §3).
-- [ ] 3.4 Write `test/no-torrent/playback-resolution-equivalence.test.js`:
+- [x] 3.3 Copy `server.js:526-904` from `origin/main` verbatim into `test/no-torrent/support/resolve-playback-before-270.js`, as `resolvePlaybackBefore270({ … })` (design §3).
+- [x] 3.4 Write `test/no-torrent/playback-resolution-equivalence.test.js`:
   - generate a 12 s AVI, MKV and MP4 with `ffmpeg-static` from `lavfi` into a temporary directory;
   - run both sides through the same maps;
   - compare windows and `(outputKey, index, joined)` notes.
-- [ ] 3.5 Check that 3.1, 3.2 and 3.4 fail because the module and the port are missing.
+- [x] 3.5 Check that 3.1, 3.2 and 3.4 fail because the module and the port are missing.
 
 ### Implementation
 
-- [ ] 3.6 Add `parts.playedOutputsOf` to `services/server/wire-outputs.js`, importing `trackChoicesOf`.
-- [ ] 3.7 Add `services/torrent/PlaybackResolution.js`, moving `server.js:540-651` and `675-904` verbatim, with every free variable made a port (design §3).
-- [ ] 3.8 In `server.js`:
+- [x] 3.6 Add `parts.playedOutputsOf` to `services/server/wire-outputs.js`, importing `trackChoicesOf`.
+- [x] 3.7 Add `services/torrent/PlaybackResolution.js`, moving `server.js:540-651` and `675-904` verbatim, with every free variable made a port (design §3).
+- [x] 3.8 In `server.js`:
   - construct `resolution` and pass `resolvePlayback: map => resolution.resolve(map)`;
   - in `setPriorityMap`, call `resolution.clear` instead of `playbackProjections…clear()`;
   - in `onSourceForgotten`, call `resolution.forget`;
   - keep `segmentInputs` in `server.js`.
-- [ ] 3.9 Check that `server.js` has none of `playbackProjections`, `segmentReadings`, `choicesKeys`, `checkedGrids`, `madeRates`, `passCosts` or `refreshAfterTable`.
+- [x] 3.9 Check that `server.js` has none of `playbackProjections`, `segmentReadings`, `choicesKeys`, `checkedGrids`, `madeRates`, `passCosts` or `refreshAfterTable`.
 - [ ] 3.10 Run `npm test`. The equivalence test must pass on all three files.
 - [ ] 3.11 Once a build containing #273 runs on the Home Assistant host, the field agent records the baseline and after figures (two-hour AVI and MKV, seek, audio switch) on the issue, read from the `/data` logs:
   - `download map passes … longest Nms`;

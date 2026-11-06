@@ -216,7 +216,7 @@ Depends on #276 and #280. It moves nothing.
 
 ### Tests first
 
-- [ ] 8.1 Check that `composition-root-states-no-facts.test.js` passes on `main` after #277. It is the standing check this step documents.
+- [x] 8.1 Check that `composition-root-states-no-facts.test.js` passes on `main` after #277. It is the standing check this step documents.
 
 ### Implementation
 
@@ -233,4 +233,4 @@ Depends on #276 and #280. It moves nothing.
   - CI.
   
   Add the Home Assistant figures from 3.11, or a link to where they will be recorded. "`server.js` < 900 lines" is met by #280; record the count.
-- [ ] 8.7 Archive this change: `openspec archive composition-root-owners`.
+- [x] 8.7 Archive this change: `openspec archive composition-root-owners`.

@@ -91,7 +91,7 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
   - `download map passes … longest Nms`;
   - P4.1 outcomes;
   - time to first segment.
-- [ ] 3.12 In a follow-up `test(proxy): … #ttv-273` commit on `main`, delete `playback-resolution-equivalence.test.js` and `support/resolve-playback-before-270.js`.
+- [x] 3.12 In a follow-up `test(proxy): … #ttv-273` commit on `main`, delete `playback-resolution-equivalence.test.js` and `support/resolve-playback-before-270.js`.
 
 ## 4. Media read parameters (#ttv-274)
 

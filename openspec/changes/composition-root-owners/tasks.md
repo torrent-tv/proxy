@@ -148,24 +148,24 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
 
 ### Tests first
 
-- [ ] 6.1 Write `test/no-torrent/start-playback.test.js` (design §6). Cover:
+- [x] 6.1 Write `test/no-torrent/start-playback.test.js` (design §6). Cover:
   - subscribed before adoption (listener count 1);
   - a viewer change calls `preparation`, `maps` and `state` in order;
   - the maps' failure is warned;
   - an adopted segment is seen through `playedOutputsOf(...).sizes()`.
-- [ ] 6.2 Add a case to `test/no-torrent/manager-surface.test.js`, or a new `viewer-changes.test.js`, checking that `viewerChanges` emits `"change"` when a viewer becomes present.
-- [ ] 6.3 Check that both fail.
+- [x] 6.2 Add a case to `test/no-torrent/manager-surface.test.js`, or a new `viewer-changes.test.js`, checking that `viewerChanges` emits `"change"` when a viewer becomes present.
+- [x] 6.3 Check that both fail.
 
 ### Implementation
 
-- [ ] 6.4 In `wire-outputs.js`, add `parts.viewerChanges = new EventEmitter()`, emit `"change"` in the `Viewers` `onChange`, and remove `onViewerChanged`.
-- [ ] 6.5 Add `services/server/start-playback.js` (design §6).
-- [ ] 6.6 Reorder `server.js` as in design §6:
+- [x] 6.4 In `wire-outputs.js`, add `parts.viewerChanges = new EventEmitter()`, emit `"change"` in the `Viewers` `onChange`, and remove `onViewerChanged`.
+- [x] 6.5 Add `services/server/start-playback.js` (design §6).
+- [x] 6.6 Reorder `server.js` as in design §6:
   - build the graph first, then destructure `outputParts` once and rename shadowing locals;
   - then `resolution`, `downloadMaps` (with `fileWanted` reading `viewers`) and `const sourcePreparation`;
   - then `startPlayback(…)`;
   - drop `?.` on `sourcePreparation`.
-- [ ] 6.7 Check that `server.js` has no `outputPartsReady`, `let sourcePreparation`, `onViewerChanged` or `adoptSegmentsLeftBehind`. Count `outputParts.`, which must be at most 10.
+- [x] 6.7 Check that `server.js` has no `outputPartsReady`, `let sourcePreparation`, `onViewerChanged` or `adoptSegmentsLeftBehind`. Count `outputParts.`, which must be at most 10.
 - [ ] 6.8 Run `npm test`.
 
 ## 6.5 The rest of the facts and long closures out of server.js (#ttv-280)

@@ -90,6 +90,7 @@ import { measureStartAndStop } from "./services/encode/start-stop-cost.js";
 import { benchmarkAudio } from "./services/encode/audio-calibration.js";
 import { logger } from "./utils/logger.js";
 import { completedFilesRoot } from "./services/storage/files/CompletedFiles.js";
+import { startPlayback } from "./services/server/start-playback.js";
 import { startupCpuProfile } from "./services/storage/cpu-profile.js";
 import { startProcessorReport } from "./services/storage/processor-report.js";
 import { processorBound } from "./services/storage/machine-processor.js";
@@ -234,7 +235,7 @@ export async function startProxyServer({
     heapSnapshots,
     onHoldingsChanged: () => onStateChanged(),
     onSourceForgotten: ({ sourceKey }) => {
-      sourcePreparation?.forget(sourceKey);
+      sourcePreparation.forget(sourceKey);
       mediaReads.forget(sourceKey);
       chapters.forget(sourceKey);
       probeReads.forget(sourceKey);
@@ -246,7 +247,7 @@ export async function startProxyServer({
       sourceRanges.forget(sourceKey);
       resolution.forget(sourceKey);
       segmentInputs.forget(sourceKey);
-      outputParts.encodeInputs?.bytesChanged();
+      encodeInputs?.bytesChanged();
     },
     // Pieces arriving is ANNOUNCED by the thread that owns the swarm; what is
     // done about it — walking a file's new subtitle clusters and pushing what
@@ -262,7 +263,7 @@ export async function startProxyServer({
       for (const fileIndex of fileIndexes) {
         mediaReads.bytesChanged(sourceKey, fileIndex);
         probeReads.bytesChanged(sourceKey, fileIndex);
-        void sourcePreparation?.bytesChanged(sourceKey, fileIndex).catch(error =>
+        void sourcePreparation.bytesChanged(sourceKey, fileIndex).catch(error =>
           logger.warn(`source input readiness failed: ${error.message}`));
         void pushFreshCues(`${sourceKey}:${fileIndex}`, sourceKey, fileIndex);
         // A keyframe table somebody asked for while its bytes had not arrived
@@ -271,7 +272,7 @@ export async function startProxyServer({
       }
       // Which bytes arrived, when the event names them: an input waiting for
       // named bytes is tried again only when some of them have come.
-      outputParts.encodeInputs?.bytesChanged(Array.isArray(arrived) ? { sourceKey, ranges: arrived } : null);
+      encodeInputs?.bytesChanged(Array.isArray(arrived) ? { sourceKey, ranges: arrived } : null);
     }
   });
   const selectedPort = await getPort({
@@ -524,47 +525,6 @@ export async function startProxyServer({
   const sourceRanges = new SegmentSourceRanges({ orchestrator: containerOrchestrator });
   /** Which source bytes each segment of an output reads, for the forecast (`segment-input-table.js`). */
   const segmentInputs = new SegmentInputTable();
-  /**
-   * The download map's pass: what the torrent is told about the file a viewer
-   * plays, worked out from the viewers' map (torrent-tv/meta#273).
-   */
-  const resolution = new PlaybackResolution({
-    paramsFor: request => mediaParams.paramsFor(request),
-    sourceRanges,
-    segmentReading,
-    playedOutputsOf: (sourceKey, fileIndex) => outputParts.playedOutputsOf(sourceKey, fileIndex),
-    pieceLengthOf: sourceKey => Number(torrentPool.knownTorrent(sourceKey)?.pieceLength),
-    noteSegmentInput: (...args) => segmentInputs.set(...args),
-    refresh: (sourceKey, fileIndex) => downloadMaps.refresh(sourceKey, fileIndex),
-    observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
-    log: line => logger.info(line),
-    warn: line => logger.warn(line)
-  });
-  let outputPartsReady = false;
-  const downloadMaps = new DownloadMaps({
-    // The ranges a picture reads at open are named again by every segment;
-    // only the zone the swarm would rank first is sent (torrent-tv/meta#166).
-    // Left out of what is SENT and nowhere else: every segment's own zones are
-    // also what says which bytes that segment needs, and a segment whose zones
-    // all repeat another's — two of one group of pictures in an AVI read the
-    // same bytes — lost them with 2.96.11, and the start forecast answered
-    // "source-input-ranges-unavailable" for ever (Home Assistant 2026-10-11).
-    publish: (map) => torrentPool.setPriorityMap({ ...map, zones: withoutRepeatedZones(map.zones) }),
-    // And what is sent is packed: a stretch of one level and priority is one
-    // window, not one zone per range of each of its segments
-    // (`coalescedZones`, torrent-tv/meta#178). The playback zones come packed
-    // already from the projection; this packs them with the native ones.
-    pack: (zones) => coalescedZones(zones),
-    log: (line) => logger.info(line),
-    observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
-    // A file's own reads are wanted while a present viewer has the file chosen
-    // or on screen. The viewers are assembled below; until they exist no read
-    // can have been asked for by one.
-    fileWanted: (sourceKey, fileIndex) => (outputPartsReady ? outputParts.viewers.forSource(sourceKey) : [])
-      .some(viewer => viewer.source?.selectedFileIndex === fileIndex ||
-        viewer.source?.visibleFileIndices?.includes(fileIndex)),
-    resolvePlayback: map => resolution.resolve(map)
-  });
   const mediaReads = new MediaReadRequests({
     read: (params, statement) => statement === "subtitle-file" ? subtitles.inspectFile(params)
       : statement === "subtitle-cues" ? subtitles.inspectPackets(params) : containerOrchestrator.inspect(params, statement),
@@ -580,8 +540,8 @@ export async function startProxyServer({
   });
   const indexMemory = new IndexMemory({
     growthBytes: LARGEST_GROWTH_BYTES,
-    reviseBudget: () => { void outputParts.machineBudget.revise("memory", "media metadata").catch(error => logger.warn(`packet index budget: ${error.message}`)); },
-    changed: () => { mediaReads.memoryChanged(); probeReads.memoryChanged(); outputParts.encodeInputs?.memoryChanged(); }
+    reviseBudget: () => { void machineBudget.revise("memory", "media metadata").catch(error => logger.warn(`packet index budget: ${error.message}`)); },
+    changed: () => { mediaReads.memoryChanged(); probeReads.memoryChanged(); encodeInputs?.memoryChanged(); }
   });
   const mediaParams = new MediaReadParams({
     heldFile: (sourceKey, fileIndex) => {
@@ -597,7 +557,7 @@ export async function startProxyServer({
     packetMemory: (sourceKey, fileIndex) => indexMemory.forFile(sourceKey, fileIndex),
     readProbe: request => probeReads.read(request),
     probePackets,
-    baseUrl: () => outputParts.localBaseUrl,
+    baseUrl: () => localBaseUrl,
     observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
     reads: { revision: (...a) => mediaReads.revision(...a), memoryRevision: () => mediaReads.memoryRevision(),
       record: (...a) => mediaReads.record(...a) },
@@ -630,13 +590,12 @@ export async function startProxyServer({
       };
     }
   });
-  let sourcePreparation;
   const encodeInputResolution = new EncodeInputResolution({
     paramsFor: request => mediaParams.paramsFor(request), sourceRanges,
     selectTracks, readingInterval, trackFor,
     declaredTracks: (sourceKey, fileIndex) => containerOrchestrator.tracks.get(`${sourceKey}:${fileIndex}`),
     known: (sourceKey, fileIndex) => containerOrchestrator.known(sourceKey, fileIndex),
-    outputs: () => outputParts.outputs.values(), // lazy: the catalog of the graph built next
+    outputs: () => outputs.values(), // lazy: the catalog of the graph built next
     log: line => logger.info(line), warn: line => logger.warn(line)
   });
   const outputParts = wireOutputs({
@@ -644,11 +603,6 @@ export async function startProxyServer({
     pinnedPreset,
     indexMemory,
     readMetadataActivity: () => containerOrchestrator.activity(),
-    onViewerChanged: () => {
-      void sourcePreparation?.refresh();
-      void downloadMaps.viewersChanged().catch(error => logger.warn(`download maps after a viewer change: ${error.message}`));
-      onStateChanged();
-    },
     onEncodersChanged: () => onStateChanged(),
     sourceInputsFor: (output, index) => segmentInputs.inputsFor(output.file.sourceKey, output.outputKey, index),
     readSourceMedia: async (params) => {
@@ -746,15 +700,15 @@ export async function startProxyServer({
       try {
         if (zones.length === 0) {
           mediaReads.retain(sourceKey, fileIndex, params => params.requestId?.startsWith("prepare:"));
-          if (!outputParts.viewers.forSource(sourceKey).length) probeReads.forget(sourceKey, fileIndex);
+          if (!viewers.forSource(sourceKey).length) probeReads.forget(sourceKey, fileIndex);
           await downloadMaps.forget(sourceKey, fileIndex, { keepPreparation: true });
           resolution.clear(sourceKey, fileIndex);
-          void sourcePreparation?.refresh();
+          void sourcePreparation.refresh();
           return;
         }
         await publishPlaybackBeforePreparationRefresh(
           () => downloadMaps.playback({ sourceKey, fileIndex, durationSeconds, zones }),
-          () => { void sourcePreparation?.refresh(); }
+          () => { void sourcePreparation.refresh(); }
         );
         mediaReads.retain(sourceKey, fileIndex, params => !params.requestId?.startsWith("download:") ||
           zones.some(zone => zone.from === params.downloadInterval?.from && zone.to === params.downloadInterval?.to));
@@ -819,7 +773,48 @@ export async function startProxyServer({
       await torrentPool.fillFileInBackground?.(torrent, fileIndex);
     }
   });
-  outputPartsReady = true;
+  const { viewers, viewerRequests, outputs, encodeRuns, serving, renditions, encodeInputs, quality,
+    lifecycle, outputTimes, machineBudget, lookaheadSeconds, segmentDurationSec, localBaseUrl,
+    encodeOrchestrator, playedOutputsOf } = outputParts;
+  /**
+   * The download map's pass: what the torrent is told about the file a viewer
+   * plays, worked out from the viewers' map (torrent-tv/meta#273).
+   */
+  const resolution = new PlaybackResolution({
+    paramsFor: request => mediaParams.paramsFor(request),
+    sourceRanges,
+    segmentReading,
+    playedOutputsOf,
+    pieceLengthOf: sourceKey => Number(torrentPool.knownTorrent(sourceKey)?.pieceLength),
+    noteSegmentInput: (...args) => segmentInputs.set(...args),
+    refresh: (sourceKey, fileIndex) => downloadMaps.refresh(sourceKey, fileIndex),
+    observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
+    log: line => logger.info(line),
+    warn: line => logger.warn(line)
+  });
+  const downloadMaps = new DownloadMaps({
+    // The ranges a picture reads at open are named again by every segment;
+    // only the zone the swarm would rank first is sent (torrent-tv/meta#166).
+    // Left out of what is SENT and nowhere else: every segment's own zones are
+    // also what says which bytes that segment needs, and a segment whose zones
+    // all repeat another's — two of one group of pictures in an AVI read the
+    // same bytes — lost them with 2.96.11, and the start forecast answered
+    // "source-input-ranges-unavailable" for ever (Home Assistant 2026-10-11).
+    publish: (map) => torrentPool.setPriorityMap({ ...map, zones: withoutRepeatedZones(map.zones) }),
+    // And what is sent is packed: a stretch of one level and priority is one
+    // window, not one zone per range of each of its segments
+    // (`coalescedZones`, torrent-tv/meta#178). The playback zones come packed
+    // already from the projection; this packs them with the native ones.
+    pack: (zones) => coalescedZones(zones),
+    log: (line) => logger.info(line),
+    observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
+    // A file's own reads are wanted while a present viewer has the file chosen
+    // or on screen.
+    fileWanted: (sourceKey, fileIndex) => viewers.forSource(sourceKey)
+      .some(viewer => viewer.source?.selectedFileIndex === fileIndex ||
+        viewer.source?.visibleFileIndices?.includes(fileIndex)),
+    resolvePlayback: map => resolution.resolve(map)
+  });
   // Where the processor goes, and at a cold start what the main thread does
   // with it, when the operator asks (torrent-tv/meta#177).
   const startupProfile = startupCpuProfile({
@@ -831,8 +826,8 @@ export async function startProxyServer({
   });
   startProcessorReport({
     log: (line) => logger.info(line),
-    ffmpegRuns: () => [...outputParts.outputs.values()]
-      .flatMap((output) => outputParts.encodeRuns.liveRunsOf(output).map((run) => ({
+    ffmpegRuns: () => [...outputs.values()]
+      .flatMap((output) => encodeRuns.liveRunsOf(output).map((run) => ({
         pid: run.process?.pid,
         label: `${output.outputKey} #${run.from}..#${run.to}`,
         film: Number(run.progress?.processedSeconds) - Number(run.progress?.startPositionSeconds ?? 0)
@@ -840,7 +835,7 @@ export async function startProxyServer({
       .filter((run) => Number.isInteger(run.pid)),
     detailed: () => startupProfile.active(),
     // What the pause rule judges from (torrent-tv/meta#180, phase 4).
-    onRunSeconds: (seconds) => outputParts.encodeOrchestrator?.noteRunSeconds(seconds)
+    onRunSeconds: (seconds) => encodeOrchestrator?.noteRunSeconds(seconds)
   });
   // What the last life of this process left on the disk. The kernel kills this
   // one often enough for that to be an ordinary state rather than an odd one —
@@ -849,20 +844,21 @@ export async function startProxyServer({
   // record that those encoders ended at all: it says what it found before it
   // decides anything, keeps the segments whose closure is proven, and removes
   // the one piece per output that was being written when the process died.
-  outputParts.lifecycle.adoptSegmentsLeftBehind();
+  startPlayback({ outputParts, downloadMaps, preparation: () => sourcePreparation, onStateChanged,
+    warn: line => logger.warn(line) });
   const publishNative = async work => {
     if (!work.nativeInput || !sourcePreparation.accepts(work)) return Promise.resolve();
-    const viewers = outputParts.viewers.forSource(work.sourceKey)
+    const watching = viewers.forSource(work.sourceKey)
       .filter(viewer => viewer.source.selectedFileIndex === work.fileIndex && viewer.outputs.size === 0);
     const convert = work.nativeInput.container ? nativeOriginalSourceMap : nativeSourceMap;
-    const zones = await convert({ ...work.nativeInput, viewers,
-      allowanceSeconds: outputParts.segmentDurationSec,
+    const zones = await convert({ ...work.nativeInput, viewers: watching,
+      allowanceSeconds: segmentDurationSec,
       urgentReadyFor: viewer => sourcePreparation.urgentReadyFor(viewer) });
     if (!sourcePreparation.accepts(work)) return;
     return downloadMaps.native({ sourceKey: work.sourceKey, fileIndex: work.fileIndex, zones });
   };
-  sourcePreparation = new SourcePreparation({
-    viewers: outputParts.viewers,
+  const sourcePreparation = new SourcePreparation({
+    viewers,
     candidatesFor: async sourceKey => {
       const record = sourceRegistry.get(sourceKey);
       if (!record) return [];
@@ -885,15 +881,15 @@ export async function startProxyServer({
     priorityFor: (viewer, priority, work) => {
       if (!sourcePreparation.subtitleReadyFor(viewer)) return priority;
       const fileIndex = work.ownerFileIndex ?? work.fileIndex;
-      const output = [...outputParts.outputs.values()].find(output => output.file?.sourceKey === work.sourceKey &&
-        output.file?.fileIndex === fileIndex && outputParts.viewers.forOutput(output).has(viewer.id) &&
-        !outputParts.outputs.supersededBy(output, viewer.activeVariantId ?? null));
-      const viewerCount = outputParts.viewers.forSource(work.sourceKey)
+      const output = [...outputs.values()].find(output => output.file?.sourceKey === work.sourceKey &&
+        output.file?.fileIndex === fileIndex && viewers.forOutput(output).has(viewer.id) &&
+        !outputs.supersededBy(output, viewer.activeVariantId ?? null));
+      const viewerCount = viewers.forSource(work.sourceKey)
         .filter(person => person.source.selectedFileIndex === fileIndex).length;
       if (!output) {
         const coefficient = pauseCoefficient({ playing: viewer.playing || viewer.waiting, viewerCount,
           pauseSeconds: viewer.pausedAt === null ? 0 : (Date.now() - viewer.pausedAt) / 1000,
-          allowanceSeconds: outputParts.segmentDurationSec,
+          allowanceSeconds: segmentDurationSec,
           urgentReady: sourcePreparation.urgentReadyFor(viewer) });
         return Math.max(1, 1 + Math.floor((priority - 1) * coefficient));
       }
@@ -905,9 +901,9 @@ export async function startProxyServer({
       const held = await torrentPool.heldRangesOf(torrent, work.fileIndex);
       return work.inputRanges.every(([start, end]) => held.some(([from, to]) => from <= start && to >= end));
     },
-    sourceRestNeededFor: (sourceKey, fileIndex) => ![...outputParts.outputs.values()].some(output =>
+    sourceRestNeededFor: (sourceKey, fileIndex) => ![...outputs.values()].some(output =>
       output.file?.sourceKey === sourceKey && output.file?.fileIndex === fileIndex &&
-      outputParts.viewers.forOutput(output).size > 0),
+      viewers.forOutput(output).size > 0),
     playbackAppliedFor: (sourceKey, fileIndex) => downloadMaps.hasAppliedPlayback(sourceKey, fileIndex),
     readyChanged: (work, ready) => logger.info(`source urgent request=${work.requestId} viewer=${work.ownerId} ` +
       `source=${work.sourceKey} file=${work.fileIndex} inputReady=${ready}`),
@@ -932,12 +928,12 @@ export async function startProxyServer({
       if ((work.statement === "packets" && (work.role !== "source-rest" || originalRanges)) || work.role === "subtitle-embedded" && work.statement === "subtitle-cues") {
         const info = await containerOrchestrator.inspect({ ...params, onReadResult: undefined }, "media-info");
         if (info.kind !== "result") return info;
-        const positions = outputParts.viewers.forSource(work.sourceKey)
+        const positions = viewers.forSource(work.sourceKey)
           .filter(viewer => viewer.source.selectedFileIndex === work.fileIndex &&
             (work.ownerId === undefined || viewer.id === work.ownerId))
           .map(viewer => viewer.positionSeconds() ?? 0);
         const from = (positions.length ? Math.min(...positions) : 0) + (Number(info.value?.startTimeSeconds) || 0);
-        params.packetInterval = preparationInterval(work.role, from, outputParts.segmentDurationSec);
+        params.packetInterval = preparationInterval(work.role, from, segmentDurationSec);
         if (work.role === "subtitle-embedded") {
           const tracks = await containerOrchestrator.containerFor(params).then(container => container.readTracks());
           const track = tracks.find(track => track.type === "subtitle" && track.declaredIndex === work.trackIndex);
@@ -1000,7 +996,7 @@ export async function startProxyServer({
         await downloadMaps.metadata({ sourceKey: work.sourceKey, fileIndex: work.fileIndex,
           statement: `${work.statement}:${work.requestId}`, result, scope: "preparation", ...sourcePreparation.demandFor(work) });
         sourcePreparation.result(work, result);
-        if (["subtitle-file", "subtitle-cues"].includes(statement)) outputParts.encodeRuns.planEncodersSoon();
+        if (["subtitle-file", "subtitle-cues"].includes(statement)) encodeRuns.planEncodersSoon();
       };
       return work.statement === "subtitle-file"
         ? subtitles.inspectFile(params) : work.statement === "subtitle-cues"
@@ -1036,7 +1032,7 @@ export async function startProxyServer({
   const playbackPlanner = createPlaybackPlanner({
     ffmpegBin,
     transcodeAudioEnabled: transcodeAudio,
-    localBaseUrl: outputParts.localBaseUrl,
+    localBaseUrl,
     sourceRegistry,
     torrentPool,
     subscribeSource: (sourceKey, fileIndex, listener) => mediaReads.subscribe(sourceKey, fileIndex, listener),
@@ -1059,7 +1055,7 @@ export async function startProxyServer({
     // The quality menu is on screen from the moment a file is opened, so the
     // heights this host can actually serve have to be answerable before any
     // encoder exists — from the probe and the startup benchmarks alone.
-    predictOfferedHeights: (mediaInfo) => outputParts.quality.predictOfferedHeights(mediaInfo)
+    predictOfferedHeights: (mediaInfo) => quality.predictOfferedHeights(mediaInfo)
   });
 
   app.get("/health", async (req, reply) => handleHealthGet(req, reply, { version }));
@@ -1083,15 +1079,15 @@ export async function startProxyServer({
   app.post("/api/sources", async (req, reply) => {
     // A cold start begins with the first source opened (torrent-tv/meta#177).
     startupProfile.begin();
-    return handleApiSourcesPost(req, reply, { sourceRegistry, viewers: outputParts.viewers,
+    return handleApiSourcesPost(req, reply, { sourceRegistry, viewers,
       associateWaitTrace: (request, sourceKey) => waitTrace.associate(request, sourceKey) });
   });
   app.get("/api/sources/:sourceKey/stats", async (req, reply) =>
-    handleApiSourceStatsGet(req, reply, { sourceRegistry, torrentPool, viewerRequests: outputParts.viewerRequests })
+    handleApiSourceStatsGet(req, reply, { sourceRegistry, torrentPool, viewerRequests })
   );
   app.get("/api/sources/:sourceKey/files", async (req, reply) =>
-    handleApiSourceFilesGet(req, reply, { sourceRegistry, torrentPool, viewers: outputParts.viewers,
-      viewerRequests: outputParts.viewerRequests })
+    handleApiSourceFilesGet(req, reply, { sourceRegistry, torrentPool, viewers,
+      viewerRequests })
   );
   app.get("/api/sources/:sourceKey/files/:fileIndex/fingerprint", async (req, reply) =>
     handleApiSourceFingerprintGet(req, reply, {
@@ -1132,11 +1128,11 @@ export async function startProxyServer({
   app.post("/api/sources/:sourceKey/warm", async (req, reply) =>
     handleApiSourceWarmPost(req, reply, {
       sourceRegistry,
-      viewers: outputParts.viewers
+      viewers
     })
   );
   app.post("/api/sources/:sourceKey/files/:fileIndex/viewer", async (req, reply) =>
-    handleApiSourceViewerPost(req, reply, { sourceRegistry, viewers: outputParts.viewers })
+    handleApiSourceViewerPost(req, reply, { sourceRegistry, viewers })
   );
   // The browser's own log, kept beside the proxy's: a file per session when
   // the proxy writes its log to a file, its console otherwise. See the route's
@@ -1145,17 +1141,17 @@ export async function startProxyServer({
     ? createClientLogFiles(logFile)
     : createClientLogConsole((message) => logger.info(message));
   app.post("/api/client-logs", async (req, reply) =>
-    handleApiClientLogsPost(req, reply, { clientLogs, viewerRequests: outputParts.viewerRequests })
+    handleApiClientLogsPost(req, reply, { clientLogs, viewerRequests })
   );
   app.post("/api/playback-plan", async (req, reply) =>
-    handleApiPlaybackPlanPost(req, reply, { playbackPlanner, viewers: outputParts.viewers,
+    handleApiPlaybackPlanPost(req, reply, { playbackPlanner, viewers,
       observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields) })
   );
   app.post("/api/playback-plan/audio-tracks", async (req, reply) =>
     handleApiPlaybackPlanAudioTracksPost(req, reply, { playbackPlanner })
   );
   app.post("/api/subtitles", async (req, reply) => handleApiSubtitlesPost(req, reply, {
-    viewers: outputParts.viewers, sourceRegistry,
+    viewers, sourceRegistry,
     subtitleTracksFor: (sourceKey, fileIndex) =>
       (containerOrchestrator.tracks.get(`${sourceKey}:${fileIndex}`) ?? []).filter(track => track.type === "subtitle"),
     subtitleFilesFor: (sourceKey, fileIndex) => {
@@ -1168,13 +1164,13 @@ export async function startProxyServer({
     handleApiSubtitlesGet(req, reply, {
       sourceRegistry,
       torrentPool,
-      viewers: outputParts.viewers,
+      viewers,
       subtitles
     })
   );
   app.get("/encode-input/:token/:fileIndex", (req, reply) =>
-    handleEncodeInputGet(req, reply, { inputOf: token => outputParts.encodeRuns.originalInputOf(token),
-      noteFirstInputBytes: (token, fileIndex, bytes) => outputParts.encodeRuns.noteFirstInputBytes(token, fileIndex, bytes),
+    handleEncodeInputGet(req, reply, { inputOf: token => encodeRuns.originalInputOf(token),
+      noteFirstInputBytes: (token, fileIndex, bytes) => encodeRuns.noteFirstInputBytes(token, fileIndex, bytes),
       refused: ({ fileIndex, start, runTag }) => logger.warn(`encode input: run ${runTag ?? "?"} asked for byte ${start} of file ${fileIndex}, which it was not given`) })
   );
   app.get("/stream", async (req, reply) =>
@@ -1184,47 +1180,47 @@ export async function startProxyServer({
       // So a session that has produced nothing yet can still show it is being
       // fed. The route knows only files; the session id rides on the URL the
       // session itself built.
-      noteInputBytes: (sessionId, bytes) => outputParts.encodeRuns.noteInputBytes(sessionId, bytes),
-      noteFirstInputBytes: (token, fileIndex, bytes) => outputParts.encodeRuns.noteFirstInputBytes(token, fileIndex, bytes),
+      noteInputBytes: (sessionId, bytes) => encodeRuns.noteInputBytes(sessionId, bytes),
+      noteFirstInputBytes: (token, fileIndex, bytes) => encodeRuns.noteFirstInputBytes(token, fileIndex, bytes),
       // When the encoder reading this waits for its input, so its speed is
       // measured over its own work and not over the swarm's.
-      noteInputWaiting: (runToken, waiting) => outputParts.encodeRuns.noteInputWaiting(runToken, waiting)
+      noteInputWaiting: (runToken, waiting) => encodeRuns.noteInputWaiting(runToken, waiting)
     })
   );
   app.post("/api/transcode-sessions", async (req, reply) =>
-    handleApiTranscodeSessionsPost(req, reply, { viewerRequests: outputParts.viewerRequests, renditions: outputParts.renditions, quality: outputParts.quality, outputs: outputParts.outputs, lookaheadSeconds: outputParts.lookaheadSeconds, sourceRegistry, torrentPool,
+    handleApiTranscodeSessionsPost(req, reply, { viewerRequests, renditions, quality, outputs, lookaheadSeconds, sourceRegistry, torrentPool,
       subscribeSource: (sourceKey, fileIndex, listener) => mediaReads.subscribe(sourceKey, fileIndex, listener) })
   );
   app.post("/api/transcode-sessions/:sessionId/release", async (req, reply) =>
-    handleApiTranscodeSessionReleasePost(req, reply, { lifecycle: outputParts.lifecycle })
+    handleApiTranscodeSessionReleasePost(req, reply, { lifecycle })
   );
   app.get("/api/transcode-sessions/:sessionId/progress", async (req, reply) =>
-    handleApiTranscodeSessionsProgressGet(req, reply, { viewerRequests: outputParts.viewerRequests })
+    handleApiTranscodeSessionsProgressGet(req, reply, { viewerRequests })
   );
   app.post("/api/transcode-sessions/:sessionId/net-report", async (req, reply) =>
     // A viewer's statement about itself goes to the VIEWER layer, not through
     // the session manager: what it needs is the live sessions and the registry
     // of viewers, and nothing about encoding.
     handleApiTranscodeSessionNetReportPost(req, reply, {
-      outputs: outputParts.outputs,
-      viewers: outputParts.viewers,
-      renditions: outputParts.renditions,
-      quality: outputParts.quality,
-      planSoon: () => outputParts.encodeRuns.planEncodersSoon(),
+      outputs,
+      viewers,
+      renditions,
+      quality,
+      planSoon: () => encodeRuns.planEncodersSoon(),
       segmentAt: (output, seconds) => {
         // A cut table not built yet has no pieces to move between.
-        try { return outputParts.outputTimes.segmentIndexForTime(output, seconds); } catch { return null; }
+        try { return outputTimes.segmentIndexForTime(output, seconds); } catch { return null; }
       }
     })
   );
   app.post("/api/transcode-sessions/:sessionId/fragment-far", async (req, reply) =>
-    handleApiTranscodeSessionFragmentFarPost(req, reply, { serving: outputParts.serving })
+    handleApiTranscodeSessionFragmentFarPost(req, reply, { serving })
   );
   app.post("/api/transcode-sessions/:sessionId/seek", async (req, reply) =>
-    handleApiTranscodeSessionSeekPost(req, reply, { viewerRequests: outputParts.viewerRequests })
+    handleApiTranscodeSessionSeekPost(req, reply, { viewerRequests })
   );
   app.get("/transcode/:sessionId/:fileName", async (req, reply) =>
-    handleTranscodeSessionFileGet(req, reply, { serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
+    handleTranscodeSessionFileGet(req, reply, { serving, viewerRequests })
   );
   // A quality variant's files. Registered before the static handler for the
   // same reason as the line above, and kept a separate route rather than a
@@ -1233,22 +1229,22 @@ export async function startProxyServer({
   // Fastify matches a static segment ahead of a parameter either way — stated
   // here so the order is not "tidied" into a bug.
   app.get("/transcode/:sessionId/v/:height/warm", async (req, reply) =>
-    handleTranscodeVariantWarmGet(req, reply, { renditions: outputParts.renditions, serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
+    handleTranscodeVariantWarmGet(req, reply, { renditions, serving, viewerRequests })
   );
   app.get("/transcode/:sessionId/a/:track/warm", async (req, reply) =>
-    handleTranscodeAudioWarmGet(req, reply, { renditions: outputParts.renditions, serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
+    handleTranscodeAudioWarmGet(req, reply, { renditions, serving, viewerRequests })
   );
   app.get("/transcode/:sessionId/a/:trackIndex/:fileName", async (req, reply) =>
-    handleTranscodeAudioFileGet(req, reply, { renditions: outputParts.renditions, serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
+    handleTranscodeAudioFileGet(req, reply, { renditions, serving, viewerRequests })
   );
   app.get("/transcode/:sessionId/v/:height/:fileName", async (req, reply) =>
-    handleTranscodeVariantFileGet(req, reply, { renditions: outputParts.renditions, serving: outputParts.serving, viewerRequests: outputParts.viewerRequests })
+    handleTranscodeVariantFileGet(req, reply, { renditions, serving, viewerRequests })
   );
 
   app.addHook("onClose", async () => {
     // Order matters: stop the ffmpeg readers (HLS sessions) before destroying
     // the torrents whose files they read from, then remove the torrent data.
-    await outputParts.lifecycle.disposeAll();
+    await lifecycle.disposeAll();
     await torrentPool.destroyAll();
   });
 

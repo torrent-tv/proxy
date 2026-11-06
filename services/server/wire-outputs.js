@@ -8,6 +8,7 @@
  * `server.js` to give each route the ones that route asks.
  */
 
+import { EventEmitter } from "node:events";
 import { logger } from "../../utils/logger.js";
 import { KeyframeTables } from "../media/KeyframeTables.js";
 import { bandOf, WaitLedger } from "../encode/OutputWaitLedger.js";
@@ -244,7 +245,6 @@ export function wireOutputs({
     encodeInputs = null,
     indexMemory = null,
     budgetPolicy = null,
-    onViewerChanged = null,
     // Told when an encoder starts or ends: the room this host has for one more
     // encode changes with it, and the server chooses proxies by that room.
     onEncodersChanged = null}) {
@@ -979,10 +979,13 @@ export function wireOutputs({
   // be re-taken on a five-second timer instead, which made a just-created
   // output wait up to five seconds before anything noticed it had a viewer.
   parts.retention = new OutputRetention();
+  // Who listens to viewer changes subscribes here (`startPlayback`); a throw
+  // of a listener reaches the code that changed the viewers.
+  parts.viewerChanges = new EventEmitter();
   parts.viewers = new Viewers({ onChange: () => {
     parts.lifecycle.observeUse();
     parts.encodeRuns.planEncodersSoon();
-    onViewerChanged?.();
+    parts.viewerChanges.emit("change");
   } });
   // The outputs that exist, and every question about them: the picture a step
   // belongs to, the steps, the soundtracks, the height a step is named by.

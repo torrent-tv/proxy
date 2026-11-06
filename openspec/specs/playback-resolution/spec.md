@@ -1,7 +1,7 @@
 # playback-resolution Specification
 
 ## Purpose
-TBD - created by archiving change composition-root-owners. Update Purpose after archive.
+One module owns the download-map pass: projections, segment records, grids, rates and costs, with every currency check made after each await.
 
 ## Requirements
 

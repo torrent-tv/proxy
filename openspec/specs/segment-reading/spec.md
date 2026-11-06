@@ -1,7 +1,7 @@
 # segment-reading Specification
 
 ## Purpose
-TBD - created by archiving change composition-root-owners. Update Purpose after archive.
+One rule decides which tracks a segment reads and the interval it states, and every call site uses it instead of repeating the track selection.
 
 ## Requirements
 

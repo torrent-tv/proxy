@@ -15,6 +15,7 @@ import { readEndedChildrenCpuSeconds, readMachineState, readProcessCpuSeconds, r
 import { minimumBufferFrom } from "../torrent/supply-margin.js";
 import { PriorityOrchestrator } from "../viewer/PriorityOrchestrator.js";
 import { urgentOutputsReady } from "../viewer/urgent-output-ready.js";
+import { trackChoicesOf } from "../viewer/segment-demands.js";
 import { softwareDescriptor } from "../encode/hwaccel.js";
 import { resolveSegmentFormat } from "../encode/segment-formats/index.js";
 import { Timelines } from "../encode/output/Timeline.js";
@@ -1375,5 +1376,36 @@ export function wireOutputs({
     void parts.quality.runQualityBudgetOnce();
   }, BUDGET_CHECK_INTERVAL_MS);
   parts.budgetTimer.unref();
+  /**
+   * What the download map's pass reads of the outputs: each output of a source
+   * that a present viewer watches and that reads the file, in catalog order,
+   * with what decides how long its segments take to make and deliver and what
+   * it has made (`PlaybackResolution`).
+   *
+   * @param {string} sourceKey
+   * @param {number} fileIndex
+   * @returns {Array<{ outputKey: string, timeline: object, choices: object[], revision: unknown,
+   *   sizes: () => Map<number, number>, encodeSpeed: number | undefined, linkMbps: number | null, target: number | null }>}
+   */
+  parts.playedOutputsOf = (sourceKey, fileIndex) => {
+    const played = [];
+    for (const output of parts.outputs.values()) {
+      if (output.file.sourceKey !== sourceKey) continue;
+      const consumers = [...parts.viewers.forOutput(output).values()].filter(viewer =>
+        viewer.isPresent() && !parts.outputs.supersededBy(output, viewer.activeVariantId ?? null));
+      if (consumers.length === 0) continue;
+      const choices = trackChoicesOf(output, fileIndex);
+      if (choices.length === 0) continue;
+      const links = consumers.map(viewer => viewer.linkReading()?.linkMbps)
+        .filter(value => Number.isFinite(value) && value > 0);
+      played.push({ outputKey: output.outputKey, timeline: output.timeline, choices,
+        revision: parts.segmentStore.revisionOf(output.outputKey),
+        sizes: () => parts.segmentStore.sizesOf(output.outputKey),
+        encodeSpeed: parts.encodeCost.latestSpeedReadingOf(output)?.speed,
+        linkMbps: links.length ? Math.min(...links) : null,
+        target: parts.encodeInputs?.targetInputBytes?.(output) ?? null });
+    }
+    return played;
+  };
   return parts;
 }

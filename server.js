@@ -73,7 +73,7 @@ import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
 import { nativeSourceMap, nativeOriginalSourceMap } from "./services/viewer/NativeSourceMap.js";
 import { MediaReadRequests } from "./services/media/MediaReadRequests.js";
 import { SegmentInputs } from "./services/media/SegmentInputs.js";
-import { directSegmentInput } from "./services/media/direct-segment-input.js";
+import { SegmentSourceRanges } from "./services/media/SegmentSourceRanges.js";
 import { readingInterval, segmentReading, selectTracks, trackFor } from "./services/media/segment-reading.js";
 import { pauseCoefficient, viewerStartsOn } from "./services/viewer/PriorityMap.js";
 import { coalescing } from "./utils/coalesce.js";
@@ -245,7 +245,7 @@ export async function startProxyServer({
       playbackPlanner.forget(sourceKey);
       indexMemory.forget(sourceKey);
       downloadMaps.retire(sourceKey);
-      for (const key of segmentSourceRanges.keys()) if (key.startsWith(`${sourceKey}:`)) segmentSourceRanges.delete(key);
+      sourceRanges.forget(sourceKey);
       for (const key of segmentReadings.keys()) if (key.startsWith(`${sourceKey}:`)) segmentReadings.delete(key);
       for (const key of playbackProjections.keys()) if (key.startsWith(`${sourceKey}:`)) playbackProjections.delete(key);
       for (const key of madeRates.keys()) if (key.startsWith(`${sourceKey}:`)) madeRates.delete(key);
@@ -524,8 +524,8 @@ export async function startProxyServer({
   //
   // Missing metadata bytes are demand in the same file map as playback.
   // Readers never start their own downloads or wait for source bytes.
-  /** Source byte ranges of one segment interval, by file and interval; forgotten with the source. */
-  const segmentSourceRanges = new Map();
+  /** Source byte ranges of one segment interval; the cache is the resolver's, forgotten with the source. */
+  const sourceRanges = new SegmentSourceRanges({ orchestrator: containerOrchestrator });
   /**
    * WHAT ONE SEGMENT OF AN OUTPUT IS, kept from pass to pass: where it lies in
    * the source, what it reads — its tracks and the key its bytes are kept under
@@ -672,13 +672,12 @@ export async function startProxyServer({
       }
       const params = await mediaParams.paramsFor(map);
       if (!params || !map.isCurrent()) return [];
-      const tracks = await containerOrchestrator.inspect(params, "tracks");
-      if (tracks.kind !== "result" || !map.isCurrent()) return [];
-      const container = containerOrchestrator.known(map.sourceKey, map.fileIndex);
-      if (typeof container?.readSourceRanges !== "function" && typeof container?.readPacketIndex !== "function") return [];
-      const media = await containerOrchestrator.inspect(params, "media-info");
-      if (media.kind !== "result" || !map.isCurrent()) return [];
-      const shift = Number(media.value?.startTimeSeconds) || 0;
+      const tracks = await sourceRanges.tracksOf(params, () => map.isCurrent());
+      if (tracks.kind !== "result") return [];
+      const container = tracks.container;
+      const media = await sourceRanges.shiftOf(params, () => map.isCurrent());
+      if (media.kind !== "result") return [];
+      const shift = media.shift;
       // A zone's ranges are stated to the torrent at the precision it fetches:
       // ranges closer than a piece hold the same pieces as one.
       const pieceLength = Number(torrentPool.knownTorrent(map.sourceKey)?.pieceLength);
@@ -687,11 +686,11 @@ export async function startProxyServer({
       // tracks, where its clock starts and how the torrent fetches. Any of them
       // changed, every segment's ranges are other ranges.
       let projection = playbackProjections.get(fileKey);
-      if (!projection || projection.trackList !== tracks.value || projection.shift !== shift ||
+      if (!projection || projection.trackList !== tracks.trackList || projection.shift !== shift ||
         !Object.is(projection.pieceLength, pieceLength)) {
         projection?.clear();
         projection = new PlaybackProjection();
-        Object.assign(projection, { trackList: tracks.value, shift, pieceLength });
+        Object.assign(projection, { trackList: tracks.trackList, shift, pieceLength });
         playbackProjections.set(fileKey, projection);
       }
       // Every output of this file somebody is watching, with what decides how
@@ -720,7 +719,7 @@ export async function startProxyServer({
           readyRevision: revision, ready: () => outputParts.segmentStore.sizesOf(output.outputKey),
           target: outputParts.encodeInputs?.targetInputBytes?.(output) ?? null });
         readers.set(output.outputKey, { records: segmentRecordsOf(map, output), choices,
-          facts: { timeline: output.timeline, trackList: tracks.value, shift, map } });
+          facts: { timeline: output.timeline, trackList: tracks.trackList, shift, map } });
       }
       // WHAT THE MAP CHANGED, and only that, is worked out again here.
       projection.update({ zones: map.zones, outputs: played });
@@ -732,8 +731,8 @@ export async function startProxyServer({
       // through the file's queue of reads, three steps per segment. On Home
       // Assistant those steps made a pass over a two-hour AVI take minutes while
       // the arithmetic takes milliseconds (torrent-tv/meta#151).
-      const navigated = await containerOrchestrator.inspect(params, "source-navigation");
-      if (!map.isCurrent()) return [];
+      const navigated = await sourceRanges.navigable(params, () => map.isCurrent());
+      if (navigated.kind === "stale") return [];
       const direct = navigated.kind === "result" && navigated.value === true &&
         typeof container?.readSourceRanges === "function" ? container : null;
       // An output whose file-level reading is not there in this pass — the
@@ -805,8 +804,8 @@ export async function startProxyServer({
         // the map changes every few seconds; worked out afresh on every change,
         // a pass over a two-hour AVI never finished and the next segment's bytes
         // were never asked for (Home Assistant 2026-10-08, torrent-tv/meta#151).
-          const known = record.ranges ?? segmentSourceRanges.get(rangesKey);
-          if (known) { convert(known, record.ranges ? "segment-record-cache" : "source-range-cache"); continue; }
+          const known = record.ranges ? { ranges: record.ranges, method: "segment-record-cache" } : sourceRanges.cached(rangesKey);
+          if (known) { convert(known.ranges, known.method); continue; }
           if (waiting.has(zone.outputKey)) {
             resolution.outcome = "waiting-for-output-input";
             continue;
@@ -814,68 +813,39 @@ export async function startProxyServer({
         // What is resolved so far is stated before a lower zone is worked out
         // (DownloadMaps, torrent-tv/meta#178).
           map.workingOut?.(zone.priority, () => projection.windows());
-          if (direct) {
-          // Asked per zone too: a soundtrack of an AVI is read from its own
-          // packets, which the same index states (torrent-tv/meta#166).
-            let value = null;
-            try {
-              value = await directSegmentInput(direct, { interval, tracks: wanted, mode: track => modes.get(track) },
-                built => refreshWhenBuilt(direct, built, map));
-            } catch { value = null; }
-          // A table still being built holds this output's segments, and only
-          // this output's: the map is built again when it is.
-            if (value?.kind === "pending") {
-              resolution.method = "direct-source-index";
-              resolution.outcome = "source-index-pending";
-              waiting.add(zone.outputKey);
-              continue;
-            }
-            if (value?.kind === "result") segmentSourceRanges.set(rangesKey, value.ranges);
-            if (value?.kind === "result") {
-              convert(value.ranges, "direct-source-index");
-              continue;
-            }
-          }
-          resolution.method = "container-index-fallback";
-          const intervalParams = await mediaParams.paramsFor({ ...map, packetInterval: interval,
-            requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
-            demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
-          if (!map.isCurrent()) {
+          const found = await sourceRanges.resolve({ rangesKey, direct, interval, tracks: wanted, modes,
+            isCurrent: () => map.isCurrent(),
+            whenBuilt: built => refreshWhenBuilt(direct, built, map),
+            intervalParams: () => {
+              resolution.method = "container-index-fallback";
+              return mediaParams.paramsFor({ ...map, packetInterval: interval,
+                requestId: `download:${map.sourceKey}:${map.fileIndex}:${zone.outputKey}:${zone.index}`,
+                demand: { ...zone.owner, leadSeconds: zone.leadSeconds } });
+            } });
+          if (found.kind === "result") { convert(found.ranges, found.method); continue; }
+          resolution.method = found.method;
+          if (found.kind === "stale") {
             resolution.outcome = "map-replaced";
             return [];
           }
-          if (!intervalParams) {
+          if (found.kind === "pending") {
+          // A table still being built holds this output's segments, and only
+          // this output's: the map is built again when it is.
+            resolution.outcome = "source-index-pending";
+            waiting.add(zone.outputKey);
+            continue;
+          }
+          if (found.kind === "needs-source") {
             resolution.outcome = "source-file-unavailable";
             continue;
           }
-          const navigation = await containerOrchestrator.inspect(intervalParams, "source-navigation");
-          if (!map.isCurrent()) {
-            resolution.outcome = "map-replaced";
-            return [];
-          }
-          if (navigation.kind !== "result") {
-            resolution.outcome = `source-navigation-${navigation.kind}`;
-            if (navigation.kind === "needs-ranges" || navigation.kind === "needs-memory") waiting.add(zone.outputKey);
+          if (found.step === "navigation") {
+            resolution.outcome = `source-navigation-${found.kind}`;
+            if (found.kind === "needs-ranges" || found.kind === "needs-memory") waiting.add(zone.outputKey);
             continue;
           }
-          const originalRanges = navigation.value;
-          const packets = await containerOrchestrator.inspect(intervalParams, originalRanges ? "source-ranges" : "packets");
-          if (!map.isCurrent()) {
-            resolution.outcome = "map-replaced";
-            return [];
-          }
-          if (packets.kind === "needs-memory") waiting.add(zone.outputKey);
-          if (packets.kind !== "result") {
-            resolution.outcome = `source-packets-${packets.kind}`;
-            continue;
-          }
-          const input = originalRanges ? packets.value : new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({ ...interval, mode: track => modes.get(track) });
-          if (input.kind !== "result") {
-            resolution.outcome = `segment-input-${input.kind}`;
-            continue;
-          }
-          segmentSourceRanges.set(rangesKey, input.ranges);
-          convert(input.ranges, originalRanges ? "container-source-ranges" : "packet-index");
+          if (found.kind === "needs-memory") waiting.add(zone.outputKey);
+          resolution.outcome = found.step === "packets" ? `source-packets-${found.kind}` : `segment-input-${found.kind}`;
         } catch (error) {
           resolution.outcome = "error";
           resolution.error = error?.message ?? String(error);
@@ -1018,41 +988,32 @@ export async function startProxyServer({
             measured.readMs += readMs;
           };
         }
-        const tracks = await containerOrchestrator.inspect(params, "tracks");
+        const tracks = await sourceRanges.tracksOf(params);
         if (tracks.kind !== "result") return tracks;
-        const container = containerOrchestrator.known(params.sourceKey, fileIndex);
-        if (typeof container?.readPacketIndex !== "function" && typeof container?.readSourceRanges !== "function") {
-          return { kind: "needs-index", reason: "packet-index-not-yet-available" };
-        }
-        const selection = selectTracks(tracks.value, choices);
+        const selection = selectTracks(tracks.trackList, choices);
         if (!selection) return { kind: "terminal", reason: "selected-track-is-absent" };
         const { wanted, modes } = selection;
-        const media = await containerOrchestrator.inspect(params, "media-info");
+        const media = await sourceRanges.shiftOf(params);
         if (media.kind !== "result") return media;
-        const timeShiftSeconds = Number(media.value?.startTimeSeconds) || 0;
+        const timeShiftSeconds = media.shift;
         const sourceInterval = output.timeline.sourceInterval(fromIndex, toIndex, timeShiftSeconds);
         params.packetInterval = readingInterval(selection, sourceInterval);
-        const navigation = await containerOrchestrator.inspect(params, "source-navigation");
+        const navigation = await sourceRanges.navigable(params);
         if (navigation.kind !== "result") return navigation;
-        files.push({ fileIndex, choices, params, wanted, modes, timeShiftSeconds, sourceInterval, navigable: navigation.value === true });
+        files.push({ fileIndex, choices, params, wanted, modes, timeShiftSeconds, sourceInterval, navigable: navigation.value });
       }
       const original = output.segmentFormat.supportsOriginalInput === true && files.every(file => file.navigable);
       const sources = [];
       for (const { fileIndex, choices, params, wanted, modes, timeShiftSeconds, sourceInterval } of files) {
+        const read = await sourceRanges.readInput(params, { original, tracks: wanted, modes, interval: sourceInterval });
+        if (read.kind !== "result") return read.answer;
         if (original) {
-          const ranges = await containerOrchestrator.inspect(params, "source-ranges");
-          if (ranges.kind !== "result") return ranges;
           sources.push({ sourceKey: params.sourceKey, fileIndex, timeShiftSeconds,
-            input: { ...ranges.value, original: true, selections: wanted.map(track => ({ track,
+            input: { ...read.input, original: true, selections: wanted.map(track => ({ track,
               index: track.declaredIndex ?? choices.find(choice => choice.type === track.type)?.index ?? 0 })) } });
           continue;
         }
-        const packets = await containerOrchestrator.inspect(params, "packets");
-        if (packets.kind !== "result") return packets;
-        const input = new SegmentInputs({ index: packets.value, tracks: wanted }).forInterval({
-          ...sourceInterval, mode: track => modes.get(track) });
-        if (input.kind !== "result") return input;
-        sources.push({ sourceKey: params.sourceKey, fileIndex, input, timeShiftSeconds });
+        sources.push({ sourceKey: params.sourceKey, fileIndex, input: read.input, timeShiftSeconds });
       }
       return { kind: "result", sources };
     },

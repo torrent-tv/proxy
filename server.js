@@ -72,6 +72,7 @@ import { readPlaybackDeclarations } from "./services/media/read-playback-declara
 import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
 import { nativeSourceMap, nativeOriginalSourceMap } from "./services/viewer/NativeSourceMap.js";
 import { MediaReadRequests } from "./services/media/MediaReadRequests.js";
+import { EncodeInputResolution } from "./services/encode/EncodeInputResolution.js";
 import { SegmentInputs } from "./services/media/SegmentInputs.js";
 import { SegmentSourceRanges } from "./services/media/SegmentSourceRanges.js";
 import { readingInterval, segmentReading, selectTracks, trackFor } from "./services/media/segment-reading.js";
@@ -931,6 +932,14 @@ export async function startProxyServer({
     }
   });
   let sourcePreparation;
+  const encodeInputResolution = new EncodeInputResolution({
+    paramsFor: request => mediaParams.paramsFor(request), sourceRanges,
+    selectTracks, readingInterval, trackFor,
+    declaredTracks: (sourceKey, fileIndex) => containerOrchestrator.tracks.get(`${sourceKey}:${fileIndex}`),
+    known: (sourceKey, fileIndex) => containerOrchestrator.known(sourceKey, fileIndex),
+    outputs: () => outputParts.outputs.values(), // lazy: the catalog of the graph built next
+    log: line => logger.info(line), warn: line => logger.warn(line)
+  });
   const outputParts = wireOutputs({
     observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
     pinnedPreset,
@@ -952,113 +961,7 @@ export async function startProxyServer({
       error.canRetry = true;
       throw error;
     },
-    // `timing`, when given, is told how long each read of a file waited behind
-    // the reads asked before it and how long it took (torrent-tv/meta#166).
-    resolveEncodeInput: async (output, fromIndex, toIndex, timing = null, isCurrent = null, signal = null, readPriority = null) => {
-      const grid = output.timeline?.published ?? output.timeline?.boundaries;
-      const from = grid?.[fromIndex], to = grid?.[toIndex + 1];
-      if (!Number.isFinite(from) || !(to > from)) return { kind: "terminal", reason: "output-interval-not-declared" };
-      const selected = new Map();
-      for (const type of ["video", "audio"]) {
-        const spec = output.spec[type];
-        if (!spec) continue;
-        const list = selected.get(spec.fileIndex) ?? [];
-        list.push({ type, index: type === "video" ? null : spec.trackIndex,
-          mode: type === "video" ? spec.encode ? "transcode" : "copy" : spec.transcode ? "transcode" : "copy" });
-        selected.set(spec.fileIndex, list);
-      }
-      // Every selected file is read the same way in one run: from the original
-      // file when each container can name the bytes the interval needs, from
-      // reassembled packets otherwise.
-      const files = [];
-      for (const [fileIndex, choices] of selected) {
-        const params = await mediaParams.paramsFor({ sourceKey: output.file.sourceKey, fileIndex,
-          requestId: readPriority?.requestId, readPriority, signal });
-        if (!params) return { kind: "needs-source" };
-        if (isCurrent) params.isCurrent = isCurrent;
-        if (signal) params.signal = signal;
-        if (timing) {
-          params.walkAccount = timing.walk ??= { lockMs: 0, reads: 0, bytes: 0 };
-          params.onTimed = (statement, waitedMs, readMs) => {
-            timing.reads += 1;
-            timing.queuedMs += waitedMs;
-            timing.readMs += readMs;
-            const measured = timing.readsByStatement[statement] ??= { queuedMs: 0, readMs: 0 };
-            measured.queuedMs += waitedMs;
-            measured.readMs += readMs;
-          };
-        }
-        const tracks = await sourceRanges.tracksOf(params);
-        if (tracks.kind !== "result") return tracks;
-        const selection = selectTracks(tracks.trackList, choices);
-        if (!selection) return { kind: "terminal", reason: "selected-track-is-absent" };
-        const { wanted, modes } = selection;
-        const media = await sourceRanges.shiftOf(params);
-        if (media.kind !== "result") return media;
-        const timeShiftSeconds = media.shift;
-        const sourceInterval = output.timeline.sourceInterval(fromIndex, toIndex, timeShiftSeconds);
-        params.packetInterval = readingInterval(selection, sourceInterval);
-        const navigation = await sourceRanges.navigable(params);
-        if (navigation.kind !== "result") return navigation;
-        files.push({ fileIndex, choices, params, wanted, modes, timeShiftSeconds, sourceInterval, navigable: navigation.value });
-      }
-      const original = output.segmentFormat.supportsOriginalInput === true && files.every(file => file.navigable);
-      const sources = [];
-      for (const { fileIndex, choices, params, wanted, modes, timeShiftSeconds, sourceInterval } of files) {
-        const read = await sourceRanges.readInput(params, { original, tracks: wanted, modes, interval: sourceInterval });
-        if (read.kind !== "result") return read.answer;
-        if (original) {
-          sources.push({ sourceKey: params.sourceKey, fileIndex, timeShiftSeconds,
-            input: { ...read.input, original: true, selections: wanted.map(track => ({ track,
-              index: track.declaredIndex ?? choices.find(choice => choice.type === track.type)?.index ?? 0 })) } });
-          continue;
-        }
-        sources.push({ sourceKey: params.sourceKey, fileIndex, input: read.input, timeShiftSeconds });
-      }
-      return { kind: "result", sources };
-    },
-    // THE SOUND'S PACKETS FROM THE PICTURE'S COPY. A Matroska soundtrack is
-    // fed to its encoder packet by packet, and finding its packets walks the
-    // clusters the Cues name for the piece — picture and sound together,
-    // about 20 MB for 0.3 MB of sound on the field's 1080p film. The picture's
-    // input copies those same clusters through the torrent thread first, and
-    // walked a second time there each soundtrack piece took 6-11 s, slower
-    // than the film plays (r61, torrent-tv/meta#178). Walked from the copy
-    // while it is held, the sound reads only its own packets later.
-    stretchCopied: (output, from, to, input) => {
-      for (const source of input.sources ?? []) {
-        const container = containerOrchestrator.known(source.sourceKey, source.fileIndex);
-        const tracks = containerOrchestrator.tracks.get(`${source.sourceKey}:${source.fileIndex}`);
-        if (typeof container?.learnPackets !== "function" || !Array.isArray(tracks)) continue;
-        const carried = new Set((source.input.selections ?? []).map(selection => selection.track?.trackNumber));
-        const sounds = new Set();
-        for (const other of outputParts.outputs.values()) {
-          const sound = other.spec?.audio;
-          if (other.spec?.video || !sound || other.file?.sourceKey !== source.sourceKey || sound.fileIndex !== source.fileIndex) continue;
-          const track = trackFor(tracks, { type: "audio", index: sound.trackIndex });
-          if (track && !carried.has(track.trackNumber)) sounds.add(track.trackNumber);
-        }
-        if (!sounds.size || !Number.isFinite(source.input.from) || !(source.input.to > source.input.from)) continue;
-        const read = (start, end) => {
-          const answer = input.read(source.fileIndex, start, end);
-          return answer && typeof answer.then !== "function" && answer.end === end ? answer.bytes : null;
-        };
-        const holdsUntil = start => {
-          if (input.heldUntil) return input.heldUntil(source.fileIndex, start);
-          const range = source.input.ranges.find(([first, last]) => first <= start && start <= last);
-          return range ? range[1] + 1 : null;
-        };
-        const startedAt = Date.now();
-        const releaseInput = input.retain?.();
-        void container.learnPackets({ from: source.input.from, to: source.input.to, trackIds: [...sounds] }, read, holdsUntil).then(learned =>
-          logger.info(`encode input #${from}..#${to} of ${output.outputKey}: soundtrack packets of track(s) ${[...sounds].join(",")} ` +
-            `over ${source.input.from.toFixed(3)}-${source.input.to.toFixed(3)}s ` +
-            (learned === "walked" ? "walked" : `not all walked (${learned === "memory" ? "memory refused" : "the copy does not hold the rest"})`) +
-            ` from its copy in ${Date.now() - startedAt}ms`),
-        error => logger.warn(`encode input #${from}..#${to} of ${output.outputKey}: walking the soundtrack from its copy failed: ${error?.message ?? error}`))
-          .finally(() => releaseInput?.());
-      }
-    },
+    encodeInputResolution,
     repriceEncodeDemand: demand => downloadMaps.repriceRequest(demand.requestId, demand),
     readEncodeRanges: async (source, ranges, maxBytes) => {
       const torrent = torrentPool.knownTorrent(source.sourceKey);

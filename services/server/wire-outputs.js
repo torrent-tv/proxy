@@ -1396,6 +1396,10 @@ export function wireOutputs({
       if (consumers.length === 0) continue;
       const choices = trackChoicesOf(output, fileIndex);
       if (choices.length === 0) continue;
+      // An output with no cut grid is left out by the pass (`PlaybackResolution`);
+      // none of what follows is worth working out for it.
+      const timeline = output.timeline;
+      if (!timeline || typeof timeline !== "object" || !Array.isArray(timeline.published ?? timeline.boundaries)) continue;
       const links = consumers.map(viewer => viewer.linkReading()?.linkMbps)
         .filter(value => Number.isFinite(value) && value > 0);
       played.push({ outputKey: output.outputKey, timeline: output.timeline, choices,

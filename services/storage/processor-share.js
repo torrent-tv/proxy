@@ -55,3 +55,27 @@ export function downloadShare({ availableShare, baseDraw, costPerMegabyte, files
   const bytesPerSecond = perByte > 0 ? Math.max(filmSpeed, 1) * bytes : Infinity;
   return { filmSpeed, capacity, bytesPerSecond: Number.isFinite(bytesPerSecond) && bytes > 0 ? bytesPerSecond : Infinity };
 }
+
+/**
+ * The watched outputs grouped by the file they read: what the share is worked
+ * out over. Moved out of `applyDownloadShare` verbatim (torrent-tv/meta#280).
+ *
+ * @param {Iterable<{ file: { key: string, durationSeconds: number } }>} outputs
+ * @param {object} ports
+ * @param {(output: object) => boolean} ports.watched - Whether a viewer receives the output.
+ * @param {(output: object) => number} ports.lengthOf - The file's length in bytes.
+ * @param {(output: object) => number} ports.encodeCostOf - What its encoder costs, 0 when none runs.
+ * @returns {{ bytesPerFilmSecond: number, encodeCostSec: number }[]}
+ *   One per file in the order first seen; only finite positive rates kept.
+ */
+export function watchedFiles(outputs, { watched, lengthOf, encodeCostOf }) {
+  const files = new Map();
+  for (const output of outputs) {
+    if (!watched(output)) continue;
+    const key = output.file.key;
+    const file = files.get(key) ?? { bytesPerFilmSecond: lengthOf(output) / Number(output.file.durationSeconds), encodeCostSec: 0 };
+    file.encodeCostSec += encodeCostOf(output);
+    files.set(key, file);
+  }
+  return [...files.values()].filter((file) => Number.isFinite(file.bytesPerFilmSecond) && file.bytesPerFilmSecond > 0);
+}

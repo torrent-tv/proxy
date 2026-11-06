@@ -52,7 +52,6 @@ import {
   noteServingVerdict,
   noteStepBeingWarmed,
   noteStepOnScreen,
-  outputsBeingPrepared,
   placeInitially,
   placeOn,
   presentOn,
@@ -104,7 +103,8 @@ import path from "node:path";
 import { contentOf, LocalObservations, PROXY_ROOT } from "../encode/LocalObservations.js";
 import { configurationKeyOf } from "../encode/fingerprint.js";
 import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
-import { downloadShare } from "../storage/processor-share.js";
+import { preparedAddresses, watchedAddresses } from "../viewer/watched-addresses.js";
+import { downloadShare, watchedFiles } from "../storage/processor-share.js";
 import { describeProcessor, processorBetween, sampleProcessor } from "../storage/machine-processor.js";
 import { ProcessorBudget } from "../encode/ProcessorBudget.js";
 import { ENCODE_RUN_STATE, processCanBeSignalled } from "../encode/encode-run-state.js";
@@ -774,19 +774,15 @@ export function wireOutputs({
   // watched file of every torrent.
   parts.applyDownloadShare = () => {
     if (!parts.setDownloadRate || !parts.hostLoad || !parts.encodeCost) return;
-    const files = new Map();
-    for (const output of parts.outputs.values()) {
-      if (!(parts.viewers?.forOutput(output)?.size > 0)) continue;
-      const key = output.file.key;
-      const length = Number(output.file.lengthBytes ?? parts.hostLoad.fileLengthByKey.get(key));
-      const file = files.get(key) ?? { bytesPerFilmSecond: length / Number(output.file.durationSeconds), encodeCostSec: 0 };
-      const state = parts.encodeRuns.runStateOf(output);
-      if (processCanBeSignalled(state) && state !== ENCODE_RUN_STATE.SUSPENDED) {
-        file.encodeCostSec += parts.encodeCost.loadOfOutput(output.outputKey)?.costSec ?? 0;
+    const watched = watchedFiles(parts.outputs.values(), {
+      watched: (output) => parts.viewers?.forOutput(output)?.size > 0,
+      lengthOf: (output) => Number(output.file.lengthBytes ?? parts.hostLoad.fileLengthByKey.get(output.file.key)),
+      encodeCostOf: (output) => {
+        const state = parts.encodeRuns.runStateOf(output);
+        return processCanBeSignalled(state) && state !== ENCODE_RUN_STATE.SUSPENDED
+          ? parts.encodeCost.loadOfOutput(output.outputKey)?.costSec ?? 0 : 0;
       }
-      files.set(key, file);
-    }
-    const watched = [...files.values()].filter((file) => Number.isFinite(file.bytesPerFilmSecond) && file.bytesPerFilmSecond > 0);
+    });
     const share = downloadShare({ availableShare: parts.processor?.availability()?.share ?? 1,
       baseDraw: parts.hostLoad.baseDraw, costPerMegabyte: parts.hostLoad.observedTorrentCostPerMegabyte, files: watched });
     // Kept beside the readings it is judged against: what the torrents moved
@@ -1127,36 +1123,12 @@ export function wireOutputs({
   // cost) and how much of the machine nobody has priced (the host's reading).
   parts.admission = new EncodeAdmission({
     liveRunsByAddress: () => parts.encodeOrchestrator.liveRunsByAddress(),
-    preparedAddresses: () => {
-      const addresses = new Set();
-      for (const id of outputsBeingPrepared(parts.viewers)) {
-        const key = parts.outputs.get(id)?.outputKey;
-        if (key) {
-          addresses.add(key);
-        }
-      }
-      return addresses;
-    },
+    preparedAddresses: () => preparedAddresses(parts.viewers, parts.outputs),
     // Every output a present viewer RECEIVES — by the same rule the per-output
     // priority map is built by — that still has something left to make. The
     // place an output is opened on is held from the moment its viewer is put
     // on it, not from when the plan gets round to its first encoder.
-    watchedAddresses: () => {
-      const addresses = new Set();
-      for (const session of parts.outputs.values()) {
-        const address = session.outputKey;
-        if (!address || addresses.has(address) || finishedOutput(session)) {
-          continue;
-        }
-        for (const viewer of parts.viewers.forOutput(session).values()) {
-          if (viewer.isPresent() && !parts.outputs.supersededBy(session, viewer.activeVariantId ?? null)) {
-            addresses.add(address);
-            break;
-          }
-        }
-      }
-      return addresses;
-    },
+    watchedAddresses: () => watchedAddresses(parts.viewers, parts.outputs, finishedOutput),
     finished: (address) => parts.outputs.outputsOn(address).some((session) => finishedOutput(session)),
     loadOf: (address) => parts.encodeCost.loadOfOutput(address),
     loadForCandidate: (spec, file) => parts.encodeCost.loadForCandidate(spec, file),

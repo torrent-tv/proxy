@@ -1,7 +1,7 @@
 # segment-source-ranges Specification
 
 ## Purpose
-One module resolves a segment's source byte ranges from a file's tracks, with its own ranges cache, so the tracks-to-ranges chain is written once.
+One module resolves a segment's source byte ranges from a file's tracks, with its own ranges cache, so the tracks-to-ranges chain is written once. It also serves the reads of an encoder run's input.
 
 ## Requirements
 

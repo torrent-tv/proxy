@@ -131,3 +131,19 @@ test("an output with no reading of its speed or its next input says so", t => {
   assert.equal(entry.target, null);
   assert.equal(entry.sizes().size, 0);
 });
+
+test("an output with no cut grid is skipped before anything is costed", t => {
+  const { manager, cleanup } = graph();
+  t.after(cleanup);
+  const output = outputOf();
+  output.timeline = {};
+  watch(manager, output, "viewer");
+  const called = [];
+  manager.segmentStore.revisionOf = () => { called.push("revision"); return 0; };
+  manager.encodeCost.latestSpeedReadingOf = () => { called.push("encodeSpeed"); return undefined; };
+  manager.encodeInputs.targetInputBytes = () => { called.push("target"); return null; };
+  const viewer = manager.viewers.get("viewer");
+  viewer.linkReading = () => { called.push("links"); return null; };
+  assert.deepEqual(manager.playedOutputsOf("src", 0), []);
+  assert.deepEqual(called, []);
+});

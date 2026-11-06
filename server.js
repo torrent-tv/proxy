@@ -74,7 +74,7 @@ import { nativeSourceMap, nativeOriginalSourceMap } from "./services/viewer/Nati
 import { MediaReadRequests } from "./services/media/MediaReadRequests.js";
 import { SegmentInputs } from "./services/media/SegmentInputs.js";
 import { directSegmentInput } from "./services/media/direct-segment-input.js";
-import { ContainerTrack } from "./services/media/tracks/ContainerTrack.js";
+import { readingInterval, segmentReading, selectTracks, trackFor } from "./services/media/segment-reading.js";
 import { pauseCoefficient, viewerStartsOn } from "./services/viewer/PriorityMap.js";
 import { coalescing } from "./utils/coalesce.js";
 import {
@@ -558,17 +558,8 @@ export async function startProxyServer({
     const kept = records.get(demand.index);
     if (kept && kept.timeline === timeline && kept.trackList === trackList && kept.shift === shift && kept.choicesKey === choicesKey) return kept;
     const sourceInterval = timeline.sourceInterval(demand.index, demand.index, shift);
-    const selected = demand.tracks.map(choice => ({ choice, track: choice.type === "video"
-      ? ContainerTrack.firstUsable(trackList, "video")
-      : trackList.filter(track => track.type === choice.type)[choice.index] }));
-    let reading = null;
-    if (!selected.some(({ track }) => !track)) {
-      const wanted = selected.map(({ track }) => track);
-      const modes = new Map(selected.map(({ choice, track }) => [track, choice.mode]));
-      const interval = { ...sourceInterval, trackIds: wanted.map(track => track.trackNumber),
-        modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
-      reading = { wanted, modes, interval, rangesKey: `${map.sourceKey}:${map.fileIndex}:${JSON.stringify(interval)}` };
-    }
+    const found = segmentReading(trackList, demand.tracks, sourceInterval);
+    const reading = found && { ...found, rangesKey: `${map.sourceKey}:${map.fileIndex}:${JSON.stringify(found.interval)}` };
     // `joined` is the segment's ranges as the torrent is told them, made from
     // the list `ranges` at `pieceLength`; `registered` is the list the input
     // table was last given.
@@ -1033,22 +1024,14 @@ export async function startProxyServer({
         if (typeof container?.readPacketIndex !== "function" && typeof container?.readSourceRanges !== "function") {
           return { kind: "needs-index", reason: "packet-index-not-yet-available" };
         }
-        const modes = new Map(), wanted = [];
-        for (const choice of choices) {
-          // The picture is the first usable video track (torrent-tv/meta#49);
-          // a soundtrack keeps the number every list of them uses.
-          const track = choice.type === "video" ? ContainerTrack.firstUsable(tracks.value, "video")
-            : tracks.value.filter(track => track.type === choice.type)[choice.index];
-          if (!track) return { kind: "terminal", reason: "selected-track-is-absent" };
-          wanted.push(track); modes.set(track, choice.mode);
-        }
+        const selection = selectTracks(tracks.value, choices);
+        if (!selection) return { kind: "terminal", reason: "selected-track-is-absent" };
+        const { wanted, modes } = selection;
         const media = await containerOrchestrator.inspect(params, "media-info");
         if (media.kind !== "result") return media;
         const timeShiftSeconds = Number(media.value?.startTimeSeconds) || 0;
         const sourceInterval = output.timeline.sourceInterval(fromIndex, toIndex, timeShiftSeconds);
-        params.packetInterval = { ...sourceInterval,
-          trackIds: wanted.map(track => track.trackNumber),
-          modes: Object.fromEntries(wanted.map(track => [track.trackNumber, modes.get(track)])) };
+        params.packetInterval = readingInterval(selection, sourceInterval);
         const navigation = await containerOrchestrator.inspect(params, "source-navigation");
         if (navigation.kind !== "result") return navigation;
         files.push({ fileIndex, choices, params, wanted, modes, timeShiftSeconds, sourceInterval, navigable: navigation.value === true });
@@ -1091,7 +1074,7 @@ export async function startProxyServer({
         for (const other of outputParts.outputs.values()) {
           const sound = other.spec?.audio;
           if (other.spec?.video || !sound || other.file?.sourceKey !== source.sourceKey || sound.fileIndex !== source.fileIndex) continue;
-          const track = tracks.filter(candidate => candidate.type === "audio")[sound.trackIndex];
+          const track = trackFor(tracks, { type: "audio", index: sound.trackIndex });
           if (track && !carried.has(track.trackNumber)) sounds.add(track.trackNumber);
         }
         if (!sounds.size || !Number.isFinite(source.input.from) || !(source.input.to > source.input.from)) continue;

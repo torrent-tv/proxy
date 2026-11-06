@@ -232,14 +232,13 @@ export function wireOutputs({
     diagnostics = null,
     diagnosticsRoot = "",
     memoryClaimant = null,
-    resolveEncodeInput = null,
+    encodeInputResolution = null,
     repriceEncodeDemand = null,
     readSourceMedia = null,
     readMetadataActivity = null,
     sourceInputsFor = null,
     readEncodeRanges = null,
     openEncodeWholeFile = null,
-    stretchCopied = () => {},
     readEncodeHeldRanges = null,
     encodeInputs = null,
     indexMemory = null,
@@ -1216,12 +1215,12 @@ export function wireOutputs({
       void parts.machineBudget.revise(parts.machineBudget.storageResource, "playback stock");
     }
   });
-  parts.encodeInputs = encodeInputs ?? (typeof resolveEncodeInput === "function" ? new EncodeInputs({
-    resolve: resolveEncodeInput,
+  parts.encodeInputs = encodeInputs ?? (typeof encodeInputResolution?.resolve === "function" ? new EncodeInputs({
+    resolve: (...args) => encodeInputResolution.resolve(...args),
     readRanges: readEncodeRanges,
     openWholeFile: openEncodeWholeFile,
     heldRanges: readEncodeHeldRanges,
-    stretchCopied,
+    stretchCopied: (...args) => encodeInputResolution.stretchCopied(...args),
     reviseBudget: () => parts.machineBudget.revise("memory", "admitted encode inputs"),
     capacity: () => parts.machineBudget.capacityOf("memory"),
     // How long this output's input takes to open, from the one owner of start

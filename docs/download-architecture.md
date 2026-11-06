@@ -27,6 +27,30 @@ admission. It reads available bytes and returns a result, missing ranges, memory
 requirements or an explicit terminal refusal. Results belong to the source file;
 only outstanding work is withdrawn when viewer demand changes.
 
+## Where a played segment becomes bytes
+
+The projection from a played file's segments to the byte windows the swarm is
+told about has one owner, `services/torrent/PlaybackResolution.js`
+(`resolve(map)`, `clear`, `forget`). It is handed the file's playback zones and,
+from `parts.playedOutputsOf(sourceKey, fileIndex)` (built in
+`services/server/wire-outputs.js`), each output a present viewer plays: its
+timeline (the same object, so the identity caches hold), its track choices, the
+segment sizes read from the segment store, and the encoder speed. For each
+segment it asks `services/media/segment-reading.js` which tracks it reads and
+over which interval, and `services/media/SegmentSourceRanges.js` for the source
+byte ranges, which are cached per range key and forgotten with their source. The
+result goes to `DownloadMaps` as `resolvePlayback`, which stays the only
+publication of download demand. `PlaybackResolution` keeps the order of awaits,
+every `map.isCurrent()` check after an await, and the wait-trace P4.1 schema and
+the `download map passes` log line, both byte-identical to before the move.
+
+The start order is in `services/server/start-playback.js`: viewer changes are
+subscribed (`parts.viewerChanges`, emitted `"change"`) before segments left
+behind by an earlier process are adopted, and each change calls the source
+preparation's `refresh`, then the download maps' `viewersChanged`, then the
+state notification, in that order. `server.js` only constructs these owners
+and calls `startPlayback` after `listen`.
+
 ## Publication and scheduling
 
 DemandRegister retains windows by claimant and exposes a revision. SwarmSelection

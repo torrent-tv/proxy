@@ -87,7 +87,7 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
   - keep `segmentInputs` in `server.js`.
 - [x] 3.9 Check that `server.js` has none of `playbackProjections`, `segmentReadings`, `choicesKeys`, `checkedGrids`, `madeRates`, `passCosts` or `refreshAfterTable`.
 - [x] 3.10 Run `npm test`. The equivalence test must pass on all three files.
-- [ ] 3.11 Once a build containing #273 runs on the Home Assistant host, the field agent records the baseline and after figures (two-hour AVI and MKV, seek, audio switch) on the issue, read from the `/data` logs:
+- [x] 3.11 Once a build containing #273 runs on the Home Assistant host, the field agent records the baseline and after figures (two-hour AVI and MKV, seek, audio switch) on the issue, read from the `/data` logs:
   - `download map passes … longest Nms`;
   - P4.1 outcomes;
   - time to first segment.
@@ -226,7 +226,7 @@ Depends on #276 and #280. It moves nothing.
 - [x] 8.3 Update `docs/download-architecture.md`: the segment → bytes projection is `PlaybackResolution` over `SegmentSourceRanges` and `segment-reading.js`; cover `playedOutputsOf` and the start order.
 - [x] 8.4 Update `docs/encode-architecture.md`: the encoder input is `EncodeInputResolution`.
 - [x] 8.5 Add a `**Chore**` entry under `## Unreleased` (needed so the manual patch release for the Home Assistant check has a changelog entry; no log line changed).
-- [ ] 8.6 Measure the parent's criteria on `main` and record them in a comment on torrent-tv/meta#270:
+- [x] 8.6 Measure the parent's criteria on `main` and record them in a comment on torrent-tv/meta#270:
   - `wc -l server.js`;
   - the `outputParts.` count;
   - the collection check;

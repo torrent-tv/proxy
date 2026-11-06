@@ -25,7 +25,7 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
 
 ### Tests first
 
-- [ ] 2.1 Write `test/no-torrent/segment-source-ranges.test.js` with the fake orchestrator and container from design §2. Cover:
+- [x] 2.1 Write `test/no-torrent/segment-source-ranges.test.js` with the fake orchestrator and container from design §2. Cover:
   - the ranges key, cache hit and miss, and `forget`;
   - `tracksOf`: identity, `needs-index` and pass-through;
   - `shiftOf`: the default shift of 0;
@@ -33,17 +33,17 @@ cleanup comes in a later commit. Nothing starts a torrent: no `bin/cli.js`, no
   - `readInput` by `source-ranges`, by `packets`, and with `needs-memory`;
   - `resolve`: direct, direct pending (with `whenBuilt`), a direct throw falling back to source ranges, fallback by packets, navigation `needs-memory`, packets `needs-memory`, `needs-source`, and stale before needs-source;
   - the five method names.
-- [ ] 2.2 Check that it fails because the module is missing.
+- [x] 2.2 Check that it fails because the module is missing.
 
 ### Implementation
 
-- [ ] 2.3 Add `services/media/SegmentSourceRanges.js` (design §2).
-- [ ] 2.4 In `server.js`, construct `sourceRanges` and have both closures call it in place:
+- [x] 2.3 Add `services/media/SegmentSourceRanges.js` (design §2).
+- [x] 2.4 In `server.js`, construct `sourceRanges` and have both closures call it in place:
   - `resolvePlayback` uses `tracksOf`, `shiftOf`, `navigable` and `resolve`;
   - `resolveEncodeInput` uses `tracksOf`, `shiftOf`, `navigable` and `readInput`.
 
   Then remove `segmentSourceRanges` and its loop in `onSourceForgotten` in favour of `sourceRanges.forget(sourceKey)`.
-- [ ] 2.5 Check that every P4.1 `method` and `outcome` string is still produced at the same point. Diff the strings in the old and new code.
+- [x] 2.5 Check that every P4.1 `method` and `outcome` string is still produced at the same point. Diff the strings in the old and new code.
 - [ ] 2.6 Run `npm test`.
 
 ## 3. The download-map pass (#ttv-273)

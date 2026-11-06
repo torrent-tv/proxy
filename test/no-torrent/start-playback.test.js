@@ -115,3 +115,11 @@ test("an output left by an earlier process is seen by the maps once a present vi
   assert.ok(entry, "the output is played");
   assert.ok(entry.sizes().has(0), "segment 0 was adopted");
 });
+
+test("a viewer change before startPlayback subscribes reaches no subscriber", (t) => {
+  const { manager } = host(t);
+  manager.viewers.present("early");
+  const started = start(manager);
+  assert.deepEqual(started.calls, []);
+  assert.equal(started.reads(), 0);
+});

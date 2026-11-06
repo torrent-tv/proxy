@@ -49,7 +49,7 @@ subscribed (`parts.viewerChanges`, emitted `"change"`) before segments left
 behind by an earlier process are adopted, and each change calls the source
 preparation's `refresh`, then the download maps' `viewersChanged`, then the
 state notification, in that order. `server.js` only constructs these owners
-and calls `startPlayback` after `listen`.
+and calls `startPlayback` before `listen`.
 
 ## Publication and scheduling
 

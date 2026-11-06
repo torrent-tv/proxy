@@ -560,7 +560,7 @@ export class MediaReadParams {
     heldFile,        // (sourceKey, fileIndex) => HeldFile | null
     packetMemory,    // (sourceKey, fileIndex) => object               — IndexMemory#forFile
     readProbe,       // (request) => Promise<unknown>                  — ProbeRequests#read
-    probePackets,    // ({ url, statement, signal, onRecord }) => Promise<unknown>   — media/probe-packets.js
+    probePackets,    // ({ url: string, statement, signal, onRecord }) => Promise<unknown>   — media/probe-packets.js
     baseUrl,         // () => string                                   — the proxy's own loopback origin
     observeWait,     // (sourceKey, event, fields) => void
     reads,           // { revision(sourceKey, fileIndex), memoryRevision(), record(params, statement, result, storage, memory) → boolean }
@@ -606,8 +606,9 @@ signal aborts.
   readRange: (start, end) => file.readHeld(start, Math.min(end, file.length - 1)),
   fileSize: file.length,
   probe: (statement, onRecord) => readProbe({ sourceKey, fileIndex, statement: `ffprobe:${statement}`,
-    probe: ({ requestId, signal }) => probePackets({ url, statement, signal, onRecord }) }),
-    // url: new URL("/media", baseUrl()) with searchParams sourceKey, fileIndex (String), readId = requestId, set in that order
+    probe: ({ requestId, signal }) => probePackets({ url: url.toString(), statement, signal, onRecord }) }),
+    // url = new URL("/media", baseUrl()) with searchParams sourceKey, fileIndex (String), readId = requestId, set in that order;
+    // probePackets receives url.toString(), a STRING, as server.js:972-977 passes it — never the URL object
   label: file.name,
   fileOffset: file.offset,
   onObserved: fields => …,      // two observeWait events, below
@@ -847,24 +848,44 @@ Imports nothing. This is the seam the start order is tested through, since
  * @param {{ viewerChanges: import("node:events").EventEmitter,
  *           lifecycle: { adoptSegmentsLeftBehind(): object } }} graph.outputParts
  * @param {{ viewersChanged(): Promise<unknown> }} graph.downloadMaps
- * @param {{ refresh(): unknown }} graph.sourcePreparation
+ * @param {() => { refresh(): unknown }} graph.preparation   — read when a change comes, never at the call
  * @param {() => void} graph.onStateChanged
  * @param {(line: string) => void} graph.warn
  * @returns {object} what `adoptSegmentsLeftBehind` returned
  */
-export function startPlayback({ outputParts, downloadMaps, sourcePreparation, onStateChanged, warn })
+export function startPlayback({ outputParts, downloadMaps, preparation, onStateChanged, warn })
 ```
 
 1. `outputParts.viewerChanges.on("change", () => { void
-   sourcePreparation.refresh(); void downloadMaps.viewersChanged().catch(error
-   => warn(`download maps after a viewer change: ${error.message}`));
+   preparation().refresh(); void downloadMaps.viewersChanged().catch(error =>
+   warn(`download maps after a viewer change: ${error.message}`));
    onStateChanged(); })` — one listener, the three calls in the order of
-   `server.js:1053-1055`.
+   `server.js:1053-1055`. `preparation` is a getter because the source
+   preparation is constructed AFTER adoption, as today (below); `startPlayback`
+   itself never calls it.
 2. `return outputParts.lifecycle.adoptSegmentsLeftBehind();` — after the
    subscription, so whatever the adoption or anything after it changes about
    viewers reaches the maps.
 
-**`server.js` order after #276** (no `await` between steps 3 and 9):
+**Startup order: adoption does not move.** On `origin/main` adoption
+(`server.js:1380`) comes after `startupCpuProfile` (`:1353`) and
+`startProcessorReport` (`:1360`) and before `publishNative` (`:1381`) and `new
+SourcePreparation` (`:1392`). It stays exactly there: `startPlayback(…)`
+replaces the line `outputParts.lifecycle.adoptSegmentsLeftBehind();` in place.
+The ONLY new ordering constraint this change adds is: **the viewer-change
+subscription exists before adoption** — and `startPlayback` gives that by
+construction (subscribe, then adopt, in one synchronous call). Nothing else
+moves relative to adoption.
+
+`preparation: () => sourcePreparation` names a `const` declared a few lines
+later. That is safe: between `startPlayback` and `const sourcePreparation = …`
+there is no top-level `await`, the server does not listen yet and no route is
+registered, and adoption emits no viewer event (`SegmentStore#adoptWhatSurvived`
+only reads and sweeps the disk and logs), so no `"change"` can be emitted
+before `sourcePreparation` is initialised. Today the same window is covered by
+`let sourcePreparation` plus `sourcePreparation?.refresh()`.
+
+**`server.js` order after #276** (no `await` between steps 3 and 10):
 
 1. Registry, torrent pool, startup measurements, chapters, subtitles (as now).
 2. `sourceRanges`, `mediaReads`, `probeReads`, `indexMemory`, `mediaParams`,
@@ -884,14 +905,20 @@ export function startPlayback({ outputParts, downloadMaps, sourcePreparation, on
    => viewer.source?.selectedFileIndex === fileIndex ||
    viewer.source?.visibleFileIndices?.includes(fileIndex)), resolvePlayback: map
    => resolution.resolve(map) })` — `outputPartsReady` is gone; the graph
-   exists, so the guard has nothing to guard.
-7. `startupProfile`, `startProcessorReport` (as now).
-8. `const sourcePreparation = new SourcePreparation({…})` — `const`, not `let`;
-   `?.` on it dropped everywhere.
-9. `outputParts.subtitleReadyFor = …`; `startPlayback({ outputParts,
-   downloadMaps, sourcePreparation, onStateChanged, warn: line =>
-   logger.warn(line) })`.
-10. `playbackPlanner`, routes, `listen` (as now).
+   exists, so the guard has nothing to guard. (Steps 5-6 are new positions for
+   objects with side-effect-free constructors; `DownloadMaps` was built before
+   the graph and is now built right after it, with nothing between that reads
+   it.)
+7. `startupProfile`, `startProcessorReport` (as now, same place relative to
+   adoption).
+8. `startPlayback({ outputParts, downloadMaps, preparation: () =>
+   sourcePreparation, onStateChanged, warn: line => logger.warn(line) })` — at
+   the line where `server.js:1380` adopts today.
+9. `publishNative` (or, after #280, `preparationReads`); `const
+   sourcePreparation = new SourcePreparation({…})` — `const`, not `let`; `?.`
+   on it dropped everywhere.
+10. `outputParts.subtitleReadyFor = …`, `playbackPlanner`, routes, `listen` (as
+    now).
 
 Closures created in step 1-2 that name `downloadMaps`, `sourcePreparation`,
 `resolution` or a graph name are called only after `listen` (pieces arrive and
@@ -907,10 +934,12 @@ writeFileSync(path.join(store.directoryFor(key), "segment-00000.mp4"), Buffer.al
 const calls = [];
 const adopt = manager.lifecycle.adoptSegmentsLeftBehind.bind(manager.lifecycle);
 manager.lifecycle.adoptSegmentsLeftBehind = () => { calls.push(`adopt:${manager.viewerChanges.listenerCount("change")}`); return adopt(); };
+let preparationRead = 0;
 startPlayback({ outputParts: manager,
   downloadMaps: { viewersChanged: async () => { calls.push("maps"); return []; } },
-  sourcePreparation: { refresh: () => { calls.push("preparation"); } },
+  preparation: () => { preparationRead += 1; return { refresh: () => { calls.push("preparation"); } }; },
   onStateChanged: () => calls.push("state"), warn: line => warnings.push(line) });
+// preparationRead === 0 here: the getter is not read during startPlayback or adoption
 ```
 
 Then a viewer change (`manager.viewers.present("viewer-1")`), and an output on
@@ -918,34 +947,18 @@ Then a viewer change (`manager.viewers.present("viewer-1")`), and an output on
 
 ---
 
-## 7. The check, and what it moves (#ttv-277)
+## 6.5 The rest of the facts and long closures out of `server.js` (#ttv-280)
 
-**Test:** `test/no-torrent/composition-root-states-no-facts.test.js`, in the
-style of `manager-surface.test.js`: it READS `server.js` and
-`services/server/wire-outputs.js` as text.
+Issue torrent-tv/meta#280, step 6.5 of the parent: after #276, before #277.
+Acceptance: the #277 check passes on the branch; `wc -l server.js` < 900; one
+test per moved owner, written before its move. Every move is verbatim, every
+free variable a port, each owner under an existing biome rule with no new
+exception.
 
-- *Lines considered:* every line whose first non-space characters are not
-  `//`, `/*` or `*`; a trailing `// …` is stripped.
-- *State:* a line matching `/\bnew\s+(Map|WeakMap|Set|WeakSet)\s*\(/` is
-  refused in either file, wherever it is. Text cannot tell a temporary from
-  state created lazily inside a closure (`server.js:545`, `:940`), so neither
-  is allowed.
-- *Long closures:* a closure starts on a line that ends with `=> {`, or with
-  `function …(…) {`, or is a method shorthand `name(…) {` / `async name(…) {`
-  (not `if`, `for`, `while`, `switch`, `catch`). It ends at the first later
-  line indented no deeper whose first non-space character is `}`. More than
-  `LONGEST_CLOSURE_LINES = 40` lines from start to end, inclusive, is
-  refused. The two assembly functions themselves
-  (`export async function startProxyServer(`, `export function wireOutputs(`)
-  are exempt; nothing else is.
-- *`server.js` only:* no `outputPartsReady`, no `let sourcePreparation`, no
-  `encodeMetadataRequests`, and at most `OUTPUT_PARTS_REACHES = 10` matches of
-  `/\boutputParts\./g`.
-- Each refusal names the file, the line and the reason, as
-  `check-tests-start-no-torrent.mjs` does.
+### A. What the check would refuse
 
-**What the check refuses today beyond #271-#276, and where it goes** (each
-moved verbatim, every free variable a port):
+**What the #277 check would refuse after #276, and where it goes** (each moved
+verbatim, every free variable a port):
 
 | Today | Lines | Owner |
 |---|---|---|
@@ -996,23 +1009,170 @@ export class WorkTagsReport {
 export function preparedAddresses(viewers, outputs)            // → Set<string>
 export function watchedAddresses(viewers, outputs, finished)   // → Set<string>; finished: (output) => boolean
 
-// services/storage/processor-share.js
+// services/storage/processor-share.js — imports nothing new (rule services/storage/*.js: utils only)
 export function watchedFiles(outputs, { watched, lengthOf, encodeCostOf })
-// → Array<{ bytesPerFilmSecond, encodeCostSec }> grouped by output.file.key, first output's length / output.file.durationSeconds,
-//   encodeCostSec summed over encodeCostOf(output); only finite positive bytesPerFilmSecond kept.
-//   watched(output): a viewer is on it; lengthOf(output): Number(file.lengthBytes ?? hostLoad's length);
-//   encodeCostOf(output): its load's costSec while its run can be signalled and is not suspended, else 0.
+// → Array<{ bytesPerFilmSecond, encodeCostSec }>, one per output.file.key in first-seen order, of the outputs
+//   with watched(output); bytesPerFilmSecond = lengthOf(first watched output of the file) / Number(output.file.durationSeconds);
+//   encodeCostSec = Σ encodeCostOf(output) over the file's watched outputs; only finite positive bytesPerFilmSecond kept.
 ```
+
+The three ports are arrows built inside `parts.applyDownloadShare` in
+`wire-outputs.js` (each one expression, so no long closure), from the same
+fields `wire-outputs.js:779-786` reads today:
+
+```js
+const watched = watchedFiles(parts.outputs.values(), {   // imported from ../storage/processor-share.js, as downloadShare is
+  watched: output => parts.viewers?.forOutput(output)?.size > 0,
+  lengthOf: output => Number(output.file.lengthBytes ?? parts.hostLoad.fileLengthByKey.get(output.file.key)),
+  encodeCostOf: output => {
+    const state = parts.encodeRuns.runStateOf(output);   // processCanBeSignalled, ENCODE_RUN_STATE: already imported by wire-outputs.js
+    return processCanBeSignalled(state) && state !== ENCODE_RUN_STATE.SUSPENDED
+      ? parts.encodeCost.loadOfOutput(output.outputKey)?.costSec ?? 0 : 0;
+  },
+});
+```
+
+`lengthOf` reads `HostLoad#fileLengthByKey` (a `Map` the host load keeps, read
+here, not made); `encodeCostOf` reads `EncodeCost#loadOfOutput(outputKey).costSec`
+and `EncodeRuns#runStateOf(output)`. `applyDownloadShare` then passes
+`watched` to `downloadShare` as `files`, as now.
+
+### B. Startup host measurements (`server.js:286-382`)
+
+```js
+// services/encode/measure-host.js — imports ./hwaccel.js, ./calibration.js, ./fingerprint.js,
+//                                   ./start-stop-cost.js, ./audio-calibration.js (rule services/encode/*.js)
+export async function measureHost({ ffmpegBin, logger, transcode, processorCores, measures = DEFAULT_MEASURES })
+// → { videoEncoder, decodeCostModel, contentionPenalties, calibration, copySpeedX, audioCalibration, startStopCost, tonemapSupported }
+// measures = { detectVideoEncoder, benchmarkDecodeCost, benchmarkContention, readHostFingerprint, calibrateEncoder,
+//              softwareDescriptor, benchmarkCopySpeed, benchmarkAudio, measureStartAndStop, detectTonemapSupport }
+//   — the real functions by default; a test passes fakes, so no ffmpeg runs.
+```
+
+The body is `server.js:286-382` verbatim with `transcodeAudio` renamed
+`transcode`: the same awaits in the same order (encoder detection, decode
+cost, contention, fingerprint, calibration of the chosen encoder then of
+software, the fall-back to software with the same `calibration: … encoding in
+software instead` warning, copy speed, audio, start/stop cost, tonemap), and
+`transcode === false` gives `null`/`[]`/`false` without calling any measure.
+`HostCalibration` is constructed inside, as now. `processorCores =
+processorBound().cores` stays in `server.js` (the encode layer may not import
+`storage/`) and is read just before the call instead of just after the
+detection — a synchronous read of the process's CPU quota, which detection
+does not change. `server.js` keeps `getPort` where it is and destructures the
+result into the same names the `wireOutputs` call passes (`server.js:1210-1217`).
+
+Test: `test/no-torrent/measure-host.test.js` — order of the measure calls;
+software fall-back when the device's modes are empty; nothing measured
+without `transcode`.
+
+### C. The subtitle walk (`server.js:393-404`, `422-512`)
+
+```js
+// services/media/SubtitleWalk.js — imports ./SubtitleOrchestrator.js, ./SubtitleCues.js,
+//                                  ./ContainerOrchestrator.js (CONTAINER_HEAD_BYTES), ../../utils/coalesce.js
+export class SubtitleWalk {
+  constructor({
+    torrents,       // { knownTorrent(sourceKey), heldRangesOf(torrent, fileIndex), readHeldOf(torrent, fileIndex, start, end) }
+    containers,     // { known(sourceKey, fileIndex), containerFor(params) }   — containerOrchestrator
+    paramsFor,      // (request) => Promise<Params | null>                    — MediaReadParams#paramsFor (lazy arrow)
+    wantedSeconds,  // (sourceKey, fileIndex) => whatever viewerStartsOn(priority.mapFor(sourceKey, fileIndex)) returns; lazy arrow over the graph
+    publish,        // (entry) => void                     — onSubtitleCues?.(entry)
+    log, warn,
+  })
+  subtitles                          // the SubtitleOrchestrator, built in the constructor as server.js:493-512 builds it
+  heldFileFor(sourceKey, fileIndex, known = null)   // server.js:422-460, verbatim
+  pushFreshCues(sourceKey, fileIndex)               // the coalescing walk of server.js:470-491, same log lines
+}
+```
+
+`server.js` keeps `const subtitleWalk = new SubtitleWalk({…})` where
+`heldFileFor` was and reads `subtitleWalk.subtitles` and
+`subtitleWalk.pushFreshCues` where it read `subtitles` and `pushFreshCues`
+(`onPiecesArrived`, `mediaReads`, routes). The chapters wiring
+(`server.js:405-421`) stays.
+
+Test: `test/no-torrent/subtitle-walk.test.js` — a held file from a fake pool,
+`null` for an unknown torrent or an empty file, the container built once, one
+walk at a time with one more after it, the `subtitle push …` lines.
+
+### D. Torrent-pool ports of the output graph (the `wireOutputs` call)
+
+```js
+// services/server/torrent-pool-ports.js — imports nothing
+export function torrentPoolPorts({ torrentPool, sourceRegistry, wholeFilesRoot })
+// → { readEncodeRanges, openEncodeWholeFile, readEncodeHeldRanges, spillDisk, wholeFiles, memoryClaimant,
+//     getTorrentTotals, setDownloadRate, setSpeculativeHold, getSourceStats, fetchWholeFile }
+//   each the expression of server.js:1193-1204, 1228-1260, 1267-1268, 1293-1307, 1333-1348, verbatim;
+//   `wholeFiles.root` is `wholeFilesRoot` (server.js passes completedFilesRoot(), evaluated at the same moment as now).
+```
+
+`server.js` spreads `...torrentPoolPorts({ torrentPool, sourceRegistry,
+wholeFilesRoot: completedFilesRoot() })` into the `wireOutputs` options;
+`setPriorityMap`, `getContainerMediaInfo` and the planner ports stay, as they
+name owners of `server.js`.
+
+Test: `test/no-torrent/torrent-pool-ports.test.js` — a pool without
+`allowSpillBytes`/`allowWholeFileBytes`/`allowMemoryBytes` gives `null`
+claimants; `getSourceStats` is `null` without a record or torrent and on a
+throw; `fetchWholeFile` fills the file in the background; ranges read through
+the known torrent.
+
+### E. Line budget
+
+From 1805 lines: #271-#275 remove about 520, #276 about 0, A about 140, B
+about 90, C about 105, D about 70 (each net of its wiring) — about 880. If
+`wc -l server.js` is still 900 or more after A-D, #280 moves next, in this
+order and only as far as needed: the chapters wiring (`server.js:405-421`)
+into `services/server/chapter-ports.js`, then the `onPiecesArrived` handler
+(`server.js:262-278`) into `services/server/pieces-arrived.js`. #280 records
+the final count.
+
+### F. Tests
+
+One file per owner, each written and failing before its move:
+`preparation-reads.test.js`, `forwarded-response-log.test.js` (a Fastify
+`app.inject`, no `listen`), `work-tags-report.test.js`,
+`watched-addresses.test.js`, `processor-share.test.js` (extended with
+`watchedFiles`), `measure-host.test.js`, `subtitle-walk.test.js`,
+`torrent-pool-ports.test.js`.
 
 **biome.json.** Unchanged. The new files are under existing rules with no new
 exception. The `!services/server/wire-outputs.js` exception stays: that file
 imports the components it assembles, which is its job and which no step
 changes.
 
-**Tests** for the moved pieces: `test/no-torrent/preparation-reads.test.js`,
-`forwarded-response-log.test.js` (a Fastify `app.inject`, no listen),
-`work-tags-report.test.js`, `watched-addresses.test.js`,
-`processor-share.test.js` (extended if it exists, else created).
+---
+
+## 7. The check (#ttv-277)
+
+**Test:** `test/no-torrent/composition-root-states-no-facts.test.js`, in the
+style of `manager-surface.test.js`: it READS `server.js` and
+`services/server/wire-outputs.js` as text.
+
+- *Lines considered:* every line whose first non-space characters are not
+  `//`, `/*` or `*`; a trailing `// …` is stripped.
+- *State:* a line matching `/\bnew\s+(Map|WeakMap|Set|WeakSet)\s*\(/` is
+  refused in either file, wherever it is. Text cannot tell a temporary from
+  state created lazily inside a closure (`server.js:545`, `:940`), so neither
+  is allowed.
+- *Long closures:* a closure starts on a line that ends with `=> {`, or with
+  `function …(…) {`, or is a method shorthand `name(…) {` / `async name(…) {`
+  (not `if`, `for`, `while`, `switch`, `catch`). It ends at the first later
+  line indented no deeper whose first non-space character is `}`. More than
+  `LONGEST_CLOSURE_LINES = 40` lines from start to end, inclusive, is
+  refused. The two assembly functions themselves
+  (`export async function startProxyServer(`, `export function wireOutputs(`)
+  are exempt; nothing else is.
+- *`server.js` only:* no `outputPartsReady`, no `let sourcePreparation`, no
+  `encodeMetadataRequests`, and at most `OUTPUT_PARTS_REACHES = 10` matches of
+  `/\boutputParts\./g`.
+- Each refusal names the file, the line and the reason, as
+  `check-tests-start-no-torrent.mjs` does.
+
+**Depends on #276 and #280.** Everything the check refuses after #276 is
+moved by #280 (§6.5); #277 adds the check, proves it once, and moves nothing.
+Run on `main` after #280 it passes with no exception list.
 
 ---
 
@@ -1022,7 +1182,10 @@ changes.
   `services/` section names `media/segment-reading.js`,
   `media/SegmentSourceRanges.js`, `torrent/PlaybackResolution.js`,
   `server/MediaReadParams.js`, `encode/EncodeInputResolution.js`,
-  `server/start-playback.js`, `server/PreparationReads.js` with their layer.
+  `server/start-playback.js`, `server/PreparationReads.js`,
+  `server/forwarded-response-log.js`, `server/torrent-pool-ports.js`,
+  `media/WorkTagsReport.js`, `media/SubtitleWalk.js`,
+  `encode/measure-host.js`, `viewer/watched-addresses.js` with their layer.
 - `docs/download-architecture.md`: the segment → bytes projection is
   `PlaybackResolution` over `SegmentSourceRanges` and `segment-reading.js`; the
   `playedOutputsOf` port; the start order.
@@ -1034,20 +1197,21 @@ changes.
 ## What remains in `server.js`
 
 Creating Fastify and its hooks (through `installForwardedResponseLog`), the
-registry and the torrent pool, the startup measurements, the construction of
+registry and the torrent pool, the call to `measureHost`, the construction of
 every owner with its ports, the order of §6, the route registrations and
-`listen`. No collection, no closure over 40 lines, no algorithm.
+`listen`. No collection, no closure over 40 lines, no algorithm, under 900
+lines.
 
 ## Parent criteria
 
 | torrent-tv/meta#270 criterion | After this change |
 |---|---|
-| `server.js` < 900 lines | NOT reached: about 1150-1200. Left: startup host measurements (`server.js:283-382`, ~100), subtitle walk wiring (`:393-512`, ~120), torrent-pool claimant adapters in the `wireOutputs` call (~60), imports (~95). #278 records the number and opens a follow-up issue. |
+| `server.js` < 900 lines | Yes, by #280 (§6.5 E): about 880 after its moves A-D, with further moves named there if needed. #271-#276 alone leave about 1150. |
 | `outputParts.` ≤ 10 | Yes (§6 step 4), checked by §7. |
 | no `new Map/WeakMap/Set/WeakSet` in `server.js` | Yes, checked by §7. |
 | no `outputPartsReady` | Yes (#276), checked by §7. |
 | CI green | Every step. |
-| Home Assistant: two-hour AVI and MKV, seek, audio switch; `download map passes … longest Nms`, P4.1 outcomes and time to first segment no worse | Field check after #273 and after #277, by the field agent, on the host only. |
+| Home Assistant: two-hour AVI and MKV, seek, audio switch; `download map passes … longest Nms`, P4.1 outcomes and time to first segment no worse | Field check after #273 and after #280, by the field agent, on the host only. |
 
 ## Risks
 
@@ -1059,7 +1223,11 @@ every owner with its ports, the order of §6, the route registrations and
   (`directSegmentInput`); the tests flip `isCurrent` at each await.
 - **Start order.** `const` instead of late binding turns a too-early call into
   a `ReferenceError` instead of a silent `[]`; §6 keeps every such call after
-  `listen`, and `start-playback.test.js` pins subscription before adoption.
+  `listen`, keeps adoption at its place of today, and `start-playback.test.js`
+  pins subscription before adoption and that the preparation getter is not read
+  during it.
+- **The line budget of #280** is an estimate; §6.5 E names the next moves and
+  #280 does not close above 900.
 - **Merge conflicts.** Each sub-issue is one PR rebased on `main` just before
   merge; the verbatim move is its own commit so a conflict is resolved by
   re-copying the region.

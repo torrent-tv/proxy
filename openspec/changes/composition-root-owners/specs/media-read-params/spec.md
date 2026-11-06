@@ -64,7 +64,7 @@ ignored.
   `params.probe("keyframes", onRecord)` is called for file 0 of `src`, and
   `readProbe` calls the given `probe({ requestId: "r1", signal })`
 - **THEN** `readProbe` received `statement: "ffprobe:keyframes"` and
-  `probePackets` received `url`
+  `probePackets` received, as a string and not a `URL`, `url`
   `http://127.0.0.1:9000/media?sourceKey=src&fileIndex=0&readId=r1`,
   `statement: "keyframes"`, that `signal` and `onRecord`
 

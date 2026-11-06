@@ -1,7 +1,7 @@
 # encode-input-resolution Specification
 
 ## Purpose
-TBD - created by archiving change composition-root-owners. Update Purpose after archive.
+One module works out an encoder run's input, including the soundtrack walk from a picture's copy, so the output graph receives a single object instead of separate closures.
 
 ## Requirements
 

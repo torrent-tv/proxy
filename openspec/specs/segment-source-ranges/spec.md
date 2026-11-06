@@ -1,7 +1,7 @@
 # segment-source-ranges Specification
 
 ## Purpose
-TBD - created by archiving change composition-root-owners. Update Purpose after archive.
+One module resolves a segment's source byte ranges from a file's tracks, with its own ranges cache, so the tracks-to-ranges chain is written once.
 
 ## Requirements
 

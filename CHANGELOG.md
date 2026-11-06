@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Chore**: Split the proxy composition root into tested owners (segment reading, source byte ranges, playback resolution, media read parameters, encoder input, start order and the rest of its facts) with no behaviour change.
+
 ## 2.107.56
 
 - **Fix**: Keep projected encoder speed available to playback readiness while reporting its capture as unknown and preserving its prediction source, without assigning the progress poll's time as a measurement.

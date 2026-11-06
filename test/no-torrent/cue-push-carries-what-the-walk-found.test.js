@@ -52,7 +52,7 @@ test("the consumer asks for it", () => {
 test("the push forwards the whole of what the walk found, rather than a list of fields", () => {
   // The one line that closes it. A list of names here is how the fact was lost
   // twice, and a list cannot say that it is incomplete.
-  const wiring = source("server.js");
+  const wiring = source("services/media/SubtitleWalk.js");
 
-  assert.match(wiring, /onSubtitleCues\?\.\(\{ sourceKey, fileIndex, \.\.\.entry \}\)/);
+  assert.match(wiring, /this\.#publish\(\{ sourceKey, fileIndex, \.\.\.entry \}\)/);
 });

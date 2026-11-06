@@ -64,7 +64,7 @@ import { createPlaybackPlanner } from "./services/media/playback-planner.js";
 import { KeyframeTables } from "./services/media/KeyframeTables.js";
 import { contentsOf } from "./services/torrent/Contents.js";
 import { coalescedZones, withoutRepeatedZones } from "./services/torrent/map-zones.js";
-import { SubtitleOrchestrator } from "./services/media/SubtitleOrchestrator.js";
+import { SubtitleWalk } from "./services/media/SubtitleWalk.js";
 import { containerOrchestrator, CONTAINER_HEAD_BYTES } from "./services/media/ContainerOrchestrator.js";
 import { readPlaybackDeclarations } from "./services/media/read-playback-declarations.js";
 import { DownloadMaps } from "./services/viewer/DownloadMaps.js";
@@ -76,14 +76,6 @@ import { PlaybackResolution } from "./services/torrent/PlaybackResolution.js";
 import { SegmentSourceRanges } from "./services/media/SegmentSourceRanges.js";
 import { readingInterval, segmentReading, selectTracks, trackFor } from "./services/media/segment-reading.js";
 import { pauseCoefficient, viewerStartsOn } from "./services/viewer/PriorityMap.js";
-import { coalescing } from "./utils/coalesce.js";
-import {
-  warmSubtitleCues,
-  cuesHeldFor,
-  subtitleTracksOf,
-  declaredSubtitleTracksOf,
-  forgetSubtitles
-} from "./services/media/SubtitleCues.js";
 import { measureHost } from "./services/encode/measure-host.js";
 import { logger } from "./utils/logger.js";
 import { completedFilesRoot } from "./services/storage/files/CompletedFiles.js";
@@ -200,7 +192,7 @@ export async function startProxyServer({
       mediaReads.forget(sourceKey);
       chapters.forget(sourceKey);
       probeReads.forget(sourceKey);
-      subtitles.forget(sourceKey);
+      subtitleWalk.subtitles.forget(sourceKey);
       keyframeTables.forget(sourceKey);
       playbackPlanner.forget(sourceKey);
       indexMemory.forget(sourceKey);
@@ -226,7 +218,7 @@ export async function startProxyServer({
         probeReads.bytesChanged(sourceKey, fileIndex);
         void sourcePreparation.bytesChanged(sourceKey, fileIndex).catch(error =>
           logger.warn(`source input readiness failed: ${error.message}`));
-        void pushFreshCues(`${sourceKey}:${fileIndex}`, sourceKey, fileIndex);
+        void subtitleWalk.pushFreshCues(sourceKey, fileIndex);
         // A keyframe table somebody asked for while its bytes had not arrived
         // is read again now; nothing was recorded for that wait.
         keyframeTables.readAgainIfUnanswered({ sourceKey, fileIndex, logName: String(fileIndex) });
@@ -255,18 +247,6 @@ export async function startProxyServer({
   // written out is the media layer's, while which clusters may be read, where
   // the cursor stands and what one walk at a time means are the TORRENT's own
   // rules. The media layer used to import the second directly.
-  /**
-   * One file of one torrent, reduced to what the subtitle walk may know: a
-   * name, a length, its one container, which ranges are downloaded whole, how
-   * to read one of those without asking the swarm, the portion one read may
-   * span, and where the viewers stand. File offsets and the bitfield stay in
-   * the torrent's thread; the piece length crosses as a plain number.
-   *
-   * @param {string} sourceKey
-   * @param {number} fileIndex
-   * @param {object} [known] - The torrent handle when the caller already has it.
-   * @returns {Promise<import("./services/media/SubtitleCues.js").HeldFile | null>}
-   */
   const chapters = new ChapterOrchestrator({
     containers: containerOrchestrator,
     subscribe: (sourceKey, fileIndex, listener) => mediaReads.subscribe(sourceKey, fileIndex, listener),
@@ -285,95 +265,14 @@ export async function startProxyServer({
     }
   });
   const chapterController = new ChapterController({ sourceRegistry, chapters });
-  const heldFileFor = async (sourceKey, fileIndex, known = null) => {
-    let torrent = known;
-    if (!torrent) {
-      torrent = torrentPool.knownTorrent(sourceKey);
-      if (!torrent) return null;
-    }
-    const file = torrent?.files?.[fileIndex];
-    if (!file || !(file.length > 0)) {
-      return null;
-    }
-    return {
-      sourceKey,
-      fileIndex,
-      name: String(file.name ?? ""),
-      length: file.length,
-      portionBytes: Number(torrent.pieceLength) > 0 ? Number(torrent.pieceLength) : undefined,
-      // The file's ONE container — the one the track table, the media info and
-      // the keyframe table are read from. Built here only when nobody has built
-      // it yet, so a pass of the walk does not fetch the file's edges again.
-      container: async () => {
-        const known = containerOrchestrator.known(sourceKey, fileIndex);
-        if (known !== undefined) {
-          return known;
-        }
-        const params = await mediaParams.paramsFor({ sourceKey, fileIndex, tailBytes: CONTAINER_HEAD_BYTES });
-        return params ? containerOrchestrator.containerFor(params) : null;
-      },
-      heldRanges: () => torrentPool.heldRangesOf(torrent, fileIndex),
-      readHeld: (start, end) => torrentPool.readHeldOf(torrent, fileIndex, start, end),
-      // Where the viewers of this file stand: the start of every urgent stretch
-      // of its priority map, which is where each viewer's own need begins.
-      wantedSeconds: () => viewerStartsOn(outputParts.priority?.mapFor(sourceKey, fileIndex)),
-      // A pass left readable clusters for the next one: run it.
-      askAgain: () => {
-        void pushFreshCues(`${sourceKey}:${fileIndex}`, sourceKey, fileIndex);
-      }
-    };
-  };
-  /**
-   * Walk whatever new cues a file now holds and push them to the viewers.
-   *
-   * One walk of a file at a time, and one more after it whenever pieces
-   * arrived meanwhile (`coalescing`): `verified` fires per piece, so a queue of
-   * identical passes would only postpone the one with something new to find,
-   * and dropping them — as this used to — lost the pass that would have found
-   * the last pieces of a file.
-   */
-  const pushFreshCues = coalescing(async (sourceKey, fileIndex) => {
-    try {
-      const file = await heldFileFor(sourceKey, fileIndex);
-      if (!file) {
-        return;
-      }
-      for (const entry of await warmSubtitleCues(file)) {
-        if (subtitles.hasPacketCues(sourceKey, fileIndex, entry.trackIndex)) continue;
-        const span = entry.spanStartSeconds === null
-          ? "empty"
-          : `${entry.spanStartSeconds.toFixed(1)}-${entry.spanEndSeconds.toFixed(1)}s`;
-        logger.info(
-          `subtitle push ${sourceKey.slice(0, 8)}:${fileIndex} track ${entry.trackIndex}: ` +
-          `${entry.cues.length} new cue(s) covering ${span}` +
-          (entry.withdrawn.length > 0 ? `, ${entry.withdrawn.length} taken back` : "") +
-          `, clusters walked ${entry.walkedClusters}/${entry.indexedClusters}, cursor ${entry.cursor}`
-        );
-        onSubtitleCues?.({ sourceKey, fileIndex, ...entry });
-      }
-    } catch (error) {
-      logger.warn(`subtitle push ${sourceKey.slice(0, 8)}:${fileIndex} failed: ${error?.message ?? error}`);
-    }
-  });
-  const subtitles = new SubtitleOrchestrator(containerOrchestrator, {
+  const subtitleWalk = new SubtitleWalk({
+    torrents: torrentPool,
+    containers: containerOrchestrator,
+    paramsFor: request => mediaParams.paramsFor(request),
+    wantedSeconds: (sourceKey, fileIndex) => viewerStartsOn(outputParts.priority?.mapFor(sourceKey, fileIndex)),
     publish: entry => onSubtitleCues?.(entry),
-    warm: async (torrent, fileIndex, sourceKey) => {
-      const file = await heldFileFor(sourceKey, fileIndex, torrent);
-      return file ? warmSubtitleCues(file) : [];
-    },
-    held: async (torrent, fileIndex, sourceKey, trackNumber) => {
-      const file = await heldFileFor(sourceKey, fileIndex, torrent);
-      return file ? cuesHeldFor(file, trackNumber) : null;
-    },
-    tracksOf: async (torrent, fileIndex, sourceKey) => {
-      const file = await heldFileFor(sourceKey, fileIndex, torrent);
-      return file ? subtitleTracksOf(file) : [];
-    },
-    declaredTracksOf: async (torrent, fileIndex, sourceKey) => {
-      const file = await heldFileFor(sourceKey, fileIndex, torrent);
-      return file ? declaredSubtitleTracksOf(file) : [];
-    },
-    forget: forgetSubtitles
+    log: line => logger.info(line),
+    warn: line => logger.warn(line)
   });
   // WHAT A FILE STATES ABOUT ITSELF IS READ HERE, ON THIS THREAD.
   //
@@ -393,8 +292,8 @@ export async function startProxyServer({
   /** Which source bytes each segment of an output reads, for the forecast (`segment-input-table.js`). */
   const segmentInputs = new SegmentInputTable();
   const mediaReads = new MediaReadRequests({
-    read: (params, statement) => statement === "subtitle-file" ? subtitles.inspectFile(params)
-      : statement === "subtitle-cues" ? subtitles.inspectPackets(params) : containerOrchestrator.inspect(params, statement),
+    read: (params, statement) => statement === "subtitle-file" ? subtitleWalk.subtitles.inspectFile(params)
+      : statement === "subtitle-cues" ? subtitleWalk.subtitles.inspectPackets(params) : containerOrchestrator.inspect(params, statement),
     failed: (params, statement, error) => logger.warn(`media source=${params.sourceKey} file=${params.fileIndex} statement=${statement} retry failed: ${error?.message ?? error}`)
   });
   const probeReads = new ProbeRequests({
@@ -866,8 +765,8 @@ export async function startProxyServer({
         if (["subtitle-file", "subtitle-cues"].includes(statement)) encodeRuns.planEncodersSoon();
       };
       return work.statement === "subtitle-file"
-        ? subtitles.inspectFile(params) : work.statement === "subtitle-cues"
-          ? subtitles.inspectPackets(params) : containerOrchestrator.inspect(params, originalRanges ? "source-ranges" : work.statement);
+        ? subtitleWalk.subtitles.inspectFile(params) : work.statement === "subtitle-cues"
+          ? subtitleWalk.subtitles.inspectPackets(params) : containerOrchestrator.inspect(params, originalRanges ? "source-ranges" : work.statement);
     },
     withdraw: work => {
       if (work.role === "source-rest" && work.statement === "packets") {
@@ -1028,7 +927,7 @@ export async function startProxyServer({
       sourceRegistry,
       torrentPool,
       viewers,
-      subtitles
+      subtitles: subtitleWalk.subtitles
     })
   );
   app.get("/encode-input/:token/:fileIndex", (req, reply) =>

@@ -1,7 +1,7 @@
 # media-read-params Specification
 
 ## Purpose
-TBD - created by archiving change composition-root-owners. Update Purpose after archive.
+One module makes the parameters of a media read and keeps the metadata demand for as long as the request's signal, instead of that logic living in the server closure.
 
 ## Requirements
 

@@ -32,6 +32,7 @@ import { EncodeRun } from "../../services/encode/EncodeRun.js";
 import { SoftwareEncoder } from "../../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../../services/encode/EncodeOrchestrator.js";
 import { RunCosts } from "../../services/encode/run-costs.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // A file whose segment k is the ten bytes at 10k, and whose header and index
 // are ten bytes at 1000 that every stretch needs once. A stretch of n segments
@@ -50,7 +51,7 @@ function inputsOver({ held = () => [[0, 999], HEADER], allowance = () => 10_000,
   const clock = { at: 0 };
   const announced = [];
   const costs = new RunCosts();
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     openOf: (asked) => costs.openOf(asked.outputKey),
     resolve,
     heldRanges: async () => held(),
@@ -145,7 +146,7 @@ test("room taken by another output while a stretch is being shortened shortens i
   let gates = null;
   const clock = { at: 0 };
   const costs = new RunCosts();
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     openOf: (asked) => costs.openOf(asked.outputKey),
     resolve, heldRanges: async () => [[0, 999], HEADER], now: () => clock.at,
     readRanges: async (_source, ranges) => {
@@ -235,7 +236,7 @@ test("an output that has not opened is sized by the host's startup reading, and 
   const costs = new RunCosts();
   costs.noteStartup({ firstByteWaitSec: 0.05, killCostSec: 0 });
   let at = 0;
-  const inputs = new EncodeInputs({ resolve, openOf: (asked) => costs.openOf(asked.outputKey),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve, openOf: (asked) => costs.openOf(asked.outputKey),
     heldRanges: async () => [[0, 999], HEADER],
     readRanges: async (_source, ranges) => { const buffers = ranges.map(([start, end]) => Buffer.alloc(end - start + 1)); at += buffers.reduce((sum, one) => sum + one.length, 0); return buffers; },
     reviseBudget: async () => inputs.allow(10_000), now: () => at, log: (line) => lines.push(line),
@@ -405,7 +406,7 @@ test("the line that says an input is ready says where its preparation spent its 
   const lines = [];
   const clock = { at: 0 };
   const costs = new RunCosts();
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     openOf: (asked) => costs.openOf(asked.outputKey),
     // Each statement of an interval reports one read of the file that waited
     // 7 ms behind an earlier read and took 3 ms; the clock moves by both.

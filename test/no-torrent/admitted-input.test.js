@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Writable } from "node:stream";
 import { createHash } from "node:crypto";
 import { admitInput, writeAdmittedInput } from "../../services/encode/AdmittedInput.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 const packet = { pts: 2, dts: 1.9, duration: 0.1, keyframe: true, ranges: [[4, 5]] };
 const source = { sourceKey: "source", fileIndex: 0, timeShiftSeconds: 1,
@@ -11,7 +12,7 @@ const source = { sourceKey: "source", fileIndex: 0, timeShiftSeconds: 1,
 test("admitted source ends use the same movie clock as admitted packets", async () => {
   const candidate = structuredClone(source);
   candidate.input.tracks[0].sourceEndSeconds = 2.1;
-  const admitted = await admitInput({ sources: [candidate], reserve: () => () => {},
+  const admitted = await admitInput({ matroskaIdOf, sources: [candidate], reserve: () => () => {},
     readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
   assert.equal(admitted.tracks[0].sourceEndSeconds, 1.1);
   assert.equal(admitted.tracks[0].packets[0].pts, 1);
@@ -23,7 +24,7 @@ test("appended final input declares its proven source end to the existing run", 
   final.input.tracks[0].packets[0].pts = 3;
   final.input.tracks[0].sourceEndSeconds = 3.1;
   let released = 0;
-  const prepare = candidate => admitInput({ sources: [candidate], reserve: () => () => released++,
+  const prepare = candidate => admitInput({ matroskaIdOf, sources: [candidate], reserve: () => () => released++,
     readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
   const first = await prepare(source);
   let next = await prepare(final);
@@ -39,7 +40,7 @@ test("a wait for the next input is said as a wait, the writing of an input is no
   // Field 2026-10-12: a soundtrack copy fed one segment at a time read 0.43x
   // with 0.014 s of processor per second of film; the waits for its next
   // segment were counted as its work (torrent-tv/meta#178).
-  const prepare = () => admitInput({ sources: [structuredClone(source)], reserve: () => () => {},
+  const prepare = () => admitInput({ matroskaIdOf, sources: [structuredClone(source)], reserve: () => () => {},
     readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
   const events = [];
   let given = 0;
@@ -59,7 +60,7 @@ test("a wait for the next input is said as a wait, the writing of an input is no
 });
 
 test("the first admitted bytes are reported after they are written to the encoder", async () => {
-  const input = await admitInput({ sources: [structuredClone(source)], reserve: () => () => {},
+  const input = await admitInput({ matroskaIdOf, sources: [structuredClone(source)], reserve: () => () => {},
     readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
   const events = [];
   await writeAdmittedInput(input, new Writable({ write(chunk, _encoding, done) { events.push(["write", chunk.length]); done(); } }), {
@@ -79,7 +80,7 @@ test("PCM conversion reserves its owned bytes before reading and preserves the s
     packets: [{ pts: 0, duration: 3 / 48000, keyframe: true, ranges: [[0, 2]] }]
   }] } };
   let reserved = 0, read = false, released = false;
-  const admitted = await admitInput({ sources: [candidate], reserve: bytes => {
+  const admitted = await admitInput({ matroskaIdOf, sources: [candidate], reserve: bytes => {
     assert.equal(read, false);
     reserved = bytes;
     return () => { released = true; };
@@ -97,7 +98,7 @@ test("packet addresses are checked against demuxed payload before encoder admiss
   const candidate = structuredClone(source);
   candidate.input.tracks[0].packets[0].expectedHash = createHash("sha256").update("cd").digest("hex");
   let releases = 0;
-  const acquire = buffers => admitInput({ sources: [candidate], reserve: () => () => releases++, readRanges: async () => buffers });
+  const acquire = buffers => admitInput({ matroskaIdOf, sources: [candidate], reserve: () => () => releases++, readRanges: async () => buffers });
   const valid = await acquire([Buffer.from("ab"), Buffer.from("cd")]);
   assert.equal(valid.kind, "result");
   valid.release();
@@ -108,7 +109,7 @@ test("packet addresses are checked against demuxed payload before encoder admiss
 });
 
 test("input identity includes packet timing and decoder declarations with identical bytes", async () => {
-  const acquire = async candidate => admitInput({ sources: [candidate], reserve: () => () => {},
+  const acquire = async candidate => admitInput({ matroskaIdOf, sources: [candidate], reserve: () => () => {},
     readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
   const first = await acquire(source);
   const same = await acquire(structuredClone(source));
@@ -129,7 +130,7 @@ test("different payload bit addresses cannot reuse the same admitted input ident
   const shifted = structuredClone(source);
   Object.assign(candidate.input.tracks[0].packets[0], { bitOffset: 0, bitLength: 8 });
   Object.assign(shifted.input.tracks[0].packets[0], { bitOffset: 8, bitLength: 8 });
-  const acquire = input => admitInput({ sources: [input], reserve: () => () => {},
+  const acquire = input => admitInput({ matroskaIdOf, sources: [input], reserve: () => () => {},
     readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
   const first = await acquire(candidate), second = await acquire(shifted);
   assert.notEqual(first.fingerprint, second.fingerprint);
@@ -138,7 +139,7 @@ test("different payload bit addresses cannot reuse the same admitted input ident
 
 test("complete input reserves memory before reading and keeps immutable owned bytes until released", async () => {
   const order = [];
-  const input = await admitInput({ sources: [source], reserve: bytes => {
+  const input = await admitInput({ matroskaIdOf, sources: [source], reserve: bytes => {
     order.push(["reserve", bytes]); return () => order.push(["release"]);
   }, readRanges: async () => { order.push(["read"]); return [Buffer.from("ab"), Buffer.from("cd")]; } });
   assert.equal(input.kind, "result");
@@ -159,17 +160,17 @@ test("complete input reserves memory before reading and keeps immutable owned by
 test("missing memory or bytes cannot produce encoder input and reservations are returned", async () => {
   let reads = 0, releases = 0;
   const readRanges = async () => { reads++; return null; };
-  assert.equal((await admitInput({ sources: [source], reserve: () => null, readRanges })).kind, "needs-memory");
+  assert.equal((await admitInput({ matroskaIdOf, sources: [source], reserve: () => null, readRanges })).kind, "needs-memory");
   assert.equal(reads, 0);
-  assert.equal((await admitInput({ sources: [source], reserve: () => () => releases++, readRanges })).kind, "needs-bytes");
+  assert.equal((await admitInput({ matroskaIdOf, sources: [source], reserve: () => () => releases++, readRanges })).kind, "needs-bytes");
   assert.equal(releases, 1);
-  await assert.rejects(admitInput({ sources: [source], reserve: () => () => releases++, readRanges: async () => [] }), /incomplete ranges/);
+  await assert.rejects(admitInput({ matroskaIdOf, sources: [source], reserve: () => () => releases++, readRanges: async () => [] }), /incomplete ranges/);
   assert.equal(releases, 2);
 });
 
 test("a failed encoder write returns the complete input reservation", async () => {
   let releases = 0;
-  const input = await admitInput({ sources: [source], reserve: () => () => releases++, readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
+  const input = await admitInput({ matroskaIdOf, sources: [source], reserve: () => () => releases++, readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
   const stdin = new Writable({ write(_chunk, _encoding, callback) { callback(new Error("Encoder closed stdin")); } });
   stdin.on("error", () => {});
   await assert.rejects(writeAdmittedInput(input, stdin), /Encoder closed stdin/);
@@ -180,7 +181,7 @@ test("fragmented packet streaming borrows each admitted buffer without joining p
   const candidate = structuredClone(source);
   candidate.input.tracks[0].packets[0].ranges = [[0, 1], [4, 5]];
   const buffers = [Buffer.from("ab"), Buffer.from("cd")];
-  const input = await admitInput({ sources: [candidate], reserve: () => () => {}, readRanges: async () => buffers });
+  const input = await admitInput({ matroskaIdOf, sources: [candidate], reserve: () => () => {}, readRanges: async () => buffers });
   const chunks = [];
   for await (const chunk of input.stream()) chunks.push(chunk);
   for (const buffer of buffers) assert.ok(chunks.some(chunk => chunk.buffer === buffer.buffer &&
@@ -198,7 +199,7 @@ test("admitted packet writes batch small Matroska chunks", async () => {
       packets: Array.from({ length: packetCount }, (_, index) => ({ pts: index, duration: 1, keyframe: true,
         ranges: [[index * packetBytes, (index + 1) * packetBytes - 1]] })) }]
   } };
-  const input = await admitInput({ sources: [candidate], reserve: () => () => {}, readRanges: async () => [payload] });
+  const input = await admitInput({ matroskaIdOf, sources: [candidate], reserve: () => () => {}, readRanges: async () => [payload] });
   let writes = 0, writtenBytes = 0;
   const output = [];
   const stdin = new Writable({ highWaterMark: 1024 * 1024, write(chunk, _encoding, done) {
@@ -221,7 +222,7 @@ test("admitted packet writes batch small Matroska chunks", async () => {
 });
 
 test("a packet input of another file with the same ranges is another input (torrent-tv/meta#178)", async () => {
-  const acquire = candidate => admitInput({ sources: [candidate], reserve: () => () => {},
+  const acquire = candidate => admitInput({ matroskaIdOf, sources: [candidate], reserve: () => () => {},
     readRanges: async () => [Buffer.from("ab"), Buffer.from("cd")] });
   const otherFile = structuredClone(source);
   otherFile.fileIndex = 1;

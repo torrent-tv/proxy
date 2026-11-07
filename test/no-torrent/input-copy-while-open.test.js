@@ -18,6 +18,7 @@ import { setImmediate } from "node:timers/promises";
 import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
 import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // A file of 400 bytes whose byte n is n % 251; a header of ten bytes at 0 and
 // a stretch of film of 300 bytes at 100.
@@ -107,7 +108,7 @@ const output = { id: "output" };
 test("an input being prepared for a start the plan does not place is withdrawn, and one it places is kept", async () => {
   let settle, changed = 0;
   const lines = [];
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [packetSource] }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources: [packetSource] }),
     readRanges: () => new Promise(resolve => { settle = resolve; }), reviseBudget: async () => inputs.allow(100),
     changed: () => changed++, failed: error => { throw error; }, log: line => lines.push(line) });
   inputs.take(output, 7, 7);
@@ -123,7 +124,7 @@ test("an input being prepared for a start the plan does not place is withdrawn, 
 });
 
 test("an input held for a start the plan does not place goes back", async () => {
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [packetSource] }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources: [packetSource] }),
     readRanges: async () => [Buffer.from("ab")], reviseBudget: async () => inputs.allow(100),
     changed: () => {}, failed: error => { throw error; } });
   inputs.take(output, 7, 7);
@@ -142,7 +143,7 @@ test("an input whose stretch is not all downloaded waits for the bytes instead o
   // refused for good. The answer waits for every byte, as one read used to.
   let downloaded = [[0, 9]];
   const lines = [];
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources }),
     heldRanges: async () => downloaded,
     readRanges: async (_source, list) => list.map(([start, end]) => FILE.subarray(start, end + 1)),
     reviseBudget: async () => inputs.allow(1000), changed: () => {}, failed: error => { throw error; },
@@ -163,7 +164,7 @@ test("a stretch copied whole is told about while its bytes are held, so a soundt
   // r61 (torrent-tv/meta#178): the soundtrack walked the clusters the
   // picture's input had already copied, a second time through the torrent thread.
   const told = [];
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources }),
     readRanges: async (_source, list) => list.map(([start, end]) => FILE.subarray(start, end + 1)),
     reviseBudget: async () => inputs.allow(1000), changed: () => {}, failed: error => { throw error; },
     stretchCopied: (copiedFor, from, to, input) => told.push({ copiedFor, from, to, bytes: [...input.read(0, 200, 203).bytes] }) });
@@ -179,7 +180,7 @@ test("a stretch copied whole is told about while its bytes are held, so a soundt
 test("a stretch released before it is copied is not told about", async () => {
   const told = [];
   let settle = null;
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources }),
     readRanges: async (_source, list) => list.length === 1 && list[0][0] === 100
       ? new Promise(resolve => { settle = () => resolve(list.map(([start, end]) => FILE.subarray(start, end + 1))); })
       : list.map(([start, end]) => FILE.subarray(start, end + 1)),

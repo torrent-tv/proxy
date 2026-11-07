@@ -2,13 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
 import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 const output = { outputKey: "picture" };
 
 function prepare({ allowance = 10_000, presentEnd = 999 } = {}) {
   const resolutions = [], reads = [], lines = [];
   let clock = 0, heldReads = 0, open = null;
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     resolve: async (_output, from, to) => {
       resolutions.push([from, to]);
       return { kind: "result", sources: [{ sourceKey: "generated", fileIndex: 0,

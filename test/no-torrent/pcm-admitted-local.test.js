@@ -8,6 +8,7 @@ import ffmpegBin from "ffmpeg-static";
 import { ContainerFactory } from "../../services/media/container/ContainerFactory.js";
 import { SegmentInputs } from "../../services/media/SegmentInputs.js";
 import { admitInput } from "../../services/encode/AdmittedInput.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // Synthetic local audio only. The packet reader returns bytes from this file.
 for (const mode of ["transcode", "copy"]) {
@@ -30,7 +31,7 @@ for (const [format, codec, bitDepth] of [["mkv", "pcm_s24le", 24], ["mkv", "pcm_
     const bounds = index.boundsOf(tracks[0].trackNumber);
     const input = new SegmentInputs({ tracks, index }).forInterval({ from: Math.max(0, bounds.start), to: bounds.end, mode });
     assert.equal(input.kind, "result", JSON.stringify(input));
-    const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input }],
+    const admitted = await admitInput({ matroskaIdOf, sources: [{ sourceKey: "local", fileIndex: 0, input }],
       reserve: () => () => {}, readRanges: async (_source, ranges) => ranges.map(([a, b]) => bytes.subarray(a, b + 1)) });
     assert.equal(admitted.kind, "result");
     const chunks = await Array.fromAsync(admitted.stream());

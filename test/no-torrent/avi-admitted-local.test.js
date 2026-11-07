@@ -7,6 +7,7 @@ import path from "node:path";
 import ffmpegBin from "ffmpeg-static";
 import { ContainerFactory } from "../../services/media/container/ContainerFactory.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // Synthetic local files only; neither the container nor its byte reader starts a torrent.
 // An AVI with an index is read by FFmpeg from the original file
@@ -34,7 +35,7 @@ for (const audioCodec of ["pcm_s16le", "wmav2"]) {
         assert.equal(input.kind, "result", JSON.stringify(input));
         return { track, packets: input.packets };
       });
-      const chunks = await Array.fromAsync(matroskaInput({ tracks: inputs,
+      const chunks = await Array.fromAsync(matroskaInput({ matroskaIdOf, tracks: inputs,
         readPacket: async (_input, packet) => packet.ranges.map(([a, b]) => bytes.subarray(a, b + 1)) }));
       const decoded = spawnSync(ffmpegBin, ["-hide_banner", "-loglevel", "error", "-i", "pipe:0",
         "-map", "0:v", "-map", "0:a", "-f", "null", "pipe:1"],

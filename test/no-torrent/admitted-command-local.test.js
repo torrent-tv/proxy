@@ -15,6 +15,7 @@ import { softwareDescriptor } from "../../services/encode/hwaccel.js";
 import { judgePiece } from "../../services/encode/piece-completeness.js";
 import { presentationSegment } from "../../services/encode/segment-formats/presentation-segment.js";
 import { walkBoxes } from "../../services/encode/segment-formats/mp4-boxes.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // Only synthetic lavfi input and stdin are used; no torrent or HTTP boundary.
 for (const [codec, origin, delay = 0] of [["aac", 0], ["ac3", 850.016], ["aac", 0, 1024 / 48000]]) {
@@ -31,7 +32,7 @@ test(`audio-only ${codec} cuts at ${origin}s with ${delay}s delay cover each dec
     const index = await container.readPacketIndex();
     const input = new SegmentInputs({ tracks, index }).forInterval({ from: 0, to: 3, mode: "copy" });
     assert.equal(input.kind, "result");
-    const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input, timeShiftSeconds: -origin - delay }], reserve: () => () => {},
+    const admitted = await admitInput({ matroskaIdOf, sources: [{ sourceKey: "local", fileIndex: 0, input, timeShiftSeconds: -origin - delay }], reserve: () => () => {},
       readRanges: async (_source, ranges) => ranges.map(([a, b]) => Buffer.from(bytes.subarray(a, b + 1))) });
     const chunks = [];
     await writeAdmittedInput(admitted, new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } }));
@@ -87,7 +88,7 @@ test("transcoded audio publishes a complete interval after a source timestamp ga
     const grid = [0.224, 4.224];
     const input = new SegmentInputs({ tracks, index }).forInterval({ from: grid[0], to: grid[1], mode: "transcode" });
     assert.equal(input.kind, "result");
-    const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
+    const admitted = await admitInput({ matroskaIdOf, sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
       readRanges: async (_source, ranges) => ranges.map(([start, end]) => Buffer.from(bytes.subarray(start, end + 1))) });
     const chunks = [];
     await writeAdmittedInput(admitted, new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } }));
@@ -127,7 +128,7 @@ for (const transcode of [false, true]) {
         const grid = [0, 0.5, 1, 1.5, 2, 2.5, 3];
         const input = new SegmentInputs({ tracks, index }).forInterval({ from: grid[startIndex], to: grid[startIndex + 1], mode: transcode ? "transcode" : "copy" });
         assert.equal(input.kind, "result", JSON.stringify(input));
-        const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
+        const admitted = await admitInput({ matroskaIdOf, sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
           readRanges: async (_source, ranges) => ranges.map(([a, b]) => Buffer.from(bytes.subarray(a, b + 1))) });
         const chunks = [];
         const append = startIndex === 2;
@@ -135,7 +136,7 @@ for (const transcode of [false, true]) {
         if (append) {
           const following = new SegmentInputs({ tracks, index }).forInterval({ from: grid[startIndex + 1], to: grid[startIndex + 2], mode: transcode ? "transcode" : "copy" });
           assert.equal(following.kind, "result");
-          next = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input: following }], reserve: () => () => {},
+          next = await admitInput({ matroskaIdOf, sources: [{ sourceKey: "local", fileIndex: 0, input: following }], reserve: () => () => {},
             readRanges: async (_source, ranges) => ranges.map(([a, b]) => Buffer.from(bytes.subarray(a, b + 1))) });
         }
         const stdin = new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } });

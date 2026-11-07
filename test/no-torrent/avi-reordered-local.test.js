@@ -7,6 +7,7 @@ import path from "node:path";
 import ffmpegBin from "ffmpeg-static";
 import { AviContainer } from "../../services/media/container/AviContainer.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // Generated lavfi files only. No torrent boundary is imported or invoked.
 // Packets are reassembled only for an AVI without an index; an indexed AVI is
@@ -33,7 +34,7 @@ for (const codec of ["mpeg4", "libxvid", "libx264", "libx265"]) test(`AVI ${code
     const input = index.inputFor({ trackId: track.trackNumber, from: bounds.start, to: bounds.end });
     assert.equal(input.kind, "result");
     assert.ok(input.packets.some((packet, position) => position && packet.pts < input.packets[position - 1].pts), JSON.stringify({ codecId: track.codecId, pocProportional: track.pocProportional, fps: track.fps, times: input.packets.map(packet => packet.pts) }));
-    const chunks = await Array.fromAsync(matroskaInput({ tracks: [{ track, packets: input.packets }],
+    const chunks = await Array.fromAsync(matroskaInput({ matroskaIdOf, tracks: [{ track, packets: input.packets }],
       readPacket: async (_input, packet) => packet.ranges.map(([a, b]) => bytes.subarray(a, b + 1)) }));
     const options = { windowsHide: true, encoding: "utf8" };
     const args = ["-map", "0:v", "-vsync", "0", "-f", "framemd5", "pipe:1"];

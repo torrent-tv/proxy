@@ -7,6 +7,7 @@ import path from "node:path";
 import ffmpegBin from "ffmpeg-static";
 import { AviContainer } from "../../services/media/container/AviContainer.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // Only synthetic local files; no torrent client or source is used.
 // Packets are reassembled only for an AVI without an index; an indexed AVI is
@@ -39,7 +40,7 @@ test(`AVI variable-bitrate MP3 retains samples without idx1`, async () => {
     assert.equal(input.kind, "result");
     assert.ok(new Set(input.packets.map(packet => packet.ranges.reduce((sum, [a, b]) => sum + b - a + 1, 0))).size > 1);
     assert.ok(input.packets.every(packet => Math.abs(packet.duration - 1152 / 48000) < 1e-9));
-    const chunks = await Array.fromAsync(matroskaInput({ tracks: [{ track: audio, packets: input.packets }],
+    const chunks = await Array.fromAsync(matroskaInput({ matroskaIdOf, tracks: [{ track: audio, packets: input.packets }],
       readPacket: async (_input, packet) => packet.ranges.map(([a, b]) => bytes.subarray(a, b + 1)) }));
     const args = ["-map", "0:a", "-f", "s16le", "pipe:1"];
     const expected = spawnSync(ffmpegBin, ["-hide_banner", "-loglevel", "error", "-i", file, ...args], { windowsHide: true });

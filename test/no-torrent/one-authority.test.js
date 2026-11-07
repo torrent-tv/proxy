@@ -82,6 +82,33 @@ test("an encoder is stopped for scheduling reasons in exactly one place", () => 
   assert.equal(runs.filter((line) => line.includes(".stop(")).length, 1);
 });
 
+test("the stop sites of an encoder are pinned: the output form, the run form, and the one asking through them", () => {
+  // torrent-tv/meta#286. A corrected cut table means ONE run is wrong, so what
+  // it asks for is the run-level form; the output-level form stops every live
+  // run of an output and is for the callers that mean the whole output.
+  const runs = statements(source("services/encode/EncodeRuns.js"));
+  assert.equal(runs.filter((line) => /^stopRun\(\w+, \w+\) \{$/.test(line)).length, 1, "stopRun(run, reason) is declared once");
+  assert.equal(runs.filter((line) => /^stopEncodeRun\(\w+, \w+\) \{$/.test(line)).length, 1, "stopEncodeRun(output, reason) is declared once");
+  // The line that stops a process stays the one it was, and it is stopRun's.
+  assert.equal(runs.filter((line) => line.includes(".stop(")).length, 1);
+
+  const times = statements(source("services/encode/OutputTimes.js"));
+  assert.deepEqual(times.filter((line) => line.includes("stopEncodeRun")), [], "a corrected table does not stop an output");
+  assert.equal(times.filter((line) => line.includes("this.#host.stopRun(")).length, 1, "it stops the run it found, in one place");
+
+  const wiring = statements(source("services/server/wire-outputs.js"));
+  assert.equal(
+    wiring.filter((line) => line.startsWith("stopRun:") && line.includes("parts.encodeRuns.stopRun")).length,
+    1,
+    "the wiring hands OutputTimes the run-level form"
+  );
+  assert.equal(
+    wiring.filter((line) => line.startsWith("stopEncodeRun:") && line.includes("parts.encodeRuns.stopEncodeRun")).length,
+    0,
+    "and no longer the output-level one"
+  );
+});
+
 test("nothing outside the encoding layer starts an encoder", () => {
   // A run is built in one place. Two places building them is how a start came
   // to kill what the plan had decided to keep — the killing lived in the

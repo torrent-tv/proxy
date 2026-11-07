@@ -1,6 +1,7 @@
 ## 2.107.61
 
 - **Chore**: Stop setting the retired `waitEstimate` field on the viewer forecast; the browser no longer reads it and the contract now says the forecast carries no wait estimate.
+- **Chore**: Tests now share byte builders (MP4 boxes, EBML elements), wait helpers and source readers instead of carrying local copies, with no behaviour change.
 
 ## 2.107.60
 

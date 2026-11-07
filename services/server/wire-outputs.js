@@ -12,6 +12,7 @@ import { EventEmitter } from "node:events";
 import { writeJsonAtomic } from "../../utils/atomic-json.js";
 import { logger } from "../../utils/logger.js";
 import { KeyframeTables } from "../media/KeyframeTables.js";
+import { matroskaIdOf } from "../media/tracks/codec-names.js";
 import { bandOf, WaitLedger } from "../encode/OutputWaitLedger.js";
 import { readEndedChildrenCpuSeconds, readMachineState, readProcessCpuSeconds, readProxyCpuSeconds, readSystemCpu, shareOfMachine } from "../encode/host-load.js";
 import { minimumBufferFrom } from "../torrent/supply-margin.js";
@@ -1197,6 +1198,7 @@ export function wireOutputs({
   parts.encodeInputs = encodeInputs ?? (typeof encodeInputResolution?.resolve === "function" ? new EncodeInputs({
     resolve: (...args) => encodeInputResolution.resolve(...args),
     readRanges: readEncodeRanges,
+    matroskaIdOf,
     openWholeFile: openEncodeWholeFile,
     heldRanges: readEncodeHeldRanges,
     stretchCopied: (...args) => encodeInputResolution.stretchCopied(...args),

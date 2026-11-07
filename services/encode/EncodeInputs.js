@@ -67,10 +67,12 @@ export class EncodeInputs {
    */
   #stretchCopied;
   #observeWait;
+  #matroskaIdOf;
 
   constructor({ resolve, readRanges, openWholeFile = null, heldRanges = null, reviseBudget, changed, failed, capacity = () => null, urgent = () => true,
     rankAt = () => null, demandChanged = () => {}, openOf = () => null, log = () => {}, now = Date.now, stretchCopied = () => {},
-    observeWait = null }) {
+    observeWait = null, matroskaIdOf }) {
+    this.#matroskaIdOf = matroskaIdOf;
     this.#stretchCopied = stretchCopied;
     this.#observeWait = observeWait;
     this.#openOf = openOf;
@@ -461,7 +463,7 @@ export class EncodeInputs {
         }
         if (!result) return;
       } else {
-        result = await admitInput({ sources: resolved.sources, readRanges: this.#read, reserve: this.#reserveFor(request) });
+        result = await admitInput({ sources: resolved.sources, readRanges: this.#read, matroskaIdOf: this.#matroskaIdOf, reserve: this.#reserveFor(request) });
         if (result.kind === "result") Object.assign(result, { from: request.from, to: request.from });
       }
       if (this.#requests.get(request.key) !== request) { result.release?.(); return; }

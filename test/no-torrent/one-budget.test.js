@@ -228,7 +228,7 @@ test("a claimant below its own minimum says so", async () => {
   await budget.revise();
 
   assert.equal(said.length, 1, "working below what it needs is a fault of the machine, and invisible otherwise");
-  assert.match(said[0], /below the 64MB it needs/);
+  assert.match(said[0], /below the 64MiB it needs/);
 });
 
 test("the wired budget says what the spilled pieces may keep, which the start forecast compares its stock with", async () => {

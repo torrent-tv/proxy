@@ -131,9 +131,9 @@ test("the memory line says bytes, and names what it could not measure", () => {
     ]
   });
   // The figures the kernel's own kill line quoted, so the two can be compared.
-  assert.match(measured, /rss=2366MB/);
-  assert.match(measured, /1 torrent store\(s\) holding 504MB, committed 504MB of 512MB allowed/);
-  assert.match(measured, /machine has 1900MB available \(MemAvailable decides; no container limit\)$/);
+  assert.match(measured, /rss=2366MiB/);
+  assert.match(measured, /1 torrent store\(s\) holding 504MiB, committed 504MiB of 512MiB allowed/);
+  assert.match(measured, /machine has 1900MiB available \(MemAvailable decides; no container limit\)$/);
 
   const estimated = describeMemory({
     process: usage,
@@ -154,14 +154,14 @@ test("the memory line says whether a container's limit is in force, and whether 
     available: { bytes: 90 * MEGABYTE, source: "cgroup v2", limitBytes: 512 * MEGABYTE, totalBytes: 512 * MEGABYTE },
     stores: []
   });
-  assert.match(limited, /machine has 90MB available \(cgroup v2 decides; container limit 512MB\)$/);
+  assert.match(limited, /machine has 90MiB available \(cgroup v2 decides; container limit 512MiB\)$/);
 
   const roomier = describeMemory({
     process: usage,
     available: { bytes: 900 * MEGABYTE, source: "MemAvailable", limitBytes: 4 * GIGABYTE, totalBytes: 4 * GIGABYTE },
     stores: []
   });
-  assert.match(roomier, /machine has 900MB available \(MemAvailable decides; container limit 4096MB\)$/);
+  assert.match(roomier, /machine has 900MiB available \(MemAvailable decides; container limit 4096MiB\)$/);
 });
 
 test("holding and having taken are separate figures, and the line says both", () => {
@@ -182,9 +182,9 @@ test("holding and having taken are separate figures, and the line says both", ()
       }
     ]
   });
-  assert.match(line, /holding 144MB, committed 512MB of 512MB allowed, 2904MB spilled to disk/);
-  assert.match(line, /anon=870MB/);
-  assert.match(line, /12000MB free on disk$/);
+  assert.match(line, /holding 144MiB, committed 512MiB of 512MiB allowed, 3045MB spilled to disk/);
+  assert.match(line, /anon=870MiB/);
+  assert.match(line, /12583MB free on disk$/);
 });
 
 test("a thread's reading leaves out what belongs to the process", () => {
@@ -205,8 +205,8 @@ test("a thread's reading leaves out what belongs to the process", () => {
       }
     ]
   });
-  assert.match(line, /^memory \(torrent worker\): heap=12MB\/20MB/);
-  assert.match(line, /arrayBuffers=512MB/);
+  assert.match(line, /^memory \(torrent worker\): heap=12MiB\/20MiB/);
+  assert.match(line, /arrayBuffers=512MiB/);
   assert.doesNotMatch(line, /rss=/);
   assert.doesNotMatch(line, /machine has/);
 });
@@ -259,7 +259,7 @@ test("the line says how far the heap is from the ceiling it is killed for reachi
     },
     stores: []
   });
-  assert.match(line, /heap=1800MB\/1904MB of 2240MB allowed/);
+  assert.match(line, /heap=1800MiB\/1904MiB of 2240MiB allowed/);
 
   const withoutLimit = describeMemory({
     scope: "thread",
@@ -267,7 +267,7 @@ test("the line says how far the heap is from the ceiling it is killed for reachi
     process: { rss: 0, heapUsed: 12 * MEGABYTE, heapTotal: 20 * MEGABYTE, external: 0, arrayBuffers: 0 },
     stores: []
   });
-  assert.match(withoutLimit, /heap=12MB\/20MB external=/, "an unknown ceiling is left out, not printed as zero");
+  assert.match(withoutLimit, /heap=12MiB\/20MiB external=/, "an unknown ceiling is left out, not printed as zero");
 });
 
 test("a reading is written when it moved, or when the silence has gone on long enough", () => {
@@ -363,7 +363,7 @@ test("the mapping shape is said in the line, and left out when it is not known",
     mappings: summariseMappings(SMAPS),
     stores: []
   });
-  assert.match(withShape, /mappings=\[heap 40MB, 2 anon ≥2MB = 8MB \(largest 4MB\), 1 anon <2MB = 1MB, files 12MB\]/);
+  assert.match(withShape, /mappings=\[heap 40MiB, 2 anon ≥2MiB = 8MiB \(largest 4MiB\), 1 anon <2MiB = 1MiB, files 12MiB\]/);
 
   const withoutShape = describeMemory({
     process: { rss: 900 * MEGABYTE, heapUsed: 27 * MEGABYTE, heapTotal: 30 * MEGABYTE, external: 6 * MEGABYTE, arrayBuffers: 2 * MEGABYTE },
@@ -414,7 +414,7 @@ test("figures a caller reads for itself land on the same line as the memory", ()
     stores: [],
     extra: "piece buffers 21544 let go, 21482 collected, 62 still alive against 53 the store holds"
   });
-  assert.match(line, /arrayBuffers=393MB/);
+  assert.match(line, /arrayBuffers=393MiB/);
   assert.match(line, /62 still alive against 53 the store holds$/);
   assert.doesNotMatch(
     describeMemory({

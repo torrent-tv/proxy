@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { until } from "./helpers/wait.js";
 import { SharedPieceStore } from "../../services/storage/piece-store/shared-piece-store.js";
 
 const PIECE = 1024;
@@ -65,11 +66,7 @@ async function slackAfter(durations) {
         store.put(index, Buffer.alloc(PIECE, index % 251), (error) => (error ? reject(error) : resolve()));
       });
       if (index >= CAPACITY) {
-        const deadline = realNow() + 5000;
-        while (disk.pending.length === 0) {
-          if (realNow() > deadline) throw new Error("the eviction's write never reached the disk");
-          await new Promise((resolve) => setTimeout(resolve, 2));
-        }
+        await until(() => disk.pending.length > 0, "the eviction's write to reach the disk");
         clock += durations[index - CAPACITY];
         disk.pending.shift()();
       }

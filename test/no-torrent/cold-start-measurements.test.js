@@ -10,6 +10,7 @@ import { describeShares, parseStat, partOfThread, sharesBetween, threadReader } 
 import { describeAnswers } from "../../services/encode/OriginalInput.js";
 import { DownloadMaps } from "../../services/viewer/DownloadMaps.js";
 import { MachineBudget } from "../../services/storage/MachineBudget.js";
+import { until } from "./helpers/wait.js";
 
 test("a stat line names its thread and its CPU, whatever the name holds", () => {
   const fields = "S 1 2 3 4 5 6 7 8 9 10 250 50 0 0";
@@ -189,11 +190,7 @@ test("the cold-start profile is taken once, from the first source, and only when
       torrentThread: async (seconds) => { asked.push(seconds); return JSON.stringify({ nodes: [{ id: 1 }] }); } });
     profile.begin();
     profile.begin();
-    const written = await new Promise((resolve) => {
-      const wait = () => (lines.filter((line) => line.includes("written to")).length === 2 ? resolve(true) : setTimeout(wait, 20));
-      wait();
-    });
-    assert.equal(written, true);
+    await until(() => lines.filter((line) => line.includes("written to")).length === 2, "both profiles to be written");
     assert.deepEqual(asked, [0.2]);
     const files = (await readdir(dir)).sort();
     assert.equal(files.length, 2);

@@ -21,6 +21,7 @@ import { EncodeRun } from "../../services/encode/EncodeRun.js";
 import { ENCODE_EXIT } from "../../services/encode/encode-exit.js";
 import { SoftwareEncoder } from "../../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../../services/encode/EncodeOrchestrator.js";
+import { until } from "./helpers/wait.js";
 
 const PICTURE = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
@@ -184,13 +185,10 @@ test("a wake-up is asked for, because no event arrives while the data is away", 
   // what the DECISION reads, and a timer is not a decision. So this waits for
   // the condition, with a deadline only as a backstop; a fixed pause here would
   // measure the machine.
-  const deadline = Date.now() + 10_000;
-  while (stand.askedToPlanAgain() === 0) {
-    if (Date.now() > deadline) {
-      assert.fail("nothing about the state changes while the input is missing, so the plan must be recalled");
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  await until(
+    () => stand.askedToPlanAgain() > 0,
+    "the plan to be recalled: nothing about the state changes while the input is missing"
+  );
   assert.ok(stand.askedToPlanAgain() >= 1);
 });
 

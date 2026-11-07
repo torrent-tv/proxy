@@ -18,29 +18,7 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 
 import { createTunnelClient } from "../../services/transport/tunnel-client.js";
-
-/**
- * Wait for the thing being asserted, not for a length of time.
- *
- * A chosen interval followed by an assertion does not test — it samples, and
- * what it samples is how busy the machine is. The deadline here is a backstop
- * that turns a hang into a failure; it is never the measurement.
- *
- * @param {() => boolean} until
- * @param {string} what - Named in the failure, since a timeout otherwise says
- *   only that something did not happen.
- * @param {number} [limit]
- * @returns {Promise<void>}
- */
-async function waitFor(until, what, limit = 10_000) {
-  const deadline = Date.now() + limit;
-  while (!until()) {
-    if (Date.now() > deadline) {
-      throw new Error(`${what} never happened`);
-    }
-    await new Promise((resolve) => { setTimeout(resolve, 5); });
-  }
-}
+import { until } from "./helpers/wait.js";
 
 /**
  * A stand-in for the registry's tunnel endpoint, with the one behaviour that
@@ -118,7 +96,7 @@ test("the connection is replaced before its lifetime runs out, without a gap", a
   // Until the renewals have happened, however long this machine takes over
   // them. Waited out as 700 ms instead — about four lifetimes — this asserted
   // how many the scheduler had got round to.
-  await waitFor(() => registry.opened() >= 3, "three connections");
+  await until(() => registry.opened() >= 3, "three connections");
 
   assert.ok(registry.opened() >= 3, `expected several renewals, saw ${registry.opened()}`);
   // The property this exists for: the registry was never left with nothing.
@@ -153,14 +131,14 @@ test("a connection killed from outside is still reconnected", async (t) => {
   });
 
   client.connect();
-  await waitFor(() => registry.opened() === 1, "the first connection");
+  await until(() => registry.opened() === 1, "the first connection");
   // And exactly one: the lifetime above is far longer than this test runs, so
   // nothing renews and a second would mean something else had opened it.
   assert.equal(registry.opened(), 1);
 
   registry.killCurrent();
   // The renewal must not have taken the ordinary reconnect away with it.
-  await waitFor(
+  await until(
     () => lines.some((line) => line.includes("Reconnecting in")),
     "the reconnect after a connection was killed from outside"
   );

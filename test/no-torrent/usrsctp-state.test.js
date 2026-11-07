@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 
 import { createUsrsctpStateReader, SCTPSTATE_SCRIPT_PATH } from "../../services/transport/usrsctp-state.js";
+import { until } from "./helpers/wait.js";
 
 class FakeChild extends EventEmitter {
   constructor(command, args) {
@@ -48,20 +49,6 @@ function makeSpawn(output) {
   return { spawnProcess, calls };
 }
 
-/** Wait until `check` holds, rather than for a chosen interval. */
-async function waitFor(check) {
-  const deadline = Date.now() + 5_000;
-  for (;;) {
-    if (check()) {
-      return;
-    }
-    if (Date.now() > deadline) {
-      throw new Error("timed out waiting for the reading to be logged");
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
-
 test("the deadline is counted outside the process gdb stops", async () => {
   const { spawnProcess, calls } = makeSpawn("state=8 rwnd=95890\n");
   const lines = [];
@@ -72,7 +59,7 @@ test("the deadline is counted outside the process gdb stops", async () => {
   });
   const started = reader.maybeRead("test wedge");
   assert.equal(started, true);
-  await waitFor(() => lines.length > 0);
+  await until(() => lines.length > 0, "the reading to be logged");
   assert.equal(calls.length, 1);
   // `timeout` is a separate process, so it keeps counting while gdb holds every
   // thread of this one. A `setTimeout` here cannot fire — measured in the field
@@ -100,7 +87,7 @@ test("no output is reported as no reading, not silence", async () => {
   const lines = [];
   const reader = createUsrsctpStateReader({ log: (message) => lines.push(message), spawnProcess, pid: 1 });
   reader.maybeRead("empty case");
-  await waitFor(() => lines.length > 0);
+  await until(() => lines.length > 0, "the reading to be logged");
   assert.match(lines[0], /no reading/);
 });
 
@@ -114,7 +101,7 @@ test("a second read is refused within the cooldown, like the packet witness", as
     cooldownMs: 60_000
   });
   assert.equal(reader.maybeRead("first"), true);
-  await waitFor(() => lines.length > 0);
+  await until(() => lines.length > 0, "the reading to be logged");
   assert.equal(reader.maybeRead("second, too soon"), false);
   assert.equal(calls.length, 1);
 });
@@ -126,6 +113,6 @@ test("a missing gdb is reported, not thrown", async () => {
   };
   const reader = createUsrsctpStateReader({ log: (message) => lines.push(message), spawnProcess, pid: 1 });
   reader.maybeRead("no gdb on this host");
-  await waitFor(() => lines.length > 0);
+  await until(() => lines.length > 0, "the reading to be logged");
   assert.match(lines[0], /could not start gdb/);
 });

@@ -19,6 +19,7 @@ import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
 import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
 import { matroskaIdOf } from "./support/codec-lookup.js";
+import { settle, until } from "./helpers/wait.js";
 
 // A file of 400 bytes whose byte n is n % 251; a header of ten bytes at 0 and
 // a stretch of film of 300 bytes at 100.
@@ -55,8 +56,9 @@ test("the input is answered once the header is copied, and a read in the stretch
   assert.equal(input.waitedBefore(Date.now()), 0, "a read of the header waited for nothing");
   let answered = null;
   const reading = Promise.resolve(input.read(0, 150, 160, true)).then(answer => { answered = answer; });
-  await new Promise(resolve => setTimeout(resolve, 20));
+  await settle(5);
   assert.equal(answered, null, "the stretch is not copied yet: the read waits");
+  await until(() => input.waitedBefore(Date.now()) >= 20, "the read to have waited behind the copy");
   await reader.next();
   await reading;
   assert.ok(input.waitedBefore(Date.now()) >= 19, "and the wait is recorded, so a run's open can leave it out");

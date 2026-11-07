@@ -12,6 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createDataChannelHandler } from "../../services/transport/data-channel-handler.js";
+import { settle } from "./helpers/wait.js";
 
 /** A channel whose library queue the check fills and empties by hand. */
 class QueueingChannel {
@@ -67,7 +68,6 @@ function framesHanded(channel, count) {
   });
 }
 
-const settle = () => new Promise(resolve => setImmediate(resolve));
 
 test("the next frame waits until the library has handed every earlier one to usrsctp", async (t) => {
   t.mock.method(globalThis, "fetch", async () => bodyOf(1000, 1000, 1000));

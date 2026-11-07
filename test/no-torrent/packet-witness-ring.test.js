@@ -10,6 +10,7 @@ import {
   createPacketWitness,
   WITNESS_RING_BASENAME
 } from "../../services/transport/packet-witness.js";
+import { settle, until } from "./helpers/wait.js";
 
 /**
  * A stand-in for a spawned tcpdump: it records how it was called and stays
@@ -58,33 +59,6 @@ function makeSpawn() {
   };
 }
 
-/**
- * Wait until `check` holds, rather than for a chosen interval.
- *
- * A fixed sleep passes alone and fails in a full run — the defect roadmap item
- * 51 names — and the work here is several awaits deep (probe, stop, readdir,
- * copy, restart), so its duration is whatever the machine is busy with.
- *
- * @param {() => boolean | Promise<boolean>} check
- * @param {string} what
- * @returns {Promise<void>}
- */
-async function waitFor(check, what) {
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    if (await check()) {
-      return;
-    }
-    if (Date.now() > deadline) {
-      throw new Error(`timed out waiting for ${what}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
-
-/** Let every already-queued microtask and immediate run. */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
-
 async function withDir(run) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "witness-ring-"));
   try {
@@ -106,16 +80,16 @@ test("the ring runs while a channel is open and stops with the last one", async 
 
     witness.holdRing();
     witness.holdRing();
-    await waitFor(() => spawn.rings.length === 1, "the ring to start");
+    await until(() => spawn.rings.length === 1, "the ring to start");
     assert.equal(spawn.rings.length, 1, "a second channel must not start a second ring");
     assert.equal(spawn.rings[0].killed, false);
 
     witness.releaseRing();
-    await settle();
+    await settle(20);
     assert.equal(spawn.rings[0].killed, false, "one channel left still wants the ring");
 
     witness.releaseRing();
-    await waitFor(() => spawn.rings[0].killed, "the ring to stop");
+    await until(() => spawn.rings[0].killed, "the ring to stop");
   });
 });
 
@@ -133,7 +107,7 @@ test("a channel that opens and closes while the ring is starting leaves nothing 
     // nobody holds and nobody will ever stop.
     witness.holdRing();
     witness.releaseRing();
-    await waitFor(
+    await until(
       () => spawn.rings.every((child) => child.killed),
       "any ring started mid-flight to be stopped"
     );
@@ -152,10 +126,10 @@ test("the ring's files are removed once nobody is being served", async () => {
       spawnProcess: spawn.spawnProcess
     });
     witness.holdRing();
-    await waitFor(() => spawn.rings.length === 1, "the ring to start");
+    await until(() => spawn.rings.length === 1, "the ring to start");
     await writeFile(path.join(dir, `${WITNESS_RING_BASENAME}0`), "pcap");
     witness.releaseRing();
-    await waitFor(async () => (await readdir(dir)).length === 0, "the ring files to be removed");
+    await until(async () => (await readdir(dir)).length === 0, "the ring files to be removed");
   });
 });
 
@@ -170,7 +144,7 @@ test("a wedge keeps the ring's history, and the ring keeps recording afterwards"
       spawnProcess: spawn.spawnProcess
     });
     witness.holdRing();
-    await waitFor(() => spawn.rings.length === 1, "the ring to start");
+    await until(() => spawn.rings.length === 1, "the ring to start");
     await writeFile(path.join(dir, `${WITNESS_RING_BASENAME}0`), "before-the-freeze");
     await writeFile(path.join(dir, `${WITNESS_RING_BASENAME}1`), "also-before");
 
@@ -183,7 +157,7 @@ test("a wedge keeps the ring's history, and the ring keeps recording afterwards"
       stuckForMs: 4000
     });
     assert.equal(started, true);
-    await waitFor(
+    await until(
       async () => (await readdir(dir)).filter((name) => name.includes(".before")).length === 2,
       "both ring files to be copied aside"
     );
@@ -192,7 +166,7 @@ test("a wedge keeps the ring's history, and the ring keeps recording afterwards"
     assert.equal(kept.length, 2, "both ring files must be kept, not just the finished one");
     assert.ok(kept.every((name) => name.startsWith("packet-witness.68296f7d.")));
     // Stopped to flush, then started again: two ring processes over the episode.
-    await waitFor(() => spawn.rings.length >= 2, "the ring to resume after the copy");
+    await until(() => spawn.rings.length >= 2, "the ring to resume after the copy");
     assert.equal(spawn.rings.at(-1).killed, false);
     assert.ok(lines.some((line) => line.includes("kept 2 ring file(s)")));
 
@@ -201,7 +175,7 @@ test("a wedge keeps the ring's history, and the ring keeps recording afterwards"
     for (const child of spawn.children) {
       child.kill("SIGTERM");
     }
-    await settle();
+    await settle(20);
   });
 });
 
@@ -221,7 +195,7 @@ test("recovery before tcpdump availability resolves prevents the capture from st
 
     assert.equal(witness.maybeCapture(trigger), true);
     assert.equal(await witness.cancelCapture(trigger.captureId), true);
-    await settle();
+    await settle(20);
 
     assert.equal(spawn.rings.length, 0, "a disproved diagnosis must not start a tail capture");
     assert.deepEqual(await readdir(dir), []);
@@ -234,7 +208,7 @@ test("a capture stays until every incident clears, then removes only its evidenc
     const spawn = makeSpawn();
     const witness = createPacketWitness({ log: () => {}, dir, port: 9090, spawnProcess: spawn.spawnProcess });
     witness.holdRing();
-    await waitFor(() => spawn.rings.length === 1, "the ring to start");
+    await until(() => spawn.rings.length === 1, "the ring to start");
     await writeFile(path.join(dir, `${WITNESS_RING_BASENAME}0`), "before-the-freeze");
     const first = {
       sessionId: "shared-session",
@@ -248,9 +222,9 @@ test("a capture stays until every incident clears, then removes only its evidenc
     const second = { ...first, captureId: "shared-session:send-queue:1", label: "proxy" };
 
     assert.equal(witness.maybeCapture(first), true);
-    await waitFor(async () => (await readdir(dir)).some((name) => name.includes(".before")), "ring history to copy");
+    await until(async () => (await readdir(dir)).some((name) => name.includes(".before")), "ring history to copy");
     assert.equal(witness.maybeCapture(second), true, "the same connection shares one active recording");
-    await waitFor(() => spawn.rings.some((child) => child.args.some((arg) => arg.includes(".tail.pcap"))), "tail capture to start");
+    await until(() => spawn.rings.some((child) => child.args.some((arg) => arg.includes(".tail.pcap"))), "tail capture to start");
     const tail = spawn.rings.find((child) => child.args.some((arg) => arg.includes(".tail.pcap")));
     const history = (await readdir(dir)).filter((name) => name.includes(".before"));
     assert.equal(history.length, 1);
@@ -260,8 +234,8 @@ test("a capture stays until every incident clears, then removes only its evidenc
     assert.equal((await readdir(dir)).some((name) => history.includes(name)), true);
 
     await witness.cancelCapture(second.captureId);
-    await waitFor(() => tail.killed, "the tail capture to stop after the last diagnosis clears");
-    await waitFor(async () => (await readdir(dir)).every((name) => name.startsWith(WITNESS_RING_BASENAME)), "only the live ring files to remain");
+    await until(() => tail.killed, "the tail capture to stop after the last diagnosis clears");
+    await until(async () => (await readdir(dir)).every((name) => name.startsWith(WITNESS_RING_BASENAME)), "only the live ring files to remain");
     assert.ok(spawn.rings.filter((child) => child.args.some((arg) => arg.includes(WITNESS_RING_BASENAME))).some((child) => !child.killed));
     await witness.dispose();
   });
@@ -277,7 +251,7 @@ test("dispose stops the ring and clears its files", async () => {
       spawnProcess: spawn.spawnProcess
     });
     witness.holdRing();
-    await waitFor(() => spawn.rings.length === 1, "the ring to start");
+    await until(() => spawn.rings.length === 1, "the ring to start");
     await writeFile(path.join(dir, `${WITNESS_RING_BASENAME}0`), "pcap");
     await witness.dispose();
     assert.equal(spawn.rings.at(-1).killed, true);

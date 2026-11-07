@@ -14,7 +14,7 @@ const POLL_MS = 5;
  * @param {{ limitMs?: number }} [options]
  * @returns {Promise<void>}
  */
-export async function until(check, what, { limitMs = 5_000 } = {}) {
+export async function until(check, what, { limitMs = 10_000 } = {}) {
   const deadline = Date.now() + limitMs;
   while (!(await check())) {
     if (Date.now() >= deadline) {

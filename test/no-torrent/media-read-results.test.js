@@ -4,6 +4,7 @@ import { ContainerOrchestrator } from "../../services/media/ContainerOrchestrato
 import { BytesUnavailable } from "../../services/media/container/unavailable.js";
 import { IndexMemoryUnavailable } from "../../services/media/container/memory-unavailable.js";
 import { MediaReadRequests } from "../../services/media/MediaReadRequests.js";
+import { settle } from "./helpers/wait.js";
 
 const params = { sourceKey: "source", fileIndex: 0, requestId: "request", fileSize: 100 };
 
@@ -236,7 +237,7 @@ test("a read says how long it waited behind an earlier read of the same file", a
   const onTimed = (statement, waitedMs, readMs) => timed.set(statement, { waitedMs, readMs });
   const tracks = reader.inspect({ ...params, onTimed }, "tracks");
   const media = reader.inspect({ ...params, onTimed }, "media-info");
-  await new Promise(resolve => setTimeout(resolve, 20));
+  await settle(5);
   releaseTracks();
   await Promise.all([tracks, media]);
   assert.ok(timed.get("tracks").readMs > 0, "the first read was held by its own container");

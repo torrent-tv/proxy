@@ -26,7 +26,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { waitForSessionFile } from "../../services/server/transcode-session-files.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
@@ -35,6 +34,7 @@ import { Output } from "../../services/encode/output/Output.js";
 import { KeyframeTable } from "../../services/media/container/KeyframeTable.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { settle } from "./helpers/wait.js";
 
 const SESSION_ID = "2222222233334444";
 const OUTPUT_KEY = "seek-frees:fmt=fmp4:grid=uniform:video-only:v=0/copy";
@@ -188,7 +188,7 @@ test("a seek frees the seeker's requests on every output they watch", async (t) 
 
   // A grace before asserting that something did NOT happen: it can only ever
   // pass too easily, never fail by luck.
-  await delay(300);
+  await settle(20);
   assert.equal(stayed, "still held", "the other viewer is where they were and still wants this segment");
   void stayer;
 });

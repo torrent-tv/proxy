@@ -468,7 +468,7 @@ test("a family with no clips is priced as H.264, and a model with no families st
 test("the family is chosen by codec and depth, and unknown names fall to H.264", () => {
   assert.equal(decodeFamilyOf({ codec: "hevc", bitDepth: 8 }), "hevc");
   assert.equal(decodeFamilyOf({ codec: "HEVC", bitDepth: 10 }), "hevc10");
-  assert.equal(decodeFamilyOf({ codec: "h265", bitDepth: 12 }), "hevc10");
+  assert.equal(decodeFamilyOf({ codec: "hevc", bitDepth: 12 }), "hevc10");
   assert.equal(decodeFamilyOf({ codec: "h264", bitDepth: 10 }), "h264");
   assert.equal(decodeFamilyOf({ codec: "vc1", bitDepth: null }), "h264");
   assert.equal(decodeFamilyOf({ codec: "mpeg4", bitDepth: 8 }), "mpeg4");
@@ -477,4 +477,11 @@ test("the family is chosen by codec and depth, and unknown names fall to H.264",
   assert.equal(decodeFamilyOf({ codec: "av1", bitDepth: 8 }), "av1");
   assert.equal(decodeFamilyOf({ codec: "av1", bitDepth: 10 }), "h264");
   assert.equal(decodeFamilyOf({}), "h264");
+});
+
+test("decodeFamilyOf takes canonical names only: h265 and x265 are no longer hevc", () => {
+  for (const alias of ["h265", "x265"]) {
+    assert.equal(decodeFamilyOf({ codec: alias, bitDepth: 10 }), "h264", alias);
+    assert.equal(decodeFamilyOf({ codec: alias, bitDepth: 8 }), "h264", alias);
+  }
 });

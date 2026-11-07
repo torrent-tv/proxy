@@ -1783,17 +1783,30 @@ export class EncodeRuns {
     // disposed. A run that had already finished or failed is not among them,
     // which is what keeps a stop from erasing how it actually ended.
     for (const run of running) {
-      // The run resumes itself if it was suspended — a stopped process does not
-      // act on SIGTERM until it is continued — records the cause, and answers
-      // its own exit. Nothing here has to null a field so that the exit is read
-      // correctly, because there is no shared field left to misread.
-      run.stop(reason);
       // Nothing is cleared up from here. What this run left open is under its
       // own working name, and the encoding layer removes it when the run's
       // ending reaches it — one place, and it needs neither the stretch nor the
       // init bytes this method used to fetch to judge a file by its contents.
+      this.stopRun(run, reason);
     }
     this.#host.logger.info(`transcode ${session.id} ${running.length} encoder(s) stopped: ${reason}`);
+  }
+
+  /**
+   * Stop one run, for a stated reason, and nothing else of its output.
+   *
+   * For a caller that knows WHICH run is wrong: an output may hold a second run
+   * near the viewer that is positioned correctly and must keep producing.
+   *
+   * @param {object} run - A live run of this class's.
+   * @param {string} reason - Named in the log.
+   * @returns {void}
+   */
+  stopRun(run, reason) {
+    // The run resumes itself if it was suspended — a stopped process does not
+    // act on SIGTERM until it is continued — records the cause, and answers
+    // its own exit.
+    run.stop(reason);
   }
 
   /**

@@ -10,6 +10,7 @@ import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { Output } from "../../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { readFileSync } from "node:fs";
 import { handleApiTranscodeSessionsProgressGet } from "../../routes/api/transcode-sessions/progress/get.js";
 
 const SESSION_ID = "aaaaaaaabbbbcccc";
@@ -39,7 +40,7 @@ function fakeSession({ id = SESSION_ID, outputKey = "parity:fmt=fmp4:grid=kf@0:v
   };
 }
 
-async function forecastProjection(t, { lookaheadSeconds = 120, missingMapAt = null } = {}) {
+async function forecastProjection(t, { lookaheadSeconds = 120, missingMapAt = null, capture = null } = {}) {
   const previousNow = Date.now;
   Date.now = () => 1_800_000_000_000;
   const { manager, cleanup } = managerWithOwnStore();
@@ -75,6 +76,7 @@ async function forecastProjection(t, { lookaheadSeconds = 120, missingMapAt = nu
   let progress;
   await handleApiTranscodeSessionsProgressGet({ params: { sessionId: session.id }, query: { consumer: "viewer" } },
     { send(value) { progress = value; return value; }, code() { return this; } }, manager);
+  if (capture) capture.progress = progress;
   const readiness = progress.playbackReadiness;
   return {
     progress: {
@@ -143,6 +145,21 @@ test("forecast and HTTP progress fields match the recorded pre-refactor result",
       }
     }
   });
+});
+
+test("the progress response and its forecast carry no wait estimate key", async t => {
+  const capture = {};
+  await forecastProjection(t, { capture });
+  const { progress } = capture;
+  assert.ok(progress.playbackReadiness, "the first-frame wait comes from playbackReadiness");
+  assert.equal(Object.hasOwn(progress, "waitEstimate"), false, "no waitEstimate on the progress response");
+  assert.equal(Object.hasOwn(progress.playbackReadiness, "waitEstimate"), false,
+    "no waitEstimate key on the forecast, not even null");
+});
+
+test("no wait estimate is assigned anywhere in ViewerRequests", () => {
+  const source = readFileSync(new URL("../../services/server/ViewerRequests.js", import.meta.url), "utf8");
+  assert.equal(/waitEstimate/.test(source), false);
 });
 
 test("the live ViewerRequests forecast withholds ETA when a tail source map is missing", async t => {

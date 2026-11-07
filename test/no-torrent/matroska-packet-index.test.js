@@ -5,6 +5,7 @@ import { BytesUnavailable } from "../../services/media/container/unavailable.js"
 import { ElementReader } from "../../services/media/container/ebml-stream.js";
 import { PacketRecords } from "../../services/media/container/PacketRecords.js";
 import { IndexMemoryUnavailable } from "../../services/media/container/memory-unavailable.js";
+import { element as matroskaElement } from "./helpers/matroska-file.js";
 
 test("a memory shortage inside a laced block rolls back every frame before retry", async () => {
   let allowance = Infinity, held = 0;
@@ -23,7 +24,7 @@ test("a memory shortage inside a laced block rolls back every frame before retry
   records.length = previousLength;
   allowance = held;
   const refusedAt = held;
-  const bytes = cluster([element([0xa3], Buffer.from([0x81, 0, 0, 0x84, 2, 1, 2, 3]))]);
+  const bytes = cluster([element(0xa3, Buffer.from([0x81, 0, 0, 0x84, 2, 1, 2, 3]))]);
   const over = { ...params(bytes, [{ trackNumber: 1, type: "audio", defaultDurationSeconds: 0.02 }]),
     state: { packets: new Map([[1, records]]), at: 0 } };
   await assert.rejects(readMatroskaPackets(over), IndexMemoryUnavailable);
@@ -48,8 +49,8 @@ test("an EBML header needs only its own bytes, independently of its body", async
 });
 
 test("a missing part of a cluster is asked for up to the cluster's end and never past it", async () => {
-  const first = cluster([element([0xa3], Buffer.from([0x81, 0, 0, 0x80, 11]))]);
-  const bytes = Buffer.concat([first, cluster([element([0xa3], Buffer.from([0x81, 0, 0, 0x80, 22]))])]);
+  const first = cluster([element(0xa3, Buffer.from([0x81, 0, 0, 0x80, 11]))]);
+  const bytes = Buffer.concat([first, cluster([element(0xa3, Buffer.from([0x81, 0, 0, 0x80, 22]))])]);
   const frameAt = first.length - 1;
   const over = params(bytes, [{ trackNumber: 1, type: "video", defaultDurationSeconds: 0.04, reorderDepth: 0 }]);
   over.interval = { from: 0, to: 0.04, trackIds: [1] };
@@ -65,13 +66,11 @@ test("a missing part of a cluster is asked for up to the cluster's end and never
   assert.deepEqual(index.inputFor({ trackId: 1, from: 0, to: 0.04 }).packets[0].ranges, [[frameAt, frameAt]]);
 });
 
-function element(id, data) {
-  assert.ok(data.length < 127);
-  return Buffer.concat([Buffer.from(id), Buffer.from([0x80 | data.length]), data]);
-}
+// This file writes the ONE-byte size on purpose: the reader is checked against it.
+const element = (id, data) => matroskaElement(id, data, { sizeWidth: 1 });
 
 function cluster(blocks) {
-  return element([0x1f, 0x43, 0xb6, 0x75], Buffer.concat([element([0xe7], Buffer.from([0])), ...blocks]));
+  return element(0x1f43b675, Buffer.concat([element(0xe7, Buffer.from([0])), ...blocks]));
 }
 
 function params(bytes, tracks) {
@@ -86,7 +85,7 @@ for (const [name, lace, lengths] of [
 ]) {
   test(`Matroska ${name} lacing indexes separate frame addresses and timestamps`, async () => {
     const payload = Buffer.concat([lace, ...lengths.map((length, position) => Buffer.alloc(length, position + 1))]);
-    const bytes = cluster([element([0xa3], payload)]);
+    const bytes = cluster([element(0xa3, payload)]);
     const input = await readMatroskaPackets(params(bytes, [{ trackNumber: 1, type: "audio", defaultDurationSeconds: 0.02,
       seekPrerollSeconds: 0.08, codecDelaySeconds: 0.01 }]));
     const result = input.inputFor({ trackId: 1, from: 0, to: 0.04 });
@@ -98,10 +97,10 @@ for (const [name, lace, lengths] of [
 }
 
 test("a BlockGroup reference prevents treating its block as a random-access frame", async () => {
-  const key = element([0xa3], Buffer.from([0x81, 0, 0, 0x80, 11]));
-  const predicted = element([0xa0], Buffer.concat([
-    element([0xa1], Buffer.from([0x81, 0, 40, 0, 22])),
-    element([0xfb], Buffer.from([0xd8])), element([0x9b], Buffer.from([40]))
+  const key = element(0xa3, Buffer.from([0x81, 0, 0, 0x80, 11]));
+  const predicted = element(0xa0, Buffer.concat([
+    element(0xa1, Buffer.from([0x81, 0, 40, 0, 22])),
+    element(0xfb, Buffer.from([0xd8])), element(0x9b, Buffer.from([40]))
   ]));
   const bytes = cluster([key, predicted]);
   const index = await readMatroskaPackets(params(bytes, [{ trackNumber: 1, type: "video", defaultDurationSeconds: 0.04 }]));
@@ -115,9 +114,9 @@ test("laced block discard padding is distributed across the affected beginning o
   for (const seconds of [0.03, -0.03]) {
     const padding = Buffer.alloc(8);
     padding.writeBigInt64BE(BigInt(Math.round(seconds * 1e9)));
-    const bytes = cluster([element([0xa0], Buffer.concat([
-      element([0xa1], Buffer.from([0x81, 0, 0, 0x84, 2, 1, 2, 3])),
-      element([0x75, 0xa2], padding)
+    const bytes = cluster([element(0xa0, Buffer.concat([
+      element(0xa1, Buffer.from([0x81, 0, 0, 0x84, 2, 1, 2, 3])),
+      element(0x75a2, padding)
     ]))]);
     const index = await readMatroskaPackets(params(bytes, [{ trackNumber: 1, type: "audio", defaultDurationSeconds: 0.02 }]));
     const input = index.inputFor({ trackId: 1, from: 0, to: 0.06 });
@@ -128,7 +127,7 @@ test("laced block discard padding is distributed across the affected beginning o
 });
 
 test("missing block headers request their actual bytes and malformed lacing is terminal", async () => {
-  const bytes = cluster([element([0xa3], Buffer.from([0x81, 0, 0, 0x84, 2, 1, 2]))]);
+  const bytes = cluster([element(0xa3, Buffer.from([0x81, 0, 0, 0x84, 2, 1, 2]))]);
   const over = params(bytes, [{ trackNumber: 1, type: "audio", defaultDurationSeconds: 0.02 }]);
   await assert.rejects(readMatroskaPackets({ ...over, readRange: async (a, b) => {
     if (b >= 12) throw new BytesUnavailable(a, b, 0);
@@ -138,8 +137,8 @@ test("missing block headers request their actual bytes and malformed lacing is t
 });
 
 test("Matroska resumes inside a Cluster without repeating completed block headers", async () => {
-  const first = element([0xa3], Buffer.from([0x81, 0, 0, 0x80, 11]));
-  const second = element([0xa3], Buffer.from([0x81, 0, 40, 0, 22]));
+  const first = element(0xa3, Buffer.from([0x81, 0, 0, 0x80, 11]));
+  const second = element(0xa3, Buffer.from([0x81, 0, 40, 0, 22]));
   const bytes = cluster([first, second]);
   const secondAt = bytes.length - second.length;
   const state = {};
@@ -167,7 +166,7 @@ test("Matroska resumes inside a Cluster without repeating completed block header
 
 test("derived packet durations are corrected when a later indexed packet has an earlier presentation time", async () => {
   const blocks = [[1, 0], [2, 0], [2, 100], [1, 40], [2, 50], [1, 80]].map(([track, time]) =>
-    element([0xa3], Buffer.from([0x80 | track, time >> 8, time & 255, 0x80, 11])));
+    element(0xa3, Buffer.from([0x80 | track, time >> 8, time & 255, 0x80, 11])));
   const state = {};
   const over = { ...params(cluster(blocks), [
     { trackNumber: 1, type: "video", defaultDurationSeconds: 0.04, reorderDepth: 0 },
@@ -181,7 +180,7 @@ test("derived packet durations are corrected when a later indexed packet has an 
 
 test("Matroska admits an interval after codec-bounded lookahead without reading the next cluster", async () => {
   const blocks = [0, 120, 40, 80, 160, 200].map((time, position) =>
-    element([0xa3], Buffer.from([0x81, time >> 8, time & 255, position === 0 ? 0x80 : 0, position])));
+    element(0xa3, Buffer.from([0x81, time >> 8, time & 255, position === 0 ? 0x80 : 0, position])));
   const bytes = cluster(blocks);
   const unavailableAt = bytes.length - blocks.at(-1).length;
   const over = params(bytes, [{ trackNumber: 1, type: "video", defaultDurationSeconds: 0.04, reorderDepth: 1 }]);
@@ -194,7 +193,7 @@ test("Matroska admits an interval after codec-bounded lookahead without reading 
   // headers are read a portion at a time (torrent-tv/meta#178).
   await assert.rejects(readMatroskaPackets(over), BytesUnavailable);
   await assert.rejects(readMatroskaPackets({ ...over, state: {}, tracks: [{ ...over.tracks[0], reorderDepth: undefined }] }), BytesUnavailable);
-  const whole = Buffer.concat([bytes, cluster([element([0xa3], Buffer.from([0x81, 1, 0, 0x80, 9]))])]);
+  const whole = Buffer.concat([bytes, cluster([element(0xa3, Buffer.from([0x81, 1, 0, 0x80, 9]))])]);
   over.readRange = async (a, b) => {
     if (b >= bytes.length) throw new BytesUnavailable(a, b, 0);
     return whole.subarray(a, b + 1);

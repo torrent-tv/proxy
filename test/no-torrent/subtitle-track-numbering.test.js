@@ -23,6 +23,7 @@ import { Readable } from "node:stream";
 import { MatroskaContainer } from "../../services/media/container/MatroskaContainer.js";
 import { cuesHeldFor, forgetSubtitles } from "../../services/media/SubtitleCues.js";
 import { heldFileOver } from "./helpers/held-file.js";
+import { element, idBytes, uintElement, stringElement, uint32Element } from "./helpers/matroska-file.js";
 
 const ID_EBML = 0x1a45dfa3;
 const ID_SEGMENT = 0x18538067;
@@ -50,55 +51,6 @@ const ID_CUE_TRACK = 0xf7;
 const ID_CUE_CLUSTER_POSITION = 0xf1;
 const ID_CLUSTER = 0x1f43b675;
 const ID_TIMESTAMP = 0xe7;
-
-/** An element id, as the bytes the specification gives it. */
-function idBytes(id) {
-  const bytes = [];
-  let rest = id;
-  while (rest > 0) {
-    bytes.unshift(rest & 0xff);
-    rest = Math.floor(rest / 256);
-  }
-  return Buffer.from(bytes);
-}
-
-/** A size, as a four-byte EBML variable-length integer. */
-function sizeBytes(size) {
-  const buffer = Buffer.alloc(4);
-  buffer.writeUInt32BE(size, 0);
-  buffer[0] |= 0x10;
-  return buffer;
-}
-
-function element(id, payload) {
-  return Buffer.concat([idBytes(id), sizeBytes(payload.length), payload]);
-}
-
-function uintElement(id, value) {
-  const bytes = [];
-  let rest = value;
-  do {
-    bytes.unshift(rest & 0xff);
-    rest = Math.floor(rest / 256);
-  } while (rest > 0);
-  return element(id, Buffer.from(bytes));
-}
-
-function stringElement(id, value) {
-  return element(id, Buffer.from(value, "utf8"));
-}
-
-/**
- * An unsigned value at a FIXED four bytes. A cue's cluster position has to be
- * written twice — once to measure the table, once with the position that
- * measurement produced — and a value-sized element would make the second table
- * a different length from the first, moving the very cluster it names.
- */
-function uint32Element(id, value) {
-  const payload = Buffer.alloc(4);
-  payload.writeUInt32BE(value, 0);
-  return element(id, payload);
-}
 
 function trackEntry({ number, type, codecId, language, flags = {}, languageBcp47 = null }) {
   const parts = [

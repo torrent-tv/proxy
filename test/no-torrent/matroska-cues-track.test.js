@@ -17,6 +17,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MatroskaContainer } from "../../services/media/container/MatroskaContainer.js";
+import { element, idBytes, uintElement } from "./helpers/matroska-file.js";
 
 const ID_EBML = 0x1a45dfa3;
 const ID_SEGMENT = 0x18538067;
@@ -37,40 +38,6 @@ const ID_CUE_TIME = 0xb3;
 const ID_CUE_TRACK_POSITIONS = 0xb7;
 const ID_CUE_TRACK = 0xf7;
 const ID_CUE_CLUSTER_POSITION = 0xf1;
-
-/** An element id, as the bytes the specification gives it. */
-function idBytes(id) {
-  const bytes = [];
-  let rest = id;
-  while (rest > 0) {
-    bytes.unshift(rest & 0xff);
-    rest = Math.floor(rest / 256);
-  }
-  return Buffer.from(bytes);
-}
-
-/** A size, as a four-byte EBML variable-length integer. */
-function sizeBytes(size) {
-  const buffer = Buffer.alloc(4);
-  buffer.writeUInt32BE(size, 0);
-  buffer[0] |= 0x10;
-  return buffer;
-}
-
-function element(id, payload) {
-  return Buffer.concat([idBytes(id), sizeBytes(payload.length), payload]);
-}
-
-/** An unsigned value, in as few bytes as it needs. */
-function uintElement(id, value) {
-  const bytes = [];
-  let rest = value;
-  do {
-    bytes.unshift(rest & 0xff);
-    rest = Math.floor(rest / 256);
-  } while (rest > 0);
-  return element(id, Buffer.from(bytes));
-}
 
 function cuePoint(timeMs, tracks) {
   return element(ID_CUE_POINT, Buffer.concat([

@@ -32,6 +32,7 @@ import {
   trackEntry,
   uintElement
 } from "./helpers/matroska-file.js";
+import { box } from "./helpers/mp4-file.js";
 
 const quiet = { info() {}, warn() {} };
 
@@ -163,14 +164,6 @@ test("the language: LanguageBCP47 wins, then Language, then the format's default
     assert.equal(track.languageSource, source, JSON.stringify(entry));
   }
 });
-
-/** @param {string} type @param {Buffer} payload */
-function box(type, payload) {
-  const header = Buffer.alloc(8);
-  header.writeUInt32BE(8 + payload.length, 0);
-  header.write(type, 4, "latin1");
-  return Buffer.concat([header, payload]);
-}
 
 test("an MP4 whose `moov` has not arrived keeps nothing; read again, it answers", async () => {
   const mvhd = Buffer.alloc(100);

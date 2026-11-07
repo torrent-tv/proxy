@@ -7,13 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 import { Viewer } from "../../services/viewer/Viewer.js";
-
-function box(type, body) {
-  const header = Buffer.alloc(8);
-  header.writeUInt32BE(body.length + 8);
-  header.write(type, 4);
-  return Buffer.concat([header, body]);
-}
+import { box } from "./helpers/mp4-file.js";
 
 function init(emptyMs, mediaTime, kind = "vide") {
   const mvhd = Buffer.alloc(24);

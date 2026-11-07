@@ -9,23 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Mp4Container } from "../../services/media/container/Mp4Container.js";
-
-function box(type, payload) {
-  const header = Buffer.alloc(8);
-  header.writeUInt32BE(payload.length + 8, 0);
-  header.write(type, 4, "latin1");
-  return Buffer.concat([header, payload]);
-}
-
-function fullBox(type, payload) {
-  return box(type, Buffer.concat([Buffer.from([0, 0, 0, 0]), payload]));
-}
-
-function u32(...values) {
-  const buffer = Buffer.alloc(values.length * 4);
-  values.forEach((value, index) => buffer.writeUInt32BE(value, index * 4));
-  return buffer;
-}
+import { box, fullBox, u32 } from "./helpers/mp4-file.js";
 
 /** A `tx3g` sample: a two-byte length, then the text. */
 function textSample(text) {

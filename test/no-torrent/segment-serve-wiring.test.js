@@ -28,6 +28,7 @@ import { ENCODE_RUN_STATE } from "../../services/encode/encode-run-state.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { box } from "./helpers/mp4-file.js";
 
 const MOVIE_TIMESCALE = 1000;
 const VIDEO_TIMESCALE = 90_000;
@@ -37,18 +38,6 @@ const SESSION_ID = "1111111122223333";
 // Its own address, so this file's directory in the shared store is nobody
 // else's.
 const OUTPUT_KEY = "serve-wiring:fmt=fmp4:grid=uniform:video-only:v=0/copy";
-
-/**
- * @param {string} type
- * @param {Buffer} body
- * @returns {Buffer}
- */
-function box(type, body) {
-  const head = Buffer.alloc(8);
-  head.writeUInt32BE(8 + body.length, 0);
-  head.write(type, 4, "latin1");
-  return Buffer.concat([head, body]);
-}
 
 /**
  * `elst` holding one empty edit — how the `segment` muxer records where the

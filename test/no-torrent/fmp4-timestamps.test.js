@@ -11,18 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { stampSegmentStartTime } from "../../services/encode/segment-formats/mp4-boxes.js";
-
-/**
- * @param {string} type
- * @param {Buffer} body
- * @returns {Buffer}
- */
-function box(type, body) {
-  const header = Buffer.alloc(8);
-  header.writeUInt32BE(8 + body.length, 0);
-  header.write(type, 4, "latin1");
-  return Buffer.concat([header, body]);
-}
+import { box } from "./helpers/mp4-file.js";
 
 /**
  * One fragment: `moof > traf > (tfhd, tfdt)`, plus the payload it describes.

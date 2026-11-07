@@ -18,17 +18,11 @@ import { trackRatesFromTags } from "../../services/media/container/matroska-work
 import { BytesUnavailable, isUnavailable } from "../../services/media/container/unavailable.js";
 import { playbackDeclarations } from "../../services/media/playback-declarations.js";
 import { PICTURE_RATE_SOURCE, SourceFile, sourcePictureRate } from "../../services/media/SourceFile.js";
+import { box, fullBox, u32 } from "./helpers/mp4-file.js";
+import { element } from "./helpers/matroska-file.js";
 import { LINK_VERDICT, PEAK_CLASS, linkCouldCarry, loadOf, soundtrackLoadOf, videoLoadOfSpec } from "../../services/encode/quality/link-budget.js";
 
 // ---- MP4, built byte by byte -------------------------------------------------
-
-function u32(...values) {
-  const bytes = Buffer.alloc(values.length * 4);
-  values.forEach((value, at) => bytes.writeUInt32BE(value >>> 0, at * 4));
-  return bytes;
-}
-const box = (type, bytes) => Buffer.concat([u32(bytes.length + 8), Buffer.from(type), bytes]);
-const full = (type, bytes) => box(type, Buffer.concat([u32(0), bytes]));
 
 /**
  * One track: its handler, sample entry, and a sample-size table.
@@ -36,15 +30,15 @@ const full = (type, bytes) => box(type, Buffer.concat([u32(0), bytes]));
  * @param {{ id: number, handler: string, entry: Buffer, timescale: number, duration: number, sizes: number[] }} track
  */
 function trak({ id, handler, entry, timescale, duration, sizes }) {
-  const tkhd = full("tkhd", Buffer.concat([u32(0, 0, id, 0, duration), Buffer.alloc(60)]));
-  const mdhd = full("mdhd", Buffer.concat([u32(0, 0, timescale, duration), Buffer.alloc(4)]));
-  const hdlr = full("hdlr", Buffer.concat([u32(0), Buffer.from(handler), Buffer.alloc(12)]));
-  const stsd = full("stsd", Buffer.concat([u32(1), entry]));
-  const stts = full("stts", u32(1, sizes.length, duration / sizes.length));
-  const stsz = full("stsz", u32(0, sizes.length, ...sizes));
-  const stsc = full("stsc", u32(1, 1, sizes.length, 1));
+  const tkhd = fullBox("tkhd", Buffer.concat([u32(0, 0, id, 0, duration), Buffer.alloc(60)]));
+  const mdhd = fullBox("mdhd", Buffer.concat([u32(0, 0, timescale, duration), Buffer.alloc(4)]));
+  const hdlr = fullBox("hdlr", Buffer.concat([u32(0), Buffer.from(handler), Buffer.alloc(12)]));
+  const stsd = fullBox("stsd", Buffer.concat([u32(1), entry]));
+  const stts = fullBox("stts", u32(1, sizes.length, duration / sizes.length));
+  const stsz = fullBox("stsz", u32(0, sizes.length, ...sizes));
+  const stsc = fullBox("stsc", u32(1, 1, sizes.length, 1));
   return box("trak", Buffer.concat([tkhd, box("mdia", Buffer.concat([
-    mdhd, hdlr, box("minf", box("stbl", Buffer.concat([stsd, stts, stsz, stsc, full("stco", u32(1, 0))])))
+    mdhd, hdlr, box("minf", box("stbl", Buffer.concat([stsd, stts, stsz, stsc, fullBox("stco", u32(1, 0))])))
   ]))]));
 }
 
@@ -89,23 +83,16 @@ test("a fragmented MP4, whose sample table lists nothing, states no track rate",
 
 // ---- Matroska, built byte by byte --------------------------------------------
 
-function ebml(id, payload) {
-  const idBytes = Buffer.from(id.toString(16).padStart(id > 0xffffff ? 8 : id > 0xffff ? 6 : id > 0xff ? 4 : 2, "0"), "hex");
-  const size = Buffer.alloc(4);
-  size.writeUInt32BE(payload.length);
-  size[0] |= 0x10;
-  return Buffer.concat([idBytes, size, payload]);
-}
 const utf8 = (value) => Buffer.from(value, "utf8");
 const uint = (value, bytes = 1) => {
   const out = Buffer.alloc(bytes);
   out.writeUIntBE(value, 0, bytes);
   return out;
 };
-const simpleTag = (name, value) => ebml(0x67c8, Buffer.concat([ebml(0x45a3, utf8(name)), ebml(0x4487, utf8(value))]));
+const simpleTag = (name, value) => element(0x67c8, Buffer.concat([element(0x45a3, utf8(name)), element(0x4487, utf8(value))]));
 /** mkvmerge's statistics tag for one track. */
-const statistics = (uid, bps) => ebml(0x7373, Buffer.concat([
-  ebml(0x63c0, Buffer.concat([ebml(0x68ca, uint(50)), ebml(0x63c5, uid)])),
+const statistics = (uid, bps) => element(0x7373, Buffer.concat([
+  element(0x63c0, Buffer.concat([element(0x68ca, uint(50)), element(0x63c5, uid)])),
   simpleTag("BPS", String(bps)), simpleTag("NUMBER_OF_BYTES", "123")
 ]));
 
@@ -114,12 +101,12 @@ const VIDEO_UID = Buffer.from("9f3a51c2d4e6b708", "hex");
 const AUDIO_UID = Buffer.from("e1d2c3b4a5968778", "hex");
 
 function trackEntry({ number, uid, type, codec, extra }) {
-  return ebml(0xae, Buffer.concat([ebml(0xd7, uint(number)), ebml(0x73c5, uid), ebml(0x83, uint(type)), ebml(0x86, utf8(codec)), extra]));
+  return element(0xae, Buffer.concat([element(0xd7, uint(number)), element(0x73c5, uid), element(0x83, uint(type)), element(0x86, utf8(codec)), extra]));
 }
 
 function matroska(elements) {
-  const seekHeadFor = (positions) => ebml(0x114d9b74, Buffer.concat(elements.map(({ id }, index) =>
-    ebml(0x4dbb, Buffer.concat([ebml(0x53ab, Buffer.from(id.toString(16), "hex")), ebml(0x53ac, uint(positions[index], 4))])))));
+  const seekHeadFor = (positions) => element(0x114d9b74, Buffer.concat(elements.map(({ id }, index) =>
+    element(0x4dbb, Buffer.concat([element(0x53ab, Buffer.from(id.toString(16), "hex")), element(0x53ac, uint(positions[index], 4))])))));
   const length = seekHeadFor(elements.map(() => 0)).length;
   const positions = [];
   let at = length;
@@ -128,18 +115,18 @@ function matroska(elements) {
     at += element.length;
   }
   const segment = Buffer.concat([seekHeadFor(positions), ...elements.map(({ element }) => element)]);
-  return Buffer.concat([ebml(0x1a45dfa3, Buffer.alloc(4)), ebml(0x18538067, segment)]);
+  return Buffer.concat([element(0x1a45dfa3, Buffer.alloc(4)), element(0x18538067, segment)]);
 }
 
 function matroskaWithStatistics() {
-  const tracks = ebml(0x1654ae6b, Buffer.concat([
+  const tracks = element(0x1654ae6b, Buffer.concat([
     trackEntry({ number: 1, uid: VIDEO_UID, type: 1, codec: "V_MPEG4/ISO/AVC",
-      extra: ebml(0xe0, Buffer.concat([ebml(0xb0, uint(1920, 2)), ebml(0xba, uint(1080, 2))])) }),
+      extra: element(0xe0, Buffer.concat([element(0xb0, uint(1920, 2)), element(0xba, uint(1080, 2))])) }),
     trackEntry({ number: 2, uid: AUDIO_UID, type: 2, codec: "A_AC3",
-      extra: ebml(0xe1, ebml(0x9f, uint(6))) })
+      extra: element(0xe1, element(0x9f, uint(6))) })
   ]));
-  const tags = ebml(0x1254c367, Buffer.concat([statistics(VIDEO_UID, 4_812_345), statistics(AUDIO_UID, 448_000)]));
-  const cluster = ebml(0x1f43b675, ebml(0xe7, uint(0)));
+  const tags = element(0x1254c367, Buffer.concat([statistics(VIDEO_UID, 4_812_345), statistics(AUDIO_UID, 448_000)]));
+  const cluster = element(0x1f43b675, element(0xe7, uint(0)));
   // The statistics are written after the clusters, as mkvmerge does.
   return matroska([{ id: 0x1654ae6b, element: tracks }, { id: 0x1f43b675, element: cluster }, { id: 0x1254c367, element: tags }]);
 }

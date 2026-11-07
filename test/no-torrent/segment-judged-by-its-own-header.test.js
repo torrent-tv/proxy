@@ -35,22 +35,11 @@ import { managerWithOwnStore } from "./helpers/manager.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { box } from "./helpers/mp4-file.js";
 
 const SESSION_ID = "3333333344445555";
 const OUTPUT_KEY = "own-header:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 const MOVIE_TIMESCALE = 1000;
-
-/**
- * @param {string} type
- * @param {Buffer} body
- * @returns {Buffer}
- */
-function box(type, body) {
-  const head = Buffer.alloc(8);
-  head.writeUInt32BE(8 + body.length, 0);
-  head.write(type, 4, "latin1");
-  return Buffer.concat([head, body]);
-}
 
 /**
  * @param {number} trackId

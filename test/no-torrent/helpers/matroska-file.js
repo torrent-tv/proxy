@@ -305,7 +305,6 @@ export function readerOver(bytes, options = {}) {
  * @param {Buffer} bytes
  * @param {Array<[number, number]>} ranges
  * @param {{ portionBytes?: number, wantedSeconds?: number[], reads?: Array<{ start: number, end: number }> }} [options]
- * @returns {import("../../../services/media/container/Container.js").HeldReader}
  */
 export function heldOver(bytes, ranges, options = {}) {
   const holds = (start, end) => ranges.some(([from, to]) => start >= from && end <= to);

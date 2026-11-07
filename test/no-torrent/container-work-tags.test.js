@@ -20,6 +20,8 @@ import { externalIdsOf, isNumberingOnly } from "../../services/media/container/w
 import { describeWorkTags, edgesOf } from "../../services/media/ContainerOrchestrator.js";
 import { handleApiSourceContainerMetadataGet } from "../../routes/api/sources/container-metadata/get.js";
 import { handleApiSourceCoverGet } from "../../routes/api/sources/cover/get.js";
+import { box } from "./helpers/mp4-file.js";
+import { element } from "./helpers/matroska-file.js";
 
 /** The first bytes of a JPEG, which is what the cover's bytes are checked against. */
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(60, 7), Buffer.from([0xff, 0xd9])]);
@@ -31,15 +33,6 @@ function readerOver(bytes, held = () => true) {
   return async (start, end) => (held(start, end) ? bytes.subarray(start, Math.min(end + 1, bytes.length)) : Buffer.alloc(0));
 }
 
-/** An EBML element with a four-byte size. */
-function ebml(id, payload) {
-  const idBytes = Buffer.from(id.toString(16).padStart(id > 0xffffff ? 8 : id > 0xffff ? 6 : id > 0xff ? 4 : 2, "0"), "hex");
-  const size = Buffer.alloc(4);
-  size.writeUInt32BE(payload.length);
-  size[0] |= 0x10;
-  return Buffer.concat([idBytes, size, payload]);
-}
-
 const utf8 = (value) => Buffer.from(value, "utf8");
 const uint = (value, bytes = 1) => {
   const out = Buffer.alloc(bytes);
@@ -47,10 +40,10 @@ const uint = (value, bytes = 1) => {
   return out;
 };
 
-const simpleTag = (name, value) => ebml(0x67c8, Buffer.concat([ebml(0x45a3, utf8(name)), ebml(0x4487, utf8(value))]));
-const tag = (level, simple, targets = []) => ebml(0x7373, Buffer.concat([ebml(0x63c0, Buffer.concat([ebml(0x68ca, uint(level)), ...targets])), ...simple]));
-const chapter = (title) => ebml(0xb6, ebml(0x80, ebml(0x85, utf8(title))));
-const attached = (name, type, data) => ebml(0x61a7, Buffer.concat([ebml(0x466e, utf8(name)), ebml(0x4660, utf8(type)), ebml(0x465c, data)]));
+const simpleTag = (name, value) => element(0x67c8, Buffer.concat([element(0x45a3, utf8(name)), element(0x4487, utf8(value))]));
+const tag = (level, simple, targets = []) => element(0x7373, Buffer.concat([element(0x63c0, Buffer.concat([element(0x68ca, uint(level)), ...targets])), ...simple]));
+const chapter = (title) => element(0xb6, element(0x80, element(0x85, utf8(title))));
+const attached = (name, type, data) => element(0x61a7, Buffer.concat([element(0x466e, utf8(name)), element(0x4660, utf8(type)), element(0x465c, data)]));
 
 /**
  * A Matroska file whose top-level elements are given in order, with a SeekHead
@@ -59,8 +52,8 @@ const attached = (name, type, data) => ebml(0x61a7, Buffer.concat([ebml(0x466e, 
  * @param {Array<{ id: number, element: Buffer }>} elements
  */
 function matroska(elements) {
-  const seekHeadFor = (positions) => ebml(0x114d9b74, Buffer.concat(elements.map(({ id }, index) =>
-    ebml(0x4dbb, Buffer.concat([ebml(0x53ab, Buffer.from(id.toString(16), "hex")), ebml(0x53ac, uint(positions[index], 4))])))));
+  const seekHeadFor = (positions) => element(0x114d9b74, Buffer.concat(elements.map(({ id }, index) =>
+    element(0x4dbb, Buffer.concat([element(0x53ab, Buffer.from(id.toString(16), "hex")), element(0x53ac, uint(positions[index], 4))])))));
   const length = seekHeadFor(elements.map(() => 0)).length;
   const positions = [];
   let at = length;
@@ -69,22 +62,22 @@ function matroska(elements) {
     at += element.length;
   }
   const segment = Buffer.concat([seekHeadFor(positions), ...elements.map(({ element }) => element)]);
-  return Buffer.concat([ebml(0x1a45dfa3, Buffer.alloc(4)), ebml(0x18538067, segment)]);
+  return Buffer.concat([element(0x1a45dfa3, Buffer.alloc(4)), element(0x18538067, segment)]);
 }
 
-const info = (title) => ({ id: 0x1549a966, element: ebml(0x1549a966, Buffer.concat([ebml(0x2ad7b1, uint(1_000_000, 3)), ebml(0x7ba9, utf8(title))])) });
-const cluster = { id: 0x1f43b675, element: ebml(0x1f43b675, ebml(0xe7, uint(0))) };
+const info = (title) => ({ id: 0x1549a966, element: element(0x1549a966, Buffer.concat([element(0x2ad7b1, uint(1_000_000, 3)), element(0x7ba9, utf8(title))])) });
+const cluster = { id: 0x1f43b675, element: element(0x1f43b675, element(0xe7, uint(0))) };
 
 test("a Matroska episode states its series, season, episode and title by level", async () => {
-  const tags = ebml(0x1254c367, Buffer.concat([
+  const tags = element(0x1254c367, Buffer.concat([
     tag(70, [simpleTag("TITLE", "Светлячок"), simpleTag("DATE_RELEASED", "2002"), simpleTag("TMDB", "tv/1437"), simpleTag("IMDB", "tt0303461")]),
     tag(60, [simpleTag("PART_NUMBER", "1")]),
     tag(50, [simpleTag("TITLE", "Серенити"), simpleTag("PART_NUMBER", "1"), simpleTag("DATE_RELEASED", "2002-09-20"), simpleTag("GENRE", "Drama")]),
     // mkvmerge's statistics: they name one track, so they say nothing about the work.
-    tag(50, [simpleTag("TITLE", "track statistics")], [ebml(0x63c5, uint(42, 2))])
+    tag(50, [simpleTag("TITLE", "track statistics")], [element(0x63c5, uint(42, 2))])
   ]));
-  const chapters = ebml(0x1043a770, ebml(0x45b9, Buffer.concat([chapter("Chapter 01"), chapter("Пролог"), chapter("02")])));
-  const attachments = ebml(0x1941a469, Buffer.concat([attached("font.ttf", "font/ttf", Buffer.alloc(100)), attached("cover.jpg", "image/jpeg", JPEG)]));
+  const chapters = element(0x1043a770, element(0x45b9, Buffer.concat([chapter("Chapter 01"), chapter("Пролог"), chapter("02")])));
+  const attachments = element(0x1941a469, Buffer.concat([attached("font.ttf", "font/ttf", Buffer.alloc(100)), attached("cover.jpg", "image/jpeg", JPEG)]));
   const file = matroska([info("Firefly.S01E01.1080p.mkv"), { id: 0x1254c367, element: tags },
     { id: 0x1043a770, element: chapters }, { id: 0x1941a469, element: attachments }, cluster]);
   const container = new MatroskaContainer({ readRange: readerOver(file), fileSize: file.length });
@@ -111,7 +104,7 @@ test("a Matroska episode states its series, season, episode and title by level",
 });
 
 test("a Matroska film's level-50 title is the film's, and its date is its year", async () => {
-  const tags = ebml(0x1254c367, tag(50, [simpleTag("TITLE", "Кошмар на улице Вязов"), simpleTag("DATE_RELEASED", "1984")]));
+  const tags = element(0x1254c367, tag(50, [simpleTag("TITLE", "Кошмар на улице Вязов"), simpleTag("DATE_RELEASED", "1984")]));
   const file = matroska([info("A.Nightmare.on.Elm.Street.1984.mkv"), { id: 0x1254c367, element: tags }, cluster]);
   const work = await new MatroskaContainer({ readRange: readerOver(file), fileSize: file.length }).readWorkTags(everything);
 
@@ -123,7 +116,7 @@ test("a Matroska film's level-50 title is the film's, and its date is its year",
 });
 
 test("Tags outside the edges that are not held are left out, and nothing is asked for them", async () => {
-  const tags = ebml(0x1254c367, tag(50, [simpleTag("TITLE", "Moana")]));
+  const tags = element(0x1254c367, tag(50, [simpleTag("TITLE", "Moana")]));
   const file = matroska([info("Moana.2016.mkv"), cluster, { id: 0x1254c367, element: tags }]);
   const tagsAt = file.indexOf(tags);
   const held = (start) => start < tagsAt;
@@ -137,21 +130,13 @@ test("Tags outside the edges that are not held are left out, and nothing is aske
 });
 
 test("Tags inside the edges that have not arrived are waited for, not left out", async () => {
-  const tags = ebml(0x1254c367, tag(50, [simpleTag("TITLE", "Moana")]));
+  const tags = element(0x1254c367, tag(50, [simpleTag("TITLE", "Moana")]));
   const file = matroska([info("Moana.2016.mkv"), cluster, { id: 0x1254c367, element: tags }]);
   const tagsAt = file.indexOf(tags);
   const container = new MatroskaContainer({ readRange: readerOver(file, (start) => start < tagsAt), fileSize: file.length });
 
   await assert.rejects(container.readWorkTags(everything), (error) => isUnavailable(error));
 });
-
-/** An ISO/IEC 14496-12 box. */
-function box(type, payload) {
-  const header = Buffer.alloc(8);
-  header.writeUInt32BE(payload.length + 8);
-  header.write(type, 4, "latin1");
-  return Buffer.concat([header, payload]);
-}
 
 /** An iTunes item: a box named by its four characters holding one `data` box. */
 const item = (name, type, value) => box(name, box("data", Buffer.concat([uint(type, 4), Buffer.alloc(4), value])));

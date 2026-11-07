@@ -27,6 +27,7 @@ import {
   soundtrackLoadOf
 } from "../../services/encode/quality/link-budget.js";
 import { AUDIO_TRANSCODE_KBPS } from "../../services/encode/args.js";
+import { box, fullBox, u32 } from "./helpers/mp4-file.js";
 
 // AudioSpecificConfig, ISO/IEC 14496-3 §1.6.2.1: objectType(5) frequencyIndex(4)
 // channelConfiguration(4) then, for AAC-LC, frameLengthFlag(1) dependsOnCoreCoder(1)
@@ -98,23 +99,6 @@ test("a Matroska audio track takes its bound from its own CodecPrivate, not the 
 });
 
 // ---- MP4: the AudioSpecificConfig inside `esds` ----
-
-function box(type, payload) {
-  const header = Buffer.alloc(8);
-  header.writeUInt32BE(payload.length + 8, 0);
-  header.write(type, 4, "latin1");
-  return Buffer.concat([header, payload]);
-}
-
-function fullBox(type, payload) {
-  return box(type, Buffer.concat([Buffer.from([0, 0, 0, 0]), payload]));
-}
-
-function u32(...values) {
-  const buffer = Buffer.alloc(values.length * 4);
-  values.forEach((value, index) => buffer.writeUInt32BE(value, index * 4));
-  return buffer;
-}
 
 function descriptor(tag, payload) {
   return Buffer.concat([Buffer.from([tag, payload.length]), payload]);

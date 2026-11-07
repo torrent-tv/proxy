@@ -11,21 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { INIT_DIFFERENCE_EXCEPTIONS, compareInits, initLeaves } from "../../services/encode/segment-formats/init-compat.js";
-
-/**
- * One ISO base media box.
- *
- * @param {string} type
- * @param {...(Buffer | number[])} parts
- * @returns {Buffer}
- */
-function box(type, ...parts) {
-  const body = Buffer.concat(parts.map((part) => (Buffer.isBuffer(part) ? part : Buffer.from(part))));
-  const header = Buffer.alloc(8);
-  header.writeUInt32BE(body.length + 8, 0);
-  header.write(type, 4, "latin1");
-  return Buffer.concat([header, body]);
-}
+import { box } from "./helpers/mp4-file.js";
 
 /**
  * A version-0 `mdhd`: version+flags, creation, modification, timescale,

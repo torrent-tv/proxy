@@ -20,21 +20,8 @@ import test from "node:test";
 import { MatroskaContainer } from "../../services/media/container/MatroskaContainer.js";
 import { Mp4Container } from "../../services/media/container/Mp4Container.js";
 import { AviContainer } from "../../services/media/container/AviContainer.js";
-
-/**
- * An EBML element: its id bytes, a four-byte size, then the payload.
- *
- * @param {number[]} idBytes
- * @param {Buffer} payload
- * @returns {Buffer}
- */
-function ebml(idBytes, payload) {
-  const size = Buffer.alloc(4);
-  // Four-byte size form: `0001xxxx` in the leading byte marks the width.
-  size.writeUInt32BE(payload.length);
-  size[0] |= 0x10;
-  return Buffer.concat([Buffer.from(idBytes), size, payload]);
-}
+import { box } from "./helpers/mp4-file.js";
+import { element, idBytes } from "./helpers/matroska-file.js";
 
 /** @param {number} value @param {number} bytes @returns {Buffer} */
 function uint(value, bytes) {
@@ -50,18 +37,18 @@ function float64(value) {
   return out;
 }
 
-const ID_EBML_HEADER = [0x1a, 0x45, 0xdf, 0xa3];
-const ID_SEGMENT = [0x18, 0x53, 0x80, 0x67];
-const ID_SEEK_HEAD = [0x11, 0x4d, 0x9b, 0x74];
-const ID_SEEK = [0x4d, 0xbb];
-const ID_SEEK_ID = [0x53, 0xab];
-const ID_SEEK_POSITION = [0x53, 0xac];
-const ID_INFO = [0x15, 0x49, 0xa9, 0x66];
-const ID_TIMESTAMP_SCALE = [0x2a, 0xd7, 0xb1];
-const ID_DURATION = [0x44, 0x89];
-const ID_CLUSTER = [0x1f, 0x43, 0xb6, 0x75];
-const ID_TIMESTAMP = [0xe7];
-const ID_VOID = [0xec];
+const ID_EBML_HEADER = 0x1a45dfa3;
+const ID_SEGMENT = 0x18538067;
+const ID_SEEK_HEAD = 0x114d9b74;
+const ID_SEEK = 0x4dbb;
+const ID_SEEK_ID = 0x53ab;
+const ID_SEEK_POSITION = 0x53ac;
+const ID_INFO = 0x1549a966;
+const ID_TIMESTAMP_SCALE = 0x2ad7b1;
+const ID_DURATION = 0x4489;
+const ID_CLUSTER = 0x1f43b675;
+const ID_TIMESTAMP = 0xe7;
+const ID_VOID = 0xec;
 
 /**
  * A reader over a buffer, in the shape the container layer takes.
@@ -74,15 +61,15 @@ function readerOver(bytes) {
 }
 
 test("a Matroska file is shown from its first cluster, for as long as Duration says less what lies before it", async () => {
-  const info = ebml(ID_INFO, Buffer.concat([
-    ebml(ID_TIMESTAMP_SCALE, uint(1_000_000, 3)),
+  const info = element(ID_INFO, Buffer.concat([
+    element(ID_TIMESTAMP_SCALE, uint(1_000_000, 3)),
     // 2131 ticks of a millisecond each.
-    ebml(ID_DURATION, float64(2131))
+    element(ID_DURATION, float64(2131))
   ]));
-  const cluster = ebml(ID_CLUSTER, ebml(ID_TIMESTAMP, uint(130, 1)));
+  const cluster = element(ID_CLUSTER, element(ID_TIMESTAMP, uint(130, 1)));
   const file = Buffer.concat([
-    ebml(ID_EBML_HEADER, Buffer.alloc(4)),
-    ebml(ID_SEGMENT, Buffer.concat([info, cluster]))
+    element(ID_EBML_HEADER, Buffer.alloc(4)),
+    element(ID_SEGMENT, Buffer.concat([info, cluster]))
   ]);
 
   const container = new MatroskaContainer({ readRange: readerOver(file), fileSize: file.length });
@@ -98,22 +85,22 @@ test("a cluster past the head window is found through the SeekHead", async () =>
   // Everything before the cluster is padded past the 64 KB the head read covers,
   // which is the case this second path exists for: a file whose Tracks element
   // is large enough to push the first cluster out of reach.
-  const info = ebml(ID_INFO, ebml(ID_TIMESTAMP_SCALE, uint(1_000_000, 3)));
-  const padding = ebml(ID_VOID, Buffer.alloc(70 * 1024));
-  const cluster = ebml(ID_CLUSTER, ebml(ID_TIMESTAMP, uint(2500, 2)));
+  const info = element(ID_INFO, element(ID_TIMESTAMP_SCALE, uint(1_000_000, 3)));
+  const padding = element(ID_VOID, Buffer.alloc(70 * 1024));
+  const cluster = element(ID_CLUSTER, element(ID_TIMESTAMP, uint(2500, 2)));
   // The SeekHead is written first, so its own length is known before the
   // position it names can be computed — build it with a placeholder, measure,
   // then write the real position.
-  const seekHeadFor = (position) => ebml(ID_SEEK_HEAD, ebml(ID_SEEK, Buffer.concat([
-    ebml(ID_SEEK_ID, Buffer.from(ID_CLUSTER)),
-    ebml(ID_SEEK_POSITION, uint(position, 4))
+  const seekHeadFor = (position) => element(ID_SEEK_HEAD, element(ID_SEEK, Buffer.concat([
+    element(ID_SEEK_ID, idBytes(ID_CLUSTER)),
+    element(ID_SEEK_POSITION, uint(position, 4))
   ])));
   const seekHeadLength = seekHeadFor(0).length;
   const clusterPosition = seekHeadLength + info.length + padding.length;
   const segmentPayload = Buffer.concat([seekHeadFor(clusterPosition), info, padding, cluster]);
   const file = Buffer.concat([
-    ebml(ID_EBML_HEADER, Buffer.alloc(4)),
-    ebml(ID_SEGMENT, segmentPayload)
+    element(ID_EBML_HEADER, Buffer.alloc(4)),
+    element(ID_SEGMENT, segmentPayload)
   ]);
 
   const container = new MatroskaContainer({ readRange: readerOver(file), fileSize: file.length });
@@ -123,10 +110,10 @@ test("a cluster past the head window is found through the SeekHead", async () =>
 });
 
 test("a Matroska file that declares no duration says so, rather than saying zero", async () => {
-  const cluster = ebml(ID_CLUSTER, ebml(ID_TIMESTAMP, uint(0, 1)));
+  const cluster = element(ID_CLUSTER, element(ID_TIMESTAMP, uint(0, 1)));
   const file = Buffer.concat([
-    ebml(ID_EBML_HEADER, Buffer.alloc(4)),
-    ebml(ID_SEGMENT, cluster)
+    element(ID_EBML_HEADER, Buffer.alloc(4)),
+    element(ID_SEGMENT, cluster)
   ]);
 
   const container = new MatroskaContainer({ readRange: readerOver(file), fileSize: file.length });
@@ -135,20 +122,6 @@ test("a Matroska file that declares no duration says so, rather than saying zero
   assert.equal(read.durationSeconds, null);
   assert.equal(read.startTimeSeconds, 0);
 });
-
-/**
- * An ISO/IEC 14496-12 box.
- *
- * @param {string} type
- * @param {Buffer} payload
- * @returns {Buffer}
- */
-function box(type, payload) {
-  const header = Buffer.alloc(8);
-  header.writeUInt32BE(payload.length + 8);
-  header.write(type, 4, "latin1");
-  return Buffer.concat([header, payload]);
-}
 
 test("an MP4 is shown from the end of its empty edit, for as long as mvhd says less that edit", async () => {
   const mvhd = box("mvhd", Buffer.concat([

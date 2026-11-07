@@ -3,12 +3,7 @@ import assert from "node:assert/strict";
 import { Mp4Container } from "../../services/media/container/Mp4Container.js";
 import { isUnavailable } from "../../services/media/container/unavailable.js";
 import { IndexMemoryUnavailable } from "../../services/media/container/memory-unavailable.js";
-
-function u32(...values) {
-  const bytes = Buffer.alloc(values.length * 4);
-  values.forEach((value, at) => bytes.writeUInt32BE(value >>> 0, at * 4));
-  return bytes;
-}
+import { box, fullBox, u32 } from "./helpers/mp4-file.js";
 
 test("a declared MP4 table requests its complete memory instead of reparsing one block at a time", async () => {
   const { bytes } = fileOf({ uniformCount: 10000 });
@@ -30,26 +25,22 @@ test("a declared MP4 table requests its complete memory instead of reparsing one
   assert.equal(input.packets.length, 10000);
   assert.equal(held - declarations, index.allocatedBytes());
 });
-function box(type, bytes) {
-  return Buffer.concat([u32(bytes.length + 8), Buffer.from(type), bytes]);
-}
-function full(type, bytes) { return box(type, Buffer.concat([u32(0), bytes])); }
 
 function fileOf({ brokenCount = false, uniformCount = 0 } = {}) {
-  const tkhd = full("tkhd", Buffer.concat([u32(0, 0, 1, 0, 4000), Buffer.alloc(60)]));
-  const mdhd = full("mdhd", Buffer.concat([u32(0, 0, 1000, 4000), Buffer.alloc(4)]));
-  const hdlr = full("hdlr", Buffer.concat([u32(0), Buffer.from("vide"), Buffer.alloc(12)]));
-  const stsd = full("stsd", Buffer.concat([u32(1), box("avc1", Buffer.alloc(78))]));
+  const tkhd = fullBox("tkhd", Buffer.concat([u32(0, 0, 1, 0, 4000), Buffer.alloc(60)]));
+  const mdhd = fullBox("mdhd", Buffer.concat([u32(0, 0, 1000, 4000), Buffer.alloc(4)]));
+  const hdlr = fullBox("hdlr", Buffer.concat([u32(0), Buffer.from("vide"), Buffer.alloc(12)]));
+  const stsd = fullBox("stsd", Buffer.concat([u32(1), box("avc1", Buffer.alloc(78))]));
   const count = uniformCount || 4;
-  const stts = full("stts", u32(1, brokenCount ? 3 : count, 1000));
-  const ctts = full("ctts", u32(4, 1, 0, 1, 1000, 1, -1000, 1, 0));
+  const stts = fullBox("stts", u32(1, brokenCount ? 3 : count, 1000));
+  const ctts = fullBox("ctts", u32(4, 1, 0, 1, 1000, 1, -1000, 1, 0));
   // Signed composition offsets are version 1, with decode order PTS 0,2,1,3.
   ctts[8] = 1;
-  const stsz = full("stsz", uniformCount ? u32(1, count) : u32(0, 4, 10, 20, 15, 25));
-  const stsc = full("stsc", u32(1, 1, count, 1));
-  const stss = full("stss", u32(2, 1, 4));
+  const stsz = fullBox("stsz", uniformCount ? u32(1, count) : u32(0, 4, 10, 20, 15, 25));
+  const stsc = fullBox("stsc", u32(1, 1, count, 1));
+  const stss = fullBox("stss", u32(2, 1, 4));
   const moovAt = start => box("moov", box("trak", Buffer.concat([tkhd, box("mdia", Buffer.concat([
-    mdhd, hdlr, box("minf", box("stbl", Buffer.concat([stsd, stts, ...(uniformCount ? [] : [ctts]), stsz, stsc, stss, full("stco", u32(1, start))])))
+    mdhd, hdlr, box("minf", box("stbl", Buffer.concat([stsd, stts, ...(uniformCount ? [] : [ctts]), stsz, stsc, stss, fullBox("stco", u32(1, start))])))
   ]))])));
   const ftyp = box("ftyp", Buffer.concat([Buffer.from("isom"), u32(0), Buffer.from("isom")]));
   const draft = moovAt(0);

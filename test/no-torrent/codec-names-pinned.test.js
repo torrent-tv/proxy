@@ -3,6 +3,7 @@ import test from "node:test";
 import { playbackDeclarations } from "../../services/media/playback-declarations.js";
 import { matroskaTrackIdentity } from "../../services/encode/MatroskaInput.js";
 import { decodeFamilyOf } from "../../services/encode/decode-cost-fit.js";
+import { matroskaIdOf } from "../../services/media/tracks/codec-names.js";
 import { AudioTrack } from "../../services/media/tracks/AudioTrack.js";
 import { VideoTrack } from "../../services/media/tracks/VideoTrack.js";
 
@@ -49,7 +50,7 @@ test("a banner name wins over the container id and a bare sidecar falls back to 
 });
 
 test("Matroska input declares each admitted codec by its exact id", () => {
-  const idOf = codec => JSON.parse(matroskaTrackIdentity({ type: "video", codecId: codec }))[1];
+  const idOf = codec => JSON.parse(matroskaTrackIdentity({ type: "video", codecId: codec }, matroskaIdOf))[1];
   const expected = {
     avc1: "V_MPEG4/ISO/AVC", avc3: "V_MPEG4/ISO/AVC", h264: "V_MPEG4/ISO/AVC",
     hvc1: "V_MPEGH/ISO/HEVC", hev1: "V_MPEGH/ISO/HEVC", hevc: "V_MPEGH/ISO/HEVC",
@@ -66,14 +67,21 @@ test("Matroska input declares each admitted codec by its exact id", () => {
 });
 
 test("Matroska input stays exact: a codec it cannot declare throws, and identity follows the declared id", () => {
-  assert.throws(() => matroskaTrackIdentity({ type: "video", codecId: "msmpeg4v3" }), /no Matroska declaration/);
-  assert.throws(() => matroskaTrackIdentity({ type: "video", codecId: "M4S2" }), /no Matroska declaration/);
-  assert.notEqual(matroskaTrackIdentity({ type: "video", codecId: "h264" }),
-    matroskaTrackIdentity({ type: "video", codecId: "hevc" }));
-  assert.equal(matroskaTrackIdentity({ type: "video", codecId: "avc1" }),
-    matroskaTrackIdentity({ type: "video", codecId: "h264" }));
-  assert.equal(matroskaTrackIdentity({ type: "video", codecId: "x", matroskaCodecId: "V_VP9" }),
-    matroskaTrackIdentity({ type: "video", codecId: "vp9" }));
+  assert.throws(() => matroskaTrackIdentity({ type: "video", codecId: "msmpeg4v3" }, matroskaIdOf), /no Matroska declaration/);
+  assert.throws(() => matroskaTrackIdentity({ type: "video", codecId: "M4S2" }, matroskaIdOf), /no Matroska declaration/);
+  assert.notEqual(matroskaTrackIdentity({ type: "video", codecId: "h264" }, matroskaIdOf),
+    matroskaTrackIdentity({ type: "video", codecId: "hevc" }, matroskaIdOf));
+  assert.equal(matroskaTrackIdentity({ type: "video", codecId: "avc1" }, matroskaIdOf),
+    matroskaTrackIdentity({ type: "video", codecId: "h264" }, matroskaIdOf));
+  assert.equal(matroskaTrackIdentity({ type: "video", codecId: "x", matroskaCodecId: "V_VP9" }, matroskaIdOf),
+    matroskaTrackIdentity({ type: "video", codecId: "vp9" }, matroskaIdOf));
+});
+
+test("encode/ is given the lookup: the identity names ids through the function it receives", () => {
+  const lookup = name => `V_STUB/${name}`;
+  assert.equal(JSON.parse(matroskaTrackIdentity({ type: "video", codecId: "avc1" }, lookup))[1], "V_STUB/avc1");
+  // A declared Matroska id on the track still bypasses the lookup.
+  assert.equal(JSON.parse(matroskaTrackIdentity({ type: "video", codecId: "avc1", matroskaCodecId: "V_VP9" }, lookup))[1], "V_VP9");
 });
 
 test("decodeFamilyOf prices the canonical names", () => {

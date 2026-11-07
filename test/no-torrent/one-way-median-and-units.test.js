@@ -6,19 +6,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { jsFilesUnder } from "./helpers/source-text.js";
 
-/** @param {string} directory @returns {string[]} */
-function sourcesUnder(directory) {
-  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const full = path.join(directory, entry.name);
-    if (entry.isDirectory()) return sourcesUnder(full);
-    return /\.(m?js|cjs)$/.test(entry.name) ? [full] : [];
-  });
-}
+const PROXY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+/** @param {string} directory @returns {string[]} every .js file under it, named from the proxy's root */
+const sourcesUnder = (directory) => jsFilesUnder(directory).map((file) => path.relative(PROXY, file));
 
 const services = sourcesUnder("services");
 const everything = [...services, ...sourcesUnder("utils")];
-const read = (file) => fs.readFileSync(file, "utf8").split("\n");
+const read = (file) => fs.readFileSync(path.join(PROXY, file), "utf8").split("\n");
 
 /** @param {string[]} files @param {RegExp} pattern @returns {string[]} "file:line" of every match */
 function hits(files, pattern) {

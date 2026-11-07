@@ -6,6 +6,7 @@ import { OriginalInputStore } from "../../services/encode/OriginalInputStore.js"
 import { admitOriginalInput } from "../../services/encode/OriginalInput.js";
 import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 const source = (ranges, commonRanges = [[0, 9]], sourceKey = "generated") => ({ sourceKey, fileIndex: 0,
   input: { original: true, fileLength: 2000, ranges, commonRanges, selections: [] } });
@@ -165,7 +166,7 @@ test("missing and malformed reads release reservations and can be retried", asyn
 test("budget admission and copy-rate learning distinguish shared memory from full input bytes", async () => {
   let clock = 0;
   const output = { outputKey: "picture" };
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     resolve: async (_output, from, to) => ({ kind: "result", sources: [source([[0, 9], [100 + from * 10, 119 + to * 10]])] }),
     heldRanges: async () => [[0, 1999]],
     readRanges: async (s, ranges) => { const buffers = await reader(s, ranges); clock += buffers.reduce((sum, b) => sum + b.length, 0); return buffers; },

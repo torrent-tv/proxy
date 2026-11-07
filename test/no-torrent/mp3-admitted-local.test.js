@@ -8,6 +8,7 @@ import ffmpegBin from "ffmpeg-static";
 import { ContainerFactory } from "../../services/media/container/ContainerFactory.js";
 import { AudioTrack } from "../../services/media/tracks/AudioTrack.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // Local synthetic media and pipes only; no torrent source is opened.
 for (const [format, codec, codecName, fragmented] of [["mkv", "libmp3lame", "mp3"], ["mp4", "libmp3lame", "mp3"],
@@ -32,7 +33,7 @@ for (const [format, codec, codecName, fragmented] of [["mkv", "libmp3lame", "mp3
       const input = index.inputFor({ trackId: audio.trackNumber, from: Math.max(0, bounds.start), to: bounds.end });
       assert.equal(input.kind, "result");
       if (codecName === "mp3") assert.ok(input.packets.some(packet => packet.decodeFromIndex < input.packets.indexOf(packet)));
-      const chunks = await Array.fromAsync(matroskaInput({ tracks: [{ track: audio, packets: input.packets }],
+      const chunks = await Array.fromAsync(matroskaInput({ matroskaIdOf, tracks: [{ track: audio, packets: input.packets }],
         originSeconds: Math.min(...input.packets.map(packet => packet.pts + (audio.codecDelaySeconds ?? 0))),
         readPacket: async (_input, packet) => packet.ranges.map(([start, end]) => bytes.subarray(start, end + 1)) }));
       const decode = (source, data) => spawnSync(ffmpegBin, ["-v", "error", "-i", source, "-map", "0:a", "-f", "s16le", "pipe:1"],
@@ -49,7 +50,7 @@ for (const [format, codec, codecName, fragmented] of [["mkv", "libmp3lame", "mp3
       // The source container can quantize timestamps differently, and AAC noise
       // substitution cannot reproduce its random state after a decoder restart.
       const originSeconds = Math.min(...input.packets.map(packet => packet.pts + (audio.codecDelaySeconds ?? 0)));
-      const portion = Buffer.concat(await Array.fromAsync(matroskaInput({ tracks: [{ track: audio, packets: middle.packets }],
+      const portion = Buffer.concat(await Array.fromAsync(matroskaInput({ matroskaIdOf, tracks: [{ track: audio, packets: middle.packets }],
         originSeconds,
         readPacket: async (_input, packet) => packet.ranges.map(([start, end]) => bytes.subarray(start, end + 1)) })));
       const trimmed = data => spawnSync(ffmpegBin, ["-v", "error", "-copyts",

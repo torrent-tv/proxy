@@ -13,6 +13,7 @@ import { buildAdmittedCommand } from "../../services/encode/admitted-command.js"
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { judgePiece } from "../../services/encode/piece-completeness.js";
 import { softwareDescriptor } from "../../services/encode/hwaccel.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // Generated local files only; no torrent, no HTTP.
 //
@@ -106,7 +107,7 @@ async function soundPiece(directory, bytes, grid, at, transcodeAudio) {
   const picture = (await container.readSourceRanges({ from: grid[at], to: grid[at + 1], trackIds: [0, 1] })).ranges;
   const own = input.ranges.reduce((sum, [start, end]) => sum + end - start + 1, 0);
   const original = picture.reduce((sum, [start, end]) => sum + end - start + 1, 0);
-  const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
+  const admitted = await admitInput({ matroskaIdOf, sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
     readRanges: async (_source, ranges) => ranges.map(([start, end]) => Buffer.from(bytes.subarray(start, end + 1))) });
   const chunks = [];
   await writeAdmittedInput(admitted, new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } }));

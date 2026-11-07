@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import { setImmediate } from "node:timers/promises";
 import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
 import { MachineBudget } from "../../services/storage/MachineBudget.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 const output = { id: "output" };
 
 test("container reads carry the output demand into source metadata", async () => {
   let readPriority;
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     resolve: async (_output, _from, _to, _timing, _isCurrent, _signal, priority) => {
       readPriority = priority;
       return { kind: "needs-bytes", ranges: [[0, 9]] };
@@ -27,7 +28,7 @@ test("container reads carry the output demand into source metadata", async () =>
 
 test("input allowance changing before a pending memory refusal is returned is not lost", async () => {
   let finish, calls = 0;
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     resolve: () => ++calls === 1 ? new Promise(resolve => { finish = resolve; })
       : Promise.resolve({ kind: "result", sources: [source] }),
     readRanges: async () => [Buffer.from("ab")], reviseBudget: async () => {},
@@ -46,7 +47,7 @@ test("input allowance changing before a pending memory refusal is returned is no
 
 for (const duringRead of [false, true]) test(`metadata memory admission wakes encoder input (duringRead=${duringRead})`, async () => {
   let available = false, finish, calls = 0;
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     resolve: async () => {
       calls++;
       if (available) return { kind: "result", sources: [source] };
@@ -72,7 +73,7 @@ for (const duringRead of [false, true]) test(`metadata memory admission wakes en
 for (const urgent of [true, false]) test(`chosen complete input is admitted before speculative whole-file memory (urgent=${urgent})`, async () => {
   const budget = new MachineBudget({ policy: { kind: "fixed", bytes: 100 } });
   budget.defineResource({ name: "memory", readFree: () => 100 });
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources: [source] }),
     urgent: () => urgent,
     readRanges: async () => [Buffer.from("ab")], reviseBudget: () => budget.revise(),
     changed: () => {}, failed: (_output, error) => { throw error; } });
@@ -95,7 +96,7 @@ const source = { sourceKey: "source", fileIndex: 0, input: { ranges: [[0, 1]], t
 
 test("run admission is synchronous and retries missing bytes only after an availability event", async () => {
   let reads = 0, available = false, changed = 0;
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources: [source] }),
     readRanges: async () => { reads++; return available ? [Buffer.from("ab")] : null; },
     reviseBudget: async () => inputs.allow(100), changed: () => changed++, failed: error => { throw error; } });
   assert.equal(inputs.take(output, 0, 0), null);
@@ -116,7 +117,7 @@ test("run admission is synchronous and retries missing bytes only after an avail
 
 test("withdrawing an output during a read releases the late result without announcing readiness", async () => {
   let settle, changed = 0;
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources: [source] }),
     readRanges: () => new Promise(resolve => { settle = resolve; }), reviseBudget: async () => inputs.allow(100),
     changed: () => changed++, failed: error => { throw error; } });
   inputs.take(output, 0, 0);
@@ -131,7 +132,7 @@ test("withdrawing an output during a read releases the late result without annou
 
 test("withdrawing a pending input aborts its resolver", async () => {
   let signal, finished;
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     resolve: (_output, _from, _to, _timing, _isCurrent, requestSignal) => {
       signal = requestSignal;
       return new Promise(resolve => { finished = resolve; });
@@ -150,7 +151,7 @@ test("withdrawing a pending input aborts its resolver", async () => {
 
 test("an availability event during an unsuccessful read is not lost", async () => {
   let settle, reads = 0;
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources: [source] }),
     readRanges: () => ++reads === 1 ? new Promise(resolve => { settle = resolve; }) : Promise.resolve([Buffer.from("ab")]),
     reviseBudget: async () => inputs.allow(100), changed: () => {}, failed: error => { throw error; } });
   inputs.take(output, 0, 0);
@@ -164,7 +165,7 @@ test("an availability event during an unsuccessful read is not lost", async () =
 });
 
 test("withdrawing segment demand returns a prepared input immediately", async () => {
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources: [source] }),
     readRanges: async () => [Buffer.from("ab")], reviseBudget: async () => inputs.allow(100),
     changed: () => {}, failed: error => { throw error; } });
   inputs.take(output, 5, 5);
@@ -176,7 +177,7 @@ test("withdrawing segment demand returns a prepared input immediately", async ()
 
 test("an urgent complete input exceeding measured machine capacity is terminal before reading", async () => {
   let reads = 0, announced;
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources: [source] }),
     readRanges: async () => { reads++; return [Buffer.from("ab")]; }, reviseBudget: async () => inputs.allow(1),
     capacity: () => 1, changed: (_output, result) => { announced = result; }, failed: error => { throw error; } });
   inputs.take(output, 0, 0);
@@ -189,7 +190,7 @@ test("an urgent complete input exceeding measured machine capacity is terminal b
 
 test("nonurgent memory shortage can become a terminal reason when that segment becomes urgent", async () => {
   let urgent = false;
-  const inputs = new EncodeInputs({ resolve: async () => ({ kind: "result", sources: [source] }),
+  const inputs = new EncodeInputs({ matroskaIdOf, resolve: async () => ({ kind: "result", sources: [source] }),
     readRanges: async () => assert.fail("Insufficient memory must prevent reads"), reviseBudget: async () => inputs.allow(1),
     capacity: () => 1, urgent: () => urgent, changed: () => {}, failed: error => { throw error; } });
   inputs.take(output, 0, 0);
@@ -204,7 +205,7 @@ test("nonurgent memory shortage can become a terminal reason when that segment b
 test("an input's state names the piece it is prepared for and that piece's rank, not its own first piece", async () => {
   const lines = [];
   const asked = [];
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     resolve: async () => ({ kind: "needs-bytes" }),
     readRanges: async () => null, reviseBudget: async () => {},
     rankAt: (_output, index) => { asked.push(index); return { rank: 2, topRank: 3 }; },
@@ -222,7 +223,7 @@ test("input preparation logs one P8 span across missing-byte retries", async () 
   const events = [];
   const tracedOutput = { ...output, file: { sourceKey: "source" }, spec: { carries: "picture" } };
   let calls = 0;
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     resolve: async () => ++calls === 1 ? { kind: "needs-bytes" } : { kind: "result", sources: [source] },
     readRanges: async () => [Buffer.from("ab")],
     reviseBudget: async () => inputs.allow(100),

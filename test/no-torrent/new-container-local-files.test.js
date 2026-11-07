@@ -8,6 +8,7 @@ import ffmpegBin from "ffmpeg-static";
 import ffprobe from "@ffprobe-installer/ffprobe";
 import { ContainerFactory } from "../../services/media/container/ContainerFactory.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // All inputs are synthetic lavfi sources. No torrent classes, clients or URLs.
 for (const [format, video, audio, removeAud = false] of [["mpegts", "libx264", "aac_latm"], ["mpegts", "libx265", "aac", true], ["mpegts", "libx265", "aac"], ["mpegts", "mpeg2video", "ac3"], ["mpegts", "mpeg2video", "eac3"], ["mpegts", "mpeg2video", "mp2"], ["mpegts", "mpeg2video", "aac"], ["mpegts", "libx264", "aac"], ["mpegts", "libx264", "aac", true], ["mpeg", "mpeg2video", "ac3"], ["mpeg", "libx264", "mp2"], ["mpeg", "mpeg2video", "mp2"], ["asf", "wmv2", "wmav2"], ["avi", "mpeg4", "mp3"], ["matroska", "libx264", "aac"], ["mp4", "libx264", "aac"], ["mp4", "libx265", "aac"], ["matroska", "libx265", "aac"]]) {
@@ -104,7 +105,7 @@ for (const [format, video, audio, removeAud = false] of [["mpegts", "libx264", "
         }
         const originSeconds = inputs.reduce((origin, input) => input.packets.reduce((value, packet) => Math.min(value, packet.pts), origin), 0);
         const chunks = [];
-        for await (const chunk of matroskaInput({ tracks: inputs, originSeconds,
+        for await (const chunk of matroskaInput({ matroskaIdOf, tracks: inputs, originSeconds,
           readPacket: async (_input, packet) => Buffer.concat(packet.ranges.map(([a, b]) => bytes.subarray(a, b + 1))) })) chunks.push(chunk);
         const decoded = spawnSync(ffmpegBin, ["-hide_banner", "-loglevel", "error", "-f", "matroska", "-i", "pipe:0", "-map", "0", "-f", "null", "pipe:1"],
           { windowsHide: true, input: Buffer.concat(chunks), encoding: "utf8" });

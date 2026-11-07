@@ -9,6 +9,7 @@ import { probePackets } from "../../services/media/probe-packets.js";
 import { FfprobeContainer } from "../../services/media/container/FfprobeContainer.js";
 import { SegmentInputs } from "../../services/media/SegmentInputs.js";
 import { admitInput } from "../../services/encode/AdmittedInput.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // Only generated media files are passed to ffprobe; no torrent boundary is imported.
 for (const format of ["mp4", "flv"]) test(`ffprobe reads synthetic ${format} packet bytes and codec declarations without an input URL`, async () => {
@@ -30,7 +31,7 @@ for (const format of ["mp4", "flv"]) test(`ffprobe reads synthetic ${format} pac
     const input = new SegmentInputs({ tracks, index }).forInterval({ from: bounds.start, to: bounds.end });
     assert.equal(input.kind, "result");
     let released = false;
-    const admitted = await admitInput({ sources: [{ sourceKey: "synthetic", fileIndex: 0, input }],
+    const admitted = await admitInput({ matroskaIdOf, sources: [{ sourceKey: "synthetic", fileIndex: 0, input }],
       reserve: () => () => { released = true; }, readRanges: async (_source, ranges) => ranges.map(([a, b]) => bytes.subarray(a, b + 1)) });
     assert.equal(admitted.kind, "result");
     const chunks = [];

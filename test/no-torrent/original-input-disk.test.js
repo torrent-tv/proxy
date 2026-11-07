@@ -9,6 +9,7 @@ import { CompletedFiles } from "../../services/storage/files/CompletedFiles.js";
 import { openCompletedInputFile } from "../../services/torrent/worker/completed-input-file.js";
 import { EncodeInputs } from "../../services/encode/EncodeInputs.js";
 import { handleEncodeInputGet } from "../../routes/encode-input/get.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 const hash = "0123456789abcdef0123456789abcdef01234567";
 
@@ -95,7 +96,7 @@ test("withdrawing a request during completed-file acquisition returns the file l
   const waiting = new Promise(resolve => { resume = resolve; });
   const acquired = new Promise(resolve => { opened = resolve; });
   const output = { outputKey: "withdrawn" };
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     resolve: async () => ({ kind: "result", sources: [{ sourceKey: `torrent:${hash}`, fileIndex: 0,
       input: { original: true, fileLength: content.length, ranges: [[0, 9]], commonRanges: [[0, 9]], selections: [] } }] }),
     openWholeFile: async () => { const file = await openInput(files); opened(); await waiting; return file; },
@@ -114,7 +115,7 @@ test("withdrawing a request during completed-file acquisition returns the file l
 test("disk input needs no full memory reservation and retains full FFmpeg cache accounting", async () => withFile(async (files, content) => {
   const output = { outputKey: "picture" };
   let heldReads = 0, copyReads = 0;
-  const inputs = new EncodeInputs({
+  const inputs = new EncodeInputs({ matroskaIdOf,
     resolve: async () => ({ kind: "result", sources: [{ sourceKey: `torrent:${hash}`, fileIndex: 0,
       input: { original: true, fileLength: content.length, ranges: [[0, 100000], [150000, 179999]], commonRanges: [[0, 9]], selections: [] } }] }),
     openWholeFile: () => openInput(files),

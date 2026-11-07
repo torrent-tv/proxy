@@ -23,6 +23,7 @@ import { directSegmentInput } from "../../services/media/direct-segment-input.js
 import { admitInput, writeAdmittedInput } from "../../services/encode/AdmittedInput.js";
 import { buildAdmittedCommand } from "../../services/encode/admitted-command.js";
 import { softwareDescriptor } from "../../services/encode/hwaccel.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // Generated ordinary media and a loopback HTTP server only; no torrent imports.
 //
@@ -76,7 +77,7 @@ async function packetPiece(directory, bytes, container, interval, track, transco
   const input = await directSegmentInput(container, { interval, tracks: [track],
     mode: () => transcodeAudio ? "transcode" : "copy" }, () => {});
   assert.equal(input.kind, "result", JSON.stringify(input));
-  const admitted = await admitInput({ sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
+  const admitted = await admitInput({ matroskaIdOf, sources: [{ sourceKey: "local", fileIndex: 0, input }], reserve: () => () => {},
     readRanges: async (_source, ranges) => ranges.map(([start, end]) => Buffer.from(bytes.subarray(start, end + 1))) });
   const chunks = [];
   await writeAdmittedInput(admitted, new Writable({ write(chunk, _encoding, done) { chunks.push(Buffer.from(chunk)); done(); } }));

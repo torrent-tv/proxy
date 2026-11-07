@@ -5,6 +5,7 @@ import ffmpegBin from "ffmpeg-static";
 import { dtsFrame } from "../../services/media/container/dts-frame.js";
 import { MpegElementaryIndex } from "../../services/media/container/mpeg-elementary-index.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 function swapWords(bytes) {
   const result = Buffer.from(bytes);
@@ -59,7 +60,7 @@ test("DTS core word layouts preserve duration, exact ranges and admitted audio s
     assert.equal(track.samplingFrequency, 48000);
     assert.equal(input.packets.length, packets.length);
     assert.deepEqual(input.ranges, [[100, 109], [300, 300 + bytes.length - 11]]);
-    const admitted = await Array.fromAsync(matroskaInput({ tracks: [{ track, packets: input.packets }],
+    const admitted = await Array.fromAsync(matroskaInput({ matroskaIdOf, tracks: [{ track, packets: input.packets }],
       readPacket: async (_input, packet) => packet.ranges.map(([a, b]) => {
         const offset = a < 300 ? a - 100 : a - 300 + 10;
         return bytes.subarray(offset, offset + b - a + 1);

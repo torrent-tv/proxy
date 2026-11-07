@@ -9,6 +9,7 @@ import { Mp4Container } from "../../services/media/container/Mp4Container.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
 import { isUnavailable } from "../../services/media/container/unavailable.js";
 import { IndexMemoryUnavailable } from "../../services/media/container/memory-unavailable.js";
+import { matroskaIdOf } from "./support/codec-lookup.js";
 
 // Synthetic local files only; no torrent boundary is imported or constructed.
 test("fragmented MP4 retains exact sample addresses, clocks and decoded picture and sound", async t => {
@@ -59,7 +60,7 @@ test("fragmented MP4 retains exact sample addresses, clocks and decoded picture 
   assert.equal(inputs.find(input => input.track.type === "video").packets.length, 10);
   assert.ok((await container.readMediaInfo()).durationSeconds > 0);
   assert.ok((await container.parseKeyframeIndex()).times.length >= 2);
-  const chunks = await Array.fromAsync(matroskaInput({ tracks: inputs,
+  const chunks = await Array.fromAsync(matroskaInput({ matroskaIdOf, tracks: inputs,
     readPacket: async (_input, packet) => packet.ranges.map(([a, b]) => bytes.subarray(a, b + 1)) }));
   for (const kind of ["video", "audio"]) {
     const decode = (source, input) => spawnSync(ffmpegBin, ["-v", "error", "-i", source, "-map",

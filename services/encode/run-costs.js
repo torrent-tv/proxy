@@ -15,31 +15,14 @@
  * answer.
  */
 
+import { medianOf } from "../../utils/median.js";
+
 /**
  * How many recent readings a figure is taken from. The same reasoning as the
  * other learned figures in this proxy: long enough that one reading does not
  * move the answer, short enough that the answer still follows the host.
  */
 const RECENT_READINGS = 20;
-
-/**
- * The middle of a set of readings, or null when there are none.
- *
- * Written here rather than borrowed from the general helper one level up: this
- * layer states facts and imports nothing above itself, and four lines of
- * arithmetic are not worth breaking that for.
- *
- * @param {number[]} values
- * @returns {number | null}
- */
-function middleOf(values) {
-  if (values.length === 0) {
-    return null;
-  }
-  const sorted = [...values].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
-}
 
 export class RunCosts {
   /** How long dying took, in milliseconds. @type {number[]} */
@@ -145,7 +128,7 @@ export class RunCosts {
    * @returns {{ seconds: number, measured: boolean } | null}
    */
   openOf(address) {
-    const own = middleOf(this.#opens.get(address) ?? []);
+    const own = medianOf(this.#opens.get(address) ?? []);
     if (own !== null) return { seconds: own, measured: true };
     const startup = this.#atStartup?.firstByteWaitSec;
     return Number.isFinite(startup) && startup > 0 ? { seconds: startup, measured: false } : null;
@@ -191,9 +174,9 @@ export class RunCosts {
     // piece's encoding. Whoever uses it separates the two, because the piece
     // costs more when encoders share the machine and the spawn does not.
     return {
-      killCostSec: (middleOf(this.#dying) ?? 0) / 1000 || (this.#atStartup?.killCostSec ?? 0),
+      killCostSec: (medianOf(this.#dying) ?? 0) / 1000 || (this.#atStartup?.killCostSec ?? 0),
       firstByteWaitSec:
-        (middleOf(this.#firstOutput) ?? 0) / 1000 || (this.#atStartup?.firstByteWaitSec ?? 0),
+        (medianOf(this.#firstOutput) ?? 0) / 1000 || (this.#atStartup?.firstByteWaitSec ?? 0),
       samples: Math.min(this.#dying.length, this.#firstOutput.length)
     };
   }

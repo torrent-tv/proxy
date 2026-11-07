@@ -11,6 +11,7 @@
 import { EventEmitter } from "node:events";
 import { writeJsonAtomic } from "../../utils/atomic-json.js";
 import { logger } from "../../utils/logger.js";
+import { megabytesPerSecond } from "../../utils/units.js";
 import { KeyframeTables } from "../media/KeyframeTables.js";
 import { matroskaIdOf } from "../media/tracks/codec-names.js";
 import { bandOf, WaitLedger } from "../encode/OutputWaitLedger.js";
@@ -828,8 +829,8 @@ export function wireOutputs({
         because = `${made}; the swarm's rate is not measured yet`;
       } else {
         held = swarm > needs;
-        because = `${made}; the swarm gives ${(swarm / 1e6).toFixed(2)} MB/s, ` +
-          `${held ? "more than" : "not more than"} the ${(needs / 1e6).toFixed(2)} MB/s its film needs at ${asked.toFixed(2)}x`;
+        because = `${made}; the swarm gives ${megabytesPerSecond(swarm)}, ` +
+          `${held ? "more than" : "not more than"} the ${megabytesPerSecond(needs)} its film needs at ${asked.toFixed(2)}x`;
       }
     }
     if (held === parts.speculativeHeld) return;

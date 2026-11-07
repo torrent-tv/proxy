@@ -1,3 +1,4 @@
+import { medianOf } from "../../utils/median.js";
 import { admitInput } from "./AdmittedInput.js";
 import { admitOriginalInput, originalInputBytes } from "./OriginalInput.js";
 import { OriginalInputStore } from "./OriginalInputStore.js";
@@ -8,14 +9,6 @@ import { OriginalInputStore } from "./OriginalInputStore.js";
  * still follows the host. The same count as `run-costs.js`.
  */
 const RECENT_READINGS = 20;
-
-/** @param {number[]} values @returns {number | null} */
-function middleOf(values) {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
-}
 
 /** @param {number[]} readings @param {number} value */
 function keep(readings, value) {
@@ -373,7 +366,7 @@ export class EncodeInputs {
   }
 
   #sizingFor(output) {
-    const rate = middleOf(this.#copyRates);
+    const rate = medianOf(this.#copyRates);
     const open = this.#openOf(output);
     return rate === null || !open ? null : { bytes: Math.floor(rate * open.seconds * 1000),
       openMeasured: open.measured, openSeconds: open.seconds, copyBytesPerMs: rate };
@@ -388,7 +381,7 @@ export class EncodeInputs {
    */
   stretchTerms() {
     const capacity = this.#capacity();
-    return { copyBytesPerMs: middleOf(this.#copyRates), capacityBytes: Number.isFinite(capacity) ? capacity : null };
+    return { copyBytesPerMs: medianOf(this.#copyRates), capacityBytes: Number.isFinite(capacity) ? capacity : null };
   }
 
   /**

@@ -20,6 +20,7 @@
  *    with those bytes — not when they were sent, because nothing was sent.
  */
 
+import { medianOf } from "../../../utils/median.js";
 import { pieceStoreOf } from "../piece-store-of.js";
 import { urgencyName } from "../demand/index.js";
 import { demandFor } from "../download/registry.js";
@@ -232,14 +233,10 @@ function describeWaitLevels(key) {
   if (!byLevel || byLevel.size === 0) {
     return null;
   }
-  const middle = (values) => {
-    const sorted = [...values].sort((left, right) => left - right);
-    return sorted[Math.floor(sorted.length / 2)];
-  };
   return [...byLevel.entries()]
     .sort(([left], [right]) => left - right)
     .map(([urgency, waits]) =>
-      `${urgencyName(urgency)} ${waits.length} waits median ${middle(waits)}ms ` +
+      `${urgencyName(urgency)} ${waits.length} waits median ${Math.round(medianOf(waits))}ms ` +
       `worst ${Math.max(...waits)}ms`)
     .join(", ");
 }

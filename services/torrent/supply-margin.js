@@ -55,6 +55,8 @@
  * nothing smooths, weights or decays anything.
  */
 
+import { medianOf } from "../../utils/median.js";
+
 /**
  * One measured interruption: how long a read waited, and when the wait ended.
  *
@@ -106,7 +108,7 @@ export function requiredSpeedFrom(waits) {
   if (intervals.length === 0) {
     return null;
   }
-  const medianIntervalSec = median(intervals);
+  const medianIntervalSec = medianOf(intervals);
   if (!(medianIntervalSec > 0)) {
     return null;
   }
@@ -242,16 +244,6 @@ function usableWaits(waits) {
   return waits
     .filter((wait) => Number.isFinite(wait?.waitedMs) && wait.waitedMs > 0 && Number.isFinite(wait?.at))
     .sort((left, right) => left.at - right.at);
-}
-
-/**
- * @param {number[]} values - Non-empty.
- * @returns {number}
- */
-function median(values) {
-  const sorted = [...values].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
 /**

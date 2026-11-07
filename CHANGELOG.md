@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: Log lines now print data in decimal `MB` and rates in decimal `MB/s` (they divided by 2^20 or 10^6 under one label), and memory in `MiB`, all through one formatter (`utils/units.js`). Medians in logs and learned costs come from one function (`utils/median.js`), and there is one `clamp`. Field-log comparisons across versions change: the same byte count reads about 5 % higher in `MB` than it did. The wait-ledger and piece-reader log lines that said "median" used the upper middle reading and now print the true median, rounded. `slackPieces` is unchanged: it keeps the upper middle of the write times (a whole number of pieces), and the choice is now recorded in code.
+
 ## 2.107.62
 
 - **Chore**: Tests now share byte builders (MP4 boxes, EBML elements), wait helpers and source readers instead of carrying local copies, with no behaviour change.

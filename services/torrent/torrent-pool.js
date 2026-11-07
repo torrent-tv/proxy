@@ -8,6 +8,7 @@
  * download.
  */
 
+import { megabytes } from "../../utils/units.js";
 import { IDLE_KEEP_MS, SWARM_HOLD_MS } from "../storage/keep.js";
 import dns from "node:dns/promises";
 import os from "node:os";
@@ -1658,14 +1659,14 @@ export class TorrentPool {
     for (const zone of ordered) {
       const level = levelOf(zone);
       const byteCount = Math.max(0, Math.min(length - 1, zone.byteEnd) - zone.byteStart + 1);
-      const held = byLevel.get(level) ?? { zones: 0, megabytes: 0 };
+      const held = byLevel.get(level) ?? { zones: 0, bytes: 0 };
       held.zones += 1;
-      held.megabytes += byteCount / 1048576;
+      held.bytes += byteCount;
       byLevel.set(level, held);
     }
     const shape = [...byLevel.entries()]
       .sort((left, right) => right[0] - left[0])
-      .map(([level, held]) => `${urgencyName(level)} ${held.zones} zone(s) ${held.megabytes.toFixed(0)}MB`)
+      .map(([level, held]) => `${urgencyName(level)} ${held.zones} zone(s) ${megabytes(held.bytes)}`)
       .join(", ");
     // Something is wanted of this torrent, which may be news: a map published
     // for a file of a torrent whose swarm was let go is what takes it back.

@@ -10,6 +10,7 @@
 import os from "node:os";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { logger } from "../../../utils/logger.js";
+import { megabytesPerSecond } from "../../../utils/units.js";
 import { availableShareFrom } from "../available-share.js";
 import { encoderCpuBetween } from "./encoder-cpu.js";
 import { baseDrawFrom, costPerMegabyteFrom } from "../torrent-cost.js";
@@ -40,7 +41,7 @@ function threadSays(now, previous) {
   const freeBytes = (now.selection?.freeBytes ?? 0) - (previous.selection?.freeBytes ?? 0);
   const held = ms > 0 && freeMs >= 0 && freeMs <= ms
     ? `; our selection held a peer back ${Math.round((1 - freeMs / ms) * 100)}% of the time` +
-      (freeMs > 0 ? `, the rest gave ${(freeBytes / freeMs / 1000).toFixed(2)} MB/s` : "") : "";
+      (freeMs > 0 ? `, the rest gave ${megabytesPerSecond(freeBytes / freeMs * 1000)}` : "") : "";
   return loop + reads + held;
 }
 
@@ -281,12 +282,12 @@ export class HostLoad {
     // processor can be set against each kind of work (torrent-tv/meta#178).
     const movedOf = (key) => Number.isFinite(now[key]) && Number.isFinite(previous[key]) && now[key] >= previous[key]
       ? (now[key] - previous[key]) / 1e6 : null;
-    const rateOf = (key) => movedOf(key) === null ? "n/a" : `${(movedOf(key) / elapsedSec).toFixed(2)} MB/s`;
+    const rateOf = (key) => movedOf(key) === null ? "n/a" : megabytesPerSecond(movedOf(key) * 1e6 / elapsedSec);
     if (megabytes > 0 || Number.isFinite(limit) || movedOf("served") > 0 || movedOf("uploaded") > 0) {
       logger.info(
-        `torrent: downloaded ${(megabytes / elapsedSec).toFixed(2)} MB/s, sent to peers ${rateOf("uploaded")}, ` +
+        `torrent: downloaded ${megabytesPerSecond(megabytes * 1e6 / elapsedSec)}, sent to peers ${rateOf("uploaded")}, ` +
         `handed to readers ${rateOf("served")} over ${elapsedSec.toFixed(1)}s, ` +
-        `limit ${Number.isFinite(limit) ? `${(limit / 1e6).toFixed(2)} MB/s` : "none"}; ` +
+        `limit ${Number.isFinite(limit) ? megabytesPerSecond(limit) : "none"}; ` +
         `its thread drew ${Math.round(cpuSeconds / elapsedSec * 100)}% of the machine` + threadSays(now, previous)
       );
     }

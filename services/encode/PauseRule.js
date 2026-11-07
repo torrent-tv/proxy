@@ -49,6 +49,8 @@
  * `L` waited for its input say nothing about `r` and are left out.
  */
 
+import { medianOf, scatterOf } from "../../utils/median.js";
+
 /**
  * How many seconds of readings a run keeps. Enough for a baseline before a try
  * and the seconds beside after it; `L`'s cost changes from piece to piece, so
@@ -354,11 +356,5 @@ function changeOf(remembered, { band, otherRunning, others, draw }) {
  * @returns {{ middle: number, scatter: number }}
  */
 function middleAndScatter(values) {
-  const median = (list) => {
-    const sorted = [...list].sort((left, right) => left - right);
-    const half = Math.floor(sorted.length / 2);
-    return sorted.length % 2 === 0 ? (sorted[half - 1] + sorted[half]) / 2 : sorted[half];
-  };
-  const middle = median(values);
-  return { middle, scatter: median(values.map((value) => Math.abs(value - middle))) };
+  return { middle: medianOf(values), scatter: scatterOf(values) };
 }

@@ -1,6 +1,8 @@
 import nodeFs from "node:fs";
 import path from "node:path";
 
+let writes = 0;
+
 /**
  * Write a file so that a reader (or a restart after a crash) sees either the
  * previous content or the new content, never a half-written file: the text goes
@@ -17,7 +19,7 @@ import path from "node:path";
  */
 export function writeFileAtomic(filePath, data, { fs = {}, mode } = {}) {
   const io = { ...nodeFs, ...fs };
-  const temporary = path.join(path.dirname(filePath), `${path.basename(filePath)}.${process.pid}.tmp`);
+  const temporary = path.join(path.dirname(filePath), `${path.basename(filePath)}.${process.pid}.${++writes}.tmp`);
   try {
     io.writeFileSync(temporary, data, mode === undefined ? undefined : { mode });
     io.renameSync(temporary, filePath);

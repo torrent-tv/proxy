@@ -1,14 +1,13 @@
 import { avcPacketSlices } from "./annex-b-input.js";
 import { bitPayloadSlices } from "./bit-payload.js";
-import { matroskaIdOf } from "../media/tracks/codec-names.js";
 
 /** Emit already admitted packets as one timestamped Matroska input. */
-export async function* matroskaInput({ tracks, readPacket, originSeconds = 0, includeHeader = true, seen = new Map() }) {
+export async function* matroskaInput({ tracks, readPacket, originSeconds = 0, includeHeader = true, seen = new Map(), matroskaIdOf }) {
   if (!Array.isArray(tracks) || tracks.length === 0 || typeof readPacket !== "function" || !Number.isFinite(originSeconds)) {
     throw new TypeError("A Matroska input requires tracks, admitted packets and a timeline origin.");
   }
   if (includeHeader) {
-  const declarations = tracks.map((input, position) => trackElement(input.track, position + 1));
+  const declarations = tracks.map((input, position) => trackElement(input.track, position + 1, matroskaIdOf));
   yield element("1a45dfa3", Buffer.concat([
     uintElement("4286", 1), uintElement("42f7", 1), uintElement("42f2", 4), uintElement("42f3", 8),
     textElement("4282", "matroska"), uintElement("4287", 4), uintElement("4285", 2)
@@ -108,10 +107,10 @@ export async function* matroskaInput({ tracks, readPacket, originSeconds = 0, in
   }
 }
 
-function trackElement(track, number) {
+function trackElement(track, number, matroskaIdOf) {
   const type = track.type === "video" ? 1 : track.type === "audio" ? 2 : null;
   if (type === null) throw new Error("Admitted input carries an unsupported track type.");
-  const codec = track.matroskaCodecId ?? matroskaCodec(track.codecId);
+  const codec = track.matroskaCodecId ?? matroskaCodec(track.codecId, matroskaIdOf);
   const fields = [uintElement("d7", number), uintElement("73c5", number), uintElement("83", type),
     uintElement("9c", 0), textElement("86", codec)];
   const privateBytes = track.matroskaCodecPrivateB64 ?? track.codecPrivateB64;
@@ -134,9 +133,10 @@ function trackElement(track, number) {
 }
 
 /** Stable identity of every declaration emitted into the input stream. */
-export function matroskaTrackIdentity(track) {
+/** @param {(codec: string) => string | undefined} matroskaIdOf - Names a codec's Matroska id; handed in, since this layer reads no other. */
+export function matroskaTrackIdentity(track, matroskaIdOf) {
   return JSON.stringify([
-    track.type, track.matroskaCodecId ?? matroskaCodec(track.codecId),
+    track.type, track.matroskaCodecId ?? matroskaCodec(track.codecId, matroskaIdOf),
     track.matroskaCodecPrivateB64 ?? track.codecPrivateB64 ?? "",
     track.language ?? "", track.packetFraming ?? "", track.width ?? null, track.height ?? null,
     track.samplingFrequency ?? null, track.channels ?? null, track.bitDepth ?? null,
@@ -144,7 +144,8 @@ export function matroskaTrackIdentity(track) {
   ]);
 }
 
-function matroskaCodec(codec) {
+function matroskaCodec(codec, matroskaIdOf) {
+  if (typeof matroskaIdOf !== "function") throw new TypeError("A Matroska input is given the lookup that names codec ids.");
   const declared = matroskaIdOf(codec);
   if (!declared) throw new Error(`Admitted codec ${codec} has no Matroska declaration.`);
   return declared;

@@ -1,7 +1,6 @@
 ## 2.107.58
 
 - **Fix**: Resolve `--state-dir` once at startup (default: the installed proxy's own directory; an empty value keeps nothing), so the installation id, learned encoder observations, core dumps, packet captures and heap snapshots all use the same directory and the id no longer changes on every start without the option. State files (`local-observations.json`, `proxy-identity.json`, completed-file manifests and segment key files) are now written to a temporary file and renamed, so a crash mid-write no longer discards what was learned. The memory report's shared policy now lives in its defaults, and the `--state-dir` and `--memory-bytes` help describe what the code does.
-
 - **Fix**: Name MPEG-4 AVI FOURCCs from one codec table, so an FMP4, M4S2 or MP4S AVI is named `mpeg4` and its encoder placement is priced at the measured mpeg4 decoder family instead of H.264.
 
 ## 2.107.57

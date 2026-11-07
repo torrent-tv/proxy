@@ -5,7 +5,7 @@ import { pcmNormalization, normalizePcmSlices } from "./pcm-normalization.js";
 const INPUT_WRITE_BATCH_BYTES = 64 * 1024;
 
 /** Acquire complete source ranges before any process can consume the input. */
-export async function admitInput({ sources, reserve, readRanges }) {
+export async function admitInput({ sources, reserve, readRanges, matroskaIdOf }) {
   if (!Array.isArray(sources) || sources.length === 0 || typeof reserve !== "function" || typeof readRanges !== "function") {
     throw new TypeError("Admission requires resolved source inputs, memory reservation and an available-only reader.");
   }
@@ -41,7 +41,7 @@ export async function admitInput({ sources, reserve, readRanges }) {
           pts: packet.pts - (source.timeShiftSeconds ?? 0),
           ...(packet.dts === undefined ? {} : { dts: packet.dts - (source.timeShiftSeconds ?? 0) }) })) };
         tracks.push(shifted);
-        hash.update(matroskaTrackIdentity(input.track));
+        hash.update(matroskaTrackIdentity(input.track, matroskaIdOf));
         hash.update(JSON.stringify(shifted.packets.map(packet => [packet.pts, packet.dts ?? null,
           packet.duration, packet.keyframe === true, packet.ranges, packet.discardPaddingSeconds ?? 0,
           packet.bitOffset ?? null, packet.bitLength ?? null])));
@@ -82,8 +82,8 @@ export async function admitInput({ sources, reserve, readRanges }) {
     }
     retained = true;
     return {
-      kind: "result", bytes, fingerprint: hash.digest("hex"), originSeconds, tracks, readPacket,
-      stream: options => matroskaInput({ tracks,
+      kind: "result", matroskaIdOf, bytes, fingerprint: hash.digest("hex"), originSeconds, tracks, readPacket,
+      stream: options => matroskaInput({ tracks, matroskaIdOf,
         readPacket: (input, packet) => normalized.has(packet) ? [normalized.get(packet)] : packetSlices(input, packet),
         originSeconds, ...options }),
       release: () => {
@@ -112,13 +112,13 @@ export async function admitInput({ sources, reserve, readRanges }) {
 export async function writeAdmittedInput(input, stdin, { next = null, waiting = null, onFirstInputBytes = null } = {}) {
   if (input?.kind !== "result") throw new TypeError("Only complete input may be written to an encoder.");
   const originSeconds = input.originSeconds;
-  const declarations = JSON.stringify(input.tracks.map(input => matroskaTrackIdentity(input.track)));
+  const declarations = JSON.stringify(input.tracks.map(track => matroskaTrackIdentity(track.track, input.matroskaIdOf)));
   const seen = new Map();
   let firstInputBytesNoted = false;
   let current = input, includeHeader = true;
   try {
     while (current) {
-      if (JSON.stringify(current.tracks.map(input => matroskaTrackIdentity(input.track))) !== declarations) {
+      if (JSON.stringify(current.tracks.map(track => matroskaTrackIdentity(track.track, current.matroskaIdOf))) !== declarations) {
         throw new Error("Consecutive encoder input changed its declared tracks.");
       }
       for (let index = 0; index < current.tracks.length; index++) {

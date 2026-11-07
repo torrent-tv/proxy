@@ -334,7 +334,7 @@ export function decodeFamilyOf(source) {
   const codec = typeof source?.codec === "string" ? source.codec.trim().toLowerCase() : "";
   const depth = Number(source?.bitDepth);
   const tenBit = Number.isFinite(depth) && depth >= 10;
-  if (codec === "hevc" || codec === "h265" || codec === "x265") {
+  if (codec === "hevc") {
     return tenBit ? "hevc10" : "hevc";
   }
   // ffmpeg's own names. Only what has a clip set: `msmpeg4v3` (DivX 3) is a

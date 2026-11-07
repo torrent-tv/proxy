@@ -31,7 +31,6 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SourceFile } from "../../services/media/SourceFile.js";
@@ -40,34 +39,13 @@ import { managerWithOwnStore } from "./helpers/manager.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { Output } from "../../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { jsFilesUnder, sourceOf } from "./helpers/source-text.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = path.join(HERE, "..", "..");
 const SESSION_ID = "aaaaaaaabbbbcccc";
 /** The components the HTTP layer is handed. */
 const COMPONENTS = ["serving", "viewerRequests", "renditions", "lifecycle", "quality", "outputs", "coldStarts", "viewers", "encodeRuns"];
-
-/**
- * Every `.js` file under a directory, at any depth.
- *
- * @param {string} dir
- * @returns {string[]}
- */
-function jsFilesUnder(dir) {
-  /** @type {string[]} */
-  const found = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      found.push(...jsFilesUnder(full));
-      continue;
-    }
-    if (entry.name.endsWith(".js")) {
-      found.push(full);
-    }
-  }
-  return found;
-}
 
 /**
  * What the HTTP layer asks of each component, read from the HTTP layer.
@@ -82,10 +60,10 @@ function jsFilesUnder(dir) {
 function membersTheHttpLayerCalls() {
   /** @type {Map<string, string[]>} */
   const asked = new Map();
-  const sources = [path.join(PROXY, "server.js"), ...jsFilesUnder(path.join(PROXY, "routes"))];
+  const sources = [path.join(PROXY, "server.js"), ...jsFilesUnder("routes")];
   const pattern = new RegExp(String.raw`\b(${COMPONENTS.join("|")})\.([A-Za-z][A-Za-z0-9]*)\(`, "g");
   for (const file of sources) {
-    const text = readFileSync(file, "utf8");
+    const text = sourceOf(file);
     for (const match of text.matchAll(pattern)) {
       const asking = `${match[1]}.${match[2]}`;
       const where = asked.get(asking) ?? [];

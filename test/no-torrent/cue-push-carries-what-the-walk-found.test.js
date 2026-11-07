@@ -21,18 +21,15 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { sourceOf } from "./helpers/source-text.js";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
  * @param {string} relative
  * @returns {string}
  */
 function source(relative) {
-  return readFileSync(path.join(ROOT, relative), "utf8");
+  return sourceOf(relative);
 }
 
 test("the walk states the language it read from the cues", () => {

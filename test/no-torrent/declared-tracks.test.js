@@ -14,10 +14,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { sourceOf } from "./helpers/source-text.js";
 
-const planner = readFileSync(new URL("../../services/media/playback-planner.js", import.meta.url), "utf8");
-const sessions = readFileSync(new URL("../../services/encode/Renditions.js", import.meta.url), "utf8");
+const planner = sourceOf("services/media/playback-planner.js");
+const sessions = sourceOf("services/encode/Renditions.js");
 
 test("every field the declaration reads is a field the cache stores", () => {
   // What `declaredTracks` reads off the cached media info.

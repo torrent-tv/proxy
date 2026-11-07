@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { jsFilesUnder, sourceOf } from "./helpers/source-text.js";
 
 // torrent-tv/meta#284 acceptance 2:
 //   grep -rn '"V_MPEG4/ISO/AVC"\|"hvc1"' services
@@ -14,20 +14,12 @@ const services = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../
 const allowed = file => file === "media/tracks/codec-names.js"
   || file.startsWith("media/container/") || file.startsWith("encode/segment-formats/");
 
-function* sources(directory) {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const full = path.join(directory, entry.name);
-    if (entry.isDirectory()) yield* sources(full);
-    else if (entry.name.endsWith(".js")) yield full;
-  }
-}
-
 test("codec id literals live in codec-names.js and the container parsers only", () => {
   const offenders = [];
-  for (const file of sources(services)) {
+  for (const file of jsFilesUnder(services)) {
     const relative = path.relative(services, file).split(path.sep).join("/");
     if (allowed(relative)) continue;
-    readFileSync(file, "utf8").split("\n").forEach((line, index) => {
+    sourceOf(file).split("\n").forEach((line, index) => {
       if (line.includes('"V_MPEG4/ISO/AVC"') || line.includes('"hvc1"')) offenders.push(`${relative}:${index + 1}`);
     });
   }

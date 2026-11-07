@@ -15,9 +15,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { jsFilesUnder, sourceOf } from "./helpers/source-text.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const WORKER = path.join(ROOT, "services/torrent/worker");
@@ -27,28 +27,14 @@ const WORKER = path.join(ROOT, "services/torrent/worker");
  * @returns {string}
  */
 function source(name) {
-  return readFileSync(path.join(WORKER, name), "utf8");
-}
-
-/**
- * Every source file of the proxy itself, tests and dependencies left out.
- *
- * @param {string} directory
- * @returns {string[]}
- */
-function sourcesUnder(directory) {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const full = path.join(directory, entry.name);
-    if (entry.isDirectory()) return sourcesUnder(full);
-    return entry.name.endsWith(".js") ? [full] : [];
-  });
+  return sourceOf(path.join(WORKER, name));
 }
 
 test("a file's container readings have one owner", () => {
   // The orchestrator is the one place a container is built and its readings
   // kept; a second instance in any thread is the fact stored twice again.
-  const building = [path.join(ROOT, "server.js"), ...sourcesUnder(path.join(ROOT, "services")), ...sourcesUnder(path.join(ROOT, "bin"))]
-    .filter((file) => /new ContainerOrchestrator\(/.test(readFileSync(file, "utf8")))
+  const building = [path.join(ROOT, "server.js"), ...jsFilesUnder(path.join(ROOT, "services")), ...jsFilesUnder(path.join(ROOT, "bin"))]
+    .filter((file) => /new ContainerOrchestrator\(/.test(sourceOf(file)))
     .map((file) => path.relative(ROOT, file).replaceAll("\\", "/"));
 
   assert.deepEqual(building, ["services/media/ContainerOrchestrator.js"]);

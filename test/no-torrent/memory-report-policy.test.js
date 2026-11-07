@@ -16,12 +16,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { sourceOf } from "./helpers/source-text.js";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PROXY = path.join(HERE, "..", "..");
 const MiB = 1024 * 1024;
 const POLICY = { quietMs: 60_000, changeBytes: 25 * MiB, snapshotFloorBytes: 400 * MiB, snapshotGrowthBytes: 400 * MiB, keepSnapshots: 3 };
 const CLI = ["bin", "cli.js"].join("/");
@@ -58,7 +54,7 @@ function keysOf(body) {
 }
 
 test("memory-report.js defaults carry the shared policy", () => {
-  const source = readFileSync(path.join(PROXY, "services", "storage", "memory-report.js"), "utf8");
+  const source = sourceOf("services/storage/memory-report.js");
   const open = source.indexOf("{", source.indexOf("export function startMemoryReport("));
   const defaults = {};
   for (const name of Object.keys(POLICY)) {
@@ -70,7 +66,7 @@ test("memory-report.js defaults carry the shared policy", () => {
 
 for (const caller of CALLERS) {
   test(`${caller} passes startMemoryReport no part of the shared policy`, () => {
-    const source = readFileSync(path.join(PROXY, caller), "utf8");
+    const source = sourceOf(caller);
     const call = source.indexOf("startMemoryReport({");
     assert.ok(call >= 0, "the call was not found");
     const passed = keysOf(balanced(source, call + "startMemoryReport(".length));
@@ -80,7 +76,7 @@ for (const caller of CALLERS) {
 
 test("the snapshot floor is named neither by the CLI nor by the torrent thread", () => {
   for (const caller of CALLERS) {
-    const lines = readFileSync(path.join(PROXY, caller), "utf8").split("\n")
+    const lines = sourceOf(caller).split("\n")
       .map((line, index) => ({ line, number: index + 1 }))
       .filter(({ line }) => line.includes("snapshotFloorBytes") && !line.includes("bufferSnapshotFloorBytes"));
     assert.deepEqual(lines.map(({ number }) => `${caller}:${number}`), []);
@@ -88,7 +84,7 @@ test("the snapshot floor is named neither by the CLI nor by the torrent thread",
 });
 
 test("PINNING: the worker keeps the buffer thresholds only it chooses", () => {
-  const source = readFileSync(path.join(PROXY, WORKER), "utf8");
+  const source = sourceOf(WORKER);
   const call = source.indexOf("startMemoryReport({");
   const passed = keysOf(balanced(source, call + "startMemoryReport(".length));
   for (const key of ["scope", "label", "bufferSnapshotFloorBytes", "bufferSnapshotGrowthBytes"]) {

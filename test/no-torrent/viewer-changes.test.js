@@ -5,9 +5,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { sourceOf } from "./helpers/source-text.js";
 
 test("viewerChanges is an EventEmitter that emits change when a viewer becomes present", (t) => {
   const { manager, cleanup } = managerWithOwnStore();
@@ -20,6 +20,6 @@ test("viewerChanges is an EventEmitter that emits change when a viewer becomes p
 });
 
 test("wireOutputs takes no onViewerChanged option", () => {
-  const source = readFileSync(new URL("../../services/server/wire-outputs.js", import.meta.url), "utf8");
+  const source = sourceOf("services/server/wire-outputs.js");
   assert.equal(source.includes("onViewerChanged"), false);
 });

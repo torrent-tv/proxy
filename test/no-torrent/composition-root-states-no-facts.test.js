@@ -13,12 +13,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { sourceOf } from "./helpers/source-text.js";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PROXY = path.join(HERE, "..", "..");
 const FILES = ["server.js", "services/server/wire-outputs.js"];
 const LONGEST_CLOSURE_LINES = 40;
 const OUTPUT_PARTS_REACHES = 10;
@@ -131,7 +127,7 @@ test("late binding named in server.js is refused", () => {
 
 for (const file of FILES) {
   test(`${file} holds no collections and no long closures`, () => {
-    const text = readFileSync(path.join(PROXY, file), "utf8");
+    const text = sourceOf(file);
     const refused = refusalsIn(file, text);
     assert.deepEqual(refused, [], `\n${refused.join("\n")}\n`);
   });

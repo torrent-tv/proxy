@@ -22,6 +22,7 @@
  * beside it; nothing decides on it yet.
  */
 
+import { medianOf, scatterOf } from "../../utils/median.js";
 import { readFileSync, readdirSync } from "node:fs";
 
 /** Clock ticks per second of `/proc/<pid>/stat`, as in `encode/host-load.js`. */
@@ -269,13 +270,7 @@ export function describeRuns(runs) {
  */
 function middleAndScatter(values) {
   if (values.length === 0) return null;
-  const median = (list) => {
-    const sorted = [...list].sort((a, b) => a - b);
-    const half = Math.floor(sorted.length / 2);
-    return sorted.length % 2 === 0 ? (sorted[half - 1] + sorted[half]) / 2 : sorted[half];
-  };
-  const middle = median(values);
-  return { middle, scatter: median(values.map((value) => Math.abs(value - middle))) };
+  return { middle: medianOf(values), scatter: scatterOf(values) };
 }
 
 /**

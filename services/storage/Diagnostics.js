@@ -43,6 +43,7 @@
  * left where it is: changing it is a decision about evidence, not about disk.
  */
 
+import { megabytes } from "../../utils/units.js";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -193,10 +194,3 @@ export class Diagnostics {
   }
 }
 
-/**
- * @param {number} bytes
- * @returns {string}
- */
-function megabytes(bytes) {
-  return `${Math.round(Math.max(0, bytes) / (1024 * 1024))}MB`;
-}

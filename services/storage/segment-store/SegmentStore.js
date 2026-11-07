@@ -45,6 +45,7 @@ import { rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { writeFileAtomic } from "../../../utils/atomic-json.js";
+import { megabytes } from "../../../utils/units.js";
 
 /** Where every output's segments live. One root for the process. */
 const DEFAULT_STORE_ROOT = path.join(os.tmpdir(), "torrent-tv-hls");
@@ -1388,7 +1389,7 @@ export class SegmentStore {
     if (found.length > 0) {
       this.#logger.info(
         `segment-store startup sweep: ${found.length} directories left by a previous run, ` +
-        `${totals.segments} segments, ${(totals.bytes / 1048576).toFixed(1)}MB, ` +
+        `${totals.segments} segments, ${megabytes(totals.bytes)}, ` +
         `${unidentified} of them unidentifiable — each one is an encoder that ended ` +
         "without anything recording why"
       );

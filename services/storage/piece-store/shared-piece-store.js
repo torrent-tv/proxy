@@ -41,6 +41,7 @@
  * and nothing here disagrees.
  */
 
+import { medianOf, upperMiddleOf } from "../../../utils/median.js";
 import { divideAllowance, machineAllowanceBytes, OtherDemand } from "../allowance.js";
 import { availableMemoryBytes as availableMemorySync } from "../machine-memory.js";
 import { PieceLru } from "./piece-lru.js";
@@ -269,11 +270,7 @@ function median(values) {
   if (values.length === 0) {
     return null;
   }
-  const sorted = [...values].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? Math.round((sorted[middle - 1] + sorted[middle]) / 2)
-    : sorted[middle];
+  return Math.round(medianOf(values));
 }
 const CLAIM_RETRY_MS = 50;
 
@@ -1101,8 +1098,10 @@ export class SharedPieceStore {
     if (this.#writeDurations.length === 0 || this.#admittedAt.length < 2) {
       return 0;
     }
-    const sorted = [...this.#writeDurations].sort((left, right) => left - right);
-    const writeMs = sorted[Math.floor(sorted.length / 2)];
+    // The upper middle, not the true median, on purpose: slack is a number of
+    // pieces to keep in hand, so the slower of the two middle writes is the
+    // safe side and a count stays an integer. Unchanged since before #294.
+    const writeMs = upperMiddleOf(this.#writeDurations);
     const spanMs = this.#admittedAt[this.#admittedAt.length - 1] - this.#admittedAt[0];
     if (!(spanMs > 0)) {
       return 0;

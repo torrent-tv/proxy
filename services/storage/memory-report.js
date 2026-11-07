@@ -22,6 +22,7 @@
 import { readdir, readFile, rm, statfs } from "node:fs/promises";
 import { availableMemory } from "./machine-memory.js";
 import os from "node:os";
+import { megabytes, mebibytes } from "../../utils/units.js";
 import v8 from "node:v8";
 import path from "node:path";
 
@@ -218,16 +219,6 @@ async function readDiskFree(directory) {
 }
 
 /**
- * Render a size the way a person reads one.
- *
- * @param {number} bytes
- * @returns {string}
- */
-function megabytes(bytes) {
-  return `${Math.round(bytes / (1024 * 1024))}MB`;
-}
-
-/**
  * One line saying what the process holds and what the machine has left.
  *
  * Pure, so the wording and the arithmetic can be pinned without a running
@@ -282,27 +273,27 @@ export function describeMemory({
   // grows, so a spilled piece frees a slot and no memory.
   const storesPart = stores.length === 0
     ? "no torrent stores"
-    : `${stores.length} torrent store(s) holding ${megabytes(storeResident)}, ` +
-      `committed ${megabytes(storeCommitted)} of ${megabytes(storeBudget)} allowed, ` +
+    : `${stores.length} torrent store(s) holding ${mebibytes(storeResident)}, ` +
+      `committed ${mebibytes(storeCommitted)} of ${mebibytes(storeBudget)} allowed, ` +
       `${megabytes(storeSpilled)} spilled to disk`;
   const isolate =
-    `heap=${megabytes(usage.heapUsed)}/${megabytes(usage.heapTotal)}` +
-    `${usage.heapLimit ? ` of ${megabytes(usage.heapLimit)} allowed` : ""} ` +
-    `external=${megabytes(usage.external)} arrayBuffers=${megabytes(usage.arrayBuffers)}`;
+    `heap=${mebibytes(usage.heapUsed)}/${mebibytes(usage.heapTotal)}` +
+    `${usage.heapLimit ? ` of ${mebibytes(usage.heapLimit)} allowed` : ""} ` +
+    `external=${mebibytes(usage.external)} arrayBuffers=${mebibytes(usage.arrayBuffers)}`;
   const tail = extra ? `; ${extra}` : "";
   if (scope === "thread") {
     return `memory (${label || "thread"}): ${isolate}; ${storesPart}${tail}`;
   }
   const shape = mappings === null
     ? ""
-    : ` mappings=[heap ${megabytes(mappings.heapBytes)}, ` +
-      `${mappings.largeCount} anon ≥2MB = ${megabytes(mappings.largeBytes)} ` +
-      `(largest ${megabytes(mappings.largestBytes)}), ` +
-      `${mappings.smallCount} anon <2MB = ${megabytes(mappings.smallBytes)}, ` +
-      `files ${megabytes(mappings.fileBytes)}]`;
+    : ` mappings=[heap ${mebibytes(mappings.heapBytes)}, ` +
+      `${mappings.largeCount} anon ≥2MiB = ${mebibytes(mappings.largeBytes)} ` +
+      `(largest ${mebibytes(mappings.largestBytes)}), ` +
+      `${mappings.smallCount} anon <2MiB = ${mebibytes(mappings.smallBytes)}, ` +
+      `files ${mebibytes(mappings.fileBytes)}]`;
   return (
-    `memory: rss=${megabytes(usage.rss)} ${isolate}` +
-    `${anonymousBytes === null ? "" : ` anon=${megabytes(anonymousBytes)}`}${shape}; ` +
+    `memory: rss=${mebibytes(usage.rss)} ${isolate}` +
+    `${anonymousBytes === null ? "" : ` anon=${mebibytes(anonymousBytes)}`}${shape}; ` +
     `${storesPart}; ` +
     describeAvailable(available) +
     `${diskFreeBytes === null ? "" : `, ${megabytes(diskFreeBytes)} free on disk`}` +
@@ -326,8 +317,8 @@ function describeAvailable(available) {
     : `${available.source} decides`;
   const limit = available.limitBytes === null
     ? "no container limit"
-    : `container limit ${megabytes(available.limitBytes)}`;
-  return `machine has ${megabytes(available.bytes)} available (${decided}; ${limit})`;
+    : `container limit ${mebibytes(available.limitBytes)}`;
+  return `machine has ${mebibytes(available.bytes)} available (${decided}; ${limit})`;
 }
 
 /**
@@ -500,7 +491,7 @@ export function startMemoryReport({
       // that names what is holding the memory, and it is why it is bounded by
       // a floor, by a growth step and by how many are kept.
       v8.writeHeapSnapshot(snapPath);
-      log(`memory: wrote heap snapshot of the ${label || scope} to ${snapPath} (${megabytes(watchedBytes)}, ${why})`);
+      log(`memory: wrote heap snapshot of the ${label || scope} to ${snapPath} (${mebibytes(watchedBytes)}, ${why})`);
     } catch {
       // silent-ok: no snapshot is worse than a snapshot, and much better than
       // ending the series that leads to the next one.
@@ -628,7 +619,7 @@ export function startMemoryReport({
       // line is, and at one reading a second an unconditional warning would be
       // a line a second for as long as the process stayed large.
       if (scope !== "thread" && anonymousBytes !== null && processMemory.rss > 800 * 1024 * 1024) {
-        log(`memory: high rss=${megabytes(processMemory.rss)} anon=${megabytes(anonymousBytes)} heap=${megabytes(processMemory.heapUsed)} — watch for OOM`);
+        log(`memory: high rss=${mebibytes(processMemory.rss)} anon=${mebibytes(anonymousBytes)} heap=${mebibytes(processMemory.heapUsed)} — watch for OOM`);
       }
     } catch {
       // silent-ok: a reading that fails is not worth ending the series over.

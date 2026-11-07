@@ -7,6 +7,7 @@
  * returns; where encoders go follows from those facts and is the plan's.
  */
 
+import { megabytesPerSecond } from "../../utils/units.js";
 import { logger } from "../../utils/logger.js";
 import { isOutputName, OutputSpec } from "../encode/output/index.js";
 import { withSubtitleReadiness } from "./subtitle-readiness.js";
@@ -1254,7 +1255,7 @@ export class ViewerRequests {
       `${operation.track} ${operation.operation} ${Number.isFinite(operation.speed) ? operation.speed.toFixed(2) : "?"}x`);
     const downloads = (input.sources ?? []).map(source => {
       const rate = this.#host.playbackReadiness.forecastRate(source.downloadRateReadings, now, 0, "time");
-      return `${Number.isFinite(rate) ? (rate / 1_048_576).toFixed(2) : "?"} MB/s`;
+      return megabytesPerSecond(rate);
     });
     logger.info(`playback held ${session.id} consumer=${consumerId}: delay ${seconds(delay)}s by ` +
       (holding.kind === "position-not-held" ? "the position, which nothing buffered covers" :

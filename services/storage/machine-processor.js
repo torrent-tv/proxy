@@ -28,6 +28,7 @@
  * (`machine-memory.js`); the cgroup is found the same way.
  */
 
+import { clamp } from "../../utils/clamp.js";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 
@@ -382,14 +383,4 @@ function statField(text, name) {
     if (key === name) return wholeNumber(value);
   }
   return null;
-}
-
-/**
- * @param {number} value
- * @param {number} low
- * @param {number} high
- * @returns {number}
- */
-function clamp(value, low, high) {
-  return Math.min(high, Math.max(low, value));
 }

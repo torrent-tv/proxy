@@ -56,6 +56,8 @@
  * nothing changes.
  */
 
+import { clamp } from "../../utils/clamp.js";
+
 /**
  * The share of the machine available to a new encoder.
  *
@@ -146,14 +148,4 @@ export function correctForAvailability(predictedSpeed, availability) {
  */
 function finite(value) {
   return Number.isFinite(value) ? Number(value) : null;
-}
-
-/**
- * @param {number} value
- * @param {number} low
- * @param {number} high
- * @returns {number}
- */
-function clamp(value, low, high) {
-  return Math.min(high, Math.max(low, value));
 }

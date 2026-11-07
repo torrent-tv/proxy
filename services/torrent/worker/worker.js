@@ -20,6 +20,7 @@
 // before WebTorrent can reach the native one. Two isolates using
 // node-datachannel at once abort the process, and the torrent's wss trackers
 // create peer connections of their own.
+import { megabytes, mebibytes } from "../../../utils/units.js";
 import { isUsableTorrentHandle, requireCurrentTorrent } from "./handle-state.js";
 import "./install-webrtc-shim.js";
 import { parentPort, workerData } from "node:worker_threads";
@@ -826,21 +827,21 @@ setInterval(() => {
     if (revised.evicted > 0) {
       log(
         `piece-store "${revised.name.slice(0, 40)}": allowance is now ` +
-        `${Math.round(revised.ceilingBytes / 1048576)}MB, evicted ${revised.evicted} piece(s) to meet it` +
+        `${mebibytes(revised.ceilingBytes)}, evicted ${revised.evicted} piece(s) to meet it` +
         (revised.releasedBlocks > 0 ? `, gave back ${revised.releasedBlocks} block(s) of memory` : "") +
-        ` — now ${Math.round(revised.committedBytes / 1048576)}MB committed`
+        ` — now ${mebibytes(revised.committedBytes)} committed`
       );
     } else if (revised.belowActiveDemand) {
       log(
         `piece-store "${revised.name.slice(0, 40)}": the machine's share is smaller than active read demand, ` +
-        `so the allowance is held at ${Math.round(revised.ceilingBytes / 1048576)}MB ` +
+        `so the allowance is held at ${mebibytes(revised.ceilingBytes)} ` +
         "— a store cannot finish a read if it cannot hold the pieces that read is using"
       );
     } else if (revised.committedBytes > revised.ceilingBytes) {
       log(
         `piece-store "${revised.name.slice(0, 40)}": allowance is now ` +
-        `${Math.round(revised.ceilingBytes / 1048576)}MB and ` +
-        `${Math.round(revised.committedBytes / 1048576)}MB is committed — ` +
+        `${mebibytes(revised.ceilingBytes)} and ` +
+        `${mebibytes(revised.committedBytes)} is committed — ` +
         `all resident pieces are pinned, cannot shrink yet`
       );
     }
@@ -863,7 +864,7 @@ setInterval(() => {
   if (reserveNow !== reserveBefore || reserveNow !== lastReserveBytes) {
     lastReserveBytes = reserveNow;
     log(
-      `piece-store: leaving ${Math.round(reserveNow / 1048576)}MB for everything else on this ` +
+      `piece-store: leaving ${mebibytes(reserveNow)} for everything else on this ` +
       "machine — the largest fall in available memory this process has seen and did not cause"
     );
   }
@@ -882,11 +883,11 @@ setInterval(() => {
     const fromMemoryShare = reads > 0 ? ((stats.fromMemory / reads) * 100).toFixed(1) : "—";
     log(
       `piece-store "${stats.name.slice(0, 40)}": resident=${stats.resident}/${stats.capacity} ` +
-      `(${Math.round((stats.residentBytes || 0) / 1048576)}MB of ` +
-      `${Math.round((stats.budgetBytes || 0) / 1048576)}MB allowed) ` +
-      `committed=${Math.round((stats.committedBytes || 0) / 1048576)}MB ` +
+      `(${mebibytes(stats.residentBytes || 0)} of ` +
+      `${mebibytes(stats.budgetBytes || 0)} allowed) ` +
+      `committed=${mebibytes(stats.committedBytes || 0)} ` +
       `blocks=${stats.blocksAllocated} (${stats.blocksFree} spare) ` +
-      `on-disk=${Math.round((stats.spilledBytes || 0) / 1048576)}MB ` +
+      `on-disk=${megabytes(stats.spilledBytes || 0)} ` +
       `pinned=${stats.pinned} spilled=${stats.spilled} reads=${reads} (${fromMemoryShare}% from memory) ` +
       `spills=${stats.spills} revivals=${stats.revivals}` +
       (stats.blockedByPins > 0 ? ` no-block-for=${stats.blockedByPins}` : "") +
@@ -1206,7 +1207,7 @@ async function keepWholeFiles() {
         });
         if (kept) {
           logger.info(
-            `whole files: kept "${file.name}" (${Math.round(kept.length / 1048576)}MB, ` +
+            `whole files: kept "${file.name}" (${megabytes(kept.length)}, ` +
             `written in ${((performance.now() - startedAt) / 1000).toFixed(1)}s) — ` +
             "it is a file now, and reading it needs no torrent"
           );

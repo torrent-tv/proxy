@@ -21,6 +21,8 @@
  * given a rank and a number of milliseconds.
  */
 
+import { medianOf } from "../../utils/median.js";
+
 /** How many waits to keep per rank. A median wants a sample, not a history. */
 const HISTORY = 200;
 
@@ -136,7 +138,7 @@ export class WaitLedger {
         continue;
       }
       const sorted = [...held].sort((a, b) => a - b);
-      const median = sorted[Math.floor(sorted.length / 2)];
+      const median = medianOf(held);
       parts.push(
         `${band} ${counts.get(band) ?? held.length} wait(s) median ${Math.round(median)}ms ` +
         `worst ${Math.round(sorted[sorted.length - 1])}ms`

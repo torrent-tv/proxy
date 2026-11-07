@@ -17,6 +17,8 @@
  * but it is answered from the measurements rather than from a constant.
  */
 
+import { scatterOf } from "../../utils/median.js";
+
 /**
  * How many of the most recent readings the median is taken over.
  *
@@ -28,44 +30,7 @@
  */
 export const READINGS_KEPT = 7;
 
-/**
- * The middle of a set of readings, or null when there are none.
- *
- * @param {number[]} values
- * @returns {number | null}
- */
-export function medianOf(values) {
-  const usable = (Array.isArray(values) ? values : []).filter((value) => Number.isFinite(value));
-  if (usable.length === 0) {
-    return null;
-  }
-  const sorted = [...usable].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
-}
-
-/**
- * How far the readings sit from their own middle — the median of their
- * distances to it.
- *
- * The median distance rather than the mean one, for the same reason the value
- * itself is a median: a single disturbed reading describes the disturbance, not
- * the host.
- *
- * @param {number[]} values
- * @returns {number | null} Null when there is nothing to measure. Zero is a
- *   real answer: readings that all agree disagree by nothing.
- */
-export function scatterOf(values) {
-  const middle = medianOf(values);
-  if (middle === null) {
-    return null;
-  }
-  const distances = (Array.isArray(values) ? values : [])
-    .filter((value) => Number.isFinite(value))
-    .map((value) => Math.abs(value - middle));
-  return medianOf(distances);
-}
+export { medianOf, scatterOf } from "../../utils/median.js";
 
 /**
  * Whether a newly computed median should replace the published one.

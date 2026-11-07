@@ -49,6 +49,7 @@
  * is the one kind of number that is not ours to derive.
  */
 
+import { mebibytes, megabytes } from "../../utils/units.js";
 import { OtherDemand, divideAllowance } from "./allowance.js";
 
 /**
@@ -242,8 +243,8 @@ export class MachineBudget {
         // SAID, because a claimant working below what it needs is a fault of
         // the machine and not of the code, and it is invisible otherwise.
         this.#logger?.warn?.(
-          `budget: ${share.name} has ${megabytes(share.allowed)} of ${name}, ` +
-          `below the ${megabytes(claimants.find((one) => one.name === share.name)?.minimum ?? 0)} it needs`
+          `budget: ${share.name} has ${printed(name, share.allowed)} of ${name}, ` +
+          `below the ${printed(name, claimants.find((one) => one.name === share.name)?.minimum ?? 0)} it needs`
         );
       }
     }
@@ -297,18 +298,21 @@ export class MachineBudget {
     const lines = [];
     for (const [name, reading] of this.#last) {
       const parts = reading.shares.map(
-        (share) => `${share.name} ${megabytes(share.held)} of ${megabytes(share.allowed)}${share.short ? " (short)" : ""}`
+        (share) => `${share.name} ${printed(name, share.held)} of ${printed(name, share.allowed)}${share.short ? " (short)" : ""}`
       );
-      lines.push(`${name}: ${megabytes(reading.freeBytes)} free; ${parts.join(", ")}`);
+      lines.push(`${name}: ${printed(name, reading.freeBytes)} free; ${parts.join(", ")}`);
     }
     return `budget — ${lines.join(" | ")}`;
   }
 }
 
 /**
+ * Memory is printed in binary units under its own label, a disk (data) in decimal.
+ *
+ * @param {string} resource
  * @param {number} bytes
  * @returns {string}
  */
-function megabytes(bytes) {
-  return `${Math.round(Math.max(0, bytes) / (1024 * 1024))}MB`;
+function printed(resource, bytes) {
+  return resource === "memory" ? mebibytes(bytes) : megabytes(bytes);
 }

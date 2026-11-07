@@ -31,6 +31,7 @@ import { TextSubtitleTrack } from "./tracks/TextSubtitleTrack.js";
 import { detectLanguage } from "./tracks/language-detect.js";
 import { isUnavailable, strictReader } from "./container/unavailable.js";
 import { logger } from "../../utils/logger.js";
+import { megabytes } from "../../utils/units.js";
 
 /**
  * One file of one torrent, as much of it as this layer is allowed to know.
@@ -419,7 +420,7 @@ function reportWalk(source, state, stats, covered, indexed) {
       `${stats.fromSearch ?? 0} found by searching the bytes, ${stats.rejectedCandidates ?? 0} candidate(s) refused, ` +
       `${stats.pendingCandidates ?? 0} waiting for bytes, ${stats.contradictions ?? 0} withdrawn, ` +
       `${stats.unreadable ?? 0} unreadable, ${stats.refusedElements ?? 0} block(s) over one read, ` +
-      `${Math.round((stats.bytesWalked ?? 0) / 1048576)}MB read`
+      `${megabytes(stats.bytesWalked ?? 0)} read`
   );
 }
 

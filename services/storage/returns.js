@@ -16,6 +16,8 @@
  * what viewers actually do instead of from what a period felt like.
  */
 
+import { medianOf } from "../../utils/median.js";
+
 /** How many returns are kept. Enough to see a shape, few enough to say in a line. */
 const KEPT = 200;
 
@@ -65,11 +67,10 @@ export class Returns {
       return null;
     }
     const sorted = [...this.#ages].sort((left, right) => left - right);
-    const middle = Math.floor(sorted.length / 2);
     return {
       warm: this.#warm,
       cold: this.#cold,
-      medianMs: sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle],
+      medianMs: medianOf(sorted),
       longestMs: sorted[sorted.length - 1]
     };
   }

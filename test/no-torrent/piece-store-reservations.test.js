@@ -11,6 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { SharedPieceStore } from "../../services/storage/piece-store/shared-piece-store.js";
+import { until } from "./helpers/wait.js";
 
 const CHUNK = 1024;
 
@@ -207,26 +208,6 @@ test("a waiting source reader receives a released slot before queued arrivals", 
     await new Promise((resolve) => store.destroy(resolve));
   }
 });
-
-/**
- * Wait until a condition holds, rather than for a chosen interval — a test that
- * sleeps samples, it does not check (roadmap item 54).
- *
- * @param {() => boolean} holds
- * @param {string} what
- * @param {number} [limit] - A backstop, never the measurement: one of the
- *   conditions here is the store's own patience, which is itself five seconds.
- * @returns {Promise<void>}
- */
-async function until(holds, what, limit = 5_000) {
-  const deadline = Date.now() + limit;
-  while (!holds()) {
-    if (Date.now() > deadline) {
-      throw new Error(`timed out waiting until ${what}`);
-    }
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-}
 
 test("a revival that fails on the disk gives its slot back", async () => {
   const disk = makeDisk({ failRead: true });

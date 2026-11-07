@@ -4,6 +4,7 @@ import { PlaybackResolution } from "../../services/torrent/PlaybackResolution.js
 import { SegmentSourceRanges } from "../../services/media/SegmentSourceRanges.js";
 import { segmentReading } from "../../services/media/segment-reading.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
+import { settle } from "./helpers/wait.js";
 
 // Fakes and generated values only; no torrent.
 //
@@ -24,7 +25,6 @@ const sound = { type: "audio", trackNumber: 2, declaredIndex: 0 };
 const tracks = [picture, sound];
 
 const result = value => ({ kind: "result", value, requestId: "r" });
-const settle = () => new Promise(resolve => setImmediate(resolve));
 
 /** Ranges of a segment read from the packet table: one per track, apart from every other. */
 const ownRanges = ({ trackId, from }) => [[from * 1000 + trackId * 10, from * 1000 + trackId * 10 + 99]];

@@ -15,6 +15,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { logger, writeAlreadyDecided } from "../../utils/logger.js";
+import { until } from "./helpers/wait.js";
 
 /** What reached the console while `body` ran. */
 function captured(body) {
@@ -90,15 +91,11 @@ test("when it is said again, it says how many were held back", async () => {
   // The first interval is a second. Waited for rather than assumed: this asks
   // the logger itself when it is ready to speak again, with a deadline as a
   // backstop.
-  const deadline = Date.now() + 10_000;
   let later = [];
-  while (later.length === 0) {
-    if (Date.now() > deadline) {
-      assert.fail("the line should be said again once its interval has passed");
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  await until(() => {
     later = captured(() => logger.info(message));
-  }
+    return later.length > 0;
+  }, "the line to be said again once its interval has passed");
   const said = later[0].match(/\[said (\d+) more time\(s\) in the last ([0-9.]+)s\]/);
   assert.ok(said, `the rate is the fact here, and must be stated: ${later[0]}`);
   // At least the nine held back above. Each poll that found nothing said the

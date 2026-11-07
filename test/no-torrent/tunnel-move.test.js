@@ -14,25 +14,7 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 
 import { createTunnelClient } from "../../services/transport/tunnel-client.js";
-
-/**
- * Wait for the condition being asserted; the deadline only turns a hang into
- * a failure.
- *
- * @param {() => boolean} until
- * @param {string} what
- * @param {number} [limit]
- * @returns {Promise<void>}
- */
-async function waitFor(until, what, limit = 10_000) {
-  const deadline = Date.now() + limit;
-  while (!until()) {
-    if (Date.now() > deadline) {
-      throw new Error(`${what} never happened`);
-    }
-    await new Promise((resolve) => { setTimeout(resolve, 5); });
-  }
-}
+import { until } from "./helpers/wait.js";
 
 /**
  * A tunnel endpoint that keeps every connection it accepted, with what arrived
@@ -98,7 +80,7 @@ test("a move opens a second connection and answers each request where it arrived
   });
 
   client.connect();
-  await waitFor(() => registry.accepted.length === 1 && registry.accepted[0].socket.readyState === 1, "the first connection");
+  await until(() => registry.accepted.length === 1 && registry.accepted[0].socket.readyState === 1, "the first connection");
   const [old] = registry.accepted;
   assert.equal(decodeURIComponent(old.headers["x-proxy-name"]), "Кухня");
   assert.equal(old.headers["x-proxy-base-url"], "http://192.168.1.5:9090");
@@ -107,18 +89,18 @@ test("a move opens a second connection and answers each request where it arrived
   // A browser starts signalling through the old server, then the old server
   // is replaced.
   old.socket.send(JSON.stringify({ type: "signal", sessionId: "s-old", signal: { type: "offer", sdp: "o" } }));
-  await waitFor(() => old.received.some((m) => m.type === "signal"), "the answer on the old connection");
+  await until(() => old.received.some((m) => m.type === "signal"), "the answer on the old connection");
   old.socket.send(JSON.stringify({ type: "server-moving" }));
-  await waitFor(() => registry.accepted.length === 2 && registry.accepted[1].socket.readyState === 1, "the second connection");
+  await until(() => registry.accepted.length === 2 && registry.accepted[1].socket.readyState === 1, "the second connection");
   const fresh = registry.accepted[1];
 
   // Both open now. A late request on the old connection is answered there.
   old.socket.send(JSON.stringify({ type: "can-serve-request", requestId: "h-old", mediaInfo: {} }));
   old.socket.send(JSON.stringify({ type: "signal", sessionId: "s-old", signal: { type: "candidate", candidate: "c" } }));
   fresh.socket.send(JSON.stringify({ type: "can-serve-request", requestId: "h-new", mediaInfo: {} }));
-  await waitFor(() => old.received.some((m) => m.requestId === "h-old"), "the old answer");
-  await waitFor(() => fresh.received.some((m) => m.requestId === "h-new"), "the new answer");
-  await waitFor(() => old.received.filter((m) => m.type === "signal").length === 2, "the second answer to the old session");
+  await until(() => old.received.some((m) => m.requestId === "h-old"), "the old answer");
+  await until(() => fresh.received.some((m) => m.requestId === "h-new"), "the new answer");
+  await until(() => old.received.filter((m) => m.type === "signal").length === 2, "the second answer to the old session");
   assert.equal(fresh.received.some((m) => m.requestId === "h-old"), false);
   assert.equal(fresh.received.some((m) => m.type === "signal"), false);
   assert.equal(old.received.some((m) => m.requestId === "h-new"), false);
@@ -126,7 +108,7 @@ test("a move opens a second connection and answers each request where it arrived
   // The old server finishes and closes. Nothing is reconnected: the tunnel
   // never went down.
   old.socket.close(1000, "moved");
-  await waitFor(() => lines.some((line) => line.includes("Tunnel handed over")), "the handover");
+  await until(() => lines.some((line) => line.includes("Tunnel handed over")), "the handover");
   assert.equal(lines.filter((line) => line.includes("Reconnecting in")).length, 0, lines.join("\n"));
   assert.equal(registry.accepted.length, 2);
 });
@@ -150,16 +132,16 @@ test("a move whose new connection is refused keeps the old one carrying the tunn
   });
 
   client.connect();
-  await waitFor(() => registry.accepted.length === 1 && registry.accepted[0].socket.readyState === 1, "the first connection");
+  await until(() => registry.accepted.length === 1 && registry.accepted[0].socket.readyState === 1, "the first connection");
   const [old] = registry.accepted;
 
   refusing = true;
   old.socket.send(JSON.stringify({ type: "server-moving" }));
-  await waitFor(() => lines.some((line) => line.includes("while the previous one is still open")), "the refused move");
+  await until(() => lines.some((line) => line.includes("while the previous one is still open")), "the refused move");
 
   // The old connection still answers, and it is what the proxy speaks on.
   client.sendEndpoint({ externalIp: null, externalPort: 9090, protocol: "TCP" });
-  await waitFor(() => old.received.some((m) => m.type === "proxy-endpoint"), "the endpoint on the old connection");
+  await until(() => old.received.some((m) => m.type === "proxy-endpoint"), "the endpoint on the old connection");
   assert.equal(lines.filter((line) => line.includes("Tunnel disconnected")).length, 0, lines.join("\n"));
 });
 
@@ -171,10 +153,10 @@ test("the server's round-trip probe is echoed at once on the connection it came 
     await registry.close();
   });
   client.connect();
-  await waitFor(() => registry.accepted.length === 1 && registry.accepted[0].socket.readyState === 1, "the connection");
+  await until(() => registry.accepted.length === 1 && registry.accepted[0].socket.readyState === 1, "the connection");
   const [server] = registry.accepted;
   server.socket.send(JSON.stringify({ type: "rtt-probe", sentAt: 1234 }));
-  await waitFor(() => server.received.some((m) => m.type === "rtt-echo" && m.sentAt === 1234), "the echo");
+  await until(() => server.received.some((m) => m.type === "rtt-echo" && m.sentAt === 1234), "the echo");
 });
 
 test("a proxy that is stopping says so, not that a replacement carries its tunnel", async (t) => {
@@ -187,9 +169,9 @@ test("a proxy that is stopping says so, not that a replacement carries its tunne
     onLog: (line) => lines.push(line), connectionLifetimeMs: 60_000 });
   t.after(() => registry.close());
   client.connect();
-  await waitFor(() => registry.accepted.length === 1 && registry.accepted[0].socket.readyState === 1, "the connection");
+  await until(() => registry.accepted.length === 1 && registry.accepted[0].socket.readyState === 1, "the connection");
   client.disconnect();
-  await waitFor(() => lines.some((line) => line.startsWith("Tunnel closed")), "the closing line");
+  await until(() => lines.some((line) => line.startsWith("Tunnel closed")), "the closing line");
   assert.ok(lines.some((line) => line.includes("this proxy is stopping")));
   assert.equal(lines.some((line) => line.includes("handed over")), false);
 });

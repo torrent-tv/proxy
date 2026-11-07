@@ -12,6 +12,7 @@ import { handleApiSourceChaptersGet } from "../../routes/api/sources/chapters/ge
 import { ChapterController } from "../../services/server/controllers/ChapterController.js";
 import { box, u32 } from "./helpers/mp4-file.js";
 import { element } from "./helpers/matroska-file.js";
+import { settle } from "./helpers/wait.js";
 
 const u64 = (value) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(value)); return b; };
 const u16 = (value) => { const b = Buffer.alloc(2); b.writeUInt16BE(value); return b; };
@@ -32,7 +33,6 @@ function heldFile(bytes, ContainerClass, ranges = [[0, bytes.length - 1]]) {
   const container = new ContainerClass({ fileSize: bytes.length, readRange: () => { throw new Error("Fetching reader called"); } });
   return { held, container, reads: () => reads };
 }
-const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 test("Matroska chapter times are nanoseconds, UID strings preserve all bits", async () => {
   const bytes = mkv(minimalElement(0x1549a966, minimalElement(0x2ad7b1, u64(5000000))), minimalElement(0x1043a770,

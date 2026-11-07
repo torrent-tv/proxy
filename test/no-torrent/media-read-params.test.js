@@ -7,8 +7,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { MediaReadParams } from "../../services/server/MediaReadParams.js";
+import { settle } from "./helpers/wait.js";
 
-const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 const rig = (over = {}) => {
   const seen = { notes: [], stated: [], withdrawn: [], refreshed: 0, warned: [], observed: [],
@@ -178,7 +178,7 @@ test("a refresh that rejects is warned about, not thrown", async () => {
   const { owner, seen } = rig({ refreshFails: true });
   const params = await owner.paramsFor({ sourceKey: "src", fileIndex: 2 });
   await params.onReadResult("tracks", { kind: "result" }, revision);
-  await flush();
+  await settle();
   assert.deepEqual(seen.warned, ["download map source=src file=2 metadata refresh failed: boom"]);
 });
 
@@ -248,7 +248,7 @@ test("demand withdrawn on abort, once", async () => {
   await params.onReadResult("packets", { kind: "needs-ranges" }, revision);
   controller.abort();
   controller.abort();
-  await flush();
+  await settle();
   assert.deepEqual(seen.withdrawn, ["packets:enc-1"]);
 });
 
@@ -259,7 +259,7 @@ test("needs-ranges tracked and then released by a result", async () => {
   await params.onReadResult("packets", { kind: "needs-ranges" }, revision);
   await params.onReadResult("packets", { kind: "result" }, revision);
   controller.abort();
-  await flush();
+  await settle();
   assert.deepEqual(seen.withdrawn, []);
 });
 
@@ -272,7 +272,7 @@ test("one tracker per signal and file", async () => {
   await second.onReadResult("tracks", { kind: "needs-ranges" }, revision);
   assert.equal(listeners.length, 1);
   controller.abort();
-  await flush();
+  await settle();
   assert.deepEqual(seen.withdrawn.sort(), ["packets:enc-1", "tracks:enc-1"]);
 });
 
@@ -281,7 +281,7 @@ test("an aborted signal: no listener, nothing withdrawn", async () => {
   const { controller, signal, listeners } = signalOf();
   controller.abort();
   await encodeRead(owner, signal);
-  await flush();
+  await settle();
   assert.equal(listeners.length, 0);
   assert.deepEqual(seen.withdrawn, []);
 });

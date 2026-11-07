@@ -33,6 +33,7 @@ import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.
 import { installationId } from "../../services/identity/installation-id.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { recordWrites, whyNotAtomic } from "./helpers/recorded-writes.js";
+import { until } from "./helpers/wait.js";
 
 const FINGERPRINT = Object.freeze({ ffmpeg: "8.1.2", x264: "core 164", cpu: "test", threads: 4, devices: {} });
 const CONTENT = { codec: "h264", bitDepth: 8, width: 1280, height: 720, megabitsPerSecond: 5 };
@@ -179,9 +180,7 @@ test("the CompletedFiles manifest appears by a rename, never written in place", 
     const files = new CompletedFiles({ root });
     const bytes = Buffer.from("a small film");
     await files.keep({ infoHash, fileIndex: 0, length: bytes.length, name: "film.mkv", open: () => Readable.from([bytes]) });
-    for (let waited = 0; waited < 2000; waited += 20) {
-      try { readFileSync(manifest); break; } catch { await new Promise((resolve) => setTimeout(resolve, 20)); }
-    }
+    await until(() => { try { readFileSync(manifest); return true; } catch { return false; } }, "the manifest to appear", { limitMs: 2_000 });
   } finally {
     restore();
   }

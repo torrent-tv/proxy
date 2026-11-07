@@ -33,6 +33,7 @@ import { SoftwareEncoder } from "../../services/encode/SoftwareEncoder.js";
 import { EncodeOrchestrator } from "../../services/encode/EncodeOrchestrator.js";
 import { RunCosts } from "../../services/encode/run-costs.js";
 import { matroskaIdOf } from "./support/codec-lookup.js";
+import { settle } from "./helpers/wait.js";
 
 // A file whose segment k is the ten bytes at 10k, and whose header and index
 // are ten bytes at 1000 that every stretch needs once. A stretch of n segments
@@ -475,30 +476,29 @@ test("bytes arriving while an input is being tried start another try only when i
   let answer = null;
   let asked = 0;
   const { inputs } = inputsOver({ held: () => { asked += 1; return new Promise(resolve => { answer = resolve; }); } });
-  const settle = async () => { for (let turn = 0; turn < 5; turn++) await setImmediate(); };
   assert.equal(inputs.take(output, 0, 0), null);
-  await settle();
+  await settle(5);
   inputs.bytesChanged({ sourceKey: "film", ranges: [{ fileIndex: 0, start: 500, end: 509 }] });
   answer([HEADER]);
-  await settle();
+  await settle(5);
   assert.equal(asked, 1, "bytes it does not wait for start no second try");
   assert.equal(inputs.take(output, 0, 0), null);
-  await settle();
+  await settle(5);
   assert.equal(asked, 1, "nor does the plan's next look");
 
   inputs.bytesChanged({ sourceKey: "film", ranges: [{ fileIndex: 0, start: 0, end: 9 }] });
-  await settle();
+  await settle(5);
   assert.equal(asked, 2, "its own bytes try it");
   inputs.bytesChanged({ sourceKey: "film", ranges: [{ fileIndex: 0, start: 0, end: 9 }] });
   answer([HEADER]);
-  await settle();
+  await settle(5);
   assert.equal(asked, 3, "its own bytes during a try start another after it");
   inputs.bytesChanged();
   answer([HEADER]);
-  await settle();
+  await settle(5);
   assert.equal(asked, 4, "an event naming nothing during a try starts another");
   answer([[0, 9], HEADER]);
-  await settle();
+  await settle(5);
   const input = inputs.take(output, 0, 0);
   assert.deepEqual([input?.from, input?.to], [0, 0]);
   input.release();

@@ -22,6 +22,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { SharedPieceStore } from "../../services/storage/piece-store/shared-piece-store.js";
 import { withdrawClaim } from "../../services/torrent/download/withdraw-claim.js";
+import { until } from "./helpers/wait.js";
 
 const PIECE = 1024;
 
@@ -50,23 +51,6 @@ async function storeWithGone(extras = {}) {
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   };
   return { store, gone, put, clean };
-}
-
-/**
- * Wait for the CONDITION, with a deadline only as a backstop. A fixed pause
- * here would measure the machine rather than the store.
- *
- * @param {() => boolean} ready
- * @param {string} what
- */
-async function until(ready, what) {
-  const deadline = Date.now() + 5_000;
-  while (!ready()) {
-    if (Date.now() > deadline) {
-      throw new Error(`timed out waiting for ${what}`);
-    }
-    await new Promise((resolve) => setImmediate(resolve));
-  }
 }
 
 test("a capacity reduction drops stored pieces and withdraws their claims", async () => {

@@ -5,11 +5,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, watch, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { directoryNameFor, SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { settle, until } from "./helpers/wait.js";
 
 /**
  * @returns {{ store: SegmentStore, root: string, lines: string[] }}
@@ -393,8 +394,22 @@ test("a watched directory is read once and then kept up piece by piece", async (
   assert.equal(store.refresh(KEY), reading, "the publication is put into the reading, not read again");
 
   // A working file opened and written moves the directory, and is no piece.
-  writeFileSync(path.join(dir, "making-7-00003.mp4"), Buffer.alloc(5));
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // The store's own watch is told of the file in the same turn as this witness,
+  // so waiting for the platform to name it here, then letting the queue run,
+  // means the store has been told too. A watch that began a moment ago can miss
+  // a first write, so the same bytes are written again until it is named.
+  let named = false;
+  const working = path.join(dir, "making-7-00003.mp4");
+  const witness = watch(dir, { persistent: false }, (_event, name) => { if (name === "making-7-00003.mp4") named = true; });
+  try {
+    await until(() => {
+      writeFileSync(working, Buffer.alloc(5));
+      return named;
+    }, "the platform to name the working file");
+    await settle(5);
+  } finally {
+    witness.close();
+  }
   assert.equal(store.refresh(KEY), reading, "a working file does not make the directory be read again");
   assert.deepEqual(store.provenNumbers(KEY), [0, 1, 2]);
 

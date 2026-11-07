@@ -49,6 +49,19 @@ import { fileURLToPath } from "node:url";
 import { configurationKeyOf, kindOfEncoderName } from "./fingerprint.js";
 
 /**
+ * The writer used when none is handed in (a check that only wants the file).
+ * The proxy always hands in the atomic one from `utils/atomic-json.js`, which
+ * this layer may not import.
+ *
+ * @param {string} filePath
+ * @param {unknown} value
+ * @returns {void}
+ */
+function writeInPlace(filePath, value) {
+  writeFileSync(filePath, JSON.stringify(value));
+}
+
+/**
  * The directory of the installed proxy, where these observations are kept when
  * the deployment names no state directory. Deliberately not the working
  * directory: for an ordinary `npm i -g` install that is wherever the operator
@@ -84,6 +97,8 @@ export class LocalObservations {
 
   /** @type {{ info: (m: string) => void, warn: (m: string) => void }} */
   #logger;
+  /** @type {(filePath: string, value: unknown) => void} */
+  #writeJson;
 
   /** @type {() => number} */
   #now;
@@ -99,16 +114,19 @@ export class LocalObservations {
    * @param {import("./fingerprint.js").HostFingerprint} params.fingerprint
    * @param {string} params.filePath - Where the readings are kept; empty keeps
    *   them for this process only.
+   * @param {(filePath: string, value: unknown) => void} [params.writeJson] - How
+   *   the file is saved; throws on failure. The atomic writer is handed in.
    * @param {{ info: (m: string) => void, warn: (m: string) => void }} [params.logger]
    * @param {() => number} [params.now]
    */
-  constructor({ fingerprint, filePath, logger = null, now = Date.now }) {
+  constructor({ fingerprint, filePath, writeJson = writeInPlace, logger = null, now = Date.now }) {
     if (!fingerprint || typeof fingerprint !== "object") {
       throw new TypeError("LocalObservations requires the host's fingerprint");
     }
     this.#fingerprint = fingerprint;
     this.#filePath = typeof filePath === "string" ? filePath : "";
     this.#logger = logger ?? { info: () => {}, warn: () => {} };
+    this.#writeJson = writeJson;
     this.#now = now;
   }
 
@@ -367,7 +385,7 @@ export class LocalObservations {
       return;
     }
     try {
-      writeFileSync(this.#filePath, JSON.stringify({ version: FILE_VERSION, entries: this.#entries }));
+      this.#writeJson(this.#filePath, { version: FILE_VERSION, entries: this.#entries });
     } catch (error) {
       // A read-only install keeps what it learned for this process only.
       this.#logger.warn(

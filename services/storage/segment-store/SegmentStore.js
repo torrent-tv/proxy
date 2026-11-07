@@ -44,6 +44,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
 import { rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { writeFileAtomic } from "../../../utils/atomic-json.js";
 
 /** Where every output's segments live. One root for the process. */
 const DEFAULT_STORE_ROOT = path.join(os.tmpdir(), "torrent-tv-hls");
@@ -235,7 +236,7 @@ export class SegmentStore {
       mkdirSync(dir, { recursive: true });
       // What this directory is, for whoever finds it after this process has
       // been killed. Without it the sweep can only throw everything away.
-      writeFileSync(path.join(dir, KEY_FILE), `${key}\n`, "utf8");
+      writeFileAtomic(path.join(dir, KEY_FILE), `${key}\n`);
     }
     this.#touched.set(key, this.#now());
     // Production is about to begin here, and a piece closing in this directory

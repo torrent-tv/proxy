@@ -14,6 +14,7 @@
 // for the measurement that made it necessary.
 import "./thread-pool.js";
 import { Command } from "commander";
+import { mkdirSync } from "node:fs";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -35,6 +36,7 @@ import { collectHealthMetrics } from "../services/transport/health-collector.js"
 import { LOAD_REFRESH_MS, ProxyStateReporter } from "../services/transport/proxy-state.js";
 import { createPortMapper } from "../services/transport/port-mapper.js";
 import { installationId } from "../services/identity/installation-id.js";
+import { PROXY_ROOT } from "../services/encode/LocalObservations.js";
 import { classifyNat } from "../services/transport/nat-classifier.js";
 import { DEFAULT_SEGMENT_FORMAT_ID, SEGMENT_FORMAT_IDS } from "../services/encode/segment-formats/index.js";
 import { logToFile, logger } from "../utils/logger.js";
@@ -100,7 +102,7 @@ program
     "--usrsctp-state",
     "Read usrsctp's association state with gdb when a wedge is declared. OFF by default: gdb attaches to THIS process and stops every thread of it while it works."
   )
-  .option("--memory-bytes <bytes>", "Per-torrent budget for pieces kept in memory before spilling to disk (default 512MB)")
+  .option("--memory-bytes <bytes>", "Per-torrent budget for pieces kept in memory before spilling to disk (default: derived from the memory available when the torrent opens, shared equally between open torrents)")
   .option("--budget <kind>", "How much of this machine the proxy may take: adaptive (default), share or fixed")
   .option("--budget-share <fraction>", "With --budget share: the fraction of what is free, 0..1")
   .option("--budget-bytes <bytes>", "With --budget fixed: the ceiling, per resource")
@@ -109,7 +111,7 @@ program
   .option("--ffmpeg-bin <path>", "Path to ffmpeg binary")
   .option(
     "--state-dir <path>",
-    "Where to keep what this host has measured about itself (default: beside the installed proxy)"
+    "Where to keep this installation's id, what this host has measured about itself, and diagnostic dumps (default: the installed proxy's own directory; pass an empty value to keep nothing)"
   )
   .option(
     "--log-file <path>",
@@ -137,7 +139,19 @@ const bindHost = String(options.host);
 const explicitBaseUrl = options.publicBaseUrl
   ? String(options.publicBaseUrl).replace(/\/+$/, "")
   : "";
-const clientId = installationId({ stateDir: options.stateDir, explicitId: options.id });
+// THE STATE DIRECTORY, resolved once: the one named, the installed proxy's own
+// directory when none is named, or "" when the operator passes an empty value
+// (nothing is kept). Every consumer below is handed this value and none reads
+// the option again.
+const stateDir = options.stateDir === undefined ? PROXY_ROOT : String(options.stateDir);
+if (stateDir) {
+  try {
+    mkdirSync(stateDir, { recursive: true });
+  } catch (error) {
+    logger.warn(`Could not create the state directory ${stateDir}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+const clientId = installationId({ stateDir, explicitId: options.id });
 const clientName = options.name ? String(options.name) : `proxy-${clientId.slice(0, 8)}`;
 const token = String(options.token ?? "");
 const transcodeAudio = options.transcodeAudio !== false;
@@ -347,15 +361,15 @@ async function shutdown(signal) {
 const diagnostics = new Diagnostics({
   logger,
   kinds: [
-    { name: "core dumps", directory: () => options.stateDir || "", matches: (name) => name.startsWith("core.") },
+    { name: "core dumps", directory: () => stateDir, matches: (name) => name.startsWith("core.") },
     {
       name: "heap snapshots",
-      directory: () => options.stateDir || "",
+      directory: () => stateDir,
       matches: (name) => name.endsWith(".heapsnapshot")
     },
     {
       name: "packet captures",
-      directory: () => options.stateDir || "",
+      directory: () => stateDir,
       matches: (name) => name.startsWith("packet-witness")
     }
   ]
@@ -391,7 +405,7 @@ try {
     ffmpegBin,
     memoryBytes,
     segmentFormat: options.segmentFormat,
-    stateDir: options.stateDir,
+    stateDir,
     diagnostics,
     budgetPolicy,
     logFile: options.logFile ?? "",
@@ -444,11 +458,11 @@ try {
   // A native fault writes the whole address space out — 4.18 GB each on the
   // field host, and four of them nearly filled a 235 GB disk. Keep the newest
   // two, which are the evidence for the fault still open, and drop the rest.
-  void pruneCoreDumps(options.stateDir);
+  void pruneCoreDumps(stateDir);
   // Same policy for the packet captures the send-queue witness writes.
   packetWitness = createPacketWitness({
     log: (message) => logger.info(message),
-    dir: options.stateDir || "",
+    dir: stateDir,
     port: actualPort,
     // Evidence takes room from the product, so a capture is asked for rather
     // than taken. Refused, it is a line and not a silence.
@@ -517,8 +531,6 @@ try {
     // read stayed behind the decision to write, so a quiet second costs one
     // call to `process.memoryUsage()`.
     intervalMs: 1_000,
-    quietMs: 60_000,
-    changeBytes: 25 * 1024 * 1024,
     diskPath: os.tmpdir(),
     // WHERE A SNAPSHOT SURVIVES THE PROCESS IT IS ABOUT, and how many are kept
     // — the same answer the torrent worker already had. This scope had neither:
@@ -526,11 +538,8 @@ try {
     // on every restart, and all of them were kept. Fifty-four were written on
     // 2026-09-07 and every one was gone by the time the process that wrote them
     // died of a heap it had never been possible to look at.
-    snapshotDir: options.stateDir || undefined,
+    snapshotDir: stateDir || undefined,
     heapSnapshots: options.heapSnapshots === true,
-    snapshotFloorBytes: 400 * 1024 * 1024,
-    snapshotGrowthBytes: 400 * 1024 * 1024,
-    keepSnapshots: 3
   });
 
   logger.info(`Starting @torrent-tv/proxy v${PROXY_VERSION}`);

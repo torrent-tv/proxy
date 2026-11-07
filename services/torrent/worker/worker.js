@@ -793,20 +793,15 @@ startMemoryReport({
   scope: "thread",
   label: "torrent worker",
   intervalMs: WORKER_MEMORY_SAMPLE_MS,
-  quietMs: 60_000,
-  changeBytes: 25 * 1024 * 1024,
   snapshotDir: workerData?.stateDir || undefined,
   heapSnapshots: workerData?.heapSnapshots === true,
-  snapshotFloorBytes: 400 * 1024 * 1024,
-  snapshotGrowthBytes: 400 * 1024 * 1024,
   // CHOSEN, not derived: no healthy session has recorded this figure yet, so
   // there is no measured normal to stand above. It is set well below the
   // 2.1-4.3 GB the worker held in the minutes before the kills of 2026-10-01,
   // while the machine still has room to write a snapshot. The line prints what the
   // stores hold beside it, which is what a derived floor will come from.
   bufferSnapshotFloorBytes: 500 * 1024 * 1024,
-  bufferSnapshotGrowthBytes: 500 * 1024 * 1024,
-  keepSnapshots: 3
+  bufferSnapshotGrowthBytes: 500 * 1024 * 1024
 });
 
 const STORE_REPORT_INTERVAL_MS = 60_000;

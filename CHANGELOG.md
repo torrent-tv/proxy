@@ -1,4 +1,4 @@
-## Unreleased
+## 2.107.62
 
 - **Chore**: Tests now share byte builders (MP4 boxes, EBML elements), wait helpers and source readers instead of carrying local copies, with no behaviour change.
 

@@ -35,10 +35,14 @@ import { fakeEncodeInputs } from "./admitted-input.js";
  * @param {object} [options] - Passed to the manager, over the defaults below.
  *   A `segmentStore` given here wins, for a test that wants to watch the store
  *   itself.
+ * @param {boolean} [options.planless] - A manager that plans no encoders: its
+ *   `planEncodersNow` and `planEncodersSoon` do nothing, on the instance, so
+ *   the production plan never starts a run under a test that built its output
+ *   by hand. Not passed on to the manager.
  * @returns {{ manager: object, store: SegmentStore, root: string,
  *   cleanup: () => void }} `cleanup` removes the root; call it from `t.after`.
  */
-export function managerWithOwnStore(options = {}) {
+export function managerWithOwnStore({ planless = false, ...options } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), "ttv-store-"));
   const store = options.segmentStore ?? new SegmentStore({ root });
   const manager = wireOutputs({
@@ -55,6 +59,10 @@ export function managerWithOwnStore(options = {}) {
     ...options,
     segmentStore: store
   });
+  if (planless) {
+    manager.encodeRuns.planEncodersNow = () => {};
+    manager.encodeRuns.planEncodersSoon = () => {};
+  }
   return {
     manager,
     store,

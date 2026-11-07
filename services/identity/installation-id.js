@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { writeJsonAtomic } from "../../utils/atomic-json.js";
 
 const ID_FILE = "proxy-identity.json";
 
@@ -30,9 +31,7 @@ export function installationId({ stateDir, explicitId, makeId = randomUUID } = {
   const id = requestedId || savedId || makeId();
   if (id !== savedId) {
     mkdirSync(stateDir, { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify({ id })}\n`, { mode: 0o600 });
-    renameSync(temporary, file);
+    writeJsonAtomic(file, { id }, { mode: 0o600 });
   }
   return id;
 }

@@ -27,6 +27,7 @@ import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { writeJsonAtomic } from "../../../utils/atomic-json.js";
 import { IDLE_KEEP_MS } from "../keep.js";
 
 /**
@@ -541,7 +542,11 @@ export class CompletedFiles {
       await fs.rm(directory, { ...REMOVAL, recursive: true }).catch(() => undefined);
       return;
     }
-    await fs.writeFile(path.join(directory, "manifest.json"), JSON.stringify(named)).catch(() => undefined);
+    try {
+      writeJsonAtomic(path.join(directory, "manifest.json"), named);
+    } catch {
+      // The manifest is a convenience for the next start; a failed write is not a failed keep.
+    }
   }
 
   /** Remove an empty or partial-only directory discovered during startup. */

@@ -9,6 +9,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import { writeJsonAtomic } from "../../utils/atomic-json.js";
 import { logger } from "../../utils/logger.js";
 import { KeyframeTables } from "../media/KeyframeTables.js";
 import { bandOf, WaitLedger } from "../encode/OutputWaitLedger.js";
@@ -100,7 +101,7 @@ import { freeBytesFor } from "../storage/free.js";
 import { PlaybackStorageDemand } from "../storage/PlaybackStorageDemand.js";
 import { inputCacheRoot, probeInputCache } from "../encode/input-cache.js";
 import path from "node:path";
-import { contentOf, LocalObservations, PROXY_ROOT } from "../encode/LocalObservations.js";
+import { contentOf, LocalObservations } from "../encode/LocalObservations.js";
 import { configurationKeyOf } from "../encode/fingerprint.js";
 import { qualityStateOf } from "../encode/quality/OutputQualityState.js";
 import { preparedAddresses, watchedAddresses } from "../viewer/watched-addresses.js";
@@ -875,7 +876,9 @@ export function wireOutputs({
   if (calibration?.fingerprint) {
     parts.localObservations = new LocalObservations({
       fingerprint: calibration.fingerprint,
-      filePath: path.join(typeof stateDir === "string" && stateDir.length > 0 ? stateDir : PROXY_ROOT, "local-observations.json"),
+      // The state directory arrives resolved; none keeps the observations in memory only.
+      filePath: typeof stateDir === "string" && stateDir.length > 0 ? path.join(stateDir, "local-observations.json") : "",
+      writeJson: writeJsonAtomic,
       logger
     });
     parts.localObservations.load(calibration.kinds().map((kind) => configurationKeyOf(calibration.fingerprint, {

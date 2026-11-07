@@ -1,5 +1,6 @@
 import { avcPacketSlices } from "./annex-b-input.js";
 import { bitPayloadSlices } from "./bit-payload.js";
+import { matroskaIdOf } from "../media/tracks/codec-names.js";
 
 /** Emit already admitted packets as one timestamped Matroska input. */
 export async function* matroskaInput({ tracks, readPacket, originSeconds = 0, includeHeader = true, seen = new Map() }) {
@@ -144,22 +145,7 @@ export function matroskaTrackIdentity(track) {
 }
 
 function matroskaCodec(codec) {
-  if (/^[VA]_/.test(codec)) return codec;
-  if (/^pcm_[su](?:16|24|32|64)le$/.test(codec) || /^pcm_[su]8(?:le|be)?$/.test(codec)) return "A_PCM/INT/LIT";
-  if (/^pcm_[su](?:16|24|32|64)be$/.test(codec)) return "A_PCM/INT/BIG";
-  if (/^pcm_f(?:32|64)(?:le|be)$/.test(codec)) return "A_PCM/FLOAT/IEEE";
-  const declared = new Map([
-    ["avc1", "V_MPEG4/ISO/AVC"], ["avc3", "V_MPEG4/ISO/AVC"], ["h264", "V_MPEG4/ISO/AVC"],
-    ["hvc1", "V_MPEGH/ISO/HEVC"], ["hev1", "V_MPEGH/ISO/HEVC"], ["hevc", "V_MPEGH/ISO/HEVC"],
-    ["av01", "V_AV1"], ["av1", "V_AV1"], ["vp9", "V_VP9"], ["vp8", "V_VP8"],
-    ["mjpeg", "V_MJPEG"], ["ffv1", "V_FFV1"], ["theora", "V_THEORA"], ["jpeg2000", "V_JPEG2000"],
-    ["mpeg1video", "V_MPEG1"], ["mpeg2video", "V_MPEG2"], ["mpeg4", "V_MPEG4/ISO/ASP"],
-    ["FMP4", "V_MPEG4/ISO/ASP"], ["XVID", "V_MPEG4/ISO/ASP"], ["DIVX", "V_MPEG4/ISO/ASP"],
-    ["mp4a", "A_AAC"], ["aac", "A_AAC"], ["mp3", "A_MPEG/L3"], ["mp2", "A_MPEG/L2"], ["mp1", "A_MPEG/L1"],
-    ["ac-3", "A_AC3"], ["ac3", "A_AC3"], ["ec-3", "A_EAC3"], ["eac3", "A_EAC3"],
-    ["Opus", "A_OPUS"], ["opus", "A_OPUS"], ["fLaC", "A_FLAC"], ["flac", "A_FLAC"], ["dts", "A_DTS"],
-    ["vorbis", "A_VORBIS"], ["alac", "A_ALAC"], ["truehd", "A_TRUEHD"]
-  ]).get(codec);
+  const declared = matroskaIdOf(codec);
   if (!declared) throw new Error(`Admitted codec ${codec} has no Matroska declaration.`);
   return declared;
 }

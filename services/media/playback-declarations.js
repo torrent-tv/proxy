@@ -1,33 +1,20 @@
 import { AudioTrack } from "./tracks/AudioTrack.js";
 import { TextSubtitleTrack } from "./tracks/TextSubtitleTrack.js";
 import { ContainerTrack } from "./tracks/ContainerTrack.js";
+import { videoCodecName } from "./tracks/codec-names.js";
 
-const VIDEO_CODECS = new Map([
-  ["V_MPEG4/ISO/AVC", "h264"], ["avc1", "h264"], ["avc3", "h264"],
-  ["V_MPEGH/ISO/HEVC", "hevc"], ["hvc1", "hevc"], ["hev1", "hevc"],
-  ["V_MPEG1", "mpeg1video"], ["V_MPEG2", "mpeg2video"],
-  ["V_MPEG4/ISO/ASP", "mpeg4"], ["V_MPEG4/ISO/SP", "mpeg4"], ["mp4v", "mpeg4"],
-  ["V_VP8", "vp8"], ["V_VP9", "vp9"], ["vp09", "vp9"],
-  ["V_AV1", "av1"], ["av01", "av1"], ["V_MJPEG", "mjpeg"],
-  ["V_FFV1", "ffv1"], ["V_THEORA", "theora"]
-]);
 const SUBTITLE_CODECS = new Map([
   ["S_TEXT/UTF8", "subrip"], ["S_TEXT/ASS", "ass"], ["S_TEXT/SSA", "ssa"],
   ["S_TEXT/WEBVTT", "webvtt"], ["wvtt", "webvtt"], ["tx3g", "mov_text"],
   ["S_HDMV/PGS", "hdmv_pgs_subtitle"], ["S_VOBSUB", "dvd_subtitle"]
 ]);
-const FOURCC_CODECS = new Map([
-  ["mjpg", "mjpeg"], ["jpeg", "mjpeg"], ["xvid", "mpeg4"],
-  ["divx", "mpeg4"], ["dx50", "mpeg4"], ["mpg2", "mpeg2video"]
-]);
-
 function videoCodecOf(track) {
   let id = track.codecId;
   if (id === "V_MS/VFW/FOURCC" && track.codecPrivateB64) {
     const header = Buffer.from(track.codecPrivateB64, "base64");
     if (header.length >= 20) id = header.toString("ascii", 16, 20);
   }
-  return VIDEO_CODECS.get(id) ?? FOURCC_CODECS.get(id.toLowerCase()) ?? id.toLowerCase();
+  return videoCodecName(id);
 }
 
 /** One playback inventory, taken from the same declarations used for input. */

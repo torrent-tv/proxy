@@ -11,39 +11,8 @@
  */
 
 import { codecParametersOf, peakKbpsOf } from "./audio-bound.js";
+import { audioCodecName } from "./codec-names.js";
 import { ContainerTrack } from "./ContainerTrack.js";
-
-/**
- * Codec identifiers as containers write them, against the name ffmpeg prints.
- *
- * Needed because the browser decides whether it can play a soundtrack from that
- * name, and for a sidecar file there is no ffmpeg banner to read it from — the
- * track came from the container's own table, where Matroska writes `A_AC3` and
- * MP4 writes `ac-3` for the thing ffmpeg calls `ac3`. Only what a soundtrack can
- * actually be is listed; an identifier not here is reported as it was written,
- * which the browser treats as one it does not know and therefore transcodes.
- */
-const CODEC_NAMES = new Map([
-  ["A_AAC", "aac"],
-  ["A_AC3", "ac3"],
-  ["A_EAC3", "eac3"],
-  ["A_DTS", "dts"],
-  ["A_FLAC", "flac"],
-  ["A_OPUS", "opus"],
-  ["A_VORBIS", "vorbis"],
-  ["A_TRUEHD", "truehd"],
-  ["A_MPEG/L3", "mp3"],
-  ["A_MPEG/L2", "mp2"],
-  ["A_ALAC", "alac"],
-  ["mp4a", "aac"],
-  ["ac-3", "ac3"],
-  ["ec-3", "eac3"],
-  ["alac", "alac"],
-  ["opus", "opus"],
-  ["Opus", "opus"],
-  ["fLaC", "flac"],
-  ["flac", "flac"]
-]);
 
 /**
  * Extensions of raw elementary streams, against the codec they carry.
@@ -126,21 +95,7 @@ export class AudioTrack extends ContainerTrack {
     }
     const codecId = typeof track?.codecId === "string" ? track.codecId.trim() : "";
     if (codecId.length > 0) {
-      const known = CODEC_NAMES.get(codecId);
-      if (known) {
-        return known;
-      }
-      // Matroska allows a suffix — `A_AAC/MPEG4/LC`, `A_PCM/INT/LIT` — so the
-      // family is what the first two segments say.
-      const family = codecId.split("/").slice(0, 2).join("/");
-      const byFamily = CODEC_NAMES.get(family) ?? CODEC_NAMES.get(codecId.split("/")[0]);
-      if (byFamily) {
-        return byFamily;
-      }
-      if (codecId.startsWith("A_PCM")) {
-        return "pcm";
-      }
-      return codecId.toLowerCase();
+      return audioCodecName(codecId);
     }
     return CODEC_BY_EXTENSION.get(extension) ?? "";
   }

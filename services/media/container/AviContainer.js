@@ -9,6 +9,7 @@
 
 import { FFMPEG_STREAM_SEARCH_SECONDS } from "./ffmpeg-stream-search.js";
 import { Container } from "./Container.js";
+import { MPEG4_FOURCCS } from "../tracks/codec-names.js";
 import { VideoTrack } from "../tracks/VideoTrack.js";
 import { AudioTrack } from "../tracks/AudioTrack.js";
 import { ContainerTrack } from "../tracks/ContainerTrack.js";
@@ -22,7 +23,6 @@ import { ac3Frame } from "./ac3-frame.js";
 import { RetainedReads } from "./RetainedReads.js";
 import { OutsideReadableEdges, edgeReader, emptyWorkTags, text, textList, yearOf } from "./work-tags.js";
 
-const MPEG4_CODECS = new Set(["FMP4", "XVID", "DIVX", "DX50", "MP4V", "M4S2", "MP4S"]);
 /** FFmpeg's input buffer, filled ahead of what its demuxer parses (`IO_BUFFER_SIZE`, libavformat/aviobuf.c n8.1). */
 const FFMPEG_INPUT_BUFFER_BYTES = 32768;
 /** Picture codecs whose every picture stands alone, so decoding order is showing order. */
@@ -473,7 +473,7 @@ export class AviContainer extends Container {
     const clocks = new Map();
     for (const track of tracks.filter(track => ["video", "audio"].includes(track.type))) {
       if (!(track.timeBase > 0)) throw new Error("AVI stream time base is invalid.");
-      if (track.type === "video" && !["h264", "hevc"].includes(track.codecId) && !MPEG4_CODECS.has(track.codecId.toUpperCase()) && !INTRA_PICTURE_CODECS.has(track.codecId.toUpperCase())) {
+      if (track.type === "video" && !["h264", "hevc"].includes(track.codecId) && !MPEG4_FOURCCS.has(track.codecId.toUpperCase()) && !INTRA_PICTURE_CODECS.has(track.codecId.toUpperCase())) {
         throw new Error("AVI video without an index requires elementary picture timing.");
       }
       if (track.type === "audio" && !(track.sampleSize > 0) && !MPEG_AUDIO_CODECS.has(track.codecId)) throw new Error("AVI variable-size audio requires elementary frame timing.");
@@ -651,7 +651,7 @@ export class AviContainer extends Container {
           if (length) await this.#appendPacket(state.index, state.timings, track, { pts, duration, keyframe: true, ranges: [[start, end - 1]] });
           else if (track.type === "video") state.index.extendLastPresentation(trackId, track.timeBase);
           state.clocks.set(trackId, pts + duration);
-          if (!MPEG4_CODECS.has(track.codecId.toUpperCase()) && !["h264", "hevc"].includes(track.codecId) && !MPEG_AUDIO_CODECS.has(track.codecId) && (track.type === "audio" || length)) state.index.coverThrough(trackId, Math.max(0, pts + duration));
+          if (!MPEG4_FOURCCS.has(track.codecId.toUpperCase()) && !["h264", "hevc"].includes(track.codecId) && !MPEG_AUDIO_CODECS.has(track.codecId) && (track.type === "audio" || length)) state.index.coverThrough(trackId, Math.max(0, pts + duration));
         }
         state.at = next;
         state.index.flushPending();
@@ -687,7 +687,7 @@ export class AviContainer extends Container {
       }
       return;
     }
-    if (track.type !== "video" || !MPEG4_CODECS.has(track.codecId.toUpperCase())) {
+    if (track.type !== "video" || !MPEG4_FOURCCS.has(track.codecId.toUpperCase())) {
       index.append(track.trackNumber, packet);
       return;
     }

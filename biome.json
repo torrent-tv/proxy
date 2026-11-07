@@ -95,7 +95,8 @@
                   {
                     "group": [
                       "../**",
-                      "!../media/ffmpeg-banner.js"
+                      "!../media/ffmpeg-banner.js",
+                      "!../media/tracks/codec-names.js"
                     ],
                     "message": "THE ENCODING COMPONENT imports nothing outside itself: its outputs, cut tables, playlists, container formats and quality budget are directories of it. Anything else it needs — a logger, a viewer's position, a way to read bytes — is passed in."
                   }

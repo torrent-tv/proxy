@@ -14,20 +14,17 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import { EncodeRun } from "../../services/encode/EncodeRun.js";
+import { jsFilesUnder, sourceOf } from "./helpers/source-text.js";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * @param {string} relative
  * @returns {string}
  */
 function source(relative) {
-  return readFileSync(path.join(HERE, "..", "..", relative), "utf8");
+  return sourceOf(relative);
 }
 
 /**
@@ -39,10 +36,7 @@ function source(relative) {
  * @returns {string}
  */
 function everything() {
-  return readdirSync(path.join(HERE, "..", "..", "services"), { recursive: true })
-    .filter((name) => String(name).endsWith(".js"))
-    .map((name) => source(path.join("services", String(name))))
-    .join("\n");
+  return jsFilesUnder("services").map(sourceOf).join("\n");
 }
 
 /**

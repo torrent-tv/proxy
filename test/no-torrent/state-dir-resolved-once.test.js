@@ -23,13 +23,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { readFileSync, readdirSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { jsFilesUnder, sourceOf } from "./helpers/source-text.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROXY = path.join(HERE, "..", "..");
@@ -98,24 +98,14 @@ test("PINNING: handed a state directory, wireOutputs keeps local-observations.js
 });
 
 test("services/server names PROXY_ROOT nowhere", () => {
-  const found = [];
-  const walk = (directory) => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      const full = path.join(directory, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (entry.name.endsWith(".js")) {
-        readFileSync(full, "utf8").split("\n").forEach((line, index) => {
-          if (line.includes("PROXY_ROOT")) found.push(`${path.relative(PROXY, full)}:${index + 1}`);
-        });
-      }
-    }
-  };
-  walk(path.join(PROXY, "services", "server"));
+  const found = jsFilesUnder("services/server").flatMap((file) =>
+    sourceOf(file).split("\n").flatMap((line, index) => (line.includes("PROXY_ROOT") ? [`${path.relative(PROXY, file)}:${index + 1}`] : []))
+  );
   assert.deepEqual(found, [], "PROXY_ROOT is still read by a consumer in services/server");
 });
 
 test("the CLI reads options.stateDir once, where it resolves it, and the consumers read the resolved value", () => {
-  const lines = readFileSync(path.join(PROXY, ["bin", "cli.js"].join(path.sep)), "utf8").split("\n")
+  const lines = sourceOf(path.join("bin", "cli.js")).split("\n")
     .map((line, index) => ({ line, number: index + 1 }))
     .filter(({ line }) => !line.trim().startsWith("//") && line.includes("options.stateDir"));
   assert.ok(lines.length <= 1, `options.stateDir is read in ${lines.length} places: ${lines.map(({ number }) => number).join(", ")}`);

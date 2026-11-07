@@ -13,6 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { IDLE_KEEP_MS } from "../../services/storage/keep.js";
 import { Returns } from "../../services/storage/returns.js";
+import { sourceOf } from "./helpers/source-text.js";
 
 const MINUTE = 60 * 1000;
 
@@ -28,15 +29,11 @@ test("material outlives the session that reads it", () => {
   );
 });
 
-test("one number, and both kinds of material read it", async () => {
+test("one number, and both kinds of material read it", () => {
   // Two guesses about one unknown is what produced the contradiction. Asserted
   // on the source: a second literal period appearing anywhere is the fault
   // coming back.
-  const { readFileSync } = await import("node:fs");
-  const path = await import("node:path");
-  const { fileURLToPath } = await import("node:url");
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const read = (relative) => readFileSync(path.join(here, "..", "..", relative), "utf8");
+  const read = (relative) => sourceOf(relative);
 
   assert.match(read("services/torrent/torrent-pool.js"), /TORRENT_IDLE_TTL_MS = IDLE_KEEP_MS/);
   assert.match(read("services/server/OutputLifecycle.js"), /SEGMENT_STORE_IDLE_MS = IDLE_KEEP_MS/);

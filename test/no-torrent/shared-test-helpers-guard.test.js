@@ -21,6 +21,19 @@
  * checked against; a builder that imported the writer it checks would agree
  * with it whatever it wrote.
  *
+ * torrent-tv/meta#309 adds three more, about how a check builds the serving
+ * manager and its outputs:
+ *
+ *   4. no check calls `wireOutputs` itself — it builds its manager with
+ *      `managerWithOwnStore` (helpers/manager.js), which gives it a store root of
+ *      its own; the bare call shared the default root with every other test
+ *      process, and the `disposeAll` of one removed what another had written;
+ *   5. no check hand-writes the output object's file getters
+ *      (`get inputFile() ...`) — it takes `outputOn` (helpers/output.js);
+ *   6. nothing under test/no-torrent writes the Renditions host's warming port
+ *      out again — it takes `renditionsHost` (helpers/renditions.js), whose
+ *      viewer relations are `viewerRelationsFor`, the function production uses.
+ *
  * What is NOT checked here: that the migrated files still assert what they
  * asserted. That is the existing tests staying green, and the helpers' own
  * tests (`helpers-*.test.js`) stating the exact bytes and behaviours the copies
@@ -51,6 +64,19 @@ const ABOUT_A_RUNTIME_DIRECTORY = new Set([
   "even-grid-cut-by-list.test.js", // the encode directory: what a cut removes
   "segment-store.test.js" // the segment store's directory: what is written and swept
 ]);
+
+/**
+ * The checks that may call `wireOutputs` themselves. NONE: the helper tests
+ * (`helpers-manager.test.js`, `helpers-output.test.js`, `helpers-renditions.test.js`) go through
+ * `managerWithOwnStore` like everyone else, and `helpers/manager.js` is the one caller and is not
+ * a check. A name added here is a file that shares the default store root again.
+ */
+const MAY_CALL_WIRE_OUTPUTS = new Set([]);
+
+/** Spelled so that this file does not contain what it forbids: the issue's greps read it too. */
+const WIRE_OUTPUTS_CALL = `wireOutputs${"("}`;
+const HAND_WRITTEN_FILE_GETTER = `get inputFile${"()"} { return this.file`;
+const WARMING_PORT_WRITTEN_OUT = `noteStepBeingWarmed${":"} (`;
 
 /** The synchronous directory read, spelled so that this file does not name it as a whole word. */
 const SYNC_DIRECTORY_READ = `readdir${"Sync"}`;
@@ -121,4 +147,41 @@ test("the byte builders import nothing of the proxy: they stay the oracle, indep
 test("every helper module starts no torrent (the check that runs before the tests)", () => {
   const run = spawnSync(process.execPath, ["scripts/check-tests-start-no-torrent.mjs"], { cwd: PROXY, encoding: "utf8" });
   assert.equal(run.status, 0, run.stdout + run.stderr);
+});
+
+/** @returns {Promise<Array<{ file: string, text: string }>>} every file under test/no-torrent, read as bytes (a test file that `file` calls binary is read the way `grep -a` reads it) */
+async function everyFile() {
+  const entries = await readdir(TESTS, { recursive: true, withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(entry.parentPath ?? entry.path, entry.name))
+    .sort()
+    .map((full) => ({ file: path.relative(TESTS, full).split(path.sep).join("/"), text: readFileSync(full, "latin1") }));
+}
+
+test("no check calls wireOutputs itself: it builds its manager with managerWithOwnStore", async () => {
+  const offenders = (await everyFile())
+    .filter(({ file }) => file.endsWith(".test.js") && !file.includes("/") && !MAY_CALL_WIRE_OUTPUTS.has(file))
+    .filter(({ text }) => text.includes(WIRE_OUTPUTS_CALL))
+    .map(({ file }) => file);
+  assert.deepEqual(offenders, [], "use managerWithOwnStore from helpers/manager.js (own store root; { planless: true } for a manager that plans nothing)");
+});
+
+test("no check hand-writes the output's file getters: it takes outputOn", async () => {
+  const offenders = (await everyFile())
+    .filter(({ file }) => file.endsWith(".test.js") && !file.includes("/"))
+    .filter(({ text }) => text.includes(HAND_WRITTEN_FILE_GETTER))
+    .map(({ file }) => file);
+  assert.deepEqual(offenders, [], "use outputOn from helpers/output.js");
+});
+
+test("nothing under test/no-torrent writes the Renditions host's warming port out again: it takes renditionsHost", async () => {
+  const offenders = (await everyFile()).filter(({ text }) => text.includes(WARMING_PORT_WRITTEN_OUT)).map(({ file }) => file);
+  assert.deepEqual(offenders, [], "use renditionsHost from helpers/renditions.js, which takes the viewer relations from viewerRelationsFor");
+});
+
+test("the helpers of the serving manager exist", () => {
+  for (const name of ["manager.js", "output.js", "renditions.js"]) {
+    assert.doesNotThrow(() => readFileSync(path.join(TESTS, "helpers", name)), `helpers/${name} does not exist`);
+  }
 });

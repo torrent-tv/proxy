@@ -668,3 +668,66 @@ export function bufferedSecondsOf(viewers, consumerId) {
   const held = consumerId ? viewers.get(consumerId)?.bufferedSeconds : null;
   return Number.isFinite(held) ? Math.max(0, held) : 0;
 }
+
+/**
+ * The viewer relations of the Renditions host: every port of it that is the
+ * viewers' records asked and told by name.
+ *
+ * WHAT ENCODING IS TOLD ABOUT A PERSON, and what it may tell the viewer layer
+ * about them: values and names, never the viewer itself. Steps and soundtracks
+ * are chosen, warmed and left per person, so this is the widest of the sets
+ * encoding reads — and every one of them is a call on the owner, which is what
+ * keeps one writer per fact. Production spreads this into the host it builds
+ * (`server/wire-outputs.js`), and a check takes the same function
+ * (`test/no-torrent/helpers/renditions.js`), so the two cannot drift.
+ *
+ * @param {object} viewers - The `Viewers` registry the relations answer over.
+ * @returns {Record<string, Function>}
+ */
+export function viewerRelationsFor(viewers) {
+  return {
+    viewerCountOn: (output) => viewers.forOutput(output).size,
+    // Whether anything still stands on it — somebody watching, or an
+    // assignment not yet released. See `Viewers.stillNeeded`.
+    outputStillNeeded: (output) => viewers.stillNeeded(output),
+    consumersOn: (output) => consumersOn(viewers, output),
+    presentOn: (output) => presentOn(viewers, output),
+    qualityModeOf: (output, consumerId) => qualityModeOf(viewers, output, consumerId),
+    linkMbpsOf: (output, consumerId) => linkMbpsOf(viewers, output, consumerId),
+    audioChoiceOf: (output, consumerId) => audioChoiceOf(viewers, output, consumerId),
+    chooseAudioTrack: (output, consumerId, choice) => chooseAudioTrack(viewers, output, consumerId, choice),
+    stepOnScreenOf: (output, consumerId) => stepOnScreenOf(viewers, output, consumerId),
+    noteStepOnScreen: (output, consumerId, stepId) => noteStepOnScreen(viewers, output, consumerId, stepId),
+    stepBeingWarmedOf: (output, consumerId) => stepBeingWarmedOf(viewers, output, consumerId),
+    stepBeingWarmedSinceOf: (output, consumerId) => stepBeingWarmedSinceOf(viewers, output, consumerId),
+    noteStepBeingWarmed: (output, consumerId, stepId) => noteStepBeingWarmed(viewers, output, consumerId, stepId),
+    audioBeingWarmedOf: (output, consumerId) => audioBeingWarmedOf(viewers, output, consumerId),
+    noteAudioBeingWarmed: (output, consumerId, renditionId) =>
+      noteAudioBeingWarmed(viewers, output, consumerId, renditionId),
+    watches: (output, consumerId) => watches(viewers, output, consumerId),
+    placeOn: (output, consumerId, seconds) => placeOn(viewers, output, consumerId, seconds),
+    // A viewer's own assignments: which output answered a height and segment in
+    // one generation of their viewing, so a repeat is answered the same way.
+    generationOfRequest: (consumerId, stated) => generationOfRequest(viewers, consumerId, stated),
+    givenOutputOf: (consumerId, generation, askedHeight, segmentIndex) =>
+      givenOutputOf(viewers, consumerId, generation, askedHeight, segmentIndex),
+    noteGivenOutput: (consumerId, generation, askedHeight, segmentIndex, outputKey) =>
+      noteGivenOutput(viewers, consumerId, generation, askedHeight, segmentIndex, outputKey),
+    // The output this viewer was chosen at a height, and the rule's choice of
+    // it — the viewer's own record, never one per file.
+    chosenOutputOf: (consumerId, askedHeight) => chosenOutputOf(viewers, consumerId, askedHeight),
+    chooseOutput: (consumerId, askedHeight, outputKey) => chooseOutput(viewers, consumerId, askedHeight, outputKey),
+    noteServingVerdict: (consumerId, verdict) => noteServingVerdict(viewers, consumerId, verdict),
+    heightsChosenAs: (consumerId, outputKey) => heightsChosenAs(viewers, consumerId, outputKey),
+    highestGivenSegmentOf: (consumerId, askedHeight) => highestGivenSegmentOf(viewers, consumerId, askedHeight),
+    // A move between two limits of the height on a viewer's screen: the segment
+    // they were last given, the move being prepared, and the outputs it is
+    // between.
+    sameHeightSwitchOf: (consumerId) => sameHeightSwitchOf(viewers, consumerId),
+    noteSameHeightSwitch: (consumerId, value) => noteSameHeightSwitch(viewers, consumerId, value),
+    switchingOnto: (output) => switchingOnto(viewers, output),
+    switchingFrom: (output) => switchingFrom(viewers, output),
+    // What a viewer holds.
+    bufferedSecondsOf: (consumerId) => bufferedSecondsOf(viewers, consumerId)
+  };
+}

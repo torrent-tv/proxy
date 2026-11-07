@@ -31,43 +31,16 @@ import { activeOutputFor } from "../viewer/active-output.js";
 import {
   acceptsGeneration,
   askQualityOf,
-  audioBeingWarmedOf,
-  audioChoiceOf,
-  chooseAudioTrack,
-  chooseOutput,
-  chosenOutputOf,
-  consumersOn,
   dropAskOf,
-  generationOfRequest,
-  givenOutputOf,
-  heightsChosenAs,
-  highestGivenSegmentOf,
   holdForResponse,
-  linkMbpsOf,
   linkReportOf,
   bufferOf,
-  bufferedSecondsOf,
   visiblePictureOf,
   linkReportsOn,
-  noteAudioBeingWarmed,
-  noteGivenOutput,
-  noteSameHeightSwitch,
-  noteServingVerdict,
-  noteStepBeingWarmed,
-  noteStepOnScreen,
   placeInitially,
-  placeOn,
-  presentOn,
-  qualityModeOf,
-  sameHeightSwitchOf,
   servingVerdictOf,
   standingAskOf,
-  stepBeingWarmedOf,
-  stepBeingWarmedSinceOf,
-  stepOnScreenOf,
-  switchingFrom,
-  switchingOnto,
-  watches
+  viewerRelationsFor
 } from "../viewer/choices.js";
 import { viewerSecondsOn, viewerSegmentsOn } from "../viewer/positions.js";
 import { Viewers } from "../viewer/Viewers.js";
@@ -401,6 +374,17 @@ export function wireOutputs({
     get outputTimes() { return parts.outputTimes; },
     get outputs() { return parts.outputs; },
   });
+  // Who listens to viewer changes subscribes here (`startPlayback`); a throw
+  // of a listener reaches the code that changed the viewers.
+  parts.viewerChanges = new EventEmitter();
+  parts.viewers = new Viewers({ onChange: () => {
+    parts.lifecycle.observeUse();
+    parts.encodeRuns.planEncodersSoon();
+    parts.viewerChanges.emit("change");
+  } });
+  // What encoding and the requests of a viewer are told about a person: values
+  // and names, never the viewer itself (`viewer/choices.js`).
+  const viewerRelations = viewerRelationsFor(parts.viewers);
   // The steps of a picture and its soundtracks: which output answers each, made when first asked for, and the master playlist listing them.
   // The cushion this file needs, from its segment length and the worst
   // interruption its supply has shown — one statement read by every operation
@@ -422,51 +406,9 @@ export function wireOutputs({
     viewerSecondsOn: (output, consumerId, now) => viewerSecondsOn(parts.viewers, output, consumerId, now),
     audioStartSecondsFor: (args) => audioStartSecondsFor({ ...args, viewers: parts.viewers }),
     activeOutputFor: (args) => activeOutputFor({ ...args, viewers: parts.viewers }),
-    // WHAT ENCODING IS TOLD ABOUT A PERSON, and what it may tell the viewer
-    // layer about them: values and names, never the viewer itself. Steps and
-    // soundtracks are chosen, warmed and left per person, so this is the widest
-    // of the three sets — and every one of them is a call on the owner, which
-    // is what keeps one writer per fact.
-    viewerCountOn: (output) => parts.viewers.forOutput(output).size,
-    // Whether anything still stands on it — somebody watching, or an
-    // assignment not yet released. See `Viewers.stillNeeded`.
-    outputStillNeeded: (output) => parts.viewers.stillNeeded(output),
-    consumersOn: (output) => consumersOn(parts.viewers, output),
-    presentOn: (output) => presentOn(parts.viewers, output),
-    qualityModeOf: (output, consumerId) => qualityModeOf(parts.viewers, output, consumerId),
-    linkMbpsOf: (output, consumerId) => linkMbpsOf(parts.viewers, output, consumerId),
-    audioChoiceOf: (output, consumerId) => audioChoiceOf(parts.viewers, output, consumerId),
-    chooseAudioTrack: (output, consumerId, choice) =>
-      chooseAudioTrack(parts.viewers, output, consumerId, choice),
-    stepOnScreenOf: (output, consumerId) => stepOnScreenOf(parts.viewers, output, consumerId),
-    noteStepOnScreen: (output, consumerId, stepId) =>
-      noteStepOnScreen(parts.viewers, output, consumerId, stepId),
-    stepBeingWarmedOf: (output, consumerId) => stepBeingWarmedOf(parts.viewers, output, consumerId),
-    stepBeingWarmedSinceOf: (output, consumerId) => stepBeingWarmedSinceOf(parts.viewers, output, consumerId),
-    noteStepBeingWarmed: (output, consumerId, stepId) =>
-      noteStepBeingWarmed(parts.viewers, output, consumerId, stepId),
-    audioBeingWarmedOf: (output, consumerId) => audioBeingWarmedOf(parts.viewers, output, consumerId),
-    noteAudioBeingWarmed: (output, consumerId, renditionId) =>
-      noteAudioBeingWarmed(parts.viewers, output, consumerId, renditionId),
-    watches: (output, consumerId) => watches(parts.viewers, output, consumerId),
-    placeOn: (output, consumerId, seconds) => placeOn(parts.viewers, output, consumerId, seconds),
-    // A viewer's own assignments: which output answered a height and segment in
-    // one generation of their viewing, so a repeat is answered the same way.
-    // Values in and out, like everything above.
-    generationOfRequest: (consumerId, stated) => generationOfRequest(parts.viewers, consumerId, stated),
-    givenOutputOf: (consumerId, generation, askedHeight, segmentIndex) =>
-      givenOutputOf(parts.viewers, consumerId, generation, askedHeight, segmentIndex),
-    noteGivenOutput: (consumerId, generation, askedHeight, segmentIndex, outputKey) =>
-      noteGivenOutput(parts.viewers, consumerId, generation, askedHeight, segmentIndex, outputKey),
-    // The output this viewer was chosen at a height, and the rule's choice of
-    // it — the viewer's own record, never one per file.
-    chosenOutputOf: (consumerId, askedHeight) => chosenOutputOf(parts.viewers, consumerId, askedHeight),
-    chooseOutput: (consumerId, askedHeight, outputKey) => chooseOutput(parts.viewers, consumerId, askedHeight, outputKey),
-    noteServingVerdict: (consumerId, verdict) => noteServingVerdict(parts.viewers, consumerId, verdict),
-    // A move between two limits of the height on a viewer's screen (roadmap
-    // item 97, step 12): which heights their choice is the output on screen
-    // under, the segment they were last given, the move being prepared, and
-    // whether a segment is closed on the output being prepared.
+    // What encoding is told about a person: values and names, never the viewer
+    // itself (`viewer/choices.js`, `viewerRelationsFor`).
+    ...viewerRelationsFor(parts.viewers),
     limitsFor: (frame, file) => parts.limitsFor(frame, file),
     // A move between two speed settings of the size on a viewer's screen
     // (torrent-tv/meta#178): the settings this machine measured, in quality
@@ -485,15 +427,8 @@ export function wireOutputs({
       }
     },
     requiredSpeedOf: (output) => parts.hostLoad.requiredSpeedFor(output.file.sourceKey, output.file.fileIndex) ?? 1,
-    heightsChosenAs: (consumerId, outputKey) => heightsChosenAs(parts.viewers, consumerId, outputKey),
-    highestGivenSegmentOf: (consumerId, askedHeight) => highestGivenSegmentOf(parts.viewers, consumerId, askedHeight),
-    sameHeightSwitchOf: (consumerId) => sameHeightSwitchOf(parts.viewers, consumerId),
-    noteSameHeightSwitch: (consumerId, value) => noteSameHeightSwitch(parts.viewers, consumerId, value),
-    switchingOnto: (output) => switchingOnto(parts.viewers, output),
-    switchingFrom: (output) => switchingFrom(parts.viewers, output),
-    // What a viewer holds, and the cushion this file needs before a move that
-    // is not urgent is made (roadmap item 98).
-    bufferedSecondsOf: (consumerId) => bufferedSecondsOf(parts.viewers, consumerId),
+    // The cushion this file needs before a move that is not urgent is made
+    // (roadmap item 98).
     minimumBufferSecondsFor: (output) => minimumBufferSecondsOf(output),
     // Whether the whole machine has a place for one more encoder on this output,
     // asked before a preparation is recorded.
@@ -706,8 +641,7 @@ export function wireOutputs({
     get outputs() { return parts.outputs; },
     placeViewerOn: (output, consumerId, seconds, now) =>
       placeInitially(parts.viewers, output, consumerId, seconds, now),
-    chooseAudioTrack: (output, consumerId, choice) =>
-      chooseAudioTrack(parts.viewers, output, consumerId, choice),
+    chooseAudioTrack: viewerRelations.chooseAudioTrack,
     get lookaheadSeconds() { return parts.lookaheadSeconds; },
     get quality() { return parts.quality; },
     get qualityOffer() { return parts.qualityOffer; },
@@ -721,11 +655,10 @@ export function wireOutputs({
     // Whether a request of this generation is still taken, what it belongs to,
     // what answered it, and the hold a response keeps while it is being sent.
     acceptsGeneration: (consumerId, stated) => acceptsGeneration(parts.viewers, consumerId, stated),
-    generationOfRequest: (consumerId, stated) => generationOfRequest(parts.viewers, consumerId, stated),
-    noteGivenOutput: (consumerId, generation, askedHeight, segmentIndex, outputKey) =>
-      noteGivenOutput(parts.viewers, consumerId, generation, askedHeight, segmentIndex, outputKey),
+    generationOfRequest: viewerRelations.generationOfRequest,
+    noteGivenOutput: viewerRelations.noteGivenOutput,
     holdForResponse: (consumerId, outputKey) => holdForResponse(parts.viewers, consumerId, outputKey),
-    noteServingVerdict: (consumerId, verdict) => noteServingVerdict(parts.viewers, consumerId, verdict),
+    noteServingVerdict: viewerRelations.noteServingVerdict,
     servingVerdictOf: (consumerId) => servingVerdictOf(parts.viewers, consumerId),
   });
   // How long each output took to its first served segment, said once in the log.
@@ -980,14 +913,6 @@ export function wireOutputs({
   // be re-taken on a five-second timer instead, which made a just-created
   // output wait up to five seconds before anything noticed it had a viewer.
   parts.retention = new OutputRetention();
-  // Who listens to viewer changes subscribes here (`startPlayback`); a throw
-  // of a listener reaches the code that changed the viewers.
-  parts.viewerChanges = new EventEmitter();
-  parts.viewers = new Viewers({ onChange: () => {
-    parts.lifecycle.observeUse();
-    parts.encodeRuns.planEncodersSoon();
-    parts.viewerChanges.emit("change");
-  } });
   // The outputs that exist, and every question about them: the picture a step
   // belongs to, the steps, the soundtracks, the height a step is named by.
   parts.outputs = new OutputCatalog({
@@ -1296,9 +1221,9 @@ export function wireOutputs({
     },
     // WHAT ENCODING IS TOLD ABOUT A PERSON: values, by name. Not the viewer,
     // whose record belongs to the viewer layer and is written only there.
-    consumersOn: (output) => consumersOn(parts.viewers, output),
-    qualityModeOf: (output, consumerId) => qualityModeOf(parts.viewers, output, consumerId),
-    stepOnScreenOf: (output, consumerId) => stepOnScreenOf(parts.viewers, output, consumerId),
+    consumersOn: viewerRelations.consumersOn,
+    qualityModeOf: viewerRelations.qualityModeOf,
+    stepOnScreenOf: viewerRelations.stepOnScreenOf,
     standingAskOf: (output, consumerId) => standingAskOf(parts.viewers, output, consumerId),
     askQualityOf: (output, consumerId, height, reason, now, urgent) =>
       askQualityOf(parts.viewers, output, consumerId, height, reason, now, urgent),
@@ -1318,7 +1243,7 @@ export function wireOutputs({
     // EACH viewer's own link and who is present: a thin link decides for the
     // person on it and for nobody else (roadmap item 97, step 11), so the
     // budget asks per viewer instead of taking the worst over all of them.
-    presentOn: (output) => presentOn(parts.viewers, output),
+    presentOn: viewerRelations.presentOn,
     linkReportOf: (output, consumerId) => linkReportOf(parts.viewers, output, consumerId),
     // The soundtrack a viewer receives, as part of the load their link carries.
     viewerAudioLoadOf: (base, consumerId) => parts.renditions.viewerAudioLoadOf(base, consumerId),

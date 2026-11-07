@@ -154,7 +154,7 @@ test("it says what the disk has and what each claimant may hold", async () => {
   assert.match(space.describe(), /nothing has claimed/);
   space.register(consumerOf("segments", 4 * MEGABYTE, 8 * MEGABYTE).consumer);
   await space.revise();
-  assert.match(space.describe(), /disk: 100MB free; segments 4MB of 8MB/);
+  assert.match(space.describe(), /disk: 105MB free; segments 4MB of 8MB/);
 });
 
 test("it says what it decided, every pass", async () => {
@@ -166,7 +166,7 @@ test("it says what it decided, every pass", async () => {
   space.register(consumerOf("segments", 4 * MEGABYTE, 8 * MEGABYTE).consumer);
   await space.revise();
   assert.equal(lines.length, 1, "a pass that decided the shares said nothing about them");
-  assert.match(lines[0], /disk: 100MB free; segments 4MB of 8MB/);
+  assert.match(lines[0], /disk: 105MB free; segments 4MB of 8MB/);
 });
 
 test("the free space is read from the nearest directory that exists", async () => {

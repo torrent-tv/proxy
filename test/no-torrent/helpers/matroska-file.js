@@ -55,17 +55,41 @@ export function idBytes(id) {
   return Buffer.from(bytes);
 }
 
-/** A four-byte size: a valid vint whatever the payload. @param {number} size */
-function sizeBytes(size) {
-  const buffer = Buffer.alloc(4);
-  buffer.writeUInt32BE(size, 0);
-  buffer[0] |= 0x10;
+/**
+ * A size field: `width` bytes, the width marker in the leading byte, or the
+ * smallest width that fits ("minimal"). All-ones is reserved for "unknown", so
+ * a size that would be all-ones, or more, does not fit and throws.
+ *
+ * @param {number} size
+ * @param {number | "minimal"} width
+ */
+function sizeBytes(size, width) {
+  let bytes = width;
+  if (width === "minimal") {
+    bytes = 1;
+    while (size >= 2 ** (7 * bytes) - 1) {
+      bytes += 1;
+    }
+  }
+  if (!Number.isInteger(bytes) || bytes < 1 || bytes > 8 || size >= 2 ** (7 * bytes) - 1) {
+    throw new RangeError(`a payload of ${size} bytes does not fit a ${width}-byte size`);
+  }
+  const value = BigInt(size) | (1n << BigInt(7 * bytes));
+  const buffer = Buffer.alloc(bytes);
+  for (let at = bytes - 1, rest = value; at >= 0; at -= 1, rest >>= 8n) {
+    buffer[at] = Number(rest & 0xffn);
+  }
   return buffer;
 }
 
-/** @param {number} id @param {Buffer} payload @returns {Buffer} */
-export function element(id, payload) {
-  return Buffer.concat([idBytes(id), sizeBytes(payload.length), payload]);
+/**
+ * @param {number} id
+ * @param {Buffer} payload
+ * @param {{ sizeWidth?: number | "minimal" }} [options] - four bytes by default
+ * @returns {Buffer}
+ */
+export function element(id, payload, { sizeWidth = 4 } = {}) {
+  return Buffer.concat([idBytes(id), sizeBytes(payload.length, sizeWidth), payload]);
 }
 
 /** An element whose size field says "unknown" (one byte, all value bits set). */

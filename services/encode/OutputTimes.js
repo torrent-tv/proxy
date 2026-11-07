@@ -98,7 +98,7 @@ export class OutputTimes {
   #host;
 
   /**
-   * @param {object} host - `logger`, `runsOf`, `stopEncodeRun`, `planEncodersSoon`, `outputs`, `segmentDurationSec`
+   * @param {object} host - `logger`, `runsOf`, `stopRun`, `planEncodersSoon`, `outputs`, `segmentDurationSec`
    */
   constructor(host) {
     this.#host = host;
@@ -454,7 +454,8 @@ export class OutputTimes {
     // claimed. It converges: once the boundary holds the true time, the next
     // reading agrees with it and the guard above returns before doing anything.
     for (const member of this.#host.outputs.familyOf(session)) {
-      if (member === session || runStartingAt(this.#host.runsOf(member), index) === null) {
+      const misplaced = member === session ? null : runStartingAt(this.#host.runsOf(member), index);
+      if (misplaced === null) {
         continue;
       }
       this.#host.logger.info(
@@ -474,7 +475,7 @@ export class OutputTimes {
       // which this function has just written it into and which every session of
       // the file shares. It used to be passed as an argument from here, so only
       // a run started by this line ever had it.
-      this.#host.stopEncodeRun(member, `#${index} really begins ${(trueStart - wasAt).toFixed(3)}s later than the table said`);
+      this.#host.stopRun(misplaced, `#${index} really begins ${(trueStart - wasAt).toFixed(3)}s later than the table said`);
     }
     this.#host.planEncodersSoon();
   }

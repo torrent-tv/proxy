@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Fix**: When a produced picture shows a cut boundary begins later than the table said, stop only the run of the other output that begins at that boundary instead of every live run of that output, so a second run positioned correctly near the viewer keeps producing.
+
 ## 2.107.59
 
 - **Fix**: Name MPEG-4 AVI FOURCCs from one codec table, so an FMP4, M4S2 or MP4S AVI is named `mpeg4` and its encoder placement is priced at the measured mpeg4 decoder family instead of H.264.

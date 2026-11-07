@@ -337,7 +337,7 @@ export function wireOutputs({
   parts.outputTimes = new OutputTimes({
     logger,
     runsOf: (...args) => parts.encodeRuns.runsOf(...args),
-    stopEncodeRun: (...args) => parts.encodeRuns.stopEncodeRun(...args),
+    stopRun: (...args) => parts.encodeRuns.stopRun(...args),
     planEncodersSoon: (...args) => parts.encodeRuns.planEncodersSoon(...args),
     get outputs() { return parts.outputs; },
     get segmentDurationSec() { return parts.segmentDurationSec; },

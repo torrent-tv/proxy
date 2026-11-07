@@ -228,7 +228,7 @@ continue to work without sending `connectionId`.
 
 The proxy does not currently return a numeric estimate for time to the first
 advancing audio-ready frame. File, statistics and progress responses carry no
-`waitEstimate`; the browser clears any earlier value. Completed waits and their
+`waitEstimate`; the forecast carries no wait estimate. Completed waits and their
 stage measurements remain evaluation data only and do not produce a forecast.
 
 `playbackReadiness.delaySeconds` is a different quantity: the current

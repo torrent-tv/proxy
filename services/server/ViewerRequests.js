@@ -1157,7 +1157,6 @@ export class ViewerRequests {
           firstRequiredStages: forecast.firstRequiredStages
         } });
     }
-    forecast.waitEstimate = null;
     const unavailableInput = forecast.unavailableSource;
     const previousInputState = measurement.forecastInputState ?? null;
     const currentInputState = forecastInputState(tracks, unavailableInput);

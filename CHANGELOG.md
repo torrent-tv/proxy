@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Chore**: Stop setting the retired `waitEstimate` field on the viewer forecast; the browser no longer reads it and the contract now says the forecast carries no wait estimate.
+
 ## 2.107.60
 
 - **Fix**: When a produced picture shows a cut boundary begins later than the table said, stop only the run of the other output that begins at that boundary instead of every live run of that output, so a second run positioned correctly near the viewer keeps producing.

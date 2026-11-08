@@ -1,4 +1,4 @@
-import { Bits } from "./h264-configuration.js";
+import { Bits, rbsp } from "./bitstream.js";
 
 /** HEVC SPS ordering limits are declared for every temporal sublayer (H.265 7.3.2.2). */
 export function hevcConfiguration(hvcc) {
@@ -29,27 +29,18 @@ export function hevcConfiguration(hvcc) {
 export function hevcSequence(nal) {
   if ((nal[0] & 128) || ((nal[0] >> 1) & 63) !== 33 || !(nal[1] & 7)) throw new Error("HEVC SPS NAL header is invalid.");
   if ((nal[0] & 1) || (nal[1] >> 3)) throw new Error("HEVC multilayer SPS requires layer-specific configuration.");
-  const bytes = [];
-  for (let at = 2, zeroes = 0; at < nal.length; at++) {
-    const byte = nal[at];
-    if (zeroes >= 2 && byte === 3) {
-      if (at + 1 >= nal.length || nal[at + 1] > 3) throw new Error("HEVC escape byte is invalid.");
-      zeroes = 0; continue;
-    }
-    bytes.push(byte); zeroes = byte === 0 ? zeroes + 1 : 0;
-  }
-  const bits = new Bits(Buffer.from(bytes), "HEVC");
+  const bits = new Bits(rbsp(nal, 2), "HEVC SPS");
   bits.uint(4);
   const layers = bits.uint(3);
   if (layers > 6) throw new Error("HEVC temporal sublayer count is invalid.");
   bits.uint(1);
-  skip(bits, 96);
+  bits.skip(96);
   const profiles = [], levels = [];
   for (let layer = 0; layer < layers; layer++) { profiles.push(bits.uint(1)); levels.push(bits.uint(1)); }
-  if (layers) skip(bits, (8 - layers) * 2);
+  if (layers) bits.skip((8 - layers) * 2);
   for (let layer = 0; layer < layers; layer++) {
-    if (profiles[layer]) skip(bits, 88);
-    if (levels[layer]) skip(bits, 8);
+    if (profiles[layer]) bits.skip(88);
+    if (levels[layer]) bits.skip(8);
   }
   const sequenceId = bits.ue(), chroma = bits.ue();
   if (sequenceId > 15 || chroma > 3) throw new Error("HEVC SPS identity or chroma format is invalid.");
@@ -75,8 +66,6 @@ export function hevcSequence(nal) {
   return { width, height, bitDepth: luma + 8, chromaBitDepth: chromaDepth + 8, chromaFormat: chroma, separateColourPlane: separate === 1, reorderDepth, orderBits,
     ...sequenceTiming(bits, orderBits) };
 }
-
-function skip(bits, count) { for (let left = count; left > 0; left -= 32) bits.uint(Math.min(32, left)); }
 
 function sequenceTiming(bits, orderBits) {
   for (let field = 0; field < 6; field++) bits.ue();
@@ -123,7 +112,7 @@ function sequenceTiming(bits, orderBits) {
   if (!bits.uint(1)) return {};
   if (bits.uint(1) && bits.uint(8) === 255) { bits.uint(16); bits.uint(16); }
   if (bits.uint(1)) bits.uint(1);
-  if (bits.uint(1)) { bits.uint(4); if (bits.uint(1)) skip(bits, 24); }
+  if (bits.uint(1)) { bits.uint(4); if (bits.uint(1)) bits.skip(24); }
   if (bits.uint(1)) { bits.ue(); bits.ue(); }
   bits.uint(1);
   const fieldSequence = bits.uint(1), frameFieldInfo = bits.uint(1);
@@ -140,15 +129,10 @@ function sequenceTiming(bits, orderBits) {
 /** Construct hvcC from complete in-band parameter sets without keeping picture bytes. */
 export function hevcConfigurationFromUnits(vps, sps, pps) {
   const facts = hevcSequence(sps);
-  const raw = [];
-  for (let at = 2, zeroes = 0; at < sps.length; at++) {
-    const byte = sps[at];
-    if (zeroes >= 2 && byte === 3) { zeroes = 0; continue; }
-    raw.push(byte); zeroes = byte === 0 ? zeroes + 1 : 0;
-  }
+  const raw = rbsp(sps, 2);
   const header = Buffer.alloc(23);
   header[0] = 1;
-  Buffer.from(raw).copy(header, 1, 1, 13);
+  raw.copy(header, 1, 1, 13);
   header[13] = 0xf0; header[15] = 0xfc;
   header[16] = 0xfc | facts.chromaFormat;
   header[17] = 0xf8 | (facts.bitDepth - 8); header[18] = 0xf8 | (facts.chromaBitDepth - 8);

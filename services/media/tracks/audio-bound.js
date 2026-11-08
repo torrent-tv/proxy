@@ -32,13 +32,7 @@
  * PURE: plain values in, plain values out. No container, no torrent.
  */
 
-/** ISO/IEC 14496-3 Table 1.18: samplingFrequencyIndex to Hz. 0xF is explicit. */
-const AAC_SAMPLING_FREQUENCIES = Object.freeze([
-  96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350
-]);
-
-/** ISO/IEC 14496-3 Table 1.19: channelConfiguration to channels; 0 is a PCE. */
-const AAC_CHANNELS = Object.freeze([null, 1, 2, 3, 4, 5, 6, 8]);
+import { parseAudioSpecificConfig as readAudioSpecificConfig } from "../container/bitstream.js";
 
 /** The AAC-LC object type, and the one frame length the bound is stated for. */
 const AAC_LC = 2;
@@ -63,29 +57,6 @@ const AC3_SAMPLES_PER_FRAME = 1536;
  */
 
 /**
- * A minimal MSB-first bit reader over a buffer.
- *
- * @param {Buffer} bytes
- */
-function bitReader(bytes) {
-  let position = 0;
-  return {
-    read(count) {
-      let value = 0;
-      for (let i = 0; i < count; i += 1) {
-        const byte = bytes[position >> 3];
-        if (byte === undefined) {
-          throw new RangeError("AudioSpecificConfig ended early");
-        }
-        value = (value * 2) + ((byte >> (7 - (position & 7))) & 1);
-        position += 1;
-      }
-      return value;
-    }
-  };
-}
-
-/**
  * The fields of an AudioSpecificConfig the bound is computed from (ISO/IEC
  * 14496-3 §1.6.2.1 and the GASpecificConfig that follows it for AAC-LC).
  *
@@ -94,30 +65,17 @@ function bitReader(bytes) {
  *   Null when the bytes are not a readable config.
  */
 export function parseAudioSpecificConfig(bytes) {
-  if (!Buffer.isBuffer(bytes) || bytes.length < 2) {
+  const config = readAudioSpecificConfig(bytes);
+  if (!config) {
     return null;
   }
-  try {
-    const bits = bitReader(bytes);
-    let objectType = bits.read(5);
-    if (objectType === 31) {
-      objectType = 32 + bits.read(6);
-    }
-    const frequencyIndex = bits.read(4);
-    const sampleRate = frequencyIndex === 0xf
-      ? bits.read(24)
-      : (AAC_SAMPLING_FREQUENCIES[frequencyIndex] ?? null);
-    const channelConfiguration = bits.read(4);
-    const channels = AAC_CHANNELS[channelConfiguration] ?? null;
-    // GASpecificConfig begins with frameLengthFlag for the object types that
-    // carry one; for any other the frame length is not read here.
-    const frameLength = objectType === AAC_LC
-      ? (bits.read(1) === 1 ? 960 : AAC_LC_FRAME_LENGTH)
-      : null;
-    return { objectType, sampleRate: sampleRate > 0 ? sampleRate : null, channels, frameLength };
-  } catch {
-    return null;
-  }
+  return {
+    objectType: config.objectType,
+    sampleRate: config.sampleRate > 0 ? config.sampleRate : null,
+    channels: config.channels,
+    // Only the AAC-LC bound is stated for a frame length, so only AAC-LC reports one.
+    frameLength: config.objectType === AAC_LC ? config.frameLength : null
+  };
 }
 
 /**

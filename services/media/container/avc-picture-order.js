@@ -1,4 +1,4 @@
-import { Bits, unescapeNal } from "./h264-configuration.js";
+import { Bits, rbsp } from "./bitstream.js";
 
 /** AVC frame picture-order counts, retaining reference and frame-number wraps. */
 export class AvcPictureOrder {
@@ -15,7 +15,7 @@ export class AvcPictureOrder {
         (params.type === 1 && !Array.isArray(params.referenceOffsets))) {
       throw new Error("AVC missing timestamps require supported frame picture-order declarations.");
     }
-    const bits = new Bits(unescapeNal(nal));
+    const bits = new Bits(rbsp(nal, 1), "AVC slice header");
     bits.ue(); bits.ue(); bits.ue();
     const frameNumber = bits.uint(params.frameNumberBits);
     const idr = (nal[0] & 31) === 5;

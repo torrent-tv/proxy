@@ -6,6 +6,8 @@ import { LatmFrames } from "./latm-frame.js";
 import { ac3Frame } from "./ac3-frame.js";
 import { dtsFrame } from "./dts-frame.js";
 import { MpegAudioReservoir } from "./mpeg-audio-reservoir.js";
+import { AAC_SAMPLE_RATES } from "./bitstream.js";
+import { ElementaryAddresses } from "./ElementaryAddresses.js";
 
 /** Preserve elementary-frame addresses while transport packets are discarded. */
 export class MpegElementaryIndex {
@@ -23,7 +25,7 @@ export class MpegElementaryIndex {
         this.index.refuse(track.trackNumber, `elementary-index-unavailable:${track.codecId || "unknown"}`);
         continue;
       }
-      this.#states.set(track.trackNumber, { track, offset: 0, mappings: [], stamps: [], carry: Buffer.alloc(0),
+      this.#states.set(track.trackNumber, { track, offset: 0, addresses: new ElementaryAddresses("MPEG elementary bytes have missing addresses."), carry: Buffer.alloc(0),
         latm: track.codecId === "aac_latm" ? new LatmFrames() : null,
         nalIndex: track.codecId === "h264" ? new H264ElementaryIndex(track, this.index)
           : track.codecId === "hevc" ? new HevcElementaryIndex(track, this.index) : null,
@@ -39,7 +41,7 @@ export class MpegElementaryIndex {
     const state = this.#states.get(id);
     if (!state || bytes.length === 0) return;
     const position = state.offset;
-    if (!state.nalIndex) state.mappings.push({ from: position, to: position + bytes.length, sourceStart });
+    if (!state.nalIndex) state.addresses.map(position, bytes.length, sourceStart);
     let normalized = null;
     if (pts !== null) {
       const cycle = 2 ** 33 / 90000;
@@ -56,7 +58,7 @@ export class MpegElementaryIndex {
       if (presentation < state.lastTimestamp - cycle / 2) presentation += cycle;
       else if (presentation > state.lastTimestamp + cycle / 2) presentation -= cycle;
       normalized = { position, pts: presentation, dts: state.lastTimestamp };
-      if (!state.nalIndex) state.stamps.push(normalized);
+      if (!state.nalIndex) state.addresses.stamp(position, normalized.pts, normalized.dts);
     }
     state.offset += bytes.length;
     if (state.nalIndex) state.nalIndex.push(bytes, sourceStart, normalized);
@@ -109,7 +111,7 @@ export class MpegElementaryIndex {
       if (type < 1 || type > 3) throw new Error("MPEG picture type is invalid.");
       const start = state.pendingStart ?? offset;
       if (state.picture) this.#closePicture(state, start);
-      const stamp = stampAt(state, offset);
+      const stamp = state.addresses.stampAt(offset);
       if (state.requiresStamp && !stamp) throw new Error("MPEG repeated frames require an explicit following timestamp.");
       state.requiresStamp = false;
       // `temporal_reference` counts the pictures of one group of pictures in
@@ -142,9 +144,9 @@ export class MpegElementaryIndex {
   #closePicture(state, end) {
     const { start, ...packet } = state.picture;
     if (!(end > start)) throw new Error("MPEG picture has no bytes.");
-    this.index.append(state.track.trackNumber, { ...packet, ranges: addresses(state, start, end) });
+    this.index.append(state.track.trackNumber, { ...packet, ranges: state.addresses.ranges(start, end) });
     state.shownUntil = Math.max(state.shownUntil ?? -Infinity, packet.pts + packet.duration);
-    state.mappings = state.mappings.filter(mapping => mapping.to > end);
+    state.addresses.release(end);
   }
 
   #audio(state, chunk) {
@@ -154,7 +156,7 @@ export class MpegElementaryIndex {
         : ["ac3", "eac3"].includes(state.track.codecId) ? ac3Frame(state.audioBytes)
           : state.track.codecId === "dts" ? dtsFrame(state.audioBytes) : mpegAudioFrame(state.audioBytes);
       if (state.audioBytes.length < frame.size) break;
-      const stamp = stampAt(state, state.audioStart);
+      const stamp = state.addresses.stampAt(state.audioStart);
       if (stamp) state.audioPts = stamp.pts;
       if (state.audioPts === null) throw new Error("MPEG audio frame has no presentation timestamp.");
       if (frame.codecPrivateB64) {
@@ -166,39 +168,24 @@ export class MpegElementaryIndex {
       this.index.append(state.track.trackNumber, { pts: state.audioPts, dts: state.audioPts,
         ...(reservoir ? { decodeFromIndex: reservoir.decodeFromIndex } : {}),
         ...(frame.bitOffset === undefined ? {} : { bitOffset: frame.bitOffset, bitLength: frame.bitLength }),
-        duration: frame.duration, keyframe: true, ranges: addresses(state, state.audioStart + (frame.headerBytes ?? 0), state.audioStart + frame.size) });
+        duration: frame.duration, keyframe: true, ranges: state.addresses.ranges(state.audioStart + (frame.headerBytes ?? 0), state.audioStart + frame.size) });
       reservoir?.commit();
       state.packetCount++;
       state.audioPts += frame.duration;
       this.index.coverThrough(state.track.trackNumber, Math.max(0, state.audioPts));
       state.audioStart += frame.size;
       state.audioBytes = state.audioBytes.subarray(frame.size);
-      state.mappings = state.mappings.filter(mapping => mapping.to > state.audioStart);
+      state.addresses.release(state.audioStart);
     }
     state.audioBytes = Buffer.from(state.audioBytes);
   }
-}
-
-function stampAt(state, position) {
-  let latest = null;
-  while (state.stamps[0]?.position <= position) latest = state.stamps.shift();
-  return latest;
-}
-
-function addresses(state, from, to) {
-  const ranges = state.mappings.filter(mapping => mapping.from < to && mapping.to > from).map(mapping => [
-    mapping.sourceStart + Math.max(from, mapping.from) - mapping.from,
-    mapping.sourceStart + Math.min(to, mapping.to) - mapping.from - 1
-  ]);
-  if (ranges.reduce((sum, [a, b]) => sum + b - a + 1, 0) !== to - from) throw new Error("MPEG elementary bytes have missing addresses.");
-  return ranges;
 }
 
 function adtsFrame(bytes) {
   if (bytes[0] !== 0xff || (bytes[1] & 0xf6) !== 0xf0) throw new Error("AAC ADTS header is invalid.");
   const objectType = (bytes[2] >> 6) + 1;
   const frequencyIndex = (bytes[2] >> 2) & 15;
-  const sampleRate = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350][frequencyIndex];
+  const sampleRate = AAC_SAMPLE_RATES[frequencyIndex];
   const channelConfiguration = ((bytes[2] & 1) << 2) | (bytes[3] >> 6);
   if (!sampleRate || !channelConfiguration) throw new Error("AAC ADTS requires a declared sample rate and channel configuration.");
   if (bytes[6] & 3) throw new Error("AAC ADTS multiple raw blocks require block-specific addresses.");

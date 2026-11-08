@@ -387,13 +387,16 @@ types `feat fix perf refactor docs test build ci chore style revert`); CI refuse
 a pushed commit that does not. Enable the local check once per clone:
 `git config core.hooksPath .githooks`. Rules: `torrent-tv/.github` CONTRIBUTING.md.
 
-## Changelog
+## Changesets
 
-Every behavioural change must be recorded in `CHANGELOG.md` — add a bullet
-under `## Unreleased` at the top (create the heading if it is missing),
-following the existing `- **New**/**Fix**/**Chore**:` format. Never write a
-version heading and never edit the `package.json` version: the release job
-does both. CI refuses a releasable push without an `## Unreleased` entry.
+Every pull request adds `.changeset/<branch with / as ->.md` (lower-case file
+name) holding one or two bullets for a viewer, each `- **New**: …`,
+`- **Fix**: …` or `- **Chore**: …`. Continuation lines are indented by two
+spaces; there are no blank lines. Nothing else may live in `.changeset/` (no
+README). A changeset is never edited after merge and never deleted: the release
+notes are the changesets added since the last tag. Never edit the
+`package.json` version (`0.0.0-development` in git). CI (`check-changesets`)
+refuses a pull request without one. `CHANGELOG.md` is frozen at 2.107.64.
 
 ## Release
 
@@ -404,22 +407,25 @@ torrent). Then, when the commits since the last `v*` tag ask for it (`feat`
 → minor; `fix`/`perf`/`revert` → patch; anything else → none), the release
 job in the `production` environment:
 
-1. writes the version into `package.json`/`package-lock.json` and renames
-   `## Unreleased` to it, commits `chore(release): <version>` and tags it;
+1. plans the version from the newest `v*` tag and the commits after it, and
+   writes it into `package.json`/`package-lock.json` of the workspace only;
 2. publishes `@torrent-tv/proxy` to npm with provenance, through npm trusted
-   publishing (the workflow's OIDC token; no npm token is stored);
-3. pushes the tag and the commit and creates the GitHub release;
+   publishing (the workflow's OIDC token; no npm token is stored); skipped
+   when npm already holds that version from this commit;
+3. tags the merged commit and creates the GitHub release from the changesets
+   added since the last tag;
 4. waits until npm serves the version — npm accepts a publication before it
    serves it, 6.5 minutes for 2.89.8 — then pushes
    `fix(proxy)`/`feat(proxy): install proxy <version>` to
    `torrent-tv/ha-addon` (`PROXY_VERSION` and the add-on changelog), whose own
    workflow builds the add-on image and releases the add-on.
 
-So the order proxy → add-on is kept by construction. A release can also be
-started by hand from the Actions tab with an explicit `patch` or `minor` step;
-it still needs an entry under `## Unreleased`. Re-running a failed release job
-is safe: once the tag exists, publication is skipped and only what is missing
-is done. Updating the add-on on the Home Assistant host is still done there.
+Nothing is committed to `main`. The order proxy → add-on is kept by
+construction. A release can also be started by hand from the Actions tab with
+`patch` or `minor`; that is the least step (a `feat` still releases minor) and
+it still needs a changeset since the last tag. Re-running a failed release job
+is safe: a tag holding the commit skips publication and only what is missing is
+done. Updating the add-on on the Home Assistant host is still done there.
 
 `.github/workflows/dependencies.yml` updates dependencies daily within the
 ranges, runs the same checks and pushes to `main`.

@@ -70,4 +70,5 @@ jobs:
           # npm users install the proxy from the ranges in package.json; the lock file
           # is not published, so an update of the lock file alone releases nothing.
           ships-lockfile: "false"
+          changeset: "true"
           extra-check: node scripts/check-tests-start-no-torrent.mjs

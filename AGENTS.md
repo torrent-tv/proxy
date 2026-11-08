@@ -2,7 +2,8 @@
 
 Downloads a torrent and streams the chosen file to the browser, transcoding to
 HLS only when needed. See the parent `../AGENTS.md` for the overall architecture
-and release process.
+and [`torrent-tv/.github/CONTRIBUTING.md`](https://github.com/torrent-tv/.github/blob/main/CONTRIBUTING.md)
+for shared commit, version and release rules.
 
 ## Deployment-agnostic — important
 
@@ -72,7 +73,7 @@ are recorded in `docs/browser-proxy-contract.md`.
     Inside it, the DOMAIN is `media/container/` and `media/tracks/`: they import
     nothing but each other, this proxy's own logger included. The application
     files sit flat beside them — `ContainerOrchestrator`, `KeyframeTables`,
-    `SubtitleOrchestrator`, `playback-planner.js`, `keyframe-probe.js`,
+    `SubtitleOrchestrator`, `playback-planner.js`, `probe-packets.js`,
     `ffmpeg-banner.js`, `audio-inventory.js` — and may reach their own domain and
     the logger and nothing else. What a torrent CONTAINS, which clusters may be
     read, where a viewer stands, what an encoder costs: all handed in. Both
@@ -133,8 +134,8 @@ are recorded in `docs/browser-proxy-contract.md`.
     is never recorded as an answer; it is read again when pieces of the file
     arrive (`readAgainIfUnanswered`). It is the ONLY store of the keyframe
     answer; the container keeps the Cues reading the times are taken from. The second reader is the packet probe in
-    `media/keyframe-probe.js`, which decodes rather than parsing; the fuller of the
-    two answers is the one that stands (`media/keyframe-probe.js`).
+    `media/probe-packets.js`, which scans packet records through ffprobe rather than parsing a container index; the fuller of the
+    two answers is the one that stands (`media/probe-packets.js`).
   - `server/controllers/` — interface layer: `PlaybackController` / `SubtitleController`
     (thin adapters over orchestrators; routes depend on controllers, not services).
     `routes/*` are now thin HTTP translators. A controller reaches every layer
@@ -213,8 +214,8 @@ are recorded in `docs/browser-proxy-contract.md`.
     Read both before concluding anything from a half-session.
   - `media/playback-planner.js` — single ffmpeg probe returns audioCodec,
     videoCodec, container, durationSeconds. `mode` is advisory; the browser
-    decides. `media/keyframe-probe.js` beside it is the OTHER reading of the same
-    file, by decoding rather than by parsing, for containers that state no index.
+    decides. `media/probe-packets.js` beside it is the OTHER reading of the same
+    file, by scanning packet records through ffprobe, for containers that state no index.
   - `server/` — what a request does, one operation at a time, and nothing
     that lives longer than the operation: `ViewerRequests` (open an output of a
     file and be placed on it, state a position, report progress),
@@ -380,52 +381,22 @@ are split by that one property, in two folders:
    check yet; the command that runs it comes with the first one and refuses to
    start outside the add-on (`SUPERVISOR_TOKEN`). See its `README.md`.
 
-## Commits
-
-Every commit header follows Conventional Commits (`<type>(<scope>)!: <subject>`,
-types `feat fix perf refactor docs test build ci chore style revert`); CI refuses
-a pushed commit that does not. Enable the local check once per clone:
-`git config core.hooksPath .githooks`. Rules: `torrent-tv/.github` CONTRIBUTING.md.
-
-## Changesets
+## Repository changesets and release path
 
 Every pull request adds `.changeset/<branch with / as ->.md` (lower-case file
 name) holding one or two bullets for a viewer, each `- **New**: …`,
 `- **Fix**: …` or `- **Chore**: …`. Continuation lines are indented by two
 spaces; there are no blank lines. Nothing else may live in `.changeset/` (no
 README). A changeset is never edited after merge and never deleted: the release
-notes are the changesets added since the last tag. Never edit the
-`package.json` version (`0.0.0-development` in git). CI (`check-changesets`)
+notes are the changesets added since the last tag. CI (`check-changesets`)
 refuses a pull request without one. `CHANGELOG.md` is frozen at 2.107.64.
 
-## Release
-
-GitHub Actions releases; nothing is published from a workstation. A push to
-`main` runs `.github/workflows/main.yml`: lint, the tests, and
-`scripts/check-tests-start-no-torrent.mjs` (no check may start a real
-torrent). Then, when the commits since the last `v*` tag ask for it (`feat`
-→ minor; `fix`/`perf`/`revert` → patch; anything else → none), the release
-job in the `production` environment:
-
-1. plans the version from the newest `v*` tag and the commits after it, and
-   writes it into `package.json`/`package-lock.json` of the workspace only;
-2. publishes `@torrent-tv/proxy` to npm with provenance, through npm trusted
-   publishing (the workflow's OIDC token; no npm token is stored); skipped
-   when npm already holds that version from this commit;
-3. tags the merged commit and creates the GitHub release from the changesets
-   added since the last tag;
-4. waits until npm serves the version — npm accepts a publication before it
-   serves it, 6.5 minutes for 2.89.8 — then pushes
-   `fix(proxy)`/`feat(proxy): install proxy <version>` to
-   `torrent-tv/ha-addon` (`PROXY_VERSION` and the add-on changelog), whose own
-   workflow builds the add-on image and releases the add-on.
-
-Nothing is committed to `main`. The order proxy → add-on is kept by
-construction. A release can also be started by hand from the Actions tab with
-`patch` or `minor`; that is the least step (a `feat` still releases minor) and
-it still needs a changeset since the last tag. Re-running a failed release job
-is safe: a tag holding the commit skips publication and only what is missing is
-done. Updating the add-on on the Home Assistant host is still done there.
+`.github/workflows/main.yml` runs lint, tests and
+`scripts/check-tests-start-no-torrent.mjs`, then publishes
+`@torrent-tv/proxy` through npm trusted publishing. After npm serves that exact
+version, the release updates `torrent-tv/ha-addon`'s pinned `PROXY_VERSION` and
+changelog. Its workflow builds and releases the add-on; each Home Assistant
+host still updates its installed add-on separately.
 
 `.github/workflows/dependencies.yml` updates dependencies daily within the
 ranges, runs the same checks and pushes to `main`.

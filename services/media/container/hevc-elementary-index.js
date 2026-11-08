@@ -1,6 +1,7 @@
 import { hevcConfigurationFromUnits } from "./hevc-configuration.js";
 import { HevcPictureOrder } from "./hevc-picture-order.js";
 import { CadencedPictureOrder } from "./CadencedPictureOrder.js";
+import { ElementaryAddresses } from "./ElementaryAddresses.js";
 
 /** HEVC access units keep exact source addresses and the PES presentation/decode clocks. */
 export class HevcElementaryIndex {
@@ -9,8 +10,7 @@ export class HevcElementaryIndex {
   #position = 0;
   #zeroes = 0;
   #nal = null;
-  #mappings = [];
-  #stamps = [];
+  #addresses = new ElementaryAddresses("HEVC access-unit addresses are incomplete.");
   #sets = new Map();
   #frame = null;
   #prefix = 0;
@@ -26,8 +26,8 @@ export class HevcElementaryIndex {
 
   push(bytes, sourceStart, stamp) {
     const from = this.#position;
-    this.#mappings.push({ from, to: from + bytes.length, sourceStart });
-    if (stamp?.pts !== null && stamp?.pts !== undefined) this.#stamps.push({ position: from, pts: stamp.pts, dts: stamp.dts ?? stamp.pts });
+    this.#addresses.map(from, bytes.length, sourceStart);
+    if (stamp?.pts !== null && stamp?.pts !== undefined) this.#addresses.stamp(from, stamp.pts, stamp.dts ?? stamp.pts);
     for (const byte of bytes) {
       if (byte === 1 && this.#zeroes >= 2) {
         const start = this.#position - this.#zeroes;
@@ -84,8 +84,7 @@ export class HevcElementaryIndex {
     }
     if (!this.#track.codecPrivateB64) throw new Error("HEVC picture precedes its decoder configuration.");
     const start = this.#prefix ?? nal.start;
-    let stamp = null;
-    while (this.#stamps[0]?.position <= nal.start) stamp = this.#stamps.shift();
+    let stamp = this.#addresses.stampAt(nal.start);
     let pictureOrder = null;
     try { pictureOrder = this.#order?.read(bytes); }
     catch (error) { if (!stamp) throw error; }
@@ -115,10 +114,7 @@ export class HevcElementaryIndex {
 
   #close(end, duration) {
     const { start, pictureOrder, orderReset, ...timing } = this.#frame;
-    const ranges = this.#mappings.filter(range => range.from < end && range.to > start).map(range => [
-      range.sourceStart + Math.max(start, range.from) - range.from,
-      range.sourceStart + Math.min(end, range.to) - range.from - 1]);
-    if (ranges.reduce((sum, [a, b]) => sum + b - a + 1, 0) !== end - start) throw new Error("HEVC access-unit addresses are incomplete.");
+    const ranges = this.#addresses.ranges(start, end);
     if (this.#cadenced) this.#cadenced.push({ ...timing, duration, ranges }, pictureOrder, orderReset);
     else this.#index.append(this.#track.trackNumber, { ...timing, duration, ranges });
     if (!this.#cadenced) this.#recent.push(timing.pts);
@@ -127,6 +123,6 @@ export class HevcElementaryIndex {
       this.#recent.splice(this.#recent.indexOf(earliest), 1);
       this.#index.coverThrough(this.#track.trackNumber, Math.max(0, earliest + duration));
     }
-    this.#mappings = this.#mappings.filter(range => range.to > end);
+    this.#addresses.release(end);
   }
 }

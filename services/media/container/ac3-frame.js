@@ -1,14 +1,13 @@
+import { Bits } from "./bitstream.js";
+
 /** ATSC A/52 sync information gives exact frame length and sample count. */
 export function ac3Frame(bytes) {
   if (bytes.length < 7 || bytes[0] !== 0x0b || bytes[1] !== 0x77) throw new Error("AC-3 frame synchronization is invalid.");
   const bitstreamId = bytes[5] >> 3;
   if (bitstreamId > 16) throw new Error("AC-3 bitstream version is invalid.");
-  let position = 16;
-  const read = count => {
-    let value = 0;
-    for (let bit = 0; bit < count; bit++, position++) value = (value << 1) | ((bytes[position >> 3] >> (7 - (position & 7))) & 1);
-    return value;
-  };
+  const bits = new Bits(bytes, "AC-3 frame header");
+  bits.skip(16);
+  const read = count => bits.uint(count);
   let sampleRate, size, channelMode, lfe, samples, codecId;
   const frequencies = [48000, 44100, 32000];
   if (bitstreamId <= 10) {

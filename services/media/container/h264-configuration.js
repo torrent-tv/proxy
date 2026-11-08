@@ -1,3 +1,5 @@
+import { Bits, rbsp } from "./bitstream.js";
+
 /** H.264 SPS facts required to bound decode reordering and describe frames. */
 export function h264Configuration(avcc) {
   if (!Buffer.isBuffer(avcc) || avcc.length < 7 || avcc[0] !== 1) throw new Error("AVC decoder configuration is invalid.");
@@ -21,7 +23,7 @@ export function h264Configuration(avcc) {
 
 function readSps(nal, includeOrder = false) {
   if ((nal[0] & 31) !== 7 || nal[0] & 128) throw new Error("AVC configuration entry is not an SPS.");
-  const bits = new Bits(unescapeNal(nal));
+  const bits = new Bits(rbsp(nal, 1), "AVC SPS");
   const profile = bits.uint(8), constraints = bits.uint(8), level = bits.uint(8);
   bits.ue();
   let chroma = 1, separate = 0, depth = 8;
@@ -117,25 +119,9 @@ function readSps(nal, includeOrder = false) {
 
 export function avcOrderParameters(sps, pps) {
   const facts = readSps(sps, true);
-  const bits = new Bits(unescapeNal(pps));
+  const bits = new Bits(rbsp(pps, 1), "AVC PPS");
   bits.ue(); bits.ue(); bits.uint(1);
   return { ...facts.pictureOrder, bottomFieldOrderPresent: bits.uint(1) === 1 };
-}
-
-/**
- * Remove every emulation prevention byte: a 0x03 after two zero bytes, whatever follows it. H.264 §7.4.1
- * forbids 0x000003 before a byte above 0x03, but encoders write it (LostFilm's LostCoder) and decoders drop
- * it (ffmpeg's ff_h2645_extract_rbsp), so refusing it refuses files every player plays.
- */
-export function unescapeNal(nal) {
-  const bytes = [];
-  for (let at = 1, zeroes = 0; at < nal.length; at++) {
-    const byte = nal[at];
-    if (zeroes >= 2 && byte === 3) { zeroes = 0; continue; }
-    bytes.push(byte);
-    zeroes = byte === 0 ? zeroes + 1 : 0;
-  }
-  return Buffer.from(bytes);
 }
 
 /** Build the decoder declaration from the complete in-band SPS and PPS units. */
@@ -157,20 +143,4 @@ function hrd(bits) {
   const removal = bits.uint(5) + 1, output = bits.uint(5) + 1;
   bits.uint(5);
   return removal + output;
-}
-
-export class Bits {
-  constructor(bytes, label = "AVC") { this.bytes = bytes; this.at = 0; this.label = label; }
-  uint(count) {
-    if (count < 0 || count > 32 || this.at + count > this.bytes.length * 8) throw new Error(`${this.label} SPS bits are truncated.`);
-    let value = 0;
-    for (let index = 0; index < count; index++, this.at++) value = value * 2 + ((this.bytes[this.at >> 3] >> (7 - (this.at & 7))) & 1);
-    return value;
-  }
-  ue() {
-    let zeroes = 0;
-    while (!this.uint(1)) if (++zeroes > 31) throw new Error(`${this.label} Exp-Golomb value is invalid.`);
-    return 2 ** zeroes - 1 + this.uint(zeroes);
-  }
-  se() { const code = this.ue(); return code & 1 ? (code + 1) / 2 : -code / 2; }
 }

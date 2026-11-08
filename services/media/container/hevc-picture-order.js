@@ -1,4 +1,4 @@
-import { Bits } from "./h264-configuration.js";
+import { Bits, rbsp } from "./bitstream.js";
 
 /** HEVC first-slice picture order, using the previous reference TemporalId 0 picture. */
 export class HevcPictureOrder {
@@ -14,7 +14,7 @@ export class HevcPictureOrder {
       throw new Error("HEVC picture-order declarations are invalid.");
     }
     this.#sequence = sequence;
-    const bits = new Bits(rbsp(pps), "HEVC");
+    const bits = new Bits(rbsp(pps, 2), "HEVC SPS");
     const id = bits.ue(), sequenceId = bits.ue();
     if (id > 63 || sequenceId > 15) throw new Error("HEVC PPS identity is invalid.");
     const dependentSlices = bits.uint(1), outputFlag = bits.uint(1), extraBits = bits.uint(3);
@@ -24,7 +24,7 @@ export class HevcPictureOrder {
   read(nal) {
     const type = (nal[0] >> 1) & 63, temporalId = (nal[1] & 7) - 1;
     if (type > 31 || temporalId < 0 || (nal[0] & 129) || (nal[1] >> 3)) throw new Error("HEVC slice identity is invalid.");
-    const bits = new Bits(rbsp(nal), "HEVC");
+    const bits = new Bits(rbsp(nal, 2), "HEVC SPS");
     if (!bits.uint(1)) throw new Error("HEVC picture order requires its first slice.");
     const irap = type >= 16 && type <= 23;
     if (irap) bits.uint(1);
@@ -48,19 +48,4 @@ export class HevcPictureOrder {
     this.#first = false;
     return { count: msb + lsb, reset };
   }
-}
-
-function rbsp(nal) {
-  const bytes = [];
-  for (let at = 2, zeroes = 0; at < nal.length; at++) {
-    const byte = nal[at];
-    if (zeroes >= 2 && byte === 3) {
-      if (at + 1 >= nal.length || nal[at + 1] > 3) throw new Error("HEVC escape byte is invalid.");
-      zeroes = 0;
-      continue;
-    }
-    bytes.push(byte);
-    zeroes = byte === 0 ? zeroes + 1 : 0;
-  }
-  return Buffer.from(bytes);
 }

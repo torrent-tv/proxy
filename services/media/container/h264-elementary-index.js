@@ -1,6 +1,8 @@
 import { avcConfigurationFromUnits, avcOrderParameters } from "./h264-configuration.js";
 import { AvcPictureOrder } from "./avc-picture-order.js";
 import { CadencedPictureOrder } from "./CadencedPictureOrder.js";
+import { Bits, EmulationPrevention, rbsp } from "./bitstream.js";
+import { ElementaryAddresses } from "./ElementaryAddresses.js";
 
 /** Incremental AVC access units, retaining addresses rather than frame payloads. */
 export class H264ElementaryIndex {
@@ -9,8 +11,7 @@ export class H264ElementaryIndex {
   #position = 0;
   #zeroes = 0;
   #nal = null;
-  #mappings = [];
-  #stamps = [];
+  #addresses = new ElementaryAddresses("AVC access-unit addresses are incomplete.");
   #sets = new Map();
   #frame = null;
   #prefix = 0;
@@ -28,8 +29,8 @@ export class H264ElementaryIndex {
 
   push(bytes, sourceStart, stamp) {
     const from = this.#position;
-    this.#mappings.push({ from, to: from + bytes.length, sourceStart });
-    if (stamp?.pts !== null && stamp?.pts !== undefined) this.#stamps.push({ position: from, pts: stamp.pts, dts: stamp.dts ?? stamp.pts });
+    this.#addresses.map(from, bytes.length, sourceStart);
+    if (stamp?.pts !== null && stamp?.pts !== undefined) this.#addresses.stamp(from, stamp.pts, stamp.dts ?? stamp.pts);
     for (const byte of bytes) {
       if (byte === 1 && this.#zeroes >= 2) {
         const start = this.#position - this.#zeroes;
@@ -80,7 +81,7 @@ export class H264ElementaryIndex {
     const bytes = Buffer.from(nal.bytes.slice(0, size));
     if (nal.sei) {
       const timing = nal.sei.finish();
-      if (timing && this.#track.picStructPresent) this.#picStruct = readPicStruct(timing, this.#track.seiDelayBits ?? 0);
+      if (timing && this.#track.picStructPresent) this.#picStruct = pictureStructure(timing, this.#track.seiDelayBits ?? 0);
     }
     if ([7, 8].includes(nal.type)) {
       const previous = this.#sets.get(nal.type);
@@ -100,15 +101,14 @@ export class H264ElementaryIndex {
       return;
     }
     if (![1, 5].includes(nal.type)) return;
-    const firstMacroblock = firstUe(bytes.subarray(1));
+    const firstMacroblock = firstMacroblockOf(bytes);
     if (this.#frame && firstMacroblock !== 0) {
       this.#frame.keyframe ||= nal.type === 5;
       return;
     }
     if (!this.#track.codecPrivateB64) throw new Error("AVC picture precedes its decoder configuration.");
     const start = this.#prefix ?? nal.start;
-    let stamp = null;
-    while (this.#stamps[0]?.position <= nal.start) stamp = this.#stamps.shift();
+    let stamp = this.#addresses.stampAt(nal.start);
     let pictureOrder = null;
     if (this.#track.frameOnly && !this.#track.picStructPresent) {
       try { pictureOrder = this.#order?.read(bytes); }
@@ -140,10 +140,7 @@ export class H264ElementaryIndex {
   #close(end, duration) {
     if (!(duration > 0)) throw new Error("AVC final access-unit duration is unavailable.");
     const { start, picStruct: _picStruct, pictureOrder, orderReset, ...timing } = this.#frame;
-    const ranges = this.#mappings.filter(range => range.from < end && range.to > start).map(range => [
-      range.sourceStart + Math.max(start, range.from) - range.from,
-      range.sourceStart + Math.min(end, range.to) - range.from - 1]);
-    if (ranges.reduce((sum, [a, b]) => sum + b - a + 1, 0) !== end - start) throw new Error("AVC access-unit addresses are incomplete.");
+    const ranges = this.#addresses.ranges(start, end);
     const packet = { ...timing, duration, ranges };
     if (this.#cadenced) this.#cadenced.push(packet, pictureOrder, orderReset);
     else this.#index.append(this.#track.trackNumber, packet);
@@ -154,7 +151,7 @@ export class H264ElementaryIndex {
       this.#recent.splice(this.#recent.indexOf(earliest), 1);
       this.#index.coverThrough(this.#track.trackNumber, Math.max(0, earliest + duration));
     }
-    this.#mappings = this.#mappings.filter(range => range.to > end);
+    this.#addresses.release(end);
   }
 }
 
@@ -166,18 +163,10 @@ class SeiTiming {
   #remaining = 0;
   #bytes = [];
   #timing = null;
-  #zeroes = 0;
-  #escaped = false;
+  #escapes = new EmulationPrevention();
 
   push(byte) {
-    if (this.#zeroes >= 2 && byte === 3) {
-      this.#zeroes = 0;
-      this.#escaped = true;
-      return;
-    }
-    if (this.#escaped && byte > 3) throw new Error("AVC SEI escape byte is invalid.");
-    this.#escaped = false;
-    this.#zeroes = byte === 0 ? this.#zeroes + 1 : 0;
+    if (!this.#escapes.keeps(byte)) return;
     if (this.#phase === "type") {
       this.#type += byte;
       if (byte !== 255) this.#phase = "size";
@@ -203,43 +192,27 @@ class SeiTiming {
   }
 
   finish() {
-    if (this.#escaped || !(this.#phase === "size" && this.#type === 128 && this.#size === 0)) {
+    if (!(this.#phase === "size" && this.#type === 128 && this.#size === 0)) {
       throw new Error("AVC SEI payload or trailing bits are incomplete.");
     }
     return this.#timing;
   }
 }
 
-function readPicStruct(bytes, offset) {
-  if (offset + 4 > bytes.length * 8) throw new Error("AVC SEI picture timing is truncated.");
-  let value = 0;
-  for (let at = offset; at < offset + 4; at++) value = value * 2 + ((bytes[at >> 3] >> (7 - (at & 7))) & 1);
+/** The pic_struct of a picture timing SEI payload, which follows `offset` bits of HRD delays. */
+function pictureStructure(payload, offset) {
+  if (offset + 4 > payload.length * 8) throw new Error("AVC SEI picture timing is truncated.");
+  const bits = new Bits(payload, "AVC SEI picture timing");
+  bits.skip(offset);
+  const value = bits.uint(4);
   if (value > 8) throw new Error("AVC SEI picture structure is reserved.");
   return value;
 }
 
-function firstUe(bytes) {
-  const raw = [];
-  for (let at = 0, zeroes = 0; at < bytes.length; at++) {
-    const byte = bytes[at];
-    if (zeroes >= 2 && byte === 3) {
-      if (at + 1 >= bytes.length || bytes[at + 1] > 3) throw new Error("AVC slice escape byte is invalid.");
-      zeroes = 0;
-      continue;
-    }
-    raw.push(byte);
-    zeroes = byte === 0 ? zeroes + 1 : 0;
+/** first_mb_in_slice of an AVC slice NAL unit. */
+function firstMacroblockOf(nal) {
+  try { return new Bits(rbsp(nal, 1), "AVC slice header").ue(); }
+  catch (error) {
+    throw new Error(error.message.includes("Exp-Golomb") ? "AVC first macroblock is invalid." : "AVC slice header is truncated.");
   }
-  bytes = Buffer.from(raw);
-  let position = 0, zeroes = 0;
-  const bit = () => {
-    if (position >= bytes.length * 8) throw new Error("AVC slice header is truncated.");
-    const value = (bytes[position >> 3] >> (7 - (position & 7))) & 1;
-    position++;
-    return value;
-  };
-  while (!bit()) if (++zeroes > 31) throw new Error("AVC first macroblock is invalid.");
-  let value = 0;
-  for (let at = 0; at < zeroes; at++) value = value * 2 + bit();
-  return 2 ** zeroes - 1 + value;
 }

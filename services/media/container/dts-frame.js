@@ -1,3 +1,5 @@
+import { Bits } from "./bitstream.js";
+
 /** DTS core headers declare physical frame length and PCM block duration. */
 export function dtsFrame(bytes) {
   if (bytes.length < 24) throw new Error("DTS core header is truncated.");
@@ -7,19 +9,9 @@ export function dtsFrame(bytes) {
   if (![0x7ffe8001, 0xfe7f0180, 0x1fffe800, 0xff1f00e8].includes(sync)) {
     throw new Error("DTS core synchronization is invalid.");
   }
-  let position = 32;
-  const bit = logical => {
-    const physical = packed ? Math.floor(logical / 14) * 16 + 2 + logical % 14 : logical;
-    let byte = physical >> 3;
-    if (little) byte ^= 1;
-    if (byte >= bytes.length) throw new Error("DTS core header is truncated.");
-    return (bytes[byte] >> (7 - (physical & 7))) & 1;
-  };
-  const read = count => {
-    let value = 0;
-    for (let at = 0; at < count; at++) value = value * 2 + bit(position++);
-    return value;
-  };
+  const bits = new Bits(logicalBytes(bytes.subarray(0, 24), packed, little), "DTS core header");
+  bits.skip(32);
+  const read = count => bits.uint(count);
   read(1);
   if (read(5) !== 31) throw new Error("DTS deficit sample count is invalid.");
   const crc = read(1);
@@ -48,4 +40,28 @@ export function dtsFrame(bytes) {
   if ([4, 7].includes(read(3))) throw new Error("DTS PCM resolution is invalid.");
   return { size: packed ? Math.ceil(logicalSize * 8 / 14) * 2 : logicalSize,
     sampleRate, channels: channels + Number(lfe > 0), duration: blocks * 32 / sampleRate, codecId: "dts" };
+}
+
+/**
+ * The header as a plain big-endian bit string: bytes swapped when the stream is little-endian, and the
+ * 14-bit words of a packed stream (two padding bits in each 16) joined end to end.
+ */
+function logicalBytes(bytes, packed, little) {
+  const ordered = Buffer.from(bytes.subarray(0, bytes.length - (bytes.length & 1)));
+  if (little) ordered.swap16();
+  if (!packed) return ordered;
+  const words = new Bits(ordered, "DTS core header");
+  const joined = [];
+  let held = 0, count = 0;
+  while (words.at < ordered.length * 8) {
+    words.skip(2);
+    held = held * 16384 + words.uint(14);
+    count += 14;
+    while (count >= 8) {
+      count -= 8;
+      joined.push(Math.floor(held / 2 ** count));
+      held %= 2 ** count;
+    }
+  }
+  return Buffer.from(joined);
 }

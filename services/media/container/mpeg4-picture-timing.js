@@ -1,4 +1,4 @@
-import { Bits } from "./h264-configuration.js";
+import { Bits } from "./bitstream.js";
 import { RetainedBytes } from "./RetainedBytes.js";
 
 /** MPEG-4 Visual VOL/VOP clocks, committed only after packet admission. */
@@ -46,7 +46,7 @@ export class Mpeg4PictureTiming {
       const code = bytes[at + 3];
       if (code >= 0x20 && code <= 0x2f) state.resolution = resolutionOf(bytes.subarray(at + 4));
       if (code === 0xb3) {
-        const bits = new Bits(bytes.subarray(at + 4), "MPEG-4 Visual");
+        const bits = new Bits(bytes.subarray(at + 4), "MPEG-4 Visual SPS");
         const hours = bits.uint(5), minutes = bits.uint(6);
         marker(bits);
         const seconds = bits.uint(6);
@@ -59,7 +59,7 @@ export class Mpeg4PictureTiming {
         throw new Error("Multiple MPEG-4 pictures require a packed-stream declaration.");
       }
       if (!(state.resolution > 0)) throw new Error("MPEG-4 picture precedes its VOL clock declaration.");
-      const bits = new Bits(bytes.subarray(at + 4), "MPEG-4 Visual");
+      const bits = new Bits(bytes.subarray(at + 4), "MPEG-4 Visual SPS");
       const type = bits.uint(2);
       let seconds = 0;
       while (bits.uint(1)) seconds++;
@@ -85,7 +85,7 @@ export class Mpeg4PictureTiming {
 }
 
 function resolutionOf(bytes) {
-  const bits = new Bits(bytes, "MPEG-4 Visual");
+  const bits = new Bits(bytes, "MPEG-4 Visual SPS");
   bits.uint(1); bits.uint(8);
   if (bits.uint(1)) { bits.uint(4); bits.uint(3); }
   if (bits.uint(4) === 15) { bits.uint(8); bits.uint(8); }

@@ -27,6 +27,7 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
@@ -115,33 +116,21 @@ async function sessionOnOneDirectory() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "produced-copy-"));
   // Its own store root — see `helpers/manager.js` for what sharing one cost.
   const { manager } = managerWithOwnStore();
-  const session = {
+  const spec = outputSpec({ transcodeVideo: false });
+  const session = outputOn(manager, {
     id: SESSION_ID,
-    spec: outputSpec({ transcodeVideo: false }),
+    key: spec.toKey(),
+    spec,
+    // The directory this check writes its leftovers into, not the store's.
     dirPath,
-    // Where this file is cut, held by the file. A fixture that stated it
-    // on the session was describing what production no longer does.
     timeline: new Timeline({
       boundaries: [0, SEGMENT_SECONDS, 25, 37.5, 50],
       cutGrid: "uniform"
     }),
-    state: "ready",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "Drifters - 04.mkv" }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
-    runs: new Set(),
-    lastError: "",
     segmentFormat: fmp4Format,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
-    initBytes: fmp4Format.extractInit(wholePiece(0)),
-    waitEpoch: 0
-  };
-  manager.outputs.set(SESSION_ID, session);
+    initBytes: fmp4Format.extractInit(wholePiece(0))
+  });
   // A run exists and is alive — the state the field case was in, and the one in
   // which the old test called every leftover "still being written".
   startRunOn(session, { from: 0, usesExplicitCuts: true });

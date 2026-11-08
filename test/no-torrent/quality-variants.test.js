@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { costKindForSession } from "../../services/encode/quality/EncodeCost.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 import { buildAdmittedCommand } from "../../services/encode/admitted-command.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { computeCutGrid } from "../../services/encode/output/cut-grid.js";
@@ -68,12 +69,15 @@ function askFor(manager, base, height) {
 const SEGMENT_SECONDS = 4;
 
 /**
- * A session shaped like a live one, without the ffmpeg run behind it.
+ * A session shaped like a live one, without the ffmpeg run behind it. It is not
+ * in the manager's catalog: a check puts it there when, and if, the output is
+ * meant to exist.
  *
+ * @param {object} manager
  * @param {{ id: string, encodeHeight: number, dirPath: string, transcodeVideo?: boolean, audioOnly?: boolean, audioSeparate?: boolean, audioSourceTrackIndex?: number }} params
  * @returns {object}
  */
-function fakeSession({
+function fakeSession(manager, {
   id,
   encodeHeight,
   dirPath,
@@ -82,24 +86,23 @@ function fakeSession({
   audioSeparate = false,
   audioSourceTrackIndex = 0
 }) {
-  return {
+  const spec = outputSpec({
+    transcodeVideo,
+    audioOnly,
+    audioSeparate,
+    audioSourceTrackIndex,
+    height: encodeHeight
+  });
+  const session = outputOn(manager, {
     id,
+    key: spec.toKey(),
     get outputKey() { return this.spec.toKey(); },
-    spec: outputSpec({
-      transcodeVideo,
-      audioOnly,
-      audioSeparate,
-      audioSourceTrackIndex,
-      height: encodeHeight
-    }),
+    spec,
     dirPath,
-    // Where this file is cut, held by the file. A fixture that stated it
-    // on the session was describing what production no longer does.
     timeline: new Timeline({
       boundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
       cutGrid: "uniform"
     }),
-    state: "ready",
     // The file's own facts, which is where the size and what decoding it costs
     // both come from: 1080p24 at 8 Mbit/s, the field file of 2026-08-17. A
     // fixture that assigned a cost object instead was stating an answer the
@@ -111,14 +114,7 @@ function fakeSession({
       bitrateKbps: 8000,
       durationSeconds: 100 * SEGMENT_SECONDS
     }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
     ffmpeg: null,
-    lastError: "",
     segmentFormat: fmp4Format,
     transcodeVideo,
     transcodeAudio: true,
@@ -129,13 +125,12 @@ function fakeSession({
     encodeRunGeneration: 0,
     failedStartAt: -1,
     failedStartCount: 0,
-    waitEpoch: 0,
     usesExplicitCuts: false,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
     segmentCount: 100,
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
-  };
+  });
+  manager.outputs.delete(id);
+  return session;
 }
 
 
@@ -151,7 +146,7 @@ async function managerWithBase(options = {}) {
   const { manager } = managerWithOwnStore(options);
   // 812p is what a viewport-sized budget actually produces — deliberately not a
   // ladder rung, because that is the case the master has to carry.
-  const base = fakeSession({ id: BASE_ID, encodeHeight: 812, dirPath });
+  const base = fakeSession(manager, { id: BASE_ID, encodeHeight: 812, dirPath });
   manager.outputs.set(BASE_ID, base);
   manager.encodeCost.loadOfOutput = () => ({ costSec: 0.25, fileKey: "", fileCostSec: 0 });
   return { manager, base, dirPath };
@@ -336,7 +331,7 @@ test("the rung the page says it plays is the viewer's rung, and the encoder goes
     await rm(dirPath, { recursive: true, force: true });
   });
   manager.encodeRuns.planEncodersSoon = () => {};
-  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  const variant = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
@@ -386,7 +381,7 @@ test("a rung is placed where the picture is, not where the other rung had read t
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  const variant = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
@@ -419,7 +414,7 @@ test("warming a rung prepares it without taking the encoder from the one on scre
     await rm(dirPath, { recursive: true, force: true });
   });
   manager.encodeRuns.planEncodersSoon = () => {};
-  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  const variant = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
@@ -451,7 +446,7 @@ test("a rung warmed at the playhead survives the switch that lands just ahead of
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  const variant = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
@@ -493,7 +488,7 @@ test("a rung warmed PAST the switch is repositioned, which is what warming late 
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  const variant = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
@@ -529,7 +524,7 @@ test("the rung on screen fetching its own segments does not cancel a warm-up", a
     await rm(dirPath, { recursive: true, force: true });
   });
   manager.encodeRuns.planEncodersSoon = () => {};
-  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  const variant = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
   // A step of the picture: made as one, same file, and a height of its own.
   variant.isStep = true;
@@ -569,7 +564,7 @@ test("warming the height the base itself serves still points it at the switch", 
   });
   // The viewer is on another rung; the base is parked where they left it, with
   // its encoder stopped. Warming its height must bring it back.
-  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  const variant = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 540, dirPath });
   variant.variantHeight = 540;
   manager.outputs.set(VARIANT_ID, variant);
   chooseFor(manager, base, 540, variant.outputKey);
@@ -612,7 +607,7 @@ test("a playlist or an init segment does not move the encoder", async (t) => {
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
   });
-  const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 540, dirPath });
+  const variant = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 540, dirPath });
   manager.outputs.set(VARIANT_ID, variant);
   // The plan is kept out of this: it is not what is being checked, and a run
   // with no measured speed is one it would take away for changing nothing.
@@ -802,7 +797,7 @@ test("a rung served by copy stays offered while a re-encoded rung is on screen",
   // the fixture: 49.766 Mpx/s at 8 Mbit/s.
   assert.ok(base.file.decode, "the fixture must state enough for a decode cost to exist");
 
-  const watching = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath });
+  const watching = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 240, dirPath });
   watching.variantHeight = 240;
   // The rung knows the source as well as the base does, because it IS the same
   // file. Without that it prices nothing at all — every height comes back
@@ -846,7 +841,7 @@ for (const prepare of [false, true]) {
       : manager.renditions.resolveAudioRenditionFile(BASE_ID, 0, "segment-00000.mp4", VIEWER);
     // The base can outlive its viewer because an assignment retains it.
     manager.viewers.hasGone(VIEWER);
-    const audio = fakeSession({ id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
+    const audio = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 0, dirPath, audioOnly: true });
     manager.outputs.set(audio.id, audio);
     complete(audio);
     await pending;
@@ -877,7 +872,7 @@ test("a separately published audio track starts where the picture is, from the r
     created.push(params);
     // The output itself, which is what `createOrGetSession` answers, carrying
     // the track it was asked for.
-    return fakeSession({
+    return fakeSession(manager, {
       id: VARIANT_ID,
       encodeHeight: 0,
       dirPath,
@@ -918,7 +913,7 @@ test("with two viewers the audio track starts at the EARLIEST picture, not the r
     created.push(params);
     // The output itself, which is what `createOrGetSession` answers, carrying
     // the track it was asked for.
-    return fakeSession({
+    return fakeSession(manager, {
       id: VARIANT_ID,
       encodeHeight: 0,
       dirPath,
@@ -964,7 +959,7 @@ test("a soundtrack begins where a viewer says they are, whenever they said it", 
     created.push(params);
     // The output itself, which is what `createOrGetSession` answers, carrying
     // the track it was asked for.
-    return fakeSession({
+    return fakeSession(manager, {
       id: VARIANT_ID,
       encodeHeight: 0,
       dirPath,
@@ -994,7 +989,7 @@ test("an audio track is prepared at the position the switch will land on", async
     { index: 0, language: "rus", title: "", isDefault: true },
     { index: 1, language: "eng", title: "", isDefault: false }
   ];
-  const rendition = fakeSession({
+  const rendition = fakeSession(manager, {
     id: VARIANT_ID,
     encodeHeight: 0,
     dirPath,
@@ -1056,14 +1051,14 @@ test("a quality step being warmed is not refused by its own cost", async (t) => 
   });
   // A copied 1080p picture, and a 240p step warmed beside it for a switch —
   // which is what every quality change does, two encoders on purpose.
-  const base = fakeSession({ id: BASE_ID, encodeHeight: 0, dirPath, transcodeVideo: false });
+  const base = fakeSession(manager, { id: BASE_ID, encodeHeight: 0, dirPath, transcodeVideo: false });
   base.variantHeight = 1080;
   // What this source costs to decode comes from the file's own facts, stated in
   // the fixture: 1080p24 at 8 Mbit/s, the field file. Without them nothing can
   // be priced and every height comes back offerable for want of a measurement,
   // which would make the assertion hold for the wrong reason.
   assert.ok(base.file.decode, "the fixture must state enough for a decode cost to exist");
-  const warming = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath });
+  const warming = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 240, dirPath });
   warming.variantHeight = 240;
   // Two sessions of ONE file share its facts, which is the whole point of the
   // file being an object: a step warmed beside the picture is not a second file.
@@ -1100,7 +1095,7 @@ test("the master survives a live offer that has collapsed to one rung", async (t
     softwarePresetBenchmark: [{ preset: "veryfast", pixelsPerSec: 1_000_000 }],
     decodeCostModel: { pixelTerm: 0.01, bitrateTerm: 0, constantTerm: 0 }
   });
-  const base = fakeSession({ id: BASE_ID, encodeHeight: 812, dirPath });
+  const base = fakeSession(manager, { id: BASE_ID, encodeHeight: 812, dirPath });
   // A thicker source than the fixture's, stated as the file's own bitrate
   // rather than as a cost object the file now derives.
   base.file.learn({ width: 1920, height: 1080, fps: 24, bitrateKbps: 10_000 });
@@ -1150,7 +1145,7 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
     // ONE FORMAT, ONE OUTPUT, as `OutputOpening` has it: an output is named by
     // what it carries, so a request clamped onto a picture already made is
     // answered by that output and makes nothing.
-    const probe = fakeSession({ id: "probe", encodeHeight: 240, dirPath });
+    const probe = fakeSession(manager, { id: "probe", encodeHeight: 240, dirPath });
     const existing = [...manager.outputs.values()].find((output) => output.outputKey === probe.outputKey);
     if (existing) {
       return existing;
@@ -1158,7 +1153,7 @@ test("two heights that clamp onto one picture share a single encoder", async (t)
     const id = madeIds[created.length - 1];
     const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-clamped-"));
     spawnedDirs.push(variantDir);
-    const variant = fakeSession({ id, encodeHeight: 240, dirPath: variantDir });
+    const variant = fakeSession(manager, { id, encodeHeight: 240, dirPath: variantDir });
     manager.outputs.set(id, variant);
     return variant;
   };
@@ -1208,7 +1203,7 @@ test("rungs that really do differ keep their own encoders", async (t) => {
     created.push(params);
     const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-distinct-"));
     spawnedDirs.push(variantDir);
-    const variant = fakeSession({ id, encodeHeight: params.targetHeight, dirPath: variantDir });
+    const variant = fakeSession(manager, { id, encodeHeight: params.targetHeight, dirPath: variantDir });
     manager.outputs.set(id, variant);
     return variant;
   };
@@ -1243,7 +1238,7 @@ test("a rung is never served from the COPY, whatever height the copy happens to 
     created.push(params);
     const variantDir = await mkdtemp(path.join(os.tmpdir(), "quality-variants-copy-"));
     spawnedDirs.push(variantDir);
-    const variant = fakeSession({ id: VARIANT_ID, encodeHeight: 240, dirPath: variantDir });
+    const variant = fakeSession(manager, { id: VARIANT_ID, encodeHeight: 240, dirPath: variantDir });
     manager.outputs.set(VARIANT_ID, variant);
     return variant;
   };
@@ -1275,7 +1270,7 @@ test("a file opened at a position starts its sound THERE, not a look-ahead earli
     created.push(params);
     // The output itself, which is what `createOrGetSession` answers, carrying
     // the track it was asked for.
-    return fakeSession({
+    return fakeSession(manager, {
       id: VARIANT_ID,
       encodeHeight: 0,
       dirPath,
@@ -1305,7 +1300,7 @@ test("a step the master lists and the offer no longer holds is answered as not a
     softwarePresetBenchmark: [{ preset: "veryfast", pixelsPerSec: 1_000_000 }],
     decodeCostModel: { pixelTerm: 0.01, bitrateTerm: 0, constantTerm: 0 }
   });
-  const base = fakeSession({ id: BASE_ID, encodeHeight: 812, dirPath });
+  const base = fakeSession(manager, { id: BASE_ID, encodeHeight: 812, dirPath });
   base.file.learn({ width: 1920, height: 1080, fps: 24, bitrateKbps: 10_000 });
   manager.hostLoad.requiredSpeedFor = () => 8;
   manager.outputs.set(BASE_ID, base);

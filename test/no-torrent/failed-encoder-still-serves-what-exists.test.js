@@ -18,10 +18,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { SourceFile } from "../../services/media/SourceFile.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
-import { Output } from "../../services/encode/output/Output.js";
-import { KeyframeTable } from "../../services/media/container/KeyframeTable.js";
 import { ENCODE_RUN_STATE } from "../../services/encode/encode-run-state.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { EncodeRun } from "../../services/encode/EncodeRun.js";
@@ -29,6 +26,7 @@ import { fakeProcess, silentLogger } from "./helpers/encode-run.js";
 import { waitForSessionFile } from "../../services/server/transcode-session-files.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const SESSION_ID = "3333333344445555";
 const OUTPUT_KEY = "failed-serves:fmt=fmp4:grid=uniform:video-only:v=0/copy";
@@ -55,39 +53,17 @@ async function outputWhoseEncoderDied({ failed = true, segments = [0], cutsAtGiv
     await writeFile(path.join(dirPath, fmp4Format.segmentFileName(index)), Buffer.alloc(256, 0x5a));
   }
 
-  const session = {
+  const session = outputOn(manager, {
     id: SESSION_ID,
+    key: outputKey,
     spec: cutsAtGivenTimes
       ? outputSpec({ transcodeVideo: false, cutGrid: "keyframe" })
       : outputSpec({ transcodeVideo: true, cutGrid: "uniform" }),
-    outputKey,
-    dirPath,
     timeline: new Timeline({
       boundaries: [0, 12.5, 25, 37.5, 50, 62.5],
       cutGrid: cutsAtGivenTimes ? "keyframe" : "uniform"
-    }),
-    state: "ready",
-    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({ durationSeconds: 62.5 }),
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    lastAloneSpeed: 2,
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
-    runs: new Set(),
-    lastError: "",
-    consumers: new Set(),
-    viewers: new Map(),
-    segmentCount: 5,
-    // These checks exercise lifecycle responses with arbitrary file bytes.
-    segmentFormat: { ...fmp4Format, needsSegmentRewrite: false },
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
-    output: new Output({ encodeWidth: 0, encodeHeight: 0, outputFps: 25, softwarePreset: null, applyTonemap: false }),
-    keyframes: new KeyframeTable().learn({ times: [0, 12.5, 25, 37.5, 50], format: "matroska" }),
-    audioOnly: false,
-    waitEpoch: 0
-  };
-  manager.outputs.set(SESSION_ID, session);
+    })
+  });
   manager.viewers.of(session, "viewer-a").moveTo(0);
   // The encoder ended for good, which is what every request below is asked
   // against.

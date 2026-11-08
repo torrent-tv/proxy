@@ -25,6 +25,7 @@ import { Timeline } from "../../services/encode/output/Timeline.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 import { Output } from "../../services/encode/output/Output.js";
 import { qualityStateOf } from "../../services/encode/quality/OutputQualityState.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
@@ -41,45 +42,32 @@ const RATE_SOURCE = { width: 1280, height: 720, pictureKbps: 2800 };
 /**
  * A session shaped like a live one, encoding 720p of a 1080p source.
  *
- * @param {{ dirPath: string, transcodeVideo?: boolean, cutGrid?: string }} params
+ * @param {object} manager
+ * @param {{ id?: string, key: string, transcodeVideo?: boolean, cutGrid?: string }} params
  *   `cutGrid` goes into the file's cut table; left out, it is what production
  *   builds for this branch.
  * @returns {object}
  */
-function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo ? "uniform" : "keyframe" }) {
-  return {
+function fakeSession(manager, { id = BASE_ID, key, transcodeVideo = true, cutGrid = transcodeVideo ? "uniform" : "keyframe", ...fields }) {
+  return outputOn(manager, {
+    id,
+    key,
     spec: outputSpec({ transcodeVideo, cutGrid }),
-    id: BASE_ID,
-    dirPath,
-    // Where this file is cut, held by the file. A fixture that stated it
-    // on the session was describing what production no longer does.
-    //
     // The grid travels in here and nowhere else: a copy can only be cut where
     // the source already has a keyframe, so this is what decides whether the
     // stream publishes variants at all, and `#publishesVariants` reads it off
-    // the table. The default is what production builds — a keyframe grid only
+    // the table. The default is what production builds: a keyframe grid only
     // where one was read, which is the copy.
     timeline: new Timeline({
       boundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
       cutGrid
     }),
-    state: "ready",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({ width: 1920, height: 1080, durationSeconds: 400 }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
-    runs: new Set(),
     runState: "running",
     runSerial: 1,
-    lastError: "",
-    consumers: new Set(),
     segmentFormat: fmp4Format,
     transcodeVideo,
     transcodeAudio: true,
-    audioOnly: false,
     audioTrackIndex: 0,
     // The shape this output is encoded AS, decided once for the output.
     output: new Output({
@@ -91,10 +79,9 @@ function fakeSession({ dirPath, transcodeVideo = true, cutGrid = transcodeVideo 
     }),
     encodeRunGeneration: 0,
     usesExplicitCuts: false,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
-    progress: { state: "running", processedSeconds: 40, startPositionSeconds: 0 }
-  };
+    progress: { state: "running", processedSeconds: 40, startPositionSeconds: 0 },
+    ...fields
+  });
 }
 
 /**
@@ -112,8 +99,7 @@ async function managerWithSession({ transcodeVideo = true, cutGrid, softwarePres
   // describes a proxy that no longer exists — the observed bitrate the link
   // budget reads would then be taken from files nothing can find.
   const outputKey = `auto-quality:fmt=fmp4:grid=${transcodeVideo ? "uniform" : "kf@0"}:video-only:v=0/${transcodeVideo ? "enc/libx264/1280x720@24/-/none/vbv=-" : "copy"}`;
-  manager.segmentStore.useFormat(outputKey, fmp4Format);
-  const dirPath = manager.segmentStore.directoryFor(outputKey);
+  const dirPath = manager.segmentStore.directoryFor(outputKey, fmp4Format);
   // A software host: the budget's own precondition.
   // A fully-downloaded file, so nothing here is ever read as download-bound —
   // the distinction is tested elsewhere and would only obscure these.
@@ -122,9 +108,7 @@ async function managerWithSession({ transcodeVideo = true, cutGrid, softwarePres
     fileProgress: 1,
     fileLength: 4e9
   });
-  const session = fakeSession({ dirPath, transcodeVideo, cutGrid });
-  session.outputKey = outputKey;
-  manager.outputs.set(BASE_ID, session);
+  const session = fakeSession(manager, { key: outputKey, transcodeVideo, cutGrid });
   manager.viewers.of(session, "viewer").qualityMode = "auto";
   // A run that states its speed, as every real one does from its first
   // seconds, and covers the whole film to its last segment, as the plan gives a
@@ -654,9 +638,7 @@ test("a request is answered when the viewers watching are on that height, whoeve
   // A named viewer followed the request to a 480p step. The step is an output
   // of its own; the picture's own height is still 720.
   const stepId = "aaaaaaaabbbbdddd";
-  const step = { ...fakeSession({ dirPath }), id: stepId, isStep: true, variantHeight: 480 };
-  step.outputKey = `${session.outputKey}:step480`;
-  manager.outputs.set(stepId, step);
+  const step = fakeSession(manager, { id: stepId, key: `${session.outputKey}:step480`, isStep: true, variantHeight: 480 });
   manager.outputs.markStep(step);
   manager.viewers.of(session, "alice").qualityMode = "auto";
   manager.viewers.of(session, "alice").activeVariantId = stepId;

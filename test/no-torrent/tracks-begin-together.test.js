@@ -23,6 +23,7 @@ import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { ENCODE_RUN_STATE, INITIAL_RUN_STATE } from "../../services/encode/encode-run-state.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const BOUNDARIES = [0, 4, 8, 12, 16, 20];
 
@@ -37,55 +38,39 @@ function familyAtBoundaryTwo() {
   // picture and its soundtrack hold the same array rather than a copy each.
   const boundaries = [...BOUNDARIES];
   const manager = managerWithOwnStore().manager;
-  const picture = {
+  const pictureSpec = outputSpec({ transcodeVideo: false });
+  const picture = outputOn(manager, {
     id: "picture",
-    spec: outputSpec({ transcodeVideo: false }),
+    key: pictureSpec.toKey(),
     get outputKey() { return this.spec.toKey(); },
-    state: "ready",
+    spec: pictureSpec,
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own — and the
-    // command is built from all three, so a fixture that states only the first
-    // describes a session the product cannot make.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
     // How its pieces are packaged. The command asks the format where to cut and
     // what to name the files, so a session without one is not a session.
     segmentFormat: fmp4Format,
     // Where its encoder has got to, which a run writes into as it works.
-    progress: { processedSeconds: 0 },
-    runs: new Set()
-  };
+    progress: { processedSeconds: 0 }
+  });
   // The soundtrack of that picture: the same file, published on its own. Found
   // by what it is, since no list of ids names it any more.
-  const sound = {
+  const soundSpec = outputSpec({ audioOnly: true });
+  const sound = outputOn(manager, {
     id: "sound",
-    spec: outputSpec({ audioOnly: true }),
+    key: soundSpec.toKey(),
     get outputKey() { return this.spec.toKey(); },
-    state: "ready",
+    spec: soundSpec,
+    audioOnly: true,
     baseSessionId: "picture",
     timeline: new Timeline({ boundaries: boundaries, cutGrid: "uniform" }),
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own — and the
-    // command is built from all three, so a fixture that states only the first
-    // describes a session the product cannot make.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    // How its pieces are packaged. The command asks the format where to cut and
-    // what to name the files, so a session without one is not a session.
     segmentFormat: fmp4Format,
-    // Where its encoder has got to, which a run writes into as it works.
-    progress: { processedSeconds: 0 },
-    runs: new Set()
-  };
+    progress: { processedSeconds: 0 }
+  });
   const pictureRun = startRunOn(picture, { from: 2 });
   const soundRun = startRunOn(sound, { from: 2 });
   manager.encodeOrchestrator.adopt(picture.outputKey, pictureRun);
   manager.encodeOrchestrator.adopt(sound.outputKey, soundRun);
-  manager.outputs.set("picture", picture);
-  manager.outputs.set("sound", sound);
 
   return { manager, picture, sound };
 }

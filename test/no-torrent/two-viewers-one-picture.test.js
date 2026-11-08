@@ -54,6 +54,7 @@ import os from "node:os";
 import path from "node:path";
 import { audioRenditionKey } from "../../services/encode/Renditions.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { Output } from "../../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
@@ -64,12 +65,15 @@ const FIRST = "viewer-one";
 const SECOND = "viewer-two";
 
 /**
- * A session shaped like a live one, without the ffmpeg run behind it.
+ * A session shaped like a live one, without the ffmpeg run behind it. It is not
+ * in the manager's catalog: a check puts it there when, and if, the output is
+ * meant to exist.
  *
+ * @param {object} manager
  * @param {{ id: string, dirPath: string, audioTrackIndex?: number, transcodeAudio?: boolean, audioOnly?: boolean, audioSeparate?: boolean }} params
  * @returns {object}
  */
-function fakeSession({
+function fakeSession(manager, {
   id,
   dirPath,
   audioTrackIndex = 0,
@@ -83,36 +87,27 @@ function fakeSession({
   // being too strict.
   encodeHeight = 0
 }) {
-  return {
+  const spec = outputSpec({
+    transcodeVideo: !audioOnly,
+    transcodeAudio,
+    audioOnly,
+    audioSeparate,
+    audioSourceTrackIndex: audioTrackIndex,
+    height: encodeHeight,
+    width: encodeHeight > 0 ? Math.round((encodeHeight * 16) / 9) : 0
+  });
+  const session = outputOn(manager, {
     id,
-    spec: outputSpec({
-      transcodeVideo: !audioOnly,
-      transcodeAudio,
-      audioOnly,
-      audioSeparate,
-      audioSourceTrackIndex: audioTrackIndex,
-      height: encodeHeight,
-      width: encodeHeight > 0 ? Math.round((encodeHeight * 16) / 9) : 0
-    }),
+    key: spec.toKey(),
     get outputKey() { return this.spec.toKey(); },
+    spec,
     dirPath,
-    // Where this file is cut, held by the file. A fixture that stated it
-    // on the session was describing what production no longer does.
     timeline: new Timeline({
       boundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
       cutGrid: "keyframe"
     }),
-    state: "ready",
     file: new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv" }).learn({ width: 1920, height: 1080 }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
     ffmpeg: null,
-    lastError: "",
-
     segmentFormat: fmp4Format,
     transcodeVideo: false,
     transcodeAudio,
@@ -128,12 +123,11 @@ function fakeSession({
     }),
     encodeRunGeneration: 0,
     encodeStartIndex: 0,
-    waitEpoch: 0,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
     segmentCount: 100,
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
-  };
+  });
+  manager.outputs.delete(id);
+  return session;
 }
 
 function startManagedRun(manager, output, options = {}) {
@@ -160,7 +154,7 @@ async function pictureWithTwoViewers(options = {}) {
   // placement is covered by the plan tests and must not run asynchronously in
   // the middle of an assertion about the request path.
   manager.encodeRuns.planEncodersSoon = () => {};
-  const base = fakeSession({ id: BASE_ID, dirPath, audioSeparate: true });
+  const base = fakeSession(manager, { id: BASE_ID, dirPath, audioSeparate: true });
   // Both viewers are watching the picture, which is what keeps their choices
   // alive; a viewer whose head has expired holds no encoder.
   manager.viewers.of(base, FIRST).position = { segment: 3, seconds: 12, at: Date.now() };
@@ -182,7 +176,7 @@ async function pictureWithTwoViewers(options = {}) {
     if (existing) {
       return existing;
     }
-    const rendition = fakeSession({
+    const rendition = fakeSession(manager, {
       id: `rendition-${key}`,
       dirPath,
       audioTrackIndex: params.audioTrackIndex,
@@ -307,7 +301,7 @@ test("one viewer changing quality does not take the other off their step", async
     // passes (`audioRenditions: servesAudioSeparately(base)`). Built muxed, a
     // step is not the same material as the picture it is a step of, and is
     // rightly refused.
-    const variant = fakeSession({ id: `variant-${height}`, dirPath, encodeHeight: height, audioSeparate: true });
+    const variant = fakeSession(manager, { id: `variant-${height}`, dirPath, encodeHeight: height, audioSeparate: true });
     variant.transcodeVideo = true;
     variant.output.encodeHeight = height;
     variant.variantHeight = height;
@@ -360,7 +354,7 @@ test("a step somebody is watching is never withdrawn from the offer", async (t) 
   // is derived from them.
   base.file.learn({ width: 1920, height: 1080, fps: 24, bitrateKbps: 8000 });
 
-  const variant = fakeSession({ id: "variant-720", dirPath });
+  const variant = fakeSession(manager, { id: "variant-720", dirPath });
   variant.transcodeVideo = true;
   variant.output.encodeHeight = 720;
   variant.variantHeight = 720;

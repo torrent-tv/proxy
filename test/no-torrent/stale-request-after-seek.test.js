@@ -29,6 +29,7 @@ import path from "node:path";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const SEGMENT_SECONDS = 4;
 const RUN_STARTS_AT = 373;
@@ -44,31 +45,20 @@ const SESSION_ID = "2222222233334444";
 async function sessionWithRunAt373() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "stale-request-"));
   const manager = managerWithOwnStore().manager;
-  const session = {
+  const session = outputOn(manager, {
     id: SESSION_ID,
+    key: "stale-request:fmt=fmp4:grid=uniform:video-only:v=0/copy",
+    // The directory this check removes itself, not the store's.
     dirPath,
     timeline: new Timeline({
       boundaries: Array.from({ length: 901 }, (_, index) => index * SEGMENT_SECONDS),
       cutGrid: "uniform"
     }),
-    state: "ready",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
     segmentFormat: fmp4Format,
     segmentCount: 900,
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
-    runs: new Set(),
-    consumers: new Set(),
-    viewers: new Map(),
-    progress: { processedSeconds: RUN_STARTS_AT * SEGMENT_SECONDS },
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
-    lastError: "",
-    waitEpoch: 0
-  };
-  manager.outputs.set(SESSION_ID, session);
+    progress: { processedSeconds: RUN_STARTS_AT * SEGMENT_SECONDS }
+  });
   startRunOn(session, { from: RUN_STARTS_AT, usesExplicitCuts: true, speedX: 2 });
   return { manager, session, dirPath };
 }

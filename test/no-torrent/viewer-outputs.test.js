@@ -33,6 +33,7 @@ import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const BASE_ID = "aaaaaaaabbbbcccc";
 const STEP_ID = "1111111122223333";
@@ -41,15 +42,20 @@ const VIEWER = "viewer-one";
 const SEGMENT_SECONDS = 4;
 
 /**
- * A session shaped like a live one, without the ffmpeg run behind it.
+ * A session shaped like a live one, without the ffmpeg run behind it, registered
+ * on the manager.
  *
+ * @param {object} manager
  * @param {{ id: string, dirPath: string, file: SourceFile, encodeHeight?: number,
  *   audioOnly?: boolean, isStep?: boolean }} params
  * @returns {object}
  */
-function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, isStep = false }) {
-  return {
+function fakeSession(manager, { id, dirPath, file, encodeHeight = 0, audioOnly = false, isStep = false }) {
+  return outputOn(manager, {
     id,
+    // Left set so that disposal does not remove a directory the other sessions
+    // of this output are still named by.
+    key: `output-${id}`,
     spec: outputSpec({
       sourceKey: file.sourceKey,
       fileIndex: file.fileIndex,
@@ -62,14 +68,8 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
       boundaries: Array.from({ length: 101 }, (_, index) => index * SEGMENT_SECONDS),
       cutGrid: "uniform"
     }),
-    state: "ready",
     file,
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
     ffmpeg: null,
-    lastError: "",
     segmentFormat: fmp4Format,
     transcodeVideo: !audioOnly,
     transcodeAudio: true,
@@ -77,9 +77,6 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
     audioOnly,
     isStep,
     variantHeight: isStep ? encodeHeight : undefined,
-    // Left set so that disposal does not remove a directory the other sessions
-    // of this output are still named by.
-    outputKey: `output-${id}`,
     output: new Output({
       encodeWidth: 0,
       encodeHeight,
@@ -92,14 +89,10 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
     failedStartCount: 0,
     seekSettleTimer: null,
     seekTarget: null,
-    waitEpoch: 0,
-    runs: new Set(),
     usesExplicitCuts: false,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
     segmentCount: 100,
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
-  };
+  });
 }
 
 /**
@@ -115,14 +108,11 @@ async function pictureWithStepAndSoundtrack() {
   const manager = managerWithOwnStore().manager;
   const file = new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" })
     .learn({ width: 1920, height: 1080, fps: 24, bitrateKbps: 8000 });
-  const base = fakeSession({ id: BASE_ID, dirPath, file, encodeHeight: 812 });
-  const step = fakeSession({ id: STEP_ID, dirPath, file, encodeHeight: 540, isStep: true });
-  const audio = fakeSession({ id: AUDIO_ID, dirPath, file, audioOnly: true });
+  const base = fakeSession(manager, { id: BASE_ID, dirPath, file, encodeHeight: 812 });
+  const step = fakeSession(manager, { id: STEP_ID, dirPath, file, encodeHeight: 540, isStep: true });
+  const audio = fakeSession(manager, { id: AUDIO_ID, dirPath, file, audioOnly: true });
   // The browser never learns these two ids: what keeps them is who watches
   // them, and nothing else.
-  for (const session of [base, step, audio]) {
-    manager.outputs.set(session.id, session);
-  }
   manager.outputs.markStep(step);
   return { manager, base, step, audio, dirPath };
 }

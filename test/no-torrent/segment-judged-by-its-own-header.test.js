@@ -29,12 +29,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { access, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { SourceFile } from "../../services/media/SourceFile.js";
-import { Timeline } from "../../services/encode/output/Timeline.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
-import { outputSpec } from "./helpers/output-spec.js";
 import { box } from "./helpers/mp4-file.js";
 
 const SESSION_ID = "3333333344445555";
@@ -116,34 +114,16 @@ function selfContainedPiece({ declares, carries }) {
  */
 async function managerHolding({ piece, sessionHeader }) {
   const { manager } = managerWithOwnStore({ planless: true });
-  manager.segmentStore.useFormat(OUTPUT_KEY, fmp4Format);
-  const dirPath = manager.segmentStore.directoryFor(OUTPUT_KEY);
+  const dirPath = manager.segmentStore.directoryFor(OUTPUT_KEY, fmp4Format);
   await writeFile(path.join(dirPath, "segment-00000.mp4"), piece);
   await writeFile(path.join(dirPath, "segment-00001.mp4"), piece);
 
-  const session = {
+  const session = outputOn(manager, {
     id: SESSION_ID,
-    spec: outputSpec({ transcodeVideo: false }),
-    outputKey: OUTPUT_KEY,
-    dirPath,
-    timeline: new Timeline({ boundaries: [0, 12.5, 25, 37.5, 50, 62.5], cutGrid: "uniform" }),
-    state: "ready",
-    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" })
-      .learn({ durationSeconds: 62.5 }),
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    lastAloneSpeed: 2,
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
-    runs: new Set(),
-    lastError: "",
-    segmentCount: 5,
-    segmentFormat: fmp4Format,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
-    waitEpoch: 0
-  };
-  manager.outputs.set(SESSION_ID, session);
+    key: OUTPUT_KEY,
+    // The production format, which judges what it serves.
+    segmentFormat: fmp4Format
+  });
   // The header this output serves is the store's, one owner for it.
   manager.segmentStore.keepInit(OUTPUT_KEY, sessionHeader);
   // No plan runs here: this file is about the path that answers a request.

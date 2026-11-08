@@ -32,7 +32,7 @@ import { outputSpec } from "./output-spec.js";
  */
 export function outputOn(manager, { id, key, audioOnly = false, height = 0, ...overrides }) {
   // The output's format is the store's to know before its directory is asked for.
-  const segmentFormat = { ...fmp4Format, needsSegmentRewrite: false };
+  const segmentFormat = overrides.segmentFormat ?? { ...fmp4Format, needsSegmentRewrite: false };
   manager.segmentStore.useFormat(key, segmentFormat);
   const dirPath = manager.segmentStore.directoryFor(key);
   mkdirSync(dirPath, { recursive: true });
@@ -44,19 +44,27 @@ export function outputOn(manager, { id, key, audioOnly = false, height = 0, ...o
     timeline: new Timeline({ boundaries: [0, 12.5, 25, 37.5, 50, 62.5], cutGrid: "uniform" }),
     state: "ready",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({ durationSeconds: 62.5 }),
+    // WHAT THIS HOST ENCODES AT. Every real host measures it before a viewer
+    // exists, and the plan compares arrivals, which cannot be computed without
+    // it: a machine that has never measured itself ties every arrangement and
+    // the plan takes the encoder away for changing nothing.
     lastAloneSpeed: 2,
     startedAt: Date.now(),
     lastAccessedAt: Date.now(),
     runs: new Set(),
     lastError: "",
     consumers: new Set(),
+    // Who is watching, and how long the film is: without the first the output
+    // has no viewers to build a priority map from and reads as nobody watching.
     viewers: new Map(),
     segmentCount: 5,
     // These checks serve arbitrary file bytes, which a format that rewrites what it is handed would refuse.
     segmentFormat,
     useSyntheticPlaylist: true,
     playlistText: "#EXTM3U\n",
+    // WHAT IS BEING PRODUCED, and where a produced piece's landing is recorded.
     output: new Output({ encodeWidth: 0, encodeHeight: height, outputFps: 25, softwarePreset: null, applyTonemap: false }),
+    // WHERE THIS FILE'S KEYFRAMES ARE, held by the file.
     keyframes: new KeyframeTable().learn({ times: [0, 12.5, 25, 37.5, 50], format: "matroska" }),
     audioOnly,
     waitEpoch: 0

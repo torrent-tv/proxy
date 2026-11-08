@@ -17,10 +17,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SourceFile } from "../../services/media/SourceFile.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
-import { Output } from "../../services/encode/output/Output.js";
-import { KeyframeTable } from "../../services/media/container/KeyframeTable.js";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ENCODE_RUN_STATE } from "../../services/encode/encode-run-state.js";
@@ -29,6 +26,7 @@ import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { box } from "./helpers/mp4-file.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const MOVIE_TIMESCALE = 1000;
 const VIDEO_TIMESCALE = 90_000;
@@ -124,69 +122,32 @@ async function managerWithReadySegment(overrides = {}) {
   // own and leave the session with no output address at all, so it described a
   // proxy that no longer exists and asked for a segment the store had never
   // heard of.
-  manager.segmentStore.useFormat(OUTPUT_KEY, overrides.segmentFormat ?? fmp4Format);
-  const dirPath = manager.segmentStore.directoryFor(OUTPUT_KEY);
+  const dirPath = manager.segmentStore.directoryFor(OUTPUT_KEY, overrides.segmentFormat ?? fmp4Format);
   const piece = selfContainedPiece(SEGMENT_START_SECONDS);
   // Two segments, because a piece is only finished once the next one exists.
   await writeFile(path.join(dirPath, "segment-00000.mp4"), piece);
   await writeFile(path.join(dirPath, "segment-00001.mp4"), piece);
 
-  const session = {
+  const session = outputOn(manager, {
     id: SESSION_ID,
+    key: OUTPUT_KEY,
     spec: outputSpec({
       transcodeVideo: overrides.transcodeVideo === true,
       audioOnly: overrides.audioOnly === true,
       cutGrid: "uniform"
     }),
-    outputKey: OUTPUT_KEY,
-    dirPath,
-    // Where this file is cut, held by the file. A fixture that stated it
-    // on the session was describing what production no longer does.
     // LONGER THAN WHAT IS ON DISK. Two segments exist; the film runs to five, so
     // there is film left to make and an encoder on it is warranted. With the
-    // whole film already made, an encoder is not — the plan stops it, correctly,
+    // whole film already made, an encoder is not: the plan stops it, correctly,
     // and a fixture that wants a live run has to give it something to do.
     timeline: new Timeline({
       boundaries: [0, SEGMENT_START_SECONDS, 25, 37.5, 50, 62.5],
       cutGrid: "uniform"
     }),
-    state: "ready",
-    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({ durationSeconds: 62.5 }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    // WHAT THIS HOST ENCODES AT. Every real host measures it before a viewer
-    // exists, and the plan compares arrivals — which cannot be computed without
-    // it. A fixture that leaves it out describes a machine that has never
-    // measured itself: every arrangement is then equally hopeless, they all tie,
-    // and the plan takes the encoder away for changing nothing.
-    lastAloneSpeed: 2,
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
-    runs: new Set(),
-    lastError: "",
-    consumers: new Set(),
-    // Who is watching this output, and how long it is. Without the first the
-    // output has no viewers to build a priority map from, so it states no zones
-    // at all — which reads as nobody watching and stops every encoder on it.
-    viewers: new Map(),
-    segmentCount: 5,
+    // The production format, which stamps and rewrites what it serves.
     segmentFormat: overrides.segmentFormat ?? fmp4Format,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
-    // WHAT IS BEING PRODUCED, which is also where a produced piece's landing is
-    // recorded. Per output, so one output's reading of a piece number cannot
-    // silence another output's reading of its own.
-    output: new Output({ encodeWidth: 0, encodeHeight: 0, outputFps: 25, softwarePreset: null, applyTonemap: false }),
-    // WHERE THIS FILE'S KEYFRAMES ARE, held by the file. A copied picture is cut
-    // at these and nowhere else, which is what makes its landing evidence about
-    // this table — and what makes a soundtrack's landing evidence about nothing
-    // of the sort.
-    keyframes: new KeyframeTable().learn({ times: [0, 12.5, 25, 37.5, 50], format: "matroska" }),
-    audioOnly: overrides.audioOnly === true,
-    waitEpoch: 0
-  };
+    audioOnly: overrides.audioOnly === true
+  });
   // THE INIT IS THE STORE'S, and a player fetches it before any segment — so a
   // fixture that wants segments served as production serves them has to put it
   // there first. It used to sit on the session, which nothing reads any more:
@@ -197,7 +158,6 @@ async function managerWithReadySegment(overrides = {}) {
   // shared by every piece, so its piece-specific empty edit is neutralized and
   // each piece is placed by its own.
   if (overrides.withInit !== false) manager.segmentStore.keepInit(OUTPUT_KEY, fmp4Format.prepareSharedInit(fmp4Format.extractInit(piece)));
-  manager.outputs.set(SESSION_ID, session);
   // SOMEBODY IS WATCHING IT. A segment is requested by a viewer, so a fixture
   // that asks for one without stating a viewer describes a state production
   // never reaches — and an output nobody is watching has every encoder on it

@@ -10,22 +10,22 @@ import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { Output } from "../../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 import { readFileSync } from "node:fs";
 import { handleApiTranscodeSessionsProgressGet } from "../../routes/api/transcode-sessions/progress/get.js";
 
 const SESSION_ID = "aaaaaaaabbbbcccc";
 
-function fakeSession({ id = SESSION_ID, outputKey = "parity:fmt=fmp4:grid=kf@0:video-only:v=0/copy" } = {}) {
+/** A session shaped like a live one, registered on the manager; nothing of it is on disk. */
+function fakeSession(manager, { id = SESSION_ID, outputKey = "parity:fmt=fmp4:grid=kf@0:video-only:v=0/copy" } = {}) {
   const file = new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv", length: 100_000_000 })
     .learn({ width: 1920, height: 1080, durationSeconds: 40, bitrateKbps: 20_000 });
-  return {
+  return outputOn(manager, {
     id,
+    key: outputKey,
     spec: outputSpec({ cutGrid: "keyframe", audioSeparate: false }),
-    outputKey,
     dirPath: path.join(os.tmpdir(), "viewer-forecast-parity-unused"),
     file,
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
     timeline: new Timeline({ boundaries: Array.from({ length: 11 }, (_, index) => index * 4), cutGrid: "keyframe" }),
     segmentFormat: fmp4Format,
     output: new Output({ encodeWidth: 0, encodeHeight: 0, outputFps: 24, softwarePreset: null, applyTonemap: false }),
@@ -33,11 +33,9 @@ function fakeSession({ id = SESSION_ID, outputKey = "parity:fmt=fmp4:grid=kf@0:v
     transcodeAudio: true,
     audioTrackIndex: 0,
     audioSourceTrackIndex: 0,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
     segmentCount: 10,
     progress: { state: "running", processedSeconds: 4, startPositionSeconds: 0 }
-  };
+  });
 }
 
 async function forecastProjection(t, { lookaheadSeconds = 120, missingMapAt = null, capture = null } = {}) {
@@ -46,8 +44,7 @@ async function forecastProjection(t, { lookaheadSeconds = 120, missingMapAt = nu
   const { manager, cleanup } = managerWithOwnStore();
   t.after(() => { Date.now = previousNow; cleanup(); });
   manager.lookaheadSeconds = lookaheadSeconds;
-  const session = fakeSession();
-  manager.outputs.set(session.id, session);
+  const session = fakeSession(manager);
   const viewer = manager.viewers.selectsFile("viewer", "torrent:abc", 0);
   manager.viewers.of(session, "viewer");
   const captureAt = performance.timeOrigin + performance.now();
@@ -172,10 +169,8 @@ test("the live ViewerRequests forecast withholds ETA when a tail source map is m
 test("a disposed session's pending progress request cannot create viewer or geometry state", async t => {
   const { manager, cleanup } = managerWithOwnStore();
   t.after(cleanup);
-  const session = fakeSession();
-  const other = fakeSession({ id: "bbbbbbbbccccdddd", outputKey: "other-output" });
-  manager.outputs.set(session.id, session);
-  manager.outputs.set(other.id, other);
+  const session = fakeSession(manager);
+  const other = fakeSession(manager, { id: "bbbbbbbbccccdddd", outputKey: "other-output" });
   const viewer = manager.viewers.selectsFile("viewer", "torrent:abc", 0);
   manager.viewers.of(session, "viewer");
   manager.viewers.of(other, "viewer");
@@ -200,10 +195,8 @@ test("a disposed session's pending progress request cannot create viewer or geom
 test("a late separate-audio answer cannot restore geometry after that output is disposed", async t => {
   const { manager, cleanup } = managerWithOwnStore();
   t.after(cleanup);
-  const session = fakeSession();
-  const audio = fakeSession({ id: "bbbbbbbbccccdddd", outputKey: "audio-output" });
-  manager.outputs.set(session.id, session);
-  manager.outputs.set(audio.id, audio);
+  const session = fakeSession(manager);
+  const audio = fakeSession(manager, { id: "bbbbbbbbccccdddd", outputKey: "audio-output" });
   manager.viewers.selectsFile("viewer", "torrent:abc", 0);
   manager.viewers.of(session, "viewer");
   manager.viewers.of(audio, "viewer");
@@ -243,12 +236,9 @@ test("a late separate-audio answer cannot restore geometry after that output is 
 test("a pending answer cannot recreate an old variant after the viewer selects another live variant", async t => {
   const { manager, cleanup } = managerWithOwnStore();
   t.after(cleanup);
-  const base = fakeSession();
-  const oldVariant = fakeSession({ id: "bbbbbbbbccccdddd", outputKey: "old-variant" });
-  const newVariant = fakeSession({ id: "ccccccccddddeeee", outputKey: "new-variant" });
-  manager.outputs.set(base.id, base);
-  manager.outputs.set(oldVariant.id, oldVariant);
-  manager.outputs.set(newVariant.id, newVariant);
+  const base = fakeSession(manager);
+  const oldVariant = fakeSession(manager, { id: "bbbbbbbbccccdddd", outputKey: "old-variant" });
+  const newVariant = fakeSession(manager, { id: "ccccccccddddeeee", outputKey: "new-variant" });
   manager.viewers.of(base, "viewer");
   const viewer = manager.viewers.of(oldVariant, "viewer");
   manager.viewers.of(newVariant, "viewer");
@@ -275,8 +265,7 @@ test("a pending answer cannot recreate an old variant after the viewer selects a
 test("a seek that replaces the forecast generation cancels its pending source snapshot", async t => {
   const { manager, cleanup } = managerWithOwnStore();
   t.after(cleanup);
-  const session = fakeSession();
-  manager.outputs.set(session.id, session);
+  const session = fakeSession(manager);
   const viewer = manager.viewers.of(session, "viewer");
 
   let resolveStats;
@@ -297,8 +286,7 @@ test("a seek that replaces the forecast generation cancels its pending source sn
 test("a seek that happens during the initial rate lookup cancels the progress response", async t => {
   const { manager, cleanup } = managerWithOwnStore();
   t.after(cleanup);
-  const session = fakeSession();
-  manager.outputs.set(session.id, session);
+  const session = fakeSession(manager);
   const viewer = manager.viewers.of(session, "viewer");
 
   let resolveRate;

@@ -26,37 +26,31 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { ENCODE_EXIT } from "../../services/encode/encode-exit.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const SESSION_ID = "cccccccc00004000";
 
 /**
  * A session with one run in it, shaped as the manager expects.
  *
- * @param {string} dirPath
+ * @param {object} manager
  * @returns {{ session: object, run: object }}
  */
-function sessionWithARun(dirPath) {
+function sessionWithARun(manager) {
   const run = { from: 0, to: -1, argsDescribed: "ffmpeg …", state: "ENDED_FAILED" };
-  const session = {
+  const session = outputOn(manager, {
     id: SESSION_ID,
+    key: "output-under-test",
     spec: outputSpec({ transcodeVideo: false }),
-    dirPath,
     state: "live",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    outputKey: "output-under-test",
     lastRequestedSegment: 0,
-    progress: { updatedAt: 0, processedSeconds: 0, totalSeconds: 100, startPositionSeconds: 0 },
-    lastAccessedAt: Date.now()
-  };
+    progress: { updatedAt: 0, processedSeconds: 0, totalSeconds: 100, startPositionSeconds: 0 }
+  });
   return { session, run };
 }
 
@@ -80,11 +74,8 @@ function failedFast(run, from) {
 }
 
 test("a run that ended is still recognised as the session's own", (t) => {
-  const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
-  t.after(() => rmSync(dirPath, { recursive: true, force: true }));
   const manager = managerWithOwnStore().manager;
-  const { session, run } = sessionWithARun(dirPath);
-  manager.outputs.set(SESSION_ID, session);
+  const { session, run } = sessionWithARun(manager);
   manager.encodeOrchestrator.adopt(session.outputKey, run);
 
   manager.encodeRuns.noteRunEnded(session, run, failedFast(run, 0));
@@ -102,11 +93,8 @@ test("a run that ended is still recognised as the session's own", (t) => {
 });
 
 test("the count runs at segment 0, which is where a first start happens", (t) => {
-  const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
-  t.after(() => rmSync(dirPath, { recursive: true, force: true }));
   const manager = managerWithOwnStore().manager;
-  const { session } = sessionWithARun(dirPath);
-  manager.outputs.set(SESSION_ID, session);
+  const { session } = sessionWithARun(manager);
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const run = { from: 0, to: -1, argsDescribed: "ffmpeg …" };
@@ -119,11 +107,8 @@ test("the count runs at segment 0, which is where a first start happens", (t) =>
 });
 
 test("real work resets the count, so a transient failure is not permanent", (t) => {
-  const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
-  t.after(() => rmSync(dirPath, { recursive: true, force: true }));
   const manager = managerWithOwnStore().manager;
-  const { session } = sessionWithARun(dirPath);
-  manager.outputs.set(SESSION_ID, session);
+  const { session } = sessionWithARun(manager);
 
   const quick = { from: 0, to: -1 };
   manager.encodeOrchestrator.adopt(session.outputKey, quick);
@@ -139,12 +124,9 @@ test("real work resets the count, so a transient failure is not permanent", (t) 
 });
 
 test("a failure belongs to the output it happened on, not to the next output of the same address", async (t) => {
-  const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
-  t.after(() => rmSync(dirPath, { recursive: true, force: true }));
   const manager = managerWithOwnStore().manager;
   t.after(() => manager.lifecycle.disposeAll());
-  const { session } = sessionWithARun(dirPath);
-  manager.outputs.set(SESSION_ID, session);
+  const { session } = sessionWithARun(manager);
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const run = { from: 0, to: -1, argsDescribed: "ffmpeg …" };
     manager.encodeOrchestrator.adopt(session.outputKey, run);
@@ -163,10 +145,9 @@ test("a failure belongs to the output it happened on, not to the next output of 
 });
 
 test("a run ending after its output was disposed leaves nothing behind for the next output", (t) => {
-  const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
-  t.after(() => rmSync(dirPath, { recursive: true, force: true }));
   const manager = managerWithOwnStore().manager;
-  const { session, run } = sessionWithARun(dirPath);
+  const { session, run } = sessionWithARun(manager);
+  manager.outputs.delete(SESSION_ID);
   manager.encodeOrchestrator.adopt(session.outputKey, run);
   // Disposal removed the output from the registry; its process ends later.
   manager.encodeRuns.noteRunEnded(session, run, failedFast(run, 0));

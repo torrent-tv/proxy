@@ -18,6 +18,7 @@ import { Viewers } from "../../services/viewer/Viewers.js";
 import { chooseAudioTrack, placeInitially as placeViewerInitially } from "../../services/viewer/choices.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const SESSION_ID = "aaaaaaaabbbbcccc";
 
@@ -151,20 +152,15 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
     await rm(dirPath, { recursive: true, force: true });
   });
   const manager = managerWithOwnStore().manager;
-  const session = {
+  const session = outputOn(manager, {
     id: SESSION_ID,
+    key: "viewer-test",
     spec: outputSpec(),
     dirPath,
     state: "live",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    claims: new Set(),
-    lastAccessedAt: Date.now()
-  };
-  manager.outputs.set(SESSION_ID, session);
+    claims: new Set()
+  });
 
   const leaving = manager.viewers.of(session, "leaving");
   leaving.audio = { trackIndex: 2, transcode: true };

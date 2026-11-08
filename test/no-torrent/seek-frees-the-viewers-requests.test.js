@@ -27,14 +27,10 @@ import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { waitForSessionFile } from "../../services/server/transcode-session-files.js";
-import { SourceFile } from "../../services/media/SourceFile.js";
-import { Timeline } from "../../services/encode/output/Timeline.js";
-import { Output } from "../../services/encode/output/Output.js";
-import { KeyframeTable } from "../../services/media/container/KeyframeTable.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
-import { outputSpec } from "./helpers/output-spec.js";
 import { settle } from "./helpers/wait.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const SESSION_ID = "2222222233334444";
 const OUTPUT_KEY = "seek-frees:fmt=fmp4:grid=uniform:video-only:v=0/copy";
@@ -44,47 +40,6 @@ const SOUND_ID = "4444444455556666";
 const SOUND_KEY = "seek-frees:fmt=fmp4:grid=uniform:audio-only:a=0/0/aac";
 /** Long enough that running out of it is a failure and never the measurement. */
 const HOLD_MS = 30_000;
-
-/**
- * One output of the film, with nothing produced for it yet.
- *
- * @param {object} manager
- * @param {{ id: string, key: string, audioOnly?: boolean, height?: number }} what
- * @returns {object}
- */
-function outputOn(manager, { id, key, audioOnly = false, height = 0 }) {
-  manager.segmentStore.useFormat(key, fmp4Format);
-  const dirPath = manager.segmentStore.directoryFor(key);
-  const session = {
-    id,
-    spec: outputSpec({ transcodeVideo: height > 0, height, audioOnly, cutGrid: "uniform" }),
-    outputKey: key,
-    dirPath,
-    timeline: new Timeline({ boundaries: [0, 12.5, 25, 37.5, 50, 62.5], cutGrid: "uniform" }),
-    state: "ready",
-    file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }).learn({ durationSeconds: 62.5 }),
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    lastAloneSpeed: 2,
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
-    runs: new Set(),
-    lastError: "",
-    consumers: new Set(),
-    viewers: new Map(),
-    segmentCount: 5,
-    // These checks exercise request ownership with arbitrary file bytes.
-    segmentFormat: { ...fmp4Format, needsSegmentRewrite: false },
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
-    output: new Output({ encodeWidth: 0, encodeHeight: height, outputFps: 25, softwarePreset: null, applyTonemap: false }),
-    keyframes: new KeyframeTable().learn({ times: [0, 12.5, 25, 37.5, 50], format: "matroska" }),
-    audioOnly,
-    waitEpoch: 0
-  };
-  manager.outputs.set(id, session);
-  return session;
-}
 
 /**
  * Wait until the store really holds this many waits on an output.

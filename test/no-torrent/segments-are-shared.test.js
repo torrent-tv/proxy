@@ -22,8 +22,8 @@ import path from "node:path";
 import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
-import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const OUTPUT_KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
@@ -41,28 +41,21 @@ function managerOverATempStore() {
 
 /**
  * A session shaped like a live one, sharing an output with any other built
- * from the same key.
+ * from the same key, and registered on the manager.
  *
- * @param {{ id: string, dirPath: string, outputKey: string }} params
+ * @param {object} manager
+ * @param {{ id: string, outputKey: string }} params
  * @returns {object}
  */
-function sessionOn({ id, dirPath, outputKey }) {
-  return {
+function sessionOn(manager, { id, outputKey }) {
+  return outputOn(manager, {
     id,
-    spec: outputSpec({ transcodeVideo: false }),
-    outputKey,
-    dirPath,
-    state: "ready",
+    key: outputKey,
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
     segmentFormat: fmp4Format,
     // Where the file is cut, which every live session holds.
-    timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "keyframe" }),
-    lastAccessedAt: Date.now()
-  };
+    timeline: new Timeline({ boundaries: [0, 4, 8], cutGrid: "keyframe" })
+  });
 }
 
 test("a second session of the same output is given the same directory", (t) => {
@@ -88,10 +81,8 @@ test("each session serves the segments the other one's encoder made", (t) => {
   writeFileSync(path.join(dirPath, "segment-00000.mp4"), Buffer.alloc(32, 1));
   writeFileSync(path.join(dirPath, "segment-00100.mp4"), Buffer.alloc(32, 2));
 
-  const viewerOne = sessionOn({ id: "s-one", dirPath, outputKey: OUTPUT_KEY });
-  const viewerTwo = sessionOn({ id: "s-two", dirPath, outputKey: OUTPUT_KEY });
-  manager.outputs.set(viewerOne.id, viewerOne);
-  manager.outputs.set(viewerTwo.id, viewerTwo);
+  const viewerOne = sessionOn(manager, { id: "s-one", outputKey: OUTPUT_KEY });
+  const viewerTwo = sessionOn(manager, { id: "s-two", outputKey: OUTPUT_KEY });
 
   const sorted = (numbers) => [...numbers].sort((left, right) => left - right);
   const heldByOne = sorted(manager.serving.producedSegmentNumbers(viewerOne));
@@ -109,10 +100,8 @@ test("a session leaving does not take the segments with it", async (t) => {
   store.useFormat(OUTPUT_KEY, fmp4Format);
   writeFileSync(path.join(dirPath, "segment-00000.mp4"), Buffer.alloc(32, 1));
 
-  const viewerOne = sessionOn({ id: "s-one", dirPath, outputKey: OUTPUT_KEY });
-  const viewerTwo = sessionOn({ id: "s-two", dirPath, outputKey: OUTPUT_KEY });
-  manager.outputs.set(viewerOne.id, viewerOne);
-  manager.outputs.set(viewerTwo.id, viewerTwo);
+  const viewerOne = sessionOn(manager, { id: "s-one", outputKey: OUTPUT_KEY });
+  const viewerTwo = sessionOn(manager, { id: "s-two", outputKey: OUTPUT_KEY });
 
   await manager.lifecycle.disposeSession(viewerOne.id);
   await manager.lifecycle.disposeSession(viewerTwo.id);

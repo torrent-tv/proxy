@@ -36,6 +36,7 @@ import { fileURLToPath } from "node:url";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { Output } from "../../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
@@ -86,21 +87,21 @@ function bareManager() {
 }
 
 /**
- * A session shaped like a live one, with no encoder behind it.
+ * A session shaped like a live one, with no encoder behind it, registered on the manager.
  *
- * @param {{ id?: string }} [params]
+ * @param {object} manager
+ * @param {{ id?: string, key?: string }} [params]
  * @returns {object}
  */
-function fakeSession({ id = SESSION_ID } = {}) {
-  return {
+function fakeSession(manager, { id = SESSION_ID, key = "surface:fmt=fmp4:grid=kf@0:video-only:v=0/copy" } = {}) {
+  return outputOn(manager, {
     id,
+    key,
     spec: outputSpec({ cutGrid: "keyframe", audioSeparate: true }),
-    outputKey: "surface:fmt=fmp4:grid=kf@0:video-only:v=0/copy",
+    // Nothing of this output is on disk: the directory is one that does not exist.
     dirPath: path.join(PROXY, "test", "does-not-exist"),
     file: new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv" })
       .learn({ width: 1920, height: 1080 }),
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
     timeline: new Timeline({
       boundaries: Array.from({ length: 11 }, (_, index) => index * 4),
       cutGrid: "keyframe"
@@ -117,11 +118,9 @@ function fakeSession({ id = SESSION_ID } = {}) {
     transcodeAudio: true,
     audioTrackIndex: 0,
     audioSourceTrackIndex: 0,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
     segmentCount: 10,
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
-  };
+  });
 }
 
 test("every call the HTTP layer makes is answered", () => {
@@ -143,7 +142,7 @@ test("every call the HTTP layer makes is answered", () => {
 
 test("the progress report keeps every figure it carries today", async () => {
   const manager = bareManager();
-  manager.outputs.set(SESSION_ID, fakeSession());
+  fakeSession(manager);
   const progress = await manager.viewerRequests.getSessionProgress(SESSION_ID, "viewer-one");
   assert.ok(progress, "a live session has a progress report");
 
@@ -173,8 +172,7 @@ test("the progress report keeps every figure it carries today", async () => {
 
 test("a projected encoder rate remains numeric while progress marks its capture unknown", async () => {
   const manager = bareManager();
-  const session = fakeSession();
-  manager.outputs.set(SESSION_ID, session);
+  fakeSession(manager);
   manager.encodeRuns.speedReadingsOf = () => [];
   manager.encodeCost.projectedSpeedOf = () => 1.75;
 
@@ -191,11 +189,8 @@ test("a projected encoder rate remains numeric while progress marks its capture 
 
 test("a failed selected soundtrack fails playback progress even while video remains available", async () => {
   const manager = bareManager();
-  const video = fakeSession();
-  const audio = fakeSession({ id: "1111111122223333" });
-  audio.outputKey = "soundtrack";
-  manager.outputs.set(video.id, video);
-  manager.outputs.set(audio.id, audio);
+  const video = fakeSession(manager);
+  const audio = fakeSession(manager, { id: "1111111122223333", key: "soundtrack" });
   manager.renditions.playbackAudioOutputFor = () => audio;
   manager.encodeRuns.wireStateOf = output => output === audio ? "failed" : "running";
   manager.encodeRuns.failureOf = output => output === audio ? "Closed audio piece has incomplete media." : "";
@@ -221,7 +216,7 @@ test("a session that is not there is answered, not invented", async () => {
 
 test("what a viewer states about themselves is kept and answered", () => {
   const manager = bareManager();
-  manager.outputs.set(SESSION_ID, fakeSession());
+  fakeSession(manager);
   manager.viewers.present("viewer-one");
 
   // Nine public members had no test of any kind before the dismantling began,
@@ -257,8 +252,7 @@ test("what a viewer states about themselves is kept and answered", () => {
 
 test("what a file declares and what this host could offer are answered without a session", () => {
   const manager = bareManager();
-  const session = fakeSession();
-  manager.outputs.set(SESSION_ID, session);
+  const session = fakeSession(manager);
 
   // `declaredTracks` reads the session's own record and must answer even when
   // nothing has probed the file yet.
@@ -279,7 +273,7 @@ test("what a file declares and what this host could offer are answered without a
 
 test("a segment name that is not one is refused", async () => {
   const manager = bareManager();
-  manager.outputs.set(SESSION_ID, fakeSession());
+  fakeSession(manager);
 
   for (const name of ["../key.txt", "segment-00000.mp4/../../x", "making-0-00000.mp4"]) {
     const answer = await manager.serving.getFileStream(SESSION_ID, name);
@@ -291,7 +285,7 @@ test("the progress report reads the media intervals of made pieces only", async 
   // r61 (torrent-tv/meta#178): asked of every piece, each one not made cost a
   // `stat` in the store, 1327 per poll per output on the main thread.
   const manager = bareManager();
-  manager.outputs.set(SESSION_ID, fakeSession());
+  fakeSession(manager);
   manager.segmentStore.sizesOf = () => new Map([[2, 1000]]);
   const asked = [];
   manager.encodeRuns.finishedMediaRangesOf = (_output, index) => { asked.push(index); return undefined; };

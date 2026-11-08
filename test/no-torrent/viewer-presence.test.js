@@ -21,27 +21,29 @@ import { SourceFile } from "../../services/media/SourceFile.js";
 import { Viewers } from "../../services/viewer/Viewers.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const PICTURE = "aaaaaaaa00004000";
 const SOUND = "aaaaaaaa00004001";
 
 /**
+ * An output of a film that is live, registered on the manager.
+ *
+ * @param {object} manager
  * @param {string} id
  * @param {string} dirPath
  * @returns {object}
  */
-function outputOn(id, dirPath) {
-  return {
+function liveOutput(manager, id, dirPath) {
+  return outputOn(manager, {
     id,
+    key: `presence-${id}`,
     spec: outputSpec(),
     dirPath,
     state: "live",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" }),
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    claims: new Set(),
-    lastAccessedAt: Date.now()
-  };
+    claims: new Set()
+  });
 }
 
 test("asking for a viewer of an output is that viewer watching it", () => {
@@ -86,10 +88,8 @@ test("a viewer whose connection closed is let go of every output they were watch
   });
   const manager = managerWithOwnStore().manager;
 
-  const picture = outputOn(PICTURE, dirPath);
-  const sound = outputOn(SOUND, dirPath);
-  manager.outputs.set(PICTURE, picture);
-  manager.outputs.set(SOUND, sound);
+  const picture = liveOutput(manager, PICTURE, dirPath);
+  const sound = liveOutput(manager, SOUND, dirPath);
   manager.viewers.of(picture, "watcher");
   manager.viewers.of(sound, "watcher");
 

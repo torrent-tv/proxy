@@ -21,6 +21,7 @@ import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { Output } from "../../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 function wired(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), "speculative-hold-"));
@@ -95,18 +96,22 @@ test("the start forecast's wait is said in why the download was held", (t) => {
   assert.match(told.at(-1).because, /over 5s with a viewer waiting for its #1501 by the start forecast; the swarm gives/);
 });
 
-test("a viewer the start forecast holds for an encoder's piece is told to whoever shares the processor", async (t) => {
-  const { parts } = wired(t);
-  const OUTPUT = "surface:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
-  const session = {
-    id: "aaaaaaaabbbbcccc",
+/**
+ * A session shaped like a live one, with no encoder behind it and nothing of it
+ * on disk (its directory is one that does not exist), registered on the manager.
+ *
+ * @param {object} parts
+ * @param {{ id: string, key: string, dirPath: string }} params
+ * @returns {object}
+ */
+function surfaceOutput(parts, { id, key, dirPath }) {
+  return outputOn(parts, {
+    id,
+    key,
     spec: outputSpec({ cutGrid: "keyframe", audioSeparate: false }),
-    outputKey: OUTPUT,
-    dirPath: path.join(os.tmpdir(), "speculative-hold-does-not-exist"),
+    dirPath,
     file: new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv" })
       .learn({ width: 1920, height: 1080, durationSeconds: 40 }),
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
     timeline: new Timeline({ boundaries: Array.from({ length: 11 }, (_, index) => index * 4), cutGrid: "keyframe" }),
     segmentFormat: fmp4Format,
     output: new Output({ encodeWidth: 0, encodeHeight: 0, outputFps: 24, softwarePreset: null, applyTonemap: false }),
@@ -114,12 +119,15 @@ test("a viewer the start forecast holds for an encoder's piece is told to whoeve
     transcodeAudio: true,
     audioTrackIndex: 0,
     audioSourceTrackIndex: 0,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
     segmentCount: 10,
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
-  };
-  parts.outputs.set(session.id, session);
+  });
+}
+
+test("a viewer the start forecast holds for an encoder's piece is told to whoever shares the processor", async (t) => {
+  const { parts } = wired(t);
+  const OUTPUT = "surface:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
+  const session = surfaceOutput(parts, { id: "aaaaaaaabbbbcccc", key: OUTPUT, dirPath: path.join(os.tmpdir(), "speculative-hold-does-not-exist") });
   // A viewer at the start over a fast link; nothing is made; the encoder is
   // predicted at 0.5x and each piece reads its own 10 MB of a file still
   // downloading at 50 MB/s.
@@ -155,28 +163,7 @@ test("a viewer the start forecast holds for an encoder's piece is told to whoeve
 test("the start forecast includes an unread segment ending within the seek tolerance", async (t) => {
   const { parts } = wired(t);
   const outputKey = "surface:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
-  const session = {
-    id: "bbbbbbbbccccdddd",
-    spec: outputSpec({ cutGrid: "keyframe", audioSeparate: false }),
-    outputKey,
-    dirPath: path.join(os.tmpdir(), "speculative-hold-boundary-does-not-exist"),
-    file: new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "video.mkv" })
-      .learn({ width: 1920, height: 1080, durationSeconds: 40 }),
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    timeline: new Timeline({ boundaries: Array.from({ length: 11 }, (_, index) => index * 4), cutGrid: "keyframe" }),
-    segmentFormat: fmp4Format,
-    output: new Output({ encodeWidth: 0, encodeHeight: 0, outputFps: 24, softwarePreset: null, applyTonemap: false }),
-    transcodeVideo: false,
-    transcodeAudio: true,
-    audioTrackIndex: 0,
-    audioSourceTrackIndex: 0,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
-    segmentCount: 10,
-    progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
-  };
-  parts.outputs.set(session.id, session);
+  const session = surfaceOutput(parts, { id: "bbbbbbbbccccdddd", key: outputKey, dirPath: path.join(os.tmpdir(), "speculative-hold-boundary-does-not-exist") });
   const viewer = { linkReading: () => viewerReading(session.id, 8.033) };
   parts.viewers.get = () => viewer;
   parts.encodeCost.projectedSpeedOf = () => 0.5;

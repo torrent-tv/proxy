@@ -22,6 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const SESSION_ID = "aaaaaaaa11112222";
 const SEGMENT_SECONDS = 10.4;
@@ -36,33 +37,23 @@ const SEGMENT_AT_SEEK = Math.floor(SEEK_TO_SECONDS / SEGMENT_SECONDS);
 async function managerAfterSeek() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "seek-target-"));
   const manager = managerWithOwnStore().manager;
-  const session = {
+  const session = outputOn(manager, {
     id: SESSION_ID,
+    key: "seek-target:fmt=fmp4:grid=uniform:video-only:v=0/copy",
+    // The directory this check removes itself, not the store's.
     dirPath,
-    // Where this file is cut, held by the file. A fixture that stated it
-    // on the session was describing what production no longer does.
     timeline: new Timeline({
       boundaries: Array.from({ length: 400 }, (_, index) => index * SEGMENT_SECONDS),
       cutGrid: "uniform"
     }),
-    state: "ready",
     file: new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "film.mkv" }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
-    consumers: new Set(),
     segmentFormat: fmp4Format,
     transcodeVideo: false,
-    useSyntheticPlaylist: true,
     segmentCount: 399,
     encodeStartIndex: SEGMENT_AT_SEEK,
     waitEpoch: 1,
     runState: "PRODUCING"
-  };
-  manager.outputs.set(SESSION_ID, session);
+  });
   manager.viewers.of(session, "viewer").moveTo(SEEK_TO_SECONDS);
   manager.viewers.of(session, "viewer").playing = false;
   return { manager, dirPath };

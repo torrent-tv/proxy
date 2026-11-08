@@ -26,11 +26,9 @@ import assert from "node:assert/strict";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
 import { decodeCostOf, decodeFamilyOf } from "../../services/encode/decode-cost-fit.js";
 import { Output } from "../../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
-import os from "node:os";
 import path from "node:path";
 import {
   canSustainOutput,
@@ -42,6 +40,7 @@ import { SourceFile, sourceDecodeCharacteristics } from "../../services/media/So
 import { parseFfmpegBitrateKbps, parseFfmpegVideoDimensions, parseFfmpegVideoFps } from "../../services/media/ffmpeg-banner.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { outputOn } from "./helpers/output.js";
 
 const require = createRequire(import.meta.url);
 const ffmpegBin = require("ffmpeg-static");
@@ -292,29 +291,23 @@ test("the source's decode figures come off the probe, or not at all", () => {
 });
 
 test("the OFFER drops the rungs the host cannot hold, and the master keeps addressing them", async (t) => {
-  const dirPath = await mkdtemp(path.join(os.tmpdir(), "decode-cost-"));
   const manager = managerWithOwnStore({
     // A host that can encode a little: 3 Mpx/s, so only the smallest rungs of a
     // 1080p source can be produced faster than they are watched.
     softwarePresetBenchmark: [{ preset: "ultrafast", pixelsPerSec: 3e6 }],
     decodeCostModel: ADDON_HOST_MODEL
   }).manager;
-  t.after(async () => {
-    await manager.lifecycle.disposeAll();
-    await rm(dirPath, { recursive: true, force: true });
-  });
+  t.after(() => manager.lifecycle.disposeAll());
 
-  const session = {
+  const spec = outputSpec({ transcodeVideo: false, cutGrid: "keyframe" });
+  const session = outputOn(manager, {
     id: "ccccccccddddeeee",
-    spec: outputSpec({ transcodeVideo: false, cutGrid: "keyframe" }),
-    dirPath,
-    // Where this file is cut, held by the file. A fixture that stated it
-    // on the session was describing what production no longer does.
+    key: spec.toKey(),
+    spec,
     timeline: new Timeline({
       boundaries: Array.from({ length: 101 }, (_, index) => index * 4),
       cutGrid: "keyframe"
     }),
-    state: "ready",
     // The file's own facts: the picture's size, and what decoding it costs,
     // which is derived from them rather than stated beside them. These are the
     // measured film of MEASURED_FILM above — 1080p24 at 8 Mbit/s.
@@ -324,15 +317,7 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
       fps: 24,
       bitrateKbps: 8000
     }),
-    // An ordinary session reads its own file, and its sound is inside it. The
-    // three differ only for a soundtrack shipped as a file of its own.
-    get inputFile() { return this.file; },
-    get audioFile() { return this.file; },
-    startedAt: Date.now(),
-    lastAccessedAt: Date.now(),
     ffmpeg: null,
-    lastError: "",
-    consumers: new Set(),
     segmentFormat: fmp4Format,
     transcodeVideo: false,
     transcodeAudio: true,
@@ -348,12 +333,9 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
       applyTonemap: false
     }),
     usesExplicitCuts: true,
-    useSyntheticPlaylist: true,
-    playlistText: "#EXTM3U\n",
     segmentCount: 100,
     progress: { state: "running", processedSeconds: 0, startPositionSeconds: 0 }
-  };
-  manager.outputs.set(session.id, session);
+  });
 
   assert.deepEqual(
     manager.quality.offeredHeights(session),

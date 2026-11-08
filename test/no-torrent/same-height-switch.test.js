@@ -31,33 +31,15 @@ import { Renditions } from "../../services/encode/Renditions.js";
 import { OutputCatalog } from "../../services/encode/output/OutputCatalog.js";
 import { Viewers } from "../../services/viewer/Viewers.js";
 import {
-  audioBeingWarmedOf,
-  audioChoiceOf,
-  bufferedSecondsOf,
-  chooseAudioTrack,
   chooseOutput,
   chosenOutputOf,
-  consumersOn,
-  generationOfRequest,
   givenOutputOf,
-  heightsChosenAs,
-  highestGivenSegmentOf,
-  linkMbpsOf,
-  noteAudioBeingWarmed,
   noteGivenOutput,
-  noteSameHeightSwitch,
-  noteServingVerdict,
-  noteStepBeingWarmed,
   noteStepOnScreen,
   outputsBeingPrepared,
   placeOn,
-  presentOn,
-  qualityModeOf,
   sameHeightSwitchOf,
-  stepBeingWarmedOf,
   stepOnScreenOf,
-  switchingFrom,
-  switchingOnto,
   watches
 } from "../../services/viewer/choices.js";
 import { activeOutputFor } from "../../services/viewer/active-output.js";
@@ -66,6 +48,7 @@ import { SourceFile } from "../../services/media/SourceFile.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { mpegtsFormat } from "../../services/encode/segment-formats/mpegts.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { renditionsHost } from "./helpers/renditions.js";
 import { maxrateKbpsFor, nominalKbpsFor, softwareRateControlFor } from "../../services/encode/args.js";
 
 const BASE_ID = "1111111122223333";
@@ -175,12 +158,9 @@ function pictureAtNominal(how = {}) {
       availability: () => null
     })
     : null;
-  const renditions = new Renditions({
+  const renditions = new Renditions(renditionsHost(viewers, {
     outputs,
     viewers,
-    viewerCountOn: (output) => viewers.forOutput(output).size,
-    outputStillNeeded: (output) => viewers.stillNeeded(output),
-    viewerSecondsOn: () => 0,
     activeOutputFor: (args) => activeOutputFor({ ...args, viewers }),
     viewerPositionOf: (_id, consumerId) => viewers.get(consumerId)?.positionSeconds() ?? 0,
     placeViewerOn: (output, consumerId, seconds) => placeOn(viewers, output, consumerId, seconds),
@@ -189,29 +169,6 @@ function pictureAtNominal(how = {}) {
       segmentIndexForTime: (_output, seconds) => Math.floor(seconds / SEGMENT_SECONDS)
     },
     encodeRuns: { isLive: () => true, hasFailed: (output) => failed.has(output.id) },
-    quality: { variantsOnScreen: () => new Set() },
-    consumersOn: (output) => consumersOn(viewers, output),
-    presentOn: (output) => presentOn(viewers, output),
-    qualityModeOf: (output, consumerId) => qualityModeOf(viewers, output, consumerId),
-    linkMbpsOf: (output, consumerId) => linkMbpsOf(viewers, output, consumerId),
-    audioChoiceOf: (output, consumerId) => audioChoiceOf(viewers, output, consumerId),
-    chooseAudioTrack: (output, consumerId, choice) => chooseAudioTrack(viewers, output, consumerId, choice),
-    stepOnScreenOf: (output, consumerId) => stepOnScreenOf(viewers, output, consumerId),
-    noteStepOnScreen: (output, consumerId, stepId) => noteStepOnScreen(viewers, output, consumerId, stepId),
-    stepBeingWarmedOf: (output, consumerId) => stepBeingWarmedOf(viewers, output, consumerId),
-    noteStepBeingWarmed: (output, consumerId, stepId) => noteStepBeingWarmed(viewers, output, consumerId, stepId),
-    audioBeingWarmedOf: (output, consumerId) => audioBeingWarmedOf(viewers, output, consumerId),
-    noteAudioBeingWarmed: (output, consumerId, id) => noteAudioBeingWarmed(viewers, output, consumerId, id),
-    watches: (output, consumerId) => watches(viewers, output, consumerId),
-    placeOn: (output, consumerId, seconds) => placeOn(viewers, output, consumerId, seconds),
-    generationOfRequest: (consumerId, stated) => generationOfRequest(viewers, consumerId, stated),
-    givenOutputOf: (consumerId, generation, height, index) =>
-      givenOutputOf(viewers, consumerId, generation, height, index),
-    noteGivenOutput: (consumerId, generation, height, index, key) =>
-      noteGivenOutput(viewers, consumerId, generation, height, index, key),
-    chosenOutputOf: (consumerId, height) => chosenOutputOf(viewers, consumerId, height),
-    chooseOutput: (consumerId, height, key) => chooseOutput(viewers, consumerId, height, key),
-    noteServingVerdict: (consumerId, verdict) => noteServingVerdict(viewers, consumerId, verdict),
     limitsFor: () => LIMITS,
     // The speed settings this machine measured, in quality order, and what
     // each would do here over a run, as `EncodeCost.presetSpeedOf` answers.
@@ -221,16 +178,9 @@ function pictureAtNominal(how = {}) {
     processingSpeedOf: (output) => typeof how.processingSpeedOf === "function" ? how.processingSpeedOf(output) : 1,
     notePredictedSpeed: (output, speed) => { predicted.push({ outputKey: output.outputKey, speed }); },
     requiredSpeedOf: () => 1,
-    heightsChosenAs: (consumerId, key) => heightsChosenAs(viewers, consumerId, key),
-    highestGivenSegmentOf: (consumerId, height) => highestGivenSegmentOf(viewers, consumerId, height),
-    sameHeightSwitchOf: (consumerId) => sameHeightSwitchOf(viewers, consumerId),
-    noteSameHeightSwitch: (consumerId, value) => noteSameHeightSwitch(viewers, consumerId, value),
-    switchingOnto: (output) => switchingOnto(viewers, output),
-    switchingFrom: (output) => switchingFrom(viewers, output),
     segmentClosed: (key, index) => closed.has(`${key}#${index}`),
     // What a viewer holds, as their page said, and the cushion a move that is
     // not urgent waits for — none unless a check names one.
-    bufferedSecondsOf: (consumerId) => bufferedSecondsOf(viewers, consumerId),
     minimumBufferSecondsFor: () => how.cushionSec ?? null,
     headersCompatible: () => how.headerVerdict ?? { compatible: true, differences: [] },
     // THE REAL ADMISSION over the viewers' own records, when a cost is given;
@@ -267,7 +217,7 @@ function pictureAtNominal(how = {}) {
     // When a piece closes on an output, as the check states it; unknown unless named.
     secondsUntilClosed: (output, index) => how.closeIn?.(output, index) ?? null,
     logger: { info: () => {}, warn: () => {}, error: () => {} }
-  });
+  }));
   for (const consumerId of how.viewers ?? ["viewer-a"]) {
     const viewer = viewers.of(base, consumerId);
     viewer.qualityMode = "auto";

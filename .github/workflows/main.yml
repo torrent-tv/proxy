@@ -2,7 +2,8 @@ name: Main
 
 # Every push to main runs the checks and then the release. The release publishes
 # @torrent-tv/proxy to npm when the Conventional Commits since the last tag ask for
-# one, and then points the Home Assistant add-on at it.
+# one, tags the merged commit (no release commit is made), and then points the Home
+# Assistant add-on at it.
 
 on:
   push:
@@ -12,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: Release step
+        description: Least release step (a feat still releases minor)
         type: choice
         options: [auto, patch, minor]
         default: auto
@@ -81,11 +82,8 @@ jobs:
         uses: torrent-tv/.github/actions/check-line-endings@main
       - name: Workflows are valid
         uses: torrent-tv/.github/actions/check-workflows@main
-      - name: Pending changes have a changelog entry
-        uses: torrent-tv/.github/actions/check-changelog@main
-        with:
-          changelog: CHANGELOG.md
-          version-file: package.json
+      - name: Pull request adds a changeset
+        uses: torrent-tv/.github/actions/check-changesets@main
       - name: Install dependencies
         run: npm ci
       # No check may start a real torrent; this is the static half of that rule.
@@ -117,8 +115,9 @@ jobs:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     environment: production
-    # Every release runs, one at a time, in the order the runs reach the queue; the
-    # version comparisons below make the order of arrival harmless.
+    # Every release runs, one at a time, in the order the runs reach the queue. A later
+    # run sees the earlier tag and releases what came after it; a run whose commit a
+    # tag already holds only finishes what is missing.
     concurrency:
       group: release
       cancel-in-progress: false
@@ -135,11 +134,12 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
+      # The version is the newest v* tag plus the step the commits ask for; it is
+      # written into package.json and package-lock.json of this workspace only.
       - id: release
-        uses: torrent-tv/.github/actions/release-prepare@main
+        uses: torrent-tv/.github/actions/release-plan@main
         with:
           version-files: package.json,package-lock.json
-          changelog: CHANGELOG.md
           bump: ${{ inputs.bump || 'auto' }}
 
       - name: Publish to npm
@@ -147,19 +147,30 @@ jobs:
         # npm trusted publishing (npmjs.com: torrent-tv/proxy, main.yml, environment
         # production) authenticates this step with the workflow's OIDC token; no npm
         # token is stored.
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
         run: |
           npm install --global npm@11
-          npm publish --provenance --access public
+          # A re-run after a publication whose tag push failed finds the version published
+          # from this very commit (npm records it as gitHead) and only tags it.
+          published=$(npm view "@torrent-tv/proxy@$VERSION" gitHead 2>/dev/null || true)
+          if [ -z "$published" ]; then
+            npm publish --provenance --access public
+          elif [ "$published" = "$(git rev-parse HEAD)" ]; then
+            echo "::notice::@torrent-tv/proxy@$VERSION is already published from this commit; only the tag is pushed"
+          else
+            echo "::error::@torrent-tv/proxy@$VERSION is published from $published but v$VERSION is not tagged; re-run the release of $published first"
+            exit 1
+          fi
 
       - if: steps.release.outputs.released == 'true'
-        uses: torrent-tv/.github/actions/release-finish@main
+        uses: torrent-tv/.github/actions/release-tag@main
         with:
           tag: ${{ steps.release.outputs.tag }}
-          changelog: CHANGELOG.md
-          version-files: package.json,package-lock.json
           notes-file: ${{ steps.release.outputs.notes-file }}
           github-token: ${{ github.token }}
 
+      # Unchanged until torrent-tv/meta#336 step 3 replaces them with a dispatch.
       - name: Token for the add-on only
         id: addon-token
         if: steps.release.outputs.released == 'true'

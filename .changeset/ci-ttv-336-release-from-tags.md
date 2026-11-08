@@ -1,0 +1,1 @@
+- **Chore**: Releases are now made from tags; release notes come from each pull request's changeset, and the version no longer appears in a commit on main.

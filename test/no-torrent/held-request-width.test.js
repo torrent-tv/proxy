@@ -15,8 +15,8 @@ import { Timeline } from "../../services/encode/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const SESSION_ID = "aaaaaaaabbbbcccc";
 const SEGMENT_SECONDS = 4;
@@ -26,12 +26,7 @@ const SEGMENT_SECONDS = 4;
  */
 async function managerWithSession() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "held-request-"));
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const session = {
     id: SESSION_ID,
     dirPath,

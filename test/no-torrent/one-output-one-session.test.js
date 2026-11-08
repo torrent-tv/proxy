@@ -18,10 +18,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { AudioOutput, CutGrid, OutputSpec, VideoOutput } from "../../services/encode/output/OutputSpec.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const TORRENT = "torrent:11f0929918e2b5aa2e5b71ecdbe5c0f1a4bbf7d1";
 
@@ -116,17 +116,10 @@ function knownFile(manager) {
 }
 
 test("a second viewer of one output is served by the session that exists", async (t) => {
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore({ planless: true }).manager;
   t.after(() => manager.lifecycle.disposeAll());
   // No plan runs here: this file is about which session answers a request, and
   // placing encoders would spawn real processes.
-  manager.encodeRuns.planEncodersNow = () => {};
-  manager.encodeRuns.planEncodersSoon = () => {};
   knownFile(manager);
   const seeded = seedOneSession(manager);
 
@@ -141,19 +134,14 @@ test("a request whose parameters differ is not that session", async (t) => {
   // the output's, so a request producing something else must not find it. Here
   // the sound is to be re-encoded, which is a different output and a different
   // set of bytes.
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
+  const manager = managerWithOwnStore({
+    planless: true,
     // A session made for real here waits for a playlist that nothing is going
     // to write. Zero, so this check spends no time on a deadline it is not
     // about — the deadline has its own subject elsewhere.
     startupWaitMs: 0
-  });
+  }).manager;
   t.after(() => manager.lifecycle.disposeAll());
-  manager.encodeRuns.planEncodersNow = () => {};
-  manager.encodeRuns.planEncodersSoon = () => {};
   const seeded = seedOneSession(manager);
 
   let answered = null;
@@ -170,19 +158,14 @@ test("a request whose parameters differ is not that session", async (t) => {
 });
 
 test("two screens that come to the same format share one output, and a different format does not", async (t) => {
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
+  const manager = managerWithOwnStore({
+    planless: true,
     startupWaitMs: 0,
     // A host with no ladder to choose from: the box asked for, fitted to the
     // source, is what is produced.
     videoEncoder: { kind: "vaapi", name: "h264_vaapi", inputArgs: [] }
-  });
+  }).manager;
   t.after(() => manager.lifecycle.disposeAll());
-  manager.encodeRuns.planEncodersNow = () => {};
-  manager.encodeRuns.planEncodersSoon = () => {};
   knownFile(manager);
   const spec = new OutputSpec({
     sourceKey: TORRENT,
@@ -221,18 +204,13 @@ test("a remembered dub with no stated rate opens on the output that sends it as 
   // remembered, which its browser plays as it stands and nothing states a rate
   // for. Opened as a copy, no link could be asked about it and the episode was
   // refused; it is the AAC output that answers.
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
+  const manager = managerWithOwnStore({
+    planless: true,
     // A measured copy speed, so this machine can price the output and the
     // admission answers on room rather than on knowing nothing.
     copySpeedX: 20
-  });
+  }).manager;
   t.after(() => manager.lifecycle.disposeAll());
-  manager.encodeRuns.planEncodersNow = () => {};
-  manager.encodeRuns.planEncodersSoon = () => {};
   knownFile(manager);
   const copied = seedOneSession(manager, { trackIndex: 1, transcode: false });
   const encoded = seedOneSession(manager, { trackIndex: 1, transcode: true });
@@ -251,18 +229,13 @@ test("a remembered dub with no stated rate opens on the output that sends it as 
 });
 
 test("a track whose rate is stated is still copied for a browser that plays it", async (t) => {
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
+  const manager = managerWithOwnStore({
+    planless: true,
     // A measured copy speed, so this machine can price the output and the
     // admission answers on room rather than on knowing nothing.
     copySpeedX: 20
-  });
+  }).manager;
   t.after(() => manager.lifecycle.disposeAll());
-  manager.encodeRuns.planEncodersNow = () => {};
-  manager.encodeRuns.planEncodersSoon = () => {};
   knownFile(manager);
   const copied = seedOneSession(manager);
   seedOneSession(manager, { trackIndex: 0, transcode: true });

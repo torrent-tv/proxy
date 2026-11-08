@@ -13,11 +13,11 @@ import { SourceFile } from "../../services/media/SourceFile.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { Viewer } from "../../services/viewer/Viewer.js";
 import { Viewers } from "../../services/viewer/Viewers.js";
 import { chooseAudioTrack, placeInitially as placeViewerInitially } from "../../services/viewer/choices.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const SESSION_ID = "aaaaaaaabbbbcccc";
 
@@ -150,12 +150,7 @@ test("releasing a consumer forgets everything that was true of them alone", asyn
   t.after(async () => {
     await rm(dirPath, { recursive: true, force: true });
   });
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const session = {
     id: SESSION_ID,
     spec: outputSpec(),

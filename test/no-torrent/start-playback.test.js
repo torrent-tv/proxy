@@ -19,9 +19,7 @@ import { Output } from "../../services/encode/output/Output.js";
 const SOURCE = "torrent:abc";
 
 function host(t) {
-  const made = managerWithOwnStore({ startupWaitMs: 0 });
-  made.manager.encodeRuns.planEncodersNow = () => {};
-  made.manager.encodeRuns.planEncodersSoon = () => {};
+  const made = managerWithOwnStore({ planless: true, startupWaitMs: 0 });
   t.after(async () => {
     await made.manager.lifecycle.disposeAll();
     made.cleanup();

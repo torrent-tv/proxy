@@ -20,8 +20,8 @@ import { Timeline } from "../../services/encode/output/Timeline.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const SESSION_ID = "aaaaaaaa11112222";
 const SEGMENT_SECONDS = 10.4;
@@ -35,12 +35,7 @@ const SEGMENT_AT_SEEK = Math.floor(SEEK_TO_SECONDS / SEGMENT_SECONDS);
  */
 async function managerAfterSeek() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "seek-target-"));
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const session = {
     id: SESSION_ID,
     dirPath,

@@ -23,12 +23,12 @@ import { Output } from "../../services/encode/output/Output.js";
 import { KeyframeTable } from "../../services/media/container/KeyframeTable.js";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { ENCODE_RUN_STATE } from "../../services/encode/encode-run-state.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { box } from "./helpers/mp4-file.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const MOVIE_TIMESCALE = 1000;
 const VIDEO_TIMESCALE = 90_000;
@@ -117,12 +117,7 @@ function selfContainedPiece(offsetSeconds) {
  * @returns {Promise<{ manager: object, session: object, dirPath: string }>}
  */
 async function managerWithReadySegment(overrides = {}) {
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore({ planless: true }).manager;
   // ADDRESSED THE WAY PRODUCTION ADDRESSES IT. A session's segments live in the
   // store's directory for its OUTPUT, and whether one is finished is asked of
   // the store by that same address. This fixture used to make a directory of its
@@ -212,8 +207,6 @@ async function managerWithReadySegment(overrides = {}) {
   // question with its own checks, and letting it run inside these would spawn
   // real ffmpeg processes and replace the very run each test is watching — the
   // test would then be about the plan, and about it at its least stable.
-  manager.encodeRuns.planEncodersNow = () => {};
-  manager.encodeRuns.planEncodersSoon = () => {};
   // The run in force. The fixture's segments live directly in the session
   // directory, which is exactly what one run's directory is here.
   if (overrides.withRun !== false) {

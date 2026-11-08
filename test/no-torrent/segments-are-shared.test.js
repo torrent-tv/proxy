@@ -19,11 +19,11 @@ import { SourceFile } from "../../services/media/SourceFile.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const OUTPUT_KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
@@ -33,13 +33,9 @@ const OUTPUT_KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 function managerOverATempStore() {
   const root = mkdtempSync(path.join(os.tmpdir(), "shared-segments-"));
   const store = new SegmentStore({ root });
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
+  const manager = managerWithOwnStore({
     segmentStore: store
-  });
+  }).manager;
   return { manager, store, root };
 }
 

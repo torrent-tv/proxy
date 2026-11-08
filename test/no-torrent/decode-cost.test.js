@@ -38,10 +38,10 @@ import {
   predictedRealtimeSpeed,
   speedBar
 } from "../../services/encode/hwaccel.js";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { SourceFile, sourceDecodeCharacteristics } from "../../services/media/SourceFile.js";
 import { parseFfmpegBitrateKbps, parseFfmpegVideoDimensions, parseFfmpegVideoFps } from "../../services/media/ffmpeg-banner.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const require = createRequire(import.meta.url);
 const ffmpegBin = require("ffmpeg-static");
@@ -293,16 +293,12 @@ test("the source's decode figures come off the probe, or not at all", () => {
 
 test("the OFFER drops the rungs the host cannot hold, and the master keeps addressing them", async (t) => {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "decode-cost-"));
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
+  const manager = managerWithOwnStore({
     // A host that can encode a little: 3 Mpx/s, so only the smallest rungs of a
     // 1080p source can be produced faster than they are watched.
     softwarePresetBenchmark: [{ preset: "ultrafast", pixelsPerSec: 3e6 }],
     decodeCostModel: ADDON_HOST_MODEL
-  });
+  }).manager;
   t.after(async () => {
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -381,14 +377,10 @@ test("the OFFER drops the rungs the host cannot hold, and the master keeps addre
   // second host, because the encoder's measured modes are a fact the host is
   // started with — read through the encoder in use, never assigned later — and
   // a second session on it, because the answer is settled once per session.
-  const strongerHost = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
+  const strongerHost = managerWithOwnStore({
     softwarePresetBenchmark: [{ preset: "ultrafast", pixelsPerSec: 12e6 }],
     decodeCostModel: ADDON_HOST_MODEL
-  });
+  }).manager;
   t.after(() => strongerHost.lifecycle.disposeAll());
   const stronger = { ...session, id: "ddddddddeeeeffff", offeredHeightsCache: undefined };
   strongerHost.outputs.set(stronger.id, stronger);

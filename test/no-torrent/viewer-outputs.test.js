@@ -25,7 +25,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { Viewers } from "../../services/viewer/Viewers.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
@@ -33,6 +32,7 @@ import { Output } from "../../services/encode/output/Output.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { fakeProcess as fakeEncoder, startRunOn } from "./helpers/encode-run.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const BASE_ID = "aaaaaaaabbbbcccc";
 const STEP_ID = "1111111122223333";
@@ -112,12 +112,7 @@ function fakeSession({ id, dirPath, file, encodeHeight = 0, audioOnly = false, i
  */
 async function pictureWithStepAndSoundtrack() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "viewer-outputs-"));
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const file = new SourceFile({ sourceKey: "source-1", fileIndex: 0, name: "video.mkv" })
     .learn({ width: 1920, height: 1080, fps: 24, bitrateKbps: 8000 });
   const base = fakeSession({ id: BASE_ID, dirPath, file, encodeHeight: 812 });

@@ -22,6 +22,7 @@ import { SourceFile } from "../../services/media/SourceFile.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import { KeyframeTable } from "../../services/media/container/KeyframeTable.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const TOLERANCE = 0.25;
 
@@ -122,13 +123,7 @@ test("a segment requested again is not new evidence", () => {
 });
 
 test("a boundary the index got wrong is replaced by the time the file really has", async (t) => {
-  const { wireOutputs } = await import("../../services/server/wire-outputs.js");
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   t.after(() => manager.lifecycle.disposeAll());
   // ONE table for the film, held by both. It used to be a copy each, kept in
   // step by writing the correction into every member — which is what the shared

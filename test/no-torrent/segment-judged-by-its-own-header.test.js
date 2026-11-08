@@ -115,7 +115,7 @@ function selfContainedPiece({ declares, carries }) {
  * @returns {Promise<{ manager: object, dirPath: string }>}
  */
 async function managerHolding({ piece, sessionHeader }) {
-  const { manager } = managerWithOwnStore();
+  const { manager } = managerWithOwnStore({ planless: true });
   manager.segmentStore.useFormat(OUTPUT_KEY, fmp4Format);
   const dirPath = manager.segmentStore.directoryFor(OUTPUT_KEY);
   await writeFile(path.join(dirPath, "segment-00000.mp4"), piece);
@@ -147,8 +147,6 @@ async function managerHolding({ piece, sessionHeader }) {
   // The header this output serves is the store's, one owner for it.
   manager.segmentStore.keepInit(OUTPUT_KEY, sessionHeader);
   // No plan runs here: this file is about the path that answers a request.
-  manager.encodeRuns.planEncodersNow = () => {};
-  manager.encodeRuns.planEncodersSoon = () => {};
   // A LIVE RUN, deliberately. Under the rule this replaced, a live run anywhere
   // was what turned a refusal into a permanent one — so both cases below are
   // asked with one running, which is the state the field failure happened in.

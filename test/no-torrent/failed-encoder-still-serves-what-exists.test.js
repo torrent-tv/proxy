@@ -18,7 +18,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import { Output } from "../../services/encode/output/Output.js";
@@ -29,6 +28,7 @@ import { EncodeRun } from "../../services/encode/EncodeRun.js";
 import { fakeProcess, silentLogger } from "./helpers/encode-run.js";
 import { waitForSessionFile } from "../../services/server/transcode-session-files.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const SESSION_ID = "3333333344445555";
 const OUTPUT_KEY = "failed-serves:fmt=fmp4:grid=uniform:video-only:v=0/copy";
@@ -44,14 +44,7 @@ const KEYFRAME_OUTPUT_KEY = "failed-serves-kf:fmt=fmp4:grid=kf@0:video-only:v=0/
  * @returns {Promise<{ manager: object, dirPath: string, outputKey: string }>}
  */
 async function outputWhoseEncoderDied({ failed = true, segments = [0], cutsAtGivenTimes = false } = {}) {
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
-  manager.encodeRuns.planEncodersNow = () => {};
-  manager.encodeRuns.planEncodersSoon = () => {};
+  const manager = managerWithOwnStore({ planless: true }).manager;
   const outputKey = cutsAtGivenTimes ? KEYFRAME_OUTPUT_KEY : OUTPUT_KEY;
   manager.segmentStore.useFormat(outputKey, fmp4Format);
   const dirPath = manager.segmentStore.directoryFor(outputKey);

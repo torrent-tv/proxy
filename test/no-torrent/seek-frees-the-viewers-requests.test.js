@@ -26,7 +26,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { waitForSessionFile } from "../../services/server/transcode-session-files.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
@@ -35,6 +34,7 @@ import { KeyframeTable } from "../../services/media/container/KeyframeTable.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { settle } from "./helpers/wait.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const SESSION_ID = "2222222233334444";
 const OUTPUT_KEY = "seek-frees:fmt=fmp4:grid=uniform:video-only:v=0/copy";
@@ -114,16 +114,9 @@ async function untilWaitsAreRegistered(manager, key, howMany) {
  * @returns {{ manager: object, session: object, step: object, sound: object }}
  */
 function filmWithThreeOutputs() {
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore({ planless: true }).manager;
   // No plan runs here: this is about the path that answers a request, and
   // letting the plan run would spawn real encoders.
-  manager.encodeRuns.planEncodersNow = () => {};
-  manager.encodeRuns.planEncodersSoon = () => {};
   const session = outputOn(manager, { id: SESSION_ID, key: OUTPUT_KEY });
   const step = outputOn(manager, { id: STEP_ID, key: STEP_KEY, height: 540 });
   const sound = outputOn(manager, { id: SOUND_ID, key: SOUND_KEY, audioOnly: true });

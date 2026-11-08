@@ -22,9 +22,9 @@ import assert from "node:assert/strict";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import test from "node:test";
 
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { segmentCutTimesFrom } from "../../services/encode/run-command.js";
 import { describeGridDrift } from "../../services/encode/OutputTimes.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 /** What the playlist in the player's hands says. */
 const PUBLISHED = [0, 8.342, 16.684, 25.026, 33.368, 41.71];
@@ -35,12 +35,7 @@ const CORRECTED = [0, 8.342, 14.682, 25.026, 31.366, 41.71];
  * @returns {{ manager: object, session: object }}
  */
 function sessionWithDriftedGrid() {
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const session = {
     id: "picture",
     timeline: new Timeline({ boundaries: [...CORRECTED], published: [...PUBLISHED], cutGrid: "uniform" })

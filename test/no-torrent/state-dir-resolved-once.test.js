@@ -8,7 +8,7 @@
  * default beside the installed proxy, or explicitly none) and passes that value
  * on. A consumer that is handed none does nothing with it.
  *
- * SEAM: none new. `wireOutputs({ stateDir })` is handed the resolved value;
+ * SEAM: none new. the wiring is handed the resolved `stateDir`;
  * "" means none and writes nothing anywhere. `bin/cli.js` reads
  * `options.stateDir` in exactly one place (the resolution).
  *
@@ -27,7 +27,7 @@ import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { jsFilesUnder, sourceOf } from "./helpers/source-text.js";
 
@@ -65,11 +65,7 @@ function swallowObservationWrites() {
 function whereOneEncodeIsKept(wiring) {
   const writes = swallowObservationWrites();
   try {
-    const parts = wireOutputs({
-      enabled: true,
-      ffmpegBin: "ffmpeg",
-      localBindHost: "127.0.0.1",
-      localPort: 9090,
+    const { manager: parts, cleanup } = managerWithOwnStore({
       calibration: { fingerprint: FINGERPRINT, kinds: () => [], modesFor: () => [] },
       ...wiring
     });
@@ -80,6 +76,7 @@ function whereOneEncodeIsKept(wiring) {
       aloneSpeedX: 2,
       segmentKbps: null
     });
+    cleanup();
   } finally {
     writes.restore();
   }

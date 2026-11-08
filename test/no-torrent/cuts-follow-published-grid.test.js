@@ -19,8 +19,8 @@ import { computeCutGrid } from "../../services/encode/output/cut-grid.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import test from "node:test";
 
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { segmentCutTimesFrom } from "../../services/encode/run-command.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 /** What the playlist in the player's hands says. */
 const PUBLISHED = [0, 4.004, 8.008, 12.012, 16.016, 20.02];
@@ -33,12 +33,7 @@ const CORRECTED = [0, 4.004, 6.006, 12.012, 14.014, 20.02];
  * @returns {{ manager: object, session: object }}
  */
 function sessionWithDriftedGrid() {
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const session = {
     id: "picture",
     timeline: new Timeline({ boundaries: [...CORRECTED], published: [...PUBLISHED], cutGrid: "uniform" })

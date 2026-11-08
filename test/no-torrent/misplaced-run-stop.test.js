@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { Timeline } from "../../services/encode/output/Timeline.js";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const INDEX = 2;
 /** The table before the picture says where #2 really begins. */
@@ -51,7 +51,7 @@ function fakeRun(name, from) {
  * @param {object[]} soundtrackRuns
  */
 function fileWith(soundtrackRuns) {
-  const manager = wireOutputs({ enabled: true, ffmpegBin: "ffmpeg", localBindHost: "127.0.0.1", localPort: 9090 });
+  const manager = managerWithOwnStore().manager;
   const timeline = new Timeline({ boundaries: [...TABLE], published: [...TABLE], cutGrid: "uniform" });
   const picture = {
     id: "picture",

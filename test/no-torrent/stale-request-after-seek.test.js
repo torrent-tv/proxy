@@ -26,9 +26,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { startRunOn } from "./helpers/encode-run.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const SEGMENT_SECONDS = 4;
 const RUN_STARTS_AT = 373;
@@ -43,12 +43,7 @@ const SESSION_ID = "2222222233334444";
  */
 async function sessionWithRunAt373() {
   const dirPath = await mkdtemp(path.join(os.tmpdir(), "stale-request-"));
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const session = {
     id: SESSION_ID,
     dirPath,

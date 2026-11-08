@@ -14,26 +14,22 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { Output } from "../../services/encode/output/Output.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 function wired(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), "speculative-hold-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const told = [];
-  const parts = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
+  const parts = managerWithOwnStore({
     segmentStore: new SegmentStore({ root }),
     setSpeculativeHold: (held, because) => { told.push({ held, because }); }
-  });
+  }).manager;
   t.after(() => clearInterval(parts.cleanupTimer));
   // A film of 4 GB over 8000 s: 0.5 MB per second of film.
   parts.outputs.outputsOn = () => [{ file: { key: "film", lengthBytes: 4e9, durationSeconds: 8000 } }];

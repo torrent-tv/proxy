@@ -14,25 +14,24 @@ import { Timeline } from "../../services/encode/output/Timeline.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { qualityStateOf } from "../../services/encode/quality/OutputQualityState.js";
 import { measureSpeed, startRunOn } from "./helpers/encode-run.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const KEY = "torrent:abc:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
 
 function managerWithAnOutput() {
   const root = mkdtempSync(path.join(os.tmpdir(), "orchestrator-wired-"));
   const store = new SegmentStore({ root });
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090,
-    segmentStore: store
-  });
+  // No input resolver, so no encode inputs: the plan asks `encodeInputs?.` and
+  // this file is about the plan, which the helper's fake would answer for.
+  const manager = managerWithOwnStore({
+    segmentStore: store,
+    encodeInputs: null
+  }).manager;
   const dirPath = store.directoryFor(KEY);
   store.useFormat(KEY, fmp4Format);
   return { manager, store, root, dirPath };

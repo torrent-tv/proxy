@@ -17,10 +17,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { Viewers } from "../../services/viewer/Viewers.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const PICTURE = "aaaaaaaa00004000";
 const SOUND = "aaaaaaaa00004001";
@@ -84,12 +84,7 @@ test("a viewer whose connection closed is let go of every output they were watch
   t.after(async () => {
     await rm(dirPath, { recursive: true, force: true });
   });
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
 
   const picture = outputOn(PICTURE, dirPath);
   const sound = outputOn(SOUND, dirPath);
@@ -105,12 +100,7 @@ test("a viewer whose connection closed is let go of every output they were watch
 });
 
 test("a viewer nobody knows costs nothing to let go of", async () => {
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   assert.equal(await manager.lifecycle.viewerHasGone("never-seen"), 0);
   assert.equal(await manager.lifecycle.viewerHasGone(""), 0);
 });

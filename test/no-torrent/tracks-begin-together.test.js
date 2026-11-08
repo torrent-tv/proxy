@@ -18,11 +18,11 @@ import { startRunOn } from "./helpers/encode-run.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
 import test from "node:test";
 
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { trueStartOf } from "../../services/encode/run-command.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { ENCODE_RUN_STATE, INITIAL_RUN_STATE } from "../../services/encode/encode-run-state.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const BOUNDARIES = [0, 4, 8, 12, 16, 20];
 
@@ -36,12 +36,7 @@ function familyAtBoundaryTwo() {
   // ONE table for the film. Where it is cut is a fact about the FILE, so the
   // picture and its soundtrack hold the same array rather than a copy each.
   const boundaries = [...BOUNDARIES];
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const picture = {
     id: "picture",
     spec: outputSpec({ transcodeVideo: false }),

@@ -39,14 +39,13 @@ test("a directory whose key names an asked-for box is not adopted, and one namin
 
 test("when a hardware encoder fails, the outputs it named are closed rather than continued by software", async (t) => {
   const { manager, cleanup } = managerWithOwnStore({
+    planless: true,
     videoEncoder: { kind: "vaapi", name: "h264_vaapi", inputArgs: [] }
   });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
     cleanup();
   });
-  manager.encodeRuns.planEncodersNow = () => {};
-  manager.encodeRuns.planEncodersSoon = () => {};
   const file = new SourceFile({ sourceKey: "torrent:abc", fileIndex: 0, name: "film.mkv" });
   const record = (id, encoder) => {
     const spec = outputSpec({ sourceKey: "torrent:abc", transcodeVideo: true, width: 1280, height: 720, encoder });

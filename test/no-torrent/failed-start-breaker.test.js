@@ -29,10 +29,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { wireOutputs } from "../../services/server/wire-outputs.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { ENCODE_EXIT } from "../../services/encode/encode-exit.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { managerWithOwnStore } from "./helpers/manager.js";
 
 const SESSION_ID = "cccccccc00004000";
 
@@ -82,12 +82,7 @@ function failedFast(run, from) {
 test("a run that ended is still recognised as the session's own", (t) => {
   const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
   t.after(() => rmSync(dirPath, { recursive: true, force: true }));
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const { session, run } = sessionWithARun(dirPath);
   manager.outputs.set(SESSION_ID, session);
   manager.encodeOrchestrator.adopt(session.outputKey, run);
@@ -109,12 +104,7 @@ test("a run that ended is still recognised as the session's own", (t) => {
 test("the count runs at segment 0, which is where a first start happens", (t) => {
   const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
   t.after(() => rmSync(dirPath, { recursive: true, force: true }));
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const { session } = sessionWithARun(dirPath);
   manager.outputs.set(SESSION_ID, session);
 
@@ -131,12 +121,7 @@ test("the count runs at segment 0, which is where a first start happens", (t) =>
 test("real work resets the count, so a transient failure is not permanent", (t) => {
   const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
   t.after(() => rmSync(dirPath, { recursive: true, force: true }));
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const { session } = sessionWithARun(dirPath);
   manager.outputs.set(SESSION_ID, session);
 
@@ -156,12 +141,7 @@ test("real work resets the count, so a transient failure is not permanent", (t) 
 test("a failure belongs to the output it happened on, not to the next output of the same address", async (t) => {
   const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
   t.after(() => rmSync(dirPath, { recursive: true, force: true }));
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   t.after(() => manager.lifecycle.disposeAll());
   const { session } = sessionWithARun(dirPath);
   manager.outputs.set(SESSION_ID, session);
@@ -185,12 +165,7 @@ test("a failure belongs to the output it happened on, not to the next output of 
 test("a run ending after its output was disposed leaves nothing behind for the next output", (t) => {
   const dirPath = mkdtempSync(path.join(os.tmpdir(), "breaker-"));
   t.after(() => rmSync(dirPath, { recursive: true, force: true }));
-  const manager = wireOutputs({
-    enabled: true,
-    ffmpegBin: "ffmpeg",
-    localBindHost: "127.0.0.1",
-    localPort: 9090
-  });
+  const manager = managerWithOwnStore().manager;
   const { session, run } = sessionWithARun(dirPath);
   manager.encodeOrchestrator.adopt(session.outputKey, run);
   // Disposal removed the output from the registry; its process ends later.

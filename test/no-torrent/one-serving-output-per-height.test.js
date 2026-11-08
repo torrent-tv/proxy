@@ -26,33 +26,16 @@ import { Renditions } from "../../services/encode/Renditions.js";
 import { OutputCatalog } from "../../services/encode/output/OutputCatalog.js";
 import { Viewers } from "../../services/viewer/Viewers.js";
 import {
-  audioBeingWarmedOf,
-  audioChoiceOf,
-  chooseAudioTrack,
   chooseOutput,
   chosenOutputOf,
-  consumersOn,
-  generationOfRequest,
-  givenOutputOf,
-  linkMbpsOf,
   noteGivenOutput,
-  noteServingVerdict,
-  noteAudioBeingWarmed,
-  noteStepBeingWarmed,
-  noteStepOnScreen,
-  placeOn,
-  presentOn,
-  qualityModeOf,
-  noteSameHeightSwitch,
-  sameHeightSwitchOf,
-  stepBeingWarmedOf,
   stepOnScreenOf,
-  watches
 } from "../../services/viewer/choices.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
 import { mpegtsFormat } from "../../services/encode/segment-formats/mpegts.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { renditionsHost } from "./helpers/renditions.js";
 import { softwareRateControlFor } from "../../services/encode/args.js";
 import { OUTPUT_UNAVAILABLE } from "../../services/encode/output/index.js";
 
@@ -111,44 +94,15 @@ function pictureWithSteps(how = {}) {
   outputs.set(BASE_ID, base);
   const viewers = new Viewers();
   const asked = [];
-  const renditions = new Renditions({
+  const renditions = new Renditions(renditionsHost(viewers, {
     outputs,
     viewers,
     viewersOf: (output) => viewers.forOutput(output),
-    viewerCountOn: (output) => viewers.forOutput(output).size,
-    viewerSecondsOn: () => 0,
     activeOutputFor: () => base,
-    viewerPositionOf: () => 0,
     placeViewerOn: () => {},
     outputTimes: { segmentStartTime: () => 0 },
-    encodeRuns: { isLive: () => true },
-    quality: { variantsOnScreen: () => new Set() },
-    consumersOn: (output) => consumersOn(viewers, output),
-    presentOn: (output) => presentOn(viewers, output),
-    qualityModeOf: (output, consumerId) => qualityModeOf(viewers, output, consumerId),
-    linkMbpsOf: (output, consumerId) => linkMbpsOf(viewers, output, consumerId),
-    audioChoiceOf: (output, consumerId) => audioChoiceOf(viewers, output, consumerId),
-    chooseAudioTrack: (output, consumerId, choice) => chooseAudioTrack(viewers, output, consumerId, choice),
-    stepOnScreenOf: (output, consumerId) => stepOnScreenOf(viewers, output, consumerId),
-    noteStepOnScreen: (output, consumerId, stepId) => noteStepOnScreen(viewers, output, consumerId, stepId),
-    stepBeingWarmedOf: (output, consumerId) => stepBeingWarmedOf(viewers, output, consumerId),
-    noteStepBeingWarmed: (output, consumerId, stepId) => noteStepBeingWarmed(viewers, output, consumerId, stepId),
-    audioBeingWarmedOf: (output, consumerId) => audioBeingWarmedOf(viewers, output, consumerId),
-    noteAudioBeingWarmed: (output, consumerId, id) => noteAudioBeingWarmed(viewers, output, consumerId, id),
-    watches: (output, consumerId) => watches(viewers, output, consumerId),
-    placeOn: (output, consumerId, seconds) => placeOn(viewers, output, consumerId, seconds),
-    generationOfRequest: (consumerId, stated) => generationOfRequest(viewers, consumerId, stated),
-    givenOutputOf: (consumerId, generation, height, index) =>
-      givenOutputOf(viewers, consumerId, generation, height, index),
-    noteGivenOutput: (consumerId, generation, height, index, key) =>
-      noteGivenOutput(viewers, consumerId, generation, height, index, key),
-    chosenOutputOf: (consumerId, height) => chosenOutputOf(viewers, consumerId, height),
-    chooseOutput: (consumerId, height, key) => chooseOutput(viewers, consumerId, height, key),
-    noteServingVerdict: (consumerId, verdict) => noteServingVerdict(viewers, consumerId, verdict),
     // A change of rung cancels a move between limits being prepared; nothing is
     // prepared in these fixtures.
-    sameHeightSwitchOf: (consumerId) => sameHeightSwitchOf(viewers, consumerId),
-    noteSameHeightSwitch: (consumerId, value) => noteSameHeightSwitch(viewers, consumerId, value),
     // Nothing is stored for a gone output in these fixtures, and no header can
     // be proved compatible: a lost address is lost.
     storedPieceReady: () => how.storedPieceReady === true,
@@ -175,7 +129,7 @@ function pictureWithSteps(how = {}) {
     viewerLeaves: () => {},
     invalidateWaits: () => {},
     logger: { info: () => {}, warn: () => {}, error: () => {} }
-  });
+  }));
   const viewer = viewers.of(base, "viewer-a");
   viewer.qualityMode = how.mode ?? "auto";
   return { renditions, outputs, base, file, viewers, viewer, asked };

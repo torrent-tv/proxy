@@ -16,26 +16,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Renditions } from "../../services/encode/Renditions.js";
 import { Viewers } from "../../services/viewer/Viewers.js";
-import {
-  chooseOutput,
-  chosenOutputOf,
-  noteServingVerdict,
-  audioBeingWarmedOf,
-  audioChoiceOf,
-  chooseAudioTrack,
-  consumersOn,
-  linkMbpsOf,
-  noteAudioBeingWarmed,
-  noteStepBeingWarmed,
-  noteStepOnScreen,
-  placeOn,
-  presentOn,
-  qualityModeOf,
-  stepBeingWarmedOf,
-  stepOnScreenOf,
-  watches
-} from "../../services/viewer/choices.js";
 import { SourceFile } from "../../services/media/SourceFile.js";
+import { renditionsHost } from "./helpers/renditions.js";
 
 const BASE_ID = "4444444455556666";
 const STEP_ID = "5555555566667777";
@@ -82,41 +64,19 @@ function renditionsOver(how) {
     producedHeightOf: (output) => (output === base ? (how.baseProducedHeight ?? 1080) : (how.stepProducedHeight ?? 540)),
     values: () => [base, step]
   };
-  const renditions = new Renditions({
+  const renditions = new Renditions(renditionsHost(viewers, {
     outputs,
-    viewerCountOn: (output) => viewers.forOutput(output).size,
-    outputStillNeeded: (output) => viewers.stillNeeded(output),
-    consumersOn: (output) => consumersOn(viewers, output),
-    presentOn: (output) => presentOn(viewers, output),
-    qualityModeOf: (output, consumerId) => qualityModeOf(viewers, output, consumerId),
-    linkMbpsOf: (output, consumerId) => linkMbpsOf(viewers, output, consumerId),
-    audioChoiceOf: (output, consumerId) => audioChoiceOf(viewers, output, consumerId),
-    chooseAudioTrack: (output, consumerId, trackIndex) => chooseAudioTrack(viewers, output, consumerId, trackIndex),
-    stepOnScreenOf: (output, consumerId) => stepOnScreenOf(viewers, output, consumerId),
-    noteStepOnScreen: (output, consumerId, stepId) => noteStepOnScreen(viewers, output, consumerId, stepId),
-    stepBeingWarmedOf: (output, consumerId) => stepBeingWarmedOf(viewers, output, consumerId),
-    noteStepBeingWarmed: (output, consumerId, stepId) => noteStepBeingWarmed(viewers, output, consumerId, stepId),
-    audioBeingWarmedOf: (output, consumerId) => audioBeingWarmedOf(viewers, output, consumerId),
-    noteAudioBeingWarmed: (output, consumerId, id) => noteAudioBeingWarmed(viewers, output, consumerId, id),
-    watches: (output, consumerId) => watches(viewers, output, consumerId),
-    placeOn: (output, consumerId, seconds) => placeOn(viewers, output, consumerId, seconds),
     // Which output answers a height for a viewer is the viewer's own record.
-    chosenOutputOf: (consumerId, height) => chosenOutputOf(viewers, consumerId, height),
-    chooseOutput: (consumerId, height, key) => chooseOutput(viewers, consumerId, height, key),
-    noteServingVerdict: (consumerId, verdict) => noteServingVerdict(viewers, consumerId, verdict),
     placeViewerOn: () => {},
-    viewerSecondsOn: () => 0,
     activeOutputFor: () => base,
-    viewerPositionOf: () => 0,
     outputTimes: { segmentStartTime: () => 0 },
     encodeRuns: { isLive: () => how.baseIsLive !== false },
-    quality: { variantsOnScreen: () => new Set() },
     createOrGetSession: async () => how.handBack(),
     disposeSession: async (id) => { disposed.push(id); },
     planEncodersSoon: () => {},
     viewerLeaves: () => {},
     logger: { info: (line) => lines.push(line), warn: (line) => lines.push(line), error: (line) => lines.push(line) }
-  });
+  }));
   return { renditions, base, step, viewers, disposed, lines };
 }
 

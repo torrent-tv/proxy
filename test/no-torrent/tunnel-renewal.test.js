@@ -81,7 +81,6 @@ test("the connection is replaced before its lifetime runs out, without a gap", a
     serverUrl: registry.url,
     proxyId: "p1",
     token: "t",
-    proxyPort: 9090,
     onLog: (line) => lines.push(line),
     // The real cap is 100 min 15 s and the real renewal is at 90 min; the
     // ratio is what matters, not the magnitude.
@@ -118,7 +117,6 @@ test("a connection killed from outside is still reconnected", async (t) => {
     serverUrl: registry.url,
     proxyId: "p2",
     token: "t",
-    proxyPort: 9090,
     onLog: (line) => lines.push(line),
     // Far longer than this test runs, so nothing renews and the only close is
     // the one forced below — which is what the upstream cap looks like from

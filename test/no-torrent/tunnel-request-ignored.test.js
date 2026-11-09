@@ -48,7 +48,6 @@ test("a request frame over the tunnel is neither forwarded to the local server n
     serverUrl: registry.url,
     proxyId: "p1",
     token: "t",
-    proxyPort: local.port,
     onLog: () => {}
   });
   t.after(async () => {

@@ -1,0 +1,1 @@
+- **Chore**: CI keeps the binaries `npm ci` downloads (node-datachannel, ffmpeg, node headers) in a cache and retries `npm ci`, so a GitHub download outage no longer fails every pull request.

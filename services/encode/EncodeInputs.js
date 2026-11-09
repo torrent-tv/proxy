@@ -269,6 +269,24 @@ export class EncodeInputs {
       existing.to = to;
       if (existing.result?.kind === "result" && existing.result.to > to) existing.result.to = Math.max(existing.from, to);
     }
+    // AN INPUT HOLDS THE PIECE IT IS TAKEN FOR. A stretch prepared for the
+    // piece before ends there; handed out for the next piece, the run was built
+    // `from 188, to 187`, made nothing and its ending failed the output
+    // (field 2026-11-09, 52 of 1562 runs, torrent-tv/meta#341). It is released
+    // and prepared again at once: its revision is the current one, so no event
+    // would prepare it.
+    const held = existing?.result;
+    const reaches = Math.min(serves, existing?.to ?? serves);
+    if (held?.kind === "result" && Number.isInteger(held.to) && held.to < reaches) {
+      this.#log(`encode input #${existing.from}..#${existing.to} of ${addressOf(output)}: ` +
+        `the held stretch #${held.from}..#${held.to} does not reach #${reaches}, the piece it is now taken for; ` +
+        "prepared again");
+      existing.result = null;
+      existing.noted = undefined;
+      held.release?.();
+      this.#prepare(existing);
+      return null;
+    }
     if (existing?.result?.kind === "result") {
       this.#requests.delete(key);
       return existing.result;
@@ -583,15 +601,19 @@ export class EncodeInputs {
     let minimum = originalInputBytes(firstSources);
     const stretches = new Map([[from, { sources: firstSources, bytes: minimum }]]);
     const held = new Map();
+    // What the container answered for each end that did not state an original
+    // stretch: a resolution's own answer, or the error it threw.
+    const unresolved = new Map();
     const at = async end => {
       if (!stretches.has(end)) {
         // A longer stretch that cannot be stated is not one to copy; the
         // shorter one already stated still runs.
         const current = () => this.#requests.get(request.key) === request && !request.controller.signal.aborted;
         const resolved = await this.#resolveTimed(request.timing, output, from, end, current, request.controller.signal,
-          this.#readPriority(request, from, end)).catch(() => null);
-        stretches.set(end, resolved?.kind === "result" && resolved.sources?.every(source => source.input.original === true)
-          ? { sources: resolved.sources, bytes: originalInputBytes(resolved.sources) } : null);
+          this.#readPriority(request, from, end)).catch(error => ({ kind: "error", error }));
+        const original = resolved?.kind === "result" && resolved.sources?.every(source => source.input.original === true);
+        stretches.set(end, original ? { sources: resolved.sources, bytes: originalInputBytes(resolved.sources) } : null);
+        if (!original) unresolved.set(end, resolved);
       }
       return stretches.get(end);
     };
@@ -613,7 +635,21 @@ export class EncodeInputs {
     let floor = from;
     if (serves > from) {
       const covering = await at(serves);
+      if (this.#requests.get(request.key) !== request) return undefined;
       if (covering) { floor = serves; minimum = covering.bytes; }
+      else {
+        // NEVER A STRETCH ENDING BELOW THE PIECE IT IS FOR. While the stretch
+        // through `serves` cannot be stated, the request waits as that
+        // resolution answered (`needs-bytes` names the bytes that wake it), and
+        // a terminal answer is its answer; `#from..#from` would start a run past
+        // its input (torrent-tv/meta#341).
+        const answer = unresolved.get(serves);
+        if (answer?.kind === "error") throw answer.error;
+        if (answer?.kind === "result" || !answer?.kind) {
+          throw new Error(`the stretch #${from}..#${serves} is not stated as an original input`);
+        }
+        return answer;
+      }
     }
     const longest = async (maxBytes, memory = false) => {
       let good = floor, bad = null, step = 1;

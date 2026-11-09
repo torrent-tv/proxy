@@ -100,6 +100,7 @@ length 1: `bytes=0-` → 0-0, `bytes=1-` → unsatisfiable; length 0: no header
 | `bytes=0-1,5-6` | 200, CL 1000, no CR | same | 206 from byte 0 |
 | HEAD | 200, CL 1000, no body | 200, CL 1000 | 200, CL 1000 |
 | HEAD + `bytes=0-1` | 200, CL 1000 (Range ignored) | — | — |
+| HEAD + `bytes=2000-` | 200, CL 1000 (Range ignored, no 416) | 200, CL 1000 (Range ignored, no 416) | 200, CL 1000 (Range ignored, no 416) |
 
 `/stream` body bytes equal the expected slice of the fake file on both paths.
 `/media` reads served from a fake `readHeldOf` that holds every byte.

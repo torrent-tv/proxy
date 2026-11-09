@@ -24,7 +24,8 @@
     "services/",
     "store/",
     "utils/",
-    "server.js"
+    "server.js",
+    "scripts/install-native.sh"
   ],
   "scripts": {
     "start": "node ./bin/cli.js",

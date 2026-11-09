@@ -1,0 +1,1 @@
+- **Chore**: One script, `scripts/install-native.sh`, now builds and checks the native modules (node-datachannel, our utp-native) for every image that installs the proxy, and ships in the npm package; the Docker image checks itself with `--help` while it is built.

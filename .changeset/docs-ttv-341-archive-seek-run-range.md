@@ -1,0 +1,1 @@
+- **Chore**: The specification of starting a run only inside its input, and of ending production only on a terminal input fact, is now part of the proxy's main specs.

@@ -55,8 +55,12 @@ issue; it is not fixed here.
 2. [x] Implementer (fresh, worktree from the test commit): design §3.1–3.6 in
        that order, removing the `todo` markers of the tests it makes pass.
        `npm test` exits 0.
-3. [ ] Reviewer approves on the current head; CI green; merge by rebase.
-4. [ ] Release; HA add-on update; AC-7.
+3. [x] Reviewer approves on the current head; CI green; merge by rebase
+       (torrent-tv/proxy#56, `15a1486f`).
+4. [x] Release; HA add-on update; AC-7. Proxy 2.107.73, add-on 0.100.77; AC-7
+       met on HA: 0 inverted runs of 615, 0 non-200 answers of 236 segments,
+       `prepared again` 48 times, `production goes on` 0 times
+       (https://github.com/torrent-tv/meta/issues/341#issuecomment-6750259685).
 
 ## Test plan
 

@@ -36,6 +36,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: actions/setup-node@v7
+        id: node
         with:
           node-version: 24
           cache: npm
@@ -84,8 +85,46 @@ jobs:
         uses: torrent-tv/.github/actions/check-workflows@main
       - name: Pull request adds a changeset
         uses: torrent-tv/.github/actions/check-changesets@main
+      # npm ci fetches three things outside the npm registry, with no retry of its
+      # own worth the name: node-datachannel's binary and ffmpeg-static's ffmpeg
+      # from GitHub releases, and node's headers from nodejs.org to compile
+      # utp-native. A GitHub 504 failed every pull request on 2026-11-08
+      # (torrent-tv/meta#338). With an unchanged lockfile they come from here.
+      - name: Restore native download cache
+        id: native-downloads
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.npm/_prebuilds
+            ~/.cache/node-gyp
+            ~/.cache/torrent-tv/ffmpeg-static
+          key: native-downloads-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json') }}
+      # ffmpeg-static skips its download when FFMPEG_BIN names a file. npm ci
+      # empties node_modules first, so the cached ffmpeg is copied in afterwards,
+      # and a freshly downloaded one is copied out for the cache.
       - name: Install dependencies
-        run: npm ci
+        env:
+          CACHE_HIT: ${{ steps.native-downloads.outputs.cache-hit }}
+        run: |
+          echo "::notice::Native download cache: ${CACHE_HIT:-miss}"
+          ffmpeg_cache="$HOME/.cache/torrent-tv/ffmpeg-static/ffmpeg"
+          if [ -f "$ffmpeg_cache" ]; then export FFMPEG_BIN="$ffmpeg_cache"; fi
+          node scripts/retry.mjs 3 20 npm ci --foreground-scripts
+          if [ -n "${FFMPEG_BIN:-}" ]; then
+            cp "$FFMPEG_BIN" node_modules/ffmpeg-static/ffmpeg
+          else
+            mkdir -p "$(dirname "$ffmpeg_cache")"
+            cp node_modules/ffmpeg-static/ffmpeg "$ffmpeg_cache"
+          fi
+      - name: Save native download cache
+        if: steps.native-downloads.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.npm/_prebuilds
+            ~/.cache/node-gyp
+            ~/.cache/torrent-tv/ffmpeg-static
+          key: native-downloads-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json') }}
       # No check may start a real torrent; this is the static half of that rule.
       - name: Tests start no real torrent
         run: node scripts/check-tests-start-no-torrent.mjs

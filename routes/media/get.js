@@ -1,19 +1,6 @@
 import { Readable } from "node:stream";
-
-function mediaRange(header, length) {
-  if (!header) return { start: 0, end: length - 1 };
-  const match = /^bytes=(\d*)-(\d*)$/.exec(header);
-  if (!match || (!match[1] && !match[2])) return null;
-  if (!match[1]) {
-    const suffix = Number(match[2]);
-    if (!Number.isSafeInteger(suffix) || suffix <= 0) return null;
-    return { start: Math.max(0, length - suffix), end: length - 1 };
-  }
-  const start = Number(match[1]);
-  const end = match[2] ? Number(match[2]) : length - 1;
-  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= length || end < start) return null;
-  return { start, end: Math.min(end, length - 1) };
-}
+import { parseRange } from "../../utils/parse-range.js";
+import { rangeHeaders, replyHead, replyUnsatisfiable } from "../../services/server/byte-range-reply.js";
 
 /** Serve existing downloaded bytes without creating source demand. */
 export async function handleMediaGet(req, reply, { torrentPool, onMissing = () => {} }) {
@@ -28,21 +15,19 @@ export async function handleMediaGet(req, reply, { torrentPool, onMissing = () =
   if (!file || !(file.length > 0)) {
     return reply.code(404).send({ error: "Media file is not available." });
   }
-  const rangeHeader = req.headers?.range;
-  const range = mediaRange(rangeHeader, file.length);
-  if (!range || range.start >= file.length) {
-    reply.header("Content-Range", `bytes */${file.length}`);
-    return reply.code(416).send({ error: "Invalid media byte range." });
-  }
+  const parsed = parseRange(req.headers?.range, file.length);
+  if (parsed.kind === "unsatisfiable") return replyUnsatisfiable(reply, file.length);
+  const range = parsed.kind === "range" ? parsed : { start: 0, end: file.length - 1 };
   const portion = Number(torrent.pieceLength);
   if (!Number.isSafeInteger(portion) || portion <= 0) {
     return reply.code(500).send({ error: "Source piece length is unavailable." });
   }
   if (req.method === "HEAD") {
-    reply.header("Accept-Ranges", "bytes");
-    reply.header("Content-Length", String(file.length));
-    reply.header("Content-Type", "application/octet-stream");
-    return reply.send();
+    return replyHead(reply, {
+      "Accept-Ranges": "bytes",
+      "Content-Type": "application/octet-stream",
+      "Content-Length": String(file.length)
+    });
   }
   const missing = (start, end) => {
     onMissing({ sourceKey, fileIndex, start, end, requestId: req.query?.readId ?? req.id });
@@ -59,12 +44,9 @@ export async function handleMediaGet(req, reply, { torrentPool, onMissing = () =
   }
   reply.header("Accept-Ranges", "bytes");
   reply.header("Content-Type", "application/octet-stream");
-  reply.header("Content-Length", String(range.end - range.start + 1));
   reply.header("Cache-Control", "no-store");
-  if (rangeHeader) {
-    reply.code(206);
-    reply.header("Content-Range", `bytes ${range.start}-${range.end}/${file.length}`);
-  }
+  reply.code(parsed.kind === "range" ? 206 : 200);
+  reply.headers(rangeHeaders(parsed, file.length));
   async function* bytes() {
     yield first;
     for (let start = firstEnd + 1; start <= range.end;) {

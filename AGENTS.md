@@ -113,12 +113,14 @@ are split by that property:
 
 ## Gotchas
 
-- Every install of the proxy runs with lifecycle scripts off
-  (`--ignore-scripts`), and the two native modules are then built and checked
-  by `scripts/install-native.sh`. Why scripts stay off (`ip-set`):
+- Both images that install the proxy, this repository's `Dockerfile` and the
+  add-on's, install with lifecycle scripts off (`--ignore-scripts`) and then run
+  `scripts/install-native.sh`, which builds and checks the two native modules.
+  Why scripts stay off (`ip-set`):
   [`ha-addon` AGENTS.md, Gotchas](https://github.com/torrent-tv/ha-addon/blob/main/AGENTS.md#gotchas).
 - `utp-native` is our fork, `@torrent-tv/utp-native`, chosen by `overrides` in
-  `package.json`. The add-on reads that override and refuses any other build.
+  `package.json`. `scripts/install-native.sh` reads that override and fails
+  when any other build survives.
 
 ## Changesets and release path
 

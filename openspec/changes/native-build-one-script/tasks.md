@@ -199,12 +199,12 @@ Dockerfile and workflow (AC-1, AC-4):
 
 ## 3. Implementation (one or more commits, tests untouched)
 
-- [ ] 3.1 `scripts/install-native.sh` as in design Decision 1
-- [ ] 3.2 `package.json` `files` gains `scripts/install-native.sh`
-- [ ] 3.3 `Dockerfile` runs the script after `npm ci`, `--help` in the final stage
-- [ ] 3.4 CI `build` job builds only; release keeps needing it
-- [ ] 3.5 `.changeset/build-ttv-302-native-build-script.md`
-- [ ] 3.6 `npm test` exits 0
+- [x] 3.1 `scripts/install-native.sh` as in design Decision 1
+- [x] 3.2 `package.json` `files` gains `scripts/install-native.sh`
+- [x] 3.3 `Dockerfile` runs the script after `npm ci`, `--help` in the final stage
+- [x] 3.4 CI `build` job builds only; release keeps needing it
+- [x] 3.5 `.changeset/build-ttv-302-native-build-script.md`
+- [x] 3.6 `npm test` exits 0
 
 ## 4. After merge (coordinator)
 

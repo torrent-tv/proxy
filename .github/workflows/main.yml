@@ -134,9 +134,8 @@ jobs:
         run: npm test
 
   # The README offers the Dockerfile as a way to run the proxy; nothing built it,
-  # and it stopped working unnoticed. `--help` loads every module of the main
-  # thread, node-datachannel's native binding included, and exits before
-  # anything connects.
+  # and it stopped working unnoticed. The image checks itself in its final stage
+  # (`--help`), so building it is the whole check.
   build:
     name: Image build
     needs: checks
@@ -145,8 +144,6 @@ jobs:
       - uses: actions/checkout@v7
       - name: Build the image for amd64
         run: docker build -t torrent-tv-proxy .
-      - name: Start the proxy in it
-        run: docker run --rm torrent-tv-proxy --help
 
   release:
     name: Release

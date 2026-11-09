@@ -39,18 +39,17 @@
  * ```
  * Control messages stay JSON strings so the browser can distinguish them from
  * body frames by message type (string vs ArrayBuffer).
- *
- * The protocol mirrors the tunnel relay protocol so both transports share
- * the same mental model and the same browser-side `WebRtcProxy` implementation.
  */
 
 /** @import { DataChannel } from 'node-datachannel' */
 
 import { createDeliveryProbe, PROBE_INTERVAL_MS } from "./delivery-probe.js";
-import { Agent } from "undici";
-
-// Route availability and caller cancellation determine media request lifetime.
-const loopbackDispatcher = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
+import {
+  forwardToLoopback,
+  isValidRequestPath,
+  LoopbackRefusal,
+  MAX_REQUEST_BODY_BYTES
+} from "./loopback-forward.js";
 
 /**
  * Configuration for the data channel handler.
@@ -985,7 +984,7 @@ export function createDataChannelHandler({
         send(channel, { type: "response-error", requestId, error: "Invalid request path." });
         return;
       }
-      if (!Number.isInteger(bodyBytes) || bodyBytes < 0 || bodyBytes > PROXY_MAX_REQUEST_BODY_BYTES) {
+      if (!Number.isInteger(bodyBytes) || bodyBytes < 0 || bodyBytes > MAX_REQUEST_BODY_BYTES) {
         send(channel, { type: "response-error", requestId, error: "Request body too large." });
         return;
       }
@@ -1034,7 +1033,7 @@ export function createDataChannelHandler({
         entry.chunks.push(Buffer.from(payload));
         entry.receivedBytes += payload.length;
       }
-      if (entry.receivedBytes > entry.bodyBytes || entry.receivedBytes > PROXY_MAX_REQUEST_BODY_BYTES) {
+      if (entry.receivedBytes > entry.bodyBytes || entry.receivedBytes > MAX_REQUEST_BODY_BYTES) {
         dropPartial(requestId);
         send(channel, { type: "response-error", requestId, error: "Request body size mismatch." });
         return;
@@ -1162,8 +1161,9 @@ export function createDataChannelHandler({
    * Fetch a resource from the local proxy HTTP server and stream the response
    * back to the browser over the data channel.
    *
-   * The `Host` header is rewritten to `127.0.0.1:{proxyPort}` so that Fastify
-   * routes the request correctly regardless of what the browser sent.
+   * `forwardToLoopback` refuses paths outside the browser routes and oversized
+   * bodies, and rewrites the `Host` header to `127.0.0.1:{proxyPort}` so that
+   * Fastify routes the request correctly regardless of what the browser sent.
    *
    * @param {DataChannel}        channel
    * @param {DataChannelRequest} req
@@ -1214,13 +1214,6 @@ export function createDataChannelHandler({
         : "";
     log(`[dc] ${method} ${path}${queryInfo}${bodyInfo}`);
 
-    const targetUrl = `http://127.0.0.1:${proxyPort}${path}${query ? `?${query}` : ""}`;
-    const requestHeaders = {
-      ...(forwardedHeaders ?? {}),
-      host: `127.0.0.1:${proxyPort}`,
-      "x-ttv-forwarded-request-id": requestId
-    };
-
     let response;
     // [net-debug] TEMPORARY: time spent in the local fetch (waiting for the
     // route to return a response — e.g. long-polling until an HLS segment is
@@ -1234,15 +1227,21 @@ export function createDataChannelHandler({
         `atMs=${fetchStartedAtMonotonic.toFixed(3)}`);
     }
     try {
-      response = await fetch(targetUrl, {
+      response = await forwardToLoopback({
+        port: proxyPort,
+        requestId,
         method,
-        headers: requestHeaders,
-        body: body != null ? body : undefined,
-        redirect: "manual",
-        dispatcher: loopbackDispatcher,
+        path,
+        query,
+        headers: forwardedHeaders,
+        body,
         signal
       });
     } catch (fetchError) {
+      if (fetchError instanceof LoopbackRefusal) {
+        send(channel, { type: "response-error", requestId, error: fetchError.message });
+        return;
+      }
       if (signal.aborted) return;
       log(`[dc] ${method} ${path}${queryInfo} → error: ${fetchError?.message ?? String(fetchError)}`);
       send(channel, { type: "response-error", requestId, error: fetchError?.message ?? String(fetchError) });
@@ -1508,30 +1507,6 @@ export function createDataChannelHandler({
   };
 }
 
-/**
- * Allowed path prefixes for data-channel requests.
- * Only the known proxy API and streaming routes are accepted.
- */
-const PATH_ALLOWLIST_RE = /^(?:\/api\/|\/stream(?:$|\?)|\/?transcode\/|\/health(?:z)?(?:$|\?))/;
-
-/**
- * True when `path` is an absolute, traversal-free path on a known proxy route.
- * Shared by the single-message and chunked request entry points.
- *
- * @param {unknown} path
- * @returns {boolean}
- */
-function isValidRequestPath(path) {
-  return (
-    typeof path === "string" &&
-    path.startsWith("/") &&
-    !path.includes("..") &&
-    PATH_ALLOWLIST_RE.test(path)
-  );
-}
-
-/** Max assembled size of a chunked request body (guards proxy memory). */
-const PROXY_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
 /** Drop an incomplete chunked body if no further frame arrives within this window. */
 const PARTIAL_REQUEST_TTL_MS = 60_000;
 

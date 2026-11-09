@@ -163,10 +163,10 @@ Deliberately not covered:
 
 ## 3. Implementation (implementer, from the test commit)
 
-- [ ] 3.1 `services/transport/loopback-forward.js` (design §1).
-- [ ] 3.2 `data-channel-handler.js` uses it (design §2).
-- [ ] 3.3 Delete the tunnel relay in `tunnel-client.js` (design §3).
-- [ ] 3.4 Changeset (design §5). `npm test` exits 0.
+- [x] 3.1 `services/transport/loopback-forward.js` (design §1).
+- [x] 3.2 `data-channel-handler.js` uses it (design §2).
+- [x] 3.3 Delete the tunnel relay in `tunnel-client.js` (design §3).
+- [x] 3.4 Changeset (design §5). `npm test` exits 0.
 - [ ] 3.5 Server: delete `relay()` and its dead state (design §4), changelog
       entry; `npm test` exits 0 in server.
 

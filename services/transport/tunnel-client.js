@@ -3,7 +3,6 @@
  *
  * The proxy opens one persistent connection on startup.  Through it the
  * server can:
- *   - relay browser HTTP requests to the proxy's local Fastify server, and
  *   - forward WebRTC signalling messages (offers, ICE candidates) between
  *     the browser and the proxy's WebRTC manager.
  *
@@ -63,19 +62,6 @@ import { WebSocket } from "ws";
  * @property {string}  [sdp]      - SDP string (for "offer" and "answer").
  * @property {string}  [candidate] - ICE candidate string (for "candidate").
  * @property {string}  [mid]      - SDP media ID associated with the candidate.
- */
-
-/**
- * A relay request sent by the server — asking the proxy to perform a local
- * HTTP fetch and stream the response back through the tunnel.
- *
- * @typedef {Object} TunnelRelayRequest
- * @property {string} requestId - Unique ID that ties request → response chunks.
- * @property {string} method    - HTTP method (GET, POST, etc.).
- * @property {string} path      - Request path on the local proxy (e.g. "/health").
- * @property {string} query     - Raw query string without the leading "?".
- * @property {Record<string, string>} headers - Headers forwarded from the browser.
- * @property {string | null} body - Serialised request body, or null.
  */
 
 /**
@@ -257,13 +243,6 @@ export function createTunnelClient({
         return;
       }
 
-      if (message.type === "request") {
-        void handleRelayRequest(message, connection).catch((error) => {
-          log(`Tunnel relay error: ${error?.message ?? error}`);
-        });
-        return;
-      }
-
       // WebRTC signalling: server forwards a signal from a browser session.
       if (message.type === "signal") {
         if (typeof message.sessionId === "string" && message.signal && typeof onSignal === "function") {
@@ -370,66 +349,6 @@ export function createTunnelClient({
   }
 
   /**
-   * Fetch a resource from the local Fastify server and stream the response
-   * back to the registry server chunk-by-chunk over the WebSocket.
-   *
-   * @param {TunnelRelayRequest} relayRequest
-   * @param {WebSocket} over - The connection the request arrived on, which
-   *   the response goes back over.
-   * @returns {Promise<void>}
-   */
-  async function handleRelayRequest(relayRequest, over) {
-    const { requestId, method, path, query, headers: forwardedHeaders, body } = relayRequest;
-    const targetUrl = `http://127.0.0.1:${proxyPort}${path}` + (query ? `?${query}` : "");
-    const requestHeaders = { ...(forwardedHeaders ?? {}), host: `127.0.0.1:${proxyPort}` };
-
-    let response;
-    try {
-      response = await fetch(targetUrl, {
-        method,
-        headers: requestHeaders,
-        body: body != null ? body : undefined,
-        redirect: "manual"
-      });
-    } catch (fetchError) {
-      sendError(requestId, fetchError?.message ?? String(fetchError), over);
-      return;
-    }
-
-    /** @type {Record<string, string>} */
-    const responseHeaders = {};
-    for (const [headerName, headerValue] of response.headers.entries()) {
-      responseHeaders[headerName] = headerValue;
-    }
-
-    send({ type: "response-start", requestId, status: response.status, headers: responseHeaders }, over);
-
-    if (!response.body) {
-      send({ type: "response-chunk", requestId, data: "", done: true }, over);
-      return;
-    }
-
-    try {
-      const reader = response.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          send({ type: "response-chunk", requestId, data: "", done: true }, over);
-          break;
-        }
-        send({
-          type: "response-chunk",
-          requestId,
-          data: Buffer.from(value).toString("base64"),
-          done: false
-        }, over);
-      }
-    } catch {
-      send({ type: "response-chunk", requestId, data: "", done: true }, over);
-    }
-  }
-
-  /**
    * Serialise a message to JSON and send it through the WebSocket if open.
    *
    * @param {object} message
@@ -446,18 +365,6 @@ export function createTunnelClient({
     if (target && target.readyState === WebSocket.OPEN) {
       target.send(JSON.stringify(message));
     }
-  }
-
-  /**
-   * Send a `response-error` frame for a given relay request.
-   *
-   * @param {string} requestId
-   * @param {string} errorMessage
-   * @param {WebSocket} over - The connection the request arrived on.
-   * @returns {void}
-   */
-  function sendError(requestId, errorMessage, over) {
-    send({ type: "response-error", requestId, error: errorMessage }, over);
   }
 
   return {

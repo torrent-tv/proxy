@@ -39,6 +39,19 @@ function harness({ method, range }) {
       sent.headers[name.toLowerCase()] = value;
       return reply;
     },
+    headers(values) {
+      for (const [name, value] of Object.entries(values)) reply.header(name, value);
+      return reply;
+    },
+    getHeader(name) {
+      return sent.headers[name.toLowerCase()];
+    },
+    getHeaders() {
+      return { ...sent.headers };
+    },
+    hasHeader(name) {
+      return name.toLowerCase() in sent.headers;
+    },
     send(body) {
       sent.called = true;
       sent.body = body;
@@ -48,7 +61,7 @@ function harness({ method, range }) {
       sent.hijacked = true;
     },
     raw: {
-      // `bindRelease` listens here; HEAD writes its response here.
+      // `bindRelease` listens here; a response written by hand writes here.
       once() {},
       write(_bytes, done) { done(); },
       destroy() { this.destroyed = true; },
@@ -94,6 +107,21 @@ function harness({ method, range }) {
   return { req, reply, sent, opened, state, deps: { sourceRegistry: { get: () => null }, torrentPool } };
 }
 
+/**
+ * How many bytes an answer's body holds: none when it was sent without one,
+ * and an empty stream is none too.
+ *
+ * @param {undefined | Buffer | AsyncIterable<Buffer>} body
+ * @returns {Promise<number>}
+ */
+async function bodyLength(body) {
+  if (body === undefined || body === null) return 0;
+  if (typeof body[Symbol.asyncIterator] !== "function") return body.length;
+  let length = 0;
+  for await (const chunk of body) length += chunk.length;
+  return length;
+}
+
 test("HEAD reports the size without opening a read", async () => {
   const { req, reply, sent, opened, state, deps } = harness({ method: "HEAD" });
 
@@ -106,7 +134,7 @@ test("HEAD reports the size without opening a read", async () => {
   assert.equal(sent.headers["content-length"], "5869669065");
   assert.equal(sent.headers["accept-ranges"], "bytes");
   assert.equal(sent.called, true, "HEAD never completed its response");
-  assert.equal(sent.body, undefined, "HEAD answered with a body");
+  assert.equal(await bodyLength(sent.body), 0, "HEAD answered with a body");
 });
 
 test("GET still streams the bytes", async () => {
@@ -338,6 +366,7 @@ test("HEAD reads completed-file metadata without acquiring a body lease", async 
     assert.equal(sent.headers["content-length"], String(bytes.length));
     assert.equal(sent.headers["accept-ranges"], "bytes");
     assert.equal(sent.called, true);
+    assert.equal(await bodyLength(sent.body), 0, "HEAD answered with a body");
   } finally {
     await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }

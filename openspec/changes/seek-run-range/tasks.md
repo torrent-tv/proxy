@@ -14,7 +14,7 @@ the segment store.
 | AC-2 | `#admitStretch` never answers a stretch ending below `serves`: when the stretch through `serves` does not resolve, the request's answer is that resolution's answer (`needs-bytes` with its awaited ranges, so `bytesChanged` naming them prepares it again), not `#from..#from`. | unit, `test/no-torrent/original-input-stretch.test.js` or `encode-inputs.test.js` |
 | AC-3 | No run is built with `to < from`. Field case: the piece before #188 is being made, the input keyed at #187 holds #187..#187; the plan starts #188 → `makeRunAt` returns null and no ffmpeg is spawned; after an input reaching #188 is ready, the run is built with `from` 188 and `to >= 188`. | integration: real `EncodeRuns` + `EncodeInputs`, fake spawn and resolution (as in `input-copy-while-open.test.js`) |
 | AC-4 | With an encode-input owner present, a last run ending `ENDED_FAILED` with no `EncodeInputs.failureOf` and no `InputFailures.reason` leaves `runStateOf` = `IDLE` and `hasFailed` false; held requests are not invalidated as failed; a request for a missing segment is held, not answered 500, and is answered 200 when a later run publishes the segment. | integration: `EncodeRuns` + `SegmentServing` + `waitForRequestedFile`, fake run ending (`EXITED_SHORT`, 0 segments) and a later publication |
-| AC-5 | A terminal input fact still ends production: with `InputFailures.reason` set (a single-piece input failed) or `EncodeInputs.failureOf` terminal, and no live run, `runStateOf` = `ENDED_FAILED` and a missing segment is answered 500 `canRetry: false`. Existing tests `input-failures.test.js`, `failed-encoder-still-serves-what-exists.test.js`, `failed-start-breaker.test.js` stay green. | regression test + existing tests |
+| AC-5 | A terminal input fact still ends production: with `InputFailures.reason` set (a single-piece input failed) or `EncodeInputs.failureOf` terminal, and no live run, `runStateOf` = `ENDED_FAILED` and a missing segment is answered 500 `canRetry: false`. Existing tests `input-failures.test.js` and `failed-start-breaker.test.js` stay green; in `failed-encoder-still-serves-what-exists.test.js` five tests are rewritten and one is deleted as design §6 lists, and the file is green after that. | regression test + existing tests (design §6) |
 | AC-6 | On an ending of AC-4, `noteRunEnded` logs once `encode: run #A..#B of <addr> ended ENDED_FAILED (<because>); production goes on — no input failure ends it, so requests for its pieces stay held`; on an ending of AC-5 it does not. | unit with a recording logger |
 | AC-7 | Field (HA host only, skill `ha-field-check`): after release and add-on update, open Below S01E01 1080p MKV, seek five times including to 1927 s, play 30 s after each seek. Copy the proxy and page logs to meta `research/session-logs-<date>-ttv341/` and commit them. Pass: every seek resumes playback with no error screen; the inverted-run count below, over the log slice from the process start, prints 0; no `/transcode/…/segment-… → 500` without a terminal input line for that output before it. | end-to-end on HA |
 | AC-8 | `npm test` exits 0 after every commit; `docs/encode-run-state.md` states the run/output distinction (design §3.5); the changeset of design §3.6 is present. | CI, review |
@@ -28,9 +28,27 @@ gzcat proxy.log.gz | grep -aoE 'encode-run #[0-9]+\.\.#[0-9]+ of [^ ]+ by' \
   | awk '{split($2,a,/\.\.#|#/); if (a[3]+0 < a[2]+0) n++} END {print n+0}'
 ```
 
+## Local runs of `npm test` on a Mac
+
+The test writer reports that `npm test` fails on this Mac at the base `e274d06f`
+too, in three files that this change does not touch: `avi-reordered-local`
+(the local ffmpeg has no `libxvid`), `ffprobe-packets-local` (the local ffprobe
+prints `stream_side_data` differently) and `auto-quality-step` (fails about 1
+run in 3). For these three the pass/fail authority is CI (`npm test` in
+`.github/workflows/main.yml`, with the ffmpeg CI installs), which must be green
+on the PR head. Locally the implementer shows that every other test passes and
+that these three fail at `e274d06f` with the same test names and reasons.
+`auto-quality-step` failing by chance is a defect of its own (a flaky test is
+repaired or deleted, never retried): the coordinator files it as a separate
+issue; it is not fixed here.
+
 ## Tasks
 
-1. [ ] Test writer (fresh): write the test plan into this file under
+0. [ ] Test writer (fresh, second): rewrite and delete the tests of
+       `failed-encoder-still-serves-what-exists.test.js` exactly as design §6
+       lists, without touching the tests of commit `08c7486a`; commit
+       `test(proxy): AC-5 failed outputs in failed-encoder-still-serves-what-exists rest on a terminal input fact #ttv-341`.
+1. [x] Test writer (fresh): write the test plan into this file under
        "Test plan" (skill `writing-tests`), write the tests for AC-1…AC-6
        marked `todo`, show each fails for its AC's reason, commit
        `test(proxy): AC-1 … AC-6 … #ttv-341`.

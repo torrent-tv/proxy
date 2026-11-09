@@ -15,9 +15,6 @@ export async function handleMediaGet(req, reply, { torrentPool, onMissing = () =
   if (!file || !(file.length > 0)) {
     return reply.code(404).send({ error: "Media file is not available." });
   }
-  const parsed = parseRange(req.headers?.range, file.length);
-  if (parsed.kind === "unsatisfiable") return replyUnsatisfiable(reply, file.length);
-  const range = parsed.kind === "range" ? parsed : { start: 0, end: file.length - 1 };
   const portion = Number(torrent.pieceLength);
   if (!Number.isSafeInteger(portion) || portion <= 0) {
     return reply.code(500).send({ error: "Source piece length is unavailable." });
@@ -29,6 +26,10 @@ export async function handleMediaGet(req, reply, { torrentPool, onMissing = () =
       "Content-Length": String(file.length)
     });
   }
+  // Range applies to GET only (RFC 9110 §14.2): HEAD answered above ignores it.
+  const parsed = parseRange(req.headers?.range, file.length);
+  if (parsed.kind === "unsatisfiable") return replyUnsatisfiable(reply, file.length);
+  const range = parsed.kind === "range" ? parsed : { start: 0, end: file.length - 1 };
   const missing = (start, end) => {
     onMissing({ sourceKey, fileIndex, start, end, requestId: req.query?.readId ?? req.id });
     const error = new Error(`Media bytes ${start}-${end} have not arrived.`);

@@ -247,6 +247,12 @@ for (const [name, fixture] of STREAM_PATHS) {
     const { response } = await ask(fixture, { method: "HEAD", range: "bytes=0-1" });
     assertAnswer(response, { status: 200, contentRange: undefined, contentLength: LENGTH });
   });
+
+  test(`${name} answers HEAD with an unsatisfiable Range with 200 and the true length`, async () => {
+    const { response, nothingRead } = await ask(fixture, { method: "HEAD", range: "bytes=2000-" });
+    assertAnswer(response, { status: 200, contentRange: undefined, contentLength: LENGTH });
+    nothingRead();
+  });
 }
 
 test("/media answers a request with no Range with 200 and the whole file", async () => {
@@ -283,6 +289,12 @@ test("/media answers a multi-range header with 200 and the whole file", async ()
 
 test("/media answers HEAD with 200 and the true length", async () => {
   const { response, nothingRead } = await ask(media, { method: "HEAD" });
+  assertAnswer(response, { status: 200, contentRange: undefined, contentLength: LENGTH });
+  nothingRead();
+});
+
+test("/media answers HEAD with an unsatisfiable Range with 200 and the true length", async () => {
+  const { response, nothingRead } = await ask(media, { method: "HEAD", range: "bytes=2000-" });
   assertAnswer(response, { status: 200, contentRange: undefined, contentLength: LENGTH });
   nothingRead();
 });
@@ -324,6 +336,12 @@ test("/encode-input answers a multi-range header with 206 from byte 0 to the end
 
 test("/encode-input answers HEAD with 200 and the true length", async () => {
   const { response, nothingRead } = await ask(encodeInput, { method: "HEAD" });
+  assertAnswer(response, { status: 200, contentRange: undefined, contentLength: LENGTH });
+  nothingRead();
+});
+
+test("/encode-input answers HEAD with an unsatisfiable Range with 200 and the true length", async () => {
+  const { response, nothingRead } = await ask(encodeInput, { method: "HEAD", range: "bytes=2000-" });
   assertAnswer(response, { status: 200, contentRange: undefined, contentLength: LENGTH });
   nothingRead();
 });

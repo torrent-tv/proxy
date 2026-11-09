@@ -73,7 +73,8 @@ AC-4 end-to-end.
 Positive: `bytes=0-` → range 0-999; `bytes=0-499` → 0-499; `bytes=-500` →
 500-999; `bytes=500-5000` → 500-999; `Bytes=0-1` → 0-1; `bytes= 0-1 ` → 0-1.
 
-Negative (→ `whole`): absent (`undefined`), `""`, `items=0-1`,
+Negative (→ `whole`): absent (`undefined`), `""`, a value that is not a
+string (`["bytes=0-1"]`), `items=0-1`,
 `bytes=0-1,5-6`, `bytes=`, `bytes=-`, `bytes=abc`, `bytes=1-a`, `bytes=5-3`,
 `bytes=0 - 1`, `bytes=99999999999999999999-`.
 
@@ -115,8 +116,20 @@ existing tests cover them); zero-length file on `/media` and `/encode-input`
    function returns `{start,end}`/`null`, not `{kind}`) and on the suffix /
    past-the-end cases; `byte-range-routes.test.js` fails on: `/stream` 416
    rows (old: 200 / negative length), CORS headers on HEAD and the `/stream`
-   fragment body (old: missing), `/media` HEAD length (old: 0), `/encode-input`
-   no-header row (old: 416). The test commit message names AC-1.
+   fragment body (old: missing), `/stream` and `/encode-input` `bytes=-500`
+   (old: bytes 0-500), `/media` HEAD length (old: 0) and multi-range row
+   (old: 416), `/encode-input` no-header and multi-range rows (old: 416) and
+   its 416 rows (old: no JSON body). The rows whose answer the change keeps
+   pass before the code and stay as regression guards: `/stream` from a
+   downloaded file with no header, `bytes=0-` and multi-range (that path
+   already answers through `reply.send`); `/media` with no header, `bytes=0-`,
+   `bytes=-500`, `bytes=2000-` and `bytes=2000-3000`; `/encode-input`
+   `bytes=0-`. Existing tests adapted (design §5): `stream-route.test.js`
+   (the reply fake gains `headers`/`getHeader(s)`/`hasHeader`; "no body" on
+   HEAD also accepts an empty stream) and `downloaded-media-route.test.js`
+   (the same fake methods; malformed and multi-range headers are now answered
+   as the whole file, a new failing case, instead of 416). The test commit
+   message names AC-1.
 2. Deterministic: no timers, no network beyond `inject`, temp files in the
    test's own `fs.mkdtemp` directory, removed after.
 3. One behaviour per test; names state it.

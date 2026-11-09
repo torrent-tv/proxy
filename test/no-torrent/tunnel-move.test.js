@@ -65,7 +65,6 @@ test("a move opens a second connection and answers each request where it arrived
     serverUrl: registry.url,
     proxyId: "p1",
     token: "t",
-    proxyPort: 9090,
     name: "Кухня",
     baseUrl: "http://192.168.1.5:9090",
     onLog: (line) => lines.push(line),
@@ -122,7 +121,6 @@ test("a move whose new connection is refused keeps the old one carrying the tunn
     serverUrl: registry.url,
     proxyId: "p2",
     token: "t",
-    proxyPort: 9090,
     onLog: (line) => lines.push(line),
     connectionLifetimeMs: 60_000
   });
@@ -147,7 +145,7 @@ test("a move whose new connection is refused keeps the old one carrying the tunn
 
 test("the server's round-trip probe is echoed at once on the connection it came by", async (t) => {
   const registry = await startRegistry();
-  const client = createTunnelClient({ serverUrl: registry.url, proxyId: "p3", token: "t", proxyPort: 9090, connectionLifetimeMs: 60_000 });
+  const client = createTunnelClient({ serverUrl: registry.url, proxyId: "p3", token: "t", connectionLifetimeMs: 60_000 });
   t.after(async () => {
     client.disconnect();
     await registry.close();
@@ -165,7 +163,7 @@ test("a proxy that is stopping says so, not that a replacement carries its tunne
   const registry = await startRegistry();
   /** @type {string[]} */
   const lines = [];
-  const client = createTunnelClient({ serverUrl: registry.url, proxyId: "p1", token: "t", proxyPort: 9090,
+  const client = createTunnelClient({ serverUrl: registry.url, proxyId: "p1", token: "t",
     onLog: (line) => lines.push(line), connectionLifetimeMs: 60_000 });
   t.after(() => registry.close());
   client.connect();

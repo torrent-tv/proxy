@@ -13,6 +13,7 @@
 // anything imported above it would get the default pool. See the file itself
 // for the measurement that made it necessary.
 import "./thread-pool.js";
+import "./missing-on-purpose.js";
 import { Command } from "commander";
 import { mkdirSync } from "node:fs";
 import os from "node:os";

@@ -1,0 +1,1 @@
+- **Fix**: The proxy no longer forwards requests that arrive over the server tunnel; every relayed request passes one path allowlist and body cap.

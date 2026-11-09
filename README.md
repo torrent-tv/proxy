@@ -7,7 +7,7 @@ A lightweight Node.js service that streams torrent content to browsers via a dir
 - Browsers cannot consume torrents directly.
 - This service exposes torrent files through HTTP (`/stream`) with Range support, and through a WebRTC data channel for NAT-traversed streaming.
 - It can transcode audio (or video + audio) to HLS on demand so the browser can always play the content regardless of codec support.
-- It registers itself in an external registry server and maintains a persistent tunnel WebSocket so the server can route browser requests and WebRTC signals to it.
+- It registers itself in an external registry server and maintains a persistent tunnel WebSocket so the server can route WebRTC signals to it. Browser requests reach the proxy only over the WebRTC data channel.
 
 ## Architecture Overview
 
@@ -58,13 +58,12 @@ graph TB
 Opens one persistent WebSocket to the registry server's `/ws/proxy-tunnel` endpoint on startup.
 Reconnects automatically with back-off on unexpected close.
 
-Handles three inbound message types from the server:
+Handles these inbound message types from the server (any other type is ignored):
 
 | Message type | What the proxy does |
 |---|---|
 | `health-request` | Calls `HealthCollector`, sends `health-response` back through tunnel |
 | `signal` | Forwards SDP offer or ICE candidate to `WebRtcManager` |
-| `relay-request` | Fetches the path from local Fastify, streams `relay-response` back |
 
 ### WebRtcManager
 
@@ -93,7 +92,7 @@ sequenceDiagram
 
 ### DataChannelHandler
 
-Receives JSON `request` messages over the data channel and dispatches them to the proxy's local Fastify server. Responses are streamed back as base64 `response-chunk` messages.
+Receives JSON `request` messages over the data channel and forwards them to the proxy's local Fastify server through `services/transport/loopback-forward.js`, the one place a relayed request becomes a loopback HTTP call: it refuses paths outside the browser routes (`/api/*`, `/stream`, `/transcode/*`, `/health(z)`) and bodies over 32 MiB before opening a connection. Responses are streamed back as base64 `response-chunk` messages.
 
 **Wire protocol (browser ↔ proxy):**
 

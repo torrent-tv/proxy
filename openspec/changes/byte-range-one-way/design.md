@@ -76,7 +76,9 @@ Common: a route computes `range = parseRange(req.headers.range, length)`.
 is started (and after releasing anything already acquired). `whole` → status
 200; `range` → 206; headers from `rangeHeaders`.
 
-HEAD (all three routes): ignore `Range`, answer through `replyHead` with
+HEAD (all three routes): ignore `Range` — RFC 9110 §14.2 defines range
+handling for GET only, so a HEAD with an unsatisfiable range is still 200 and
+the HEAD branch comes before the unsatisfiable check — answer through `replyHead` with
 `Accept-Ranges: bytes`, `Content-Type: application/octet-stream`,
 `Content-Length: <length>` (and `Content-Disposition` on `/stream`). The
 keyframe-index HEAD keeps the true length. `/media` HEAD today answers

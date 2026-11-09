@@ -21,25 +21,11 @@ COPY package.json package-lock.json ./
 # Install scripts are off for the whole tree: ip-set (a dependency of
 # webtorrent) runs `npx only-allow pnpm` in `preinstall`, which aborts a plain
 # npm install, and ffmpeg-static would download an ffmpeg this image does not
-# use. The two native modules that need theirs are rebuilt one by one.
-#
-# node-datachannel fetches a prebuilt binary, and one failed request ends the
-# build with an unrelated error from its broken source fallback, so the fetch
-# is retried and the result checked: without it the proxy has no WebRTC.
-#
-# utp-native is our fork, through `overrides`; it is best-effort as in the
-# add-on — without it peers are reached over TCP only.
-RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
- && for attempt in 1 2 3 4 5; do \
-      npm rebuild node-datachannel && break; \
-      echo "node-datachannel: build attempt $attempt failed; retrying in 10s" >&2; \
-      sleep 10; \
-    done \
- && ls node_modules/node-datachannel/build/Release/*.node \
- && (npm_config_build_from_source=true npm rebuild utp-native \
-     || echo "WARNING: utp-native build failed; peer connections stay TCP-only") \
- && rm -rf node_modules/utp-native/build/Release/obj.target \
-      node_modules/utp-native/build/Release/.deps
+# use. The two native modules that need theirs are built, and checked, by
+# scripts/install-native.sh — the one build every image of the proxy runs.
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+COPY scripts/install-native.sh scripts/install-native.sh
+RUN sh scripts/install-native.sh /app
 
 FROM mirror.gcr.io/library/alpine:3 AS package
 RUN apk add --no-cache nodejs npm
@@ -60,6 +46,12 @@ COPY --from=dependencies /app/node_modules /app/node_modules
 ENV NODE_ENV=production
 USER app
 WORKDIR /app
+
+# The image checks itself: `--help` loads every module of the main thread,
+# node-datachannel's native binding included, and exits before anything is
+# started or connected, so the build fails when this node cannot load what the
+# first stage built.
+RUN node /app/bin/cli.js --help > /dev/null
 
 # 9090/tcp is the HTTP API; WebRTC uses the same port number over UDP. Reaching
 # peers and viewers from a bridge network needs both published, so host

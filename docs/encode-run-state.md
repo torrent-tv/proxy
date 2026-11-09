@@ -49,7 +49,7 @@ stateDiagram-v2
 | `RETRY_WAIT` | The input went away; a restart is timed. Requests are held, not refused. |
 | `STOPPED` | Stopped on purpose with no replacement — a rung the viewer switched away from. |
 | `ENDED_COMPLETE` | Ran through the last segment of the file. Nothing is owed. |
-| `ENDED_FAILED` | Terminal for this target: requests are answered as failures. |
+| `ENDED_FAILED` | Terminal for this run. The output fails only on a terminal input fact (see below). |
 
 ## Events
 
@@ -81,6 +81,17 @@ functions the session manager calls.
 | `STOPPED` | no | no | hold | `running` | yes |
 | `ENDED_COMPLETE` | no | no | hold | `ready` | no |
 | `ENDED_FAILED` | no | no | fail | `failed` | yes |
+
+### A run's state and its output's state
+
+`ENDED_FAILED` is terminal for the run. The output answers `fail` only when
+`EncodeInputs.failureOf` or `InputFailures.reason` states that a piece will not
+be made. A run that ended `ENDED_FAILED` with neither, and no live run beside
+it, leaves the output `IDLE`: a missing segment is held, and the next run makes
+it (torrent-tv/meta#341, where the only run `#188..#187` ended `EXITED_SHORT`
+and segment-00188 was answered 500). Without an encode-input owner (tests only)
+the same holds while `InputFailures.retrying` says a piece is to be made from an
+input holding it alone (torrent-tv/meta#178).
 
 ## Edges that must never exist
 

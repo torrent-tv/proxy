@@ -82,7 +82,7 @@ export const ENCODE_RUN_STATE = Object.freeze({
   STOPPED: "STOPPED",
   /** Ran through the last segment of the file. Nothing is owed. */
   ENDED_COMPLETE: "ENDED_COMPLETE",
-  /** Terminal for this target: requests are answered as failures. */
+  /** Terminal for this run. The output fails only on a terminal input fact (`docs/encode-run-state.md`). */
   ENDED_FAILED: "ENDED_FAILED"
 });
 
@@ -106,7 +106,7 @@ export const STATE_MEANING = Object.freeze({
   [ENCODE_RUN_STATE.RETRY_WAIT]: "The input went away; a restart is timed. Requests are held, not refused.",
   [ENCODE_RUN_STATE.STOPPED]: "Stopped on purpose with no replacement — a rung the viewer switched away from.",
   [ENCODE_RUN_STATE.ENDED_COMPLETE]: "Ran through the last segment of the file. Nothing is owed.",
-  [ENCODE_RUN_STATE.ENDED_FAILED]: "Terminal for this target: requests are answered as failures."
+  [ENCODE_RUN_STATE.ENDED_FAILED]: "Terminal for this run. The output fails only on a terminal input fact (see below)."
 });
 
 /**

@@ -44,7 +44,7 @@ issue; it is not fixed here.
 
 ## Tasks
 
-0. [ ] Test writer (fresh, second): rewrite and delete the tests of
+0. [x] Test writer (fresh, second): rewrite and delete the tests of
        `failed-encoder-still-serves-what-exists.test.js` exactly as design §6
        lists, without touching the tests of commit `08c7486a`; commit
        `test(proxy): AC-5 failed outputs in failed-encoder-still-serves-what-exists rest on a terminal input fact #ttv-341`.
@@ -52,7 +52,7 @@ issue; it is not fixed here.
        "Test plan" (skill `writing-tests`), write the tests for AC-1…AC-6
        marked `todo`, show each fails for its AC's reason, commit
        `test(proxy): AC-1 … AC-6 … #ttv-341`.
-2. [ ] Implementer (fresh, worktree from the test commit): design §3.1–3.6 in
+2. [x] Implementer (fresh, worktree from the test commit): design §3.1–3.6 in
        that order, removing the `todo` markers of the tests it makes pass.
        `npm test` exits 0.
 3. [ ] Reviewer approves on the current head; CI green; merge by rebase.

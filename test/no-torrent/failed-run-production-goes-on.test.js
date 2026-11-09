@@ -106,19 +106,19 @@ async function served(manager, fileName) {
   return reply;
 }
 
-test("the only run ending short with no input failure leaves the output idle", { todo: "AC-4", timeout: 10_000 }, async (t) => {
+test("the only run ending short with no input failure leaves the output idle", { timeout: 10_000 }, async (t) => {
   const { manager, session } = anOutput(t);
   itsOnlyRun(manager, session).exit(0);
   assert.equal(manager.encodeRuns.runStateOf(session), ENCODE_RUN_STATE.IDLE);
 });
 
-test("the only run ending short with no input failure has not failed the output", { todo: "AC-4", timeout: 10_000 }, async (t) => {
+test("the only run ending short with no input failure has not failed the output", { timeout: 10_000 }, async (t) => {
   const { manager, session } = anOutput(t);
   itsOnlyRun(manager, session).exit(0);
   assert.equal(manager.encodeRuns.hasFailed(session), false);
 });
 
-test("a request held while the only run ends short is served when a later run publishes the segment", { todo: "AC-4", timeout: 10_000 }, async (t) => {
+test("a request held while the only run ends short is served when a later run publishes the segment", { timeout: 10_000 }, async (t) => {
   const { manager, session } = anOutput(t);
   const child = itsOnlyRun(manager, session);
   const held = waitForRequestedFile({}, {}, manager.serving, SESSION_ID, "segment-00003.mp4", "viewer-a");
@@ -132,7 +132,7 @@ test("a request held while the only run ends short is served when a later run pu
   assert.equal(answer.kind, "file", `the held request was answered ${answer.kind}: ${answer.message ?? ""}`);
 });
 
-test("a request after the only run ended short is held, not failed, and served once the segment is published", { todo: "AC-4", timeout: 10_000 }, async (t) => {
+test("a request after the only run ended short is held, not failed, and served once the segment is published", { timeout: 10_000 }, async (t) => {
   const { manager, session } = anOutput(t);
   itsOnlyRun(manager, session).exit(0);
   const answering = served(manager, "segment-00003.mp4");
@@ -160,7 +160,7 @@ test("a terminal input still ends production with 500 and no retry", { timeout: 
   assert.deepEqual([reply.status, reply.body?.canRetry], [500, false]);
 });
 
-test("a failed run that leaves production going says so once", { todo: "AC-6", timeout: 10_000 }, async (t) => {
+test("a failed run that leaves production going says so once", { timeout: 10_000 }, async (t) => {
   const { manager, session, said } = anOutput(t);
   itsOnlyRun(manager, session).exit(0);
   assert.equal(said.filter(line => GOES_ON.test(line)).length, 1, `the lines were:\n${said.join("\n")}`);

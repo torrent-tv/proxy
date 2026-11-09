@@ -353,11 +353,17 @@ export class EncodeRuns {
     if (this.#host.encodeInputs?.failureOf(output)) return ENCODE_RUN_STATE.ENDED_FAILED;
     if (output && this.liveRunsOf(output).length === 0 && this.#inputFailures.reason(output.outputKey)) return ENCODE_RUN_STATE.ENDED_FAILED;
     const state = output ? this.#host.encodeOrchestrator.stateOf(output.outputKey) : runStateOf([]);
-    // A piece of a longer input failed and is to be made from an input holding
-    // it alone: production has not ended, and a request for it is held rather
-    // than refused (torrent-tv/meta#178).
-    if (state === ENCODE_RUN_STATE.ENDED_FAILED && this.liveRunsOf(output).length === 0 &&
-      this.#inputFailures.retrying(output.outputKey)) return ENCODE_RUN_STATE.IDLE;
+    // PRODUCTION ENDS ONLY ON A TERMINAL INPUT FACT. `ENDED_FAILED` is the
+    // last run's state, not the output's: whether a piece will not be made is
+    // stated by `EncodeInputs.failureOf` and `InputFailures.reason`, asked
+    // above. Field 2026-11-09: the only run `#188..#187` ended `EXITED_SHORT`
+    // with neither, the plan was already starting the next run, and
+    // segment-00188 was answered 500 at 16:45:02.538 (torrent-tv/meta#341).
+    // Without an encode-input owner (tests only), a piece of a longer input
+    // that failed and is to be made from an input holding it alone keeps
+    // production going too (torrent-tv/meta#178).
+    if (state === ENCODE_RUN_STATE.ENDED_FAILED && output && this.liveRunsOf(output).length === 0 &&
+      (this.#host.encodeInputs || this.#inputFailures.retrying(output.outputKey))) return ENCODE_RUN_STATE.IDLE;
     return state;
   }
 
@@ -1559,6 +1565,13 @@ export class EncodeRuns {
       }
     }
     this.#host.encodeOrchestrator.noteEnded(ended);
+    // The field line of a failed run that does not end production: the next
+    // run makes its pieces, and requests for them are held (torrent-tv/meta#341).
+    if (ended.run?.state === ENCODE_RUN_STATE.ENDED_FAILED && !this.hasFailed(session)) {
+      this.#host.logger.info(`encode: run #${ended.from}..#${ended.to} of ${session.outputKey} ended ` +
+        `${ENCODE_RUN_STATE.ENDED_FAILED} (${ended.because}); production goes on — no input failure ends it, ` +
+        "so requests for its pieces stay held");
+    }
     // What this admitted encode was seen to do, kept for the next time this
     // host prices the same mode (roadmap item 97, step 14). Whatever the
     // ending: a run that failed still ran at the speed it ran at, and the

@@ -276,7 +276,7 @@ async function heldForThePieceBefore(inputs) {
   await turns();
 }
 
-test("a stretch held for the piece before is not handed out for the next piece", { todo: "AC-1" }, async () => {
+test("a stretch held for the piece before is not handed out for the next piece", async () => {
   const { inputs } = originalInputs();
   await heldForThePieceBefore(inputs);
   const taken = inputs.take(picture, 187, 263, 188);
@@ -284,7 +284,7 @@ test("a stretch held for the piece before is not handed out for the next piece",
   inputs.forget(picture);
 });
 
-test("a held stretch that misses the piece is released", { todo: "AC-1" }, async () => {
+test("a held stretch that misses the piece is released", async () => {
   const { inputs, announced } = originalInputs();
   await heldForThePieceBefore(inputs);
   const held = announced.find(result => result.kind === "result");
@@ -297,7 +297,7 @@ test("a held stretch that misses the piece is released", { todo: "AC-1" }, async
   inputs.forget(picture);
 });
 
-test("a held stretch that misses the piece is prepared again at once and then reaches it", { todo: "AC-1" }, async () => {
+test("a held stretch that misses the piece is prepared again at once and then reaches it", async () => {
   const { inputs } = originalInputs();
   await heldForThePieceBefore(inputs);
   const first = inputs.take(picture, 187, 263, 188);
@@ -310,7 +310,7 @@ test("a held stretch that misses the piece is prepared again at once and then re
   ready.release();
 });
 
-test("a held stretch that misses the piece says so once", { todo: "AC-1" }, async () => {
+test("a held stretch that misses the piece says so once", async () => {
   const { inputs, lines } = originalInputs();
   await heldForThePieceBefore(inputs);
   inputs.take(picture, 187, 263, 188)?.release();
@@ -342,7 +342,7 @@ function waitingForThePiece() {
   return { ...made, state };
 }
 
-test("a stretch is not answered as the piece before while the stretch through its piece cannot be stated", { todo: "AC-2" }, async () => {
+test("a stretch is not answered as the piece before while the stretch through its piece cannot be stated", async () => {
   const { inputs, announced } = waitingForThePiece();
   assert.equal(inputs.take(picture, 187, 263, 188), null);
   await turns();
@@ -351,7 +351,7 @@ test("a stretch is not answered as the piece before while the stretch through it
   inputs.forget(picture);
 });
 
-test("a stretch whose piece cannot be stated yet waits as its resolution answered", { todo: "AC-2" }, async () => {
+test("a stretch whose piece cannot be stated yet waits as its resolution answered", async () => {
   const { inputs, lines } = waitingForThePiece();
   inputs.take(picture, 187, 263, 188);
   await turns();
@@ -360,7 +360,7 @@ test("a stretch whose piece cannot be stated yet waits as its resolution answere
   inputs.forget(picture);
 });
 
-test("bytes the resolution waited for prepare the stretch through its piece", { todo: "AC-2" }, async () => {
+test("bytes the resolution waited for prepare the stretch through its piece", async () => {
   const { inputs, state } = waitingForThePiece();
   inputs.take(picture, 187, 263, 188);
   await turns();
@@ -373,7 +373,7 @@ test("bytes the resolution waited for prepare the stretch through its piece", { 
   ready.release();
 });
 
-test("a terminal resolution of the stretch through its piece is the request's answer", { todo: "AC-2" }, async () => {
+test("a terminal resolution of the stretch through its piece is the request's answer", async () => {
   const { inputs } = originalInputs({ resolveStretch: (from, to) => to >= 188
     ? { kind: "terminal", reason: "damaged-track", message: "the piece cannot be read" } : stretchOf(from, to) });
   inputs.take(picture, 187, 263, 188);

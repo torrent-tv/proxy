@@ -87,14 +87,14 @@ async function theFieldCase(t) {
   return { manager, started };
 }
 
-test("a run for a piece whose held input ends before it is not built", { todo: "AC-3", timeout: 10_000 }, async (t) => {
+test("a run for a piece whose held input ends before it is not built", { timeout: 10_000 }, async (t) => {
   const { manager, started } = await theFieldCase(t);
   const run = manager.encodeRuns.makeRunAt(OUTPUT_KEY, 188, 263, "a check asked for it");
   assert.equal(run && `#${run.from}..#${run.to}`, null, "a run was built");
   assert.deepEqual(started, [], "and no encoder was started");
 });
 
-test("once an input reaching the piece is ready, the run is built from the piece through it", { todo: "AC-3", timeout: 10_000 }, async (t) => {
+test("once an input reaching the piece is ready, the run is built from the piece through it", { timeout: 10_000 }, async (t) => {
   const { manager } = await theFieldCase(t);
   // The plan asks for #188 while the held input ends at #187, and asks again
   // once that input could have been prepared again.

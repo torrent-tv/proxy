@@ -148,6 +148,20 @@ export function renderRunGraphMarkdown() {
   lines.push("");
 
   lines.push(
+    "### A run's state and its output's state",
+    "",
+    "`ENDED_FAILED` is terminal for the run. The output answers `fail` only when",
+    "`EncodeInputs.failureOf` or `InputFailures.reason` states that a piece will not",
+    "be made. A run that ended `ENDED_FAILED` with neither, and no live run beside",
+    "it, leaves the output `IDLE`: a missing segment is held, and the next run makes",
+    "it (torrent-tv/meta#341, where the only run `#188..#187` ended `EXITED_SHORT`",
+    "and segment-00188 was answered 500). Without an encode-input owner (tests only)",
+    "the same holds while `InputFailures.retrying` says a piece is to be made from an",
+    "input holding it alone (torrent-tv/meta#178).",
+    ""
+  );
+
+  lines.push(
     "## Edges that must never exist",
     "",
     "The machine's real content: a near-complete digraph asserts nothing.",

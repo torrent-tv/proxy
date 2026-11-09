@@ -1,7 +1,7 @@
 # composition-root Specification
 
 ## Purpose
-Every fact that `server.js` and `wire-outputs.js` wire has a tested owner. The composition root holds no collections, no closures over 40 lines and no late binding; it builds the output graph first and starts playback before `listen`, and viewer changes are announced through the output graph. `AGENTS.md` and the architecture documents name each owner.
+Every fact that `server.js` and `wire-outputs.js` wire has a tested owner. The composition root holds no collections, no closures over 40 lines and no late binding; it builds the output graph first and starts playback before `listen`, and viewer changes are announced through the output graph. `docs/layout.md` and the architecture documents name each owner.
 
 ## Requirements
 
@@ -312,14 +312,14 @@ the `wireOutputs` options.
 
 ### Requirement: The documents name every owner
 
-`AGENTS.md` SHALL say what remains in `server.js` and name each new module
-with its layer. `docs/download-architecture.md` SHALL place the segment →
+`docs/layout.md` SHALL say what remains in `server.js` and name each new module
+with its component. `docs/download-architecture.md` SHALL place the segment →
 bytes projection in `PlaybackResolution`, and `docs/encode-architecture.md`
 the encoder input in `EncodeInputResolution`.
 
 #### Scenario: Owners named
 
-- **WHEN** `AGENTS.md` is searched for `segment-reading.js`,
+- **WHEN** `docs/layout.md` is searched for `segment-reading.js`,
   `SegmentSourceRanges.js`, `PlaybackResolution.js`, `MediaReadParams.js`,
   `EncodeInputResolution.js`, `start-playback.js` and `PreparationReads.js`
-- **THEN** each is found beside its layer
+- **THEN** each is found beside its component

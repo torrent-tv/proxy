@@ -299,3 +299,35 @@ and no `→ 500` on a transcode segment without a terminal input line.
 2. Re-preparing a stretch copies the start piece again; for a shared
    (`commonRanges`) input most bytes are shared, not copied (line 115837:
    `copied 7740366, shared 22126555`).
+
+## 6. Existing tests that state a failed output (amendment, 2026-11-09)
+
+`test/no-torrent/failed-encoder-still-serves-what-exists.test.js` builds every
+manager with `managerWithOwnStore`, which always supplies `fakeEncodeInputs()`
+(`test/no-torrent/helpers/manager.js:53`, `failureOf: () => null`). Its fixture
+`outputWhoseEncoderDied({ failed: true })` makes the output fail only by
+`encodeOrchestrator.noteEnded({ run: { state: ENDED_FAILED } })`, which is the
+non-terminal ending this change stops reading as the output's failure (§3.3).
+Six of its tests then fail. The decision per test, from the target behaviour:
+
+| test | decision |
+|---|---|
+| "a segment that is on disk is served although the encoder failed" | keeps its meaning (a failed output still serves what is made). Rewrite the setup: terminal fact supplied by the fixture (below). Assertions unchanged. |
+| "a segment that is not there says the encoder failed, instead of being held" | keeps its meaning (a missing piece of a failed output is answered `failed`). Fixture below; `assert.match(answer.message, /255/)` becomes `/source-input-exceeds-memory-capacity/` (`lastErrorOf` answers `<reason>: <message>` of the terminal input). |
+| "the playlist is a fact of the timeline and outlives the encoder" | keeps its meaning. Fixture below; assertions unchanged. |
+| "a failure reaches a request that was ALREADY waiting" | keeps its meaning (a wait begun before a terminal failure is told). Rewrite the setup: build the manager with `failureOf` answering the terminal input once a flag is set, and set the flag immediately before `child.exit(255)`; the run's ending then finds the terminal fact. Assertions unchanged. |
+| "a run that exits 0 having produced less than promised also reaches a waiting request" | states the bug (a short ending with no input failure fails the output). Delete it. Its corrected form is already the AC-4 test "a request held while the only run ends short is served when a later run publishes the segment" (`failed-run-production-goes-on.test.js`); a second copy is not written. |
+| "an init that will never be made says so instead of warming up for ever" | keeps its meaning. Fixture below; `/255/` becomes `/source-input-exceeds-memory-capacity/`. |
+
+"one run of two ending in failure tells nobody — the other is still making it"
+passes before and after and is not changed.
+
+Fixture change, `outputWhoseEncoderDied({ failed: true })`: build the manager
+with `managerWithOwnStore({ planless: true, encodeInputs: { ...fakeEncodeInputs(),
+failureOf: (output) => output.id === SESSION_ID ? TERMINAL : null } })`, where
+`TERMINAL = { kind: "terminal", reason: "source-input-exceeds-memory-capacity",
+message: "one piece is larger than memory" }` (the shape `EncodeInputs` answers,
+`services/encode/EncodeInputs.js` `#admitStretch`). Keep the `noteEnded` call
+and the assertion `hasFailed(session) === true`. With `failed: false` the
+manager keeps `failureOf: () => null`. The file's header comment gains one
+sentence: an output fails only on a terminal input fact (torrent-tv/meta#341).

@@ -9,6 +9,7 @@
 import { open } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { parseRange } from "../../utils/parse-range.js";
+import { rangeHeaders, replyHead, replyUnsatisfiable, writeRawHead } from "../../services/server/byte-range-reply.js";
 import { logger } from "../../utils/logger.js";
 
 /**
@@ -197,29 +198,28 @@ async function writeFromWholeFile(raw, read, from, end, onWritten) {
  */
 function serveWholeFile(req, reply, file, read) {
   const disposition = `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`;
+  const range = parseRange(req.headers.range, file.length);
+  if (range.kind === "unsatisfiable") {
+    void read.release().catch(() => undefined);
+    return replyUnsatisfiable(reply, file.length);
+  }
   reply.header("Accept-Ranges", "bytes");
   reply.header("Content-Type", "application/octet-stream");
   reply.header("Content-Disposition", disposition);
-  const range = parseRange(req.headers.range, file.length);
   if (file.length === 0) {
     reply.header("Content-Length", "0");
     void read.release().catch(() => undefined);
     return reply.send(Readable.from([]));
   }
-  const start = range?.start ?? 0;
-  const end = range?.end ?? file.length - 1;
+  const start = range.kind === "range" ? range.start : 0;
+  const end = range.kind === "range" ? range.end : file.length - 1;
   const stream = read.stream(start, end, () => {});
   if (!stream) {
     void read.release().catch(() => undefined);
     return null;
   }
-  if (!range) {
-    reply.header("Content-Length", String(file.length));
-  } else {
-    reply.code(206);
-    reply.header("Content-Length", String(end - start + 1));
-    reply.header("Content-Range", `bytes ${start}-${end}/${file.length}`);
-  }
+  reply.code(range.kind === "range" ? 206 : 200);
+  reply.headers(rangeHeaders(range, file.length));
   void read.release().catch(() => undefined);
   try {
     return reply.send(stream);
@@ -260,15 +260,12 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
       }
       if (handle) {
         await handle.close();
-        reply.hijack();
-        reply.raw.writeHead(200, {
+        return replyHead(reply, {
           "Accept-Ranges": "bytes",
           "Content-Type": "application/octet-stream",
           "Content-Length": String(whole.length),
           "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(whole.name)}`
         });
-        reply.raw.end();
-        return;
       }
     } else {
       const read = await acquireWholeFileRead(torrentPool, sourceKey, fileIndex, whole.length);
@@ -306,26 +303,22 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
   // returned headers in 23 ms and then held the connection until its 15 s
   // timeout, which is where the 73 s transcode-session create went.
   if (req.method === "HEAD") {
-    // Written to the raw response on purpose. Answering through `reply.send()`
-    // with no payload makes Fastify set `content-length: 0`, which is worse
-    // than useless here: the keyframe index asks for the file size with this
-    // very request and treats 0 as "no index available", silently falling back
-    // to an invented segment grid. Hijacking leaves the response to us, and
-    // Node omits the body for HEAD by itself.
-    reply.hijack();
-    reply.raw.writeHead(200, {
+    // The keyframe index asks for the file size with this very request, so
+    // the answer must keep the true length: see `replyHead`.
+    return replyHead(reply, {
       "Accept-Ranges": "bytes",
       "Content-Type": "application/octet-stream",
       "Content-Length": String(file.length),
       "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`
     });
-    reply.raw.end();
-    return;
   }
 
   const range = parseRange(req.headers.range, file.length);
-  const start = range ? range.start : 0;
-  const end = range ? range.end : file.length - 1;
+  if (range.kind === "unsatisfiable") {
+    return replyUnsatisfiable(reply, file.length);
+  }
+  const start = range.kind === "range" ? range.start : 0;
+  const end = range.kind === "range" ? range.end : file.length - 1;
   const contentLength = end - start + 1;
 
   // Written straight out of the torrent's shared memory when that is available:
@@ -348,13 +341,11 @@ export async function handleStreamGet(req, reply, { sourceRegistry, torrentPool,
     : null;
 
   if (fragments) {
-    reply.hijack();
-    reply.raw.writeHead(range ? 206 : 200, {
+    writeRawHead(reply, range.kind === "range" ? 206 : 200, {
       "Accept-Ranges": "bytes",
       "Content-Type": "application/octet-stream",
-      "Content-Length": String(contentLength),
       "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`,
-      ...(range ? { "Content-Range": `bytes ${start}-${end}/${file.length}` } : {})
+      ...rangeHeaders(range, file.length)
     });
 
     // A client that goes away mid-response must stop the read, or pieces keep

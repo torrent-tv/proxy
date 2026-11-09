@@ -1,5 +1,6 @@
 import { parseRange } from "../../utils/parse-range.js";
 import { Readable } from "node:stream";
+import { replyHead, replyUnsatisfiable } from "../../services/server/byte-range-reply.js";
 
 /** FFmpeg reads only original byte ranges already owned by its live run. */
 export async function handleEncodeInputGet(req, reply, { inputOf, refused = () => {}, noteFirstInputBytes = () => {} }) {
@@ -10,16 +11,17 @@ export async function handleEncodeInputGet(req, reply, { inputOf, refused = () =
   const input = inputOf(token);
   const length = input?.lengthOf(fileIndex);
   if (!Number.isSafeInteger(length) || length <= 0) return reply.code(404).send();
+  if (req.method === "HEAD") {
+    return replyHead(reply, { "Accept-Ranges": "bytes", "Content-Type": "application/octet-stream", "Content-Length": String(length) });
+  }
+  const parsed = parseRange(req.headers.range, length);
+  if (parsed.kind === "unsatisfiable") return replyUnsatisfiable(reply, length);
   reply.header("Accept-Ranges", "bytes");
   reply.header("Content-Type", "application/octet-stream");
-  if (req.method === "HEAD") {
-    reply.hijack();
-    reply.raw.writeHead(200, { "Accept-Ranges": "bytes", "Content-Type": "application/octet-stream", "Content-Length": String(length) });
-    reply.raw.end();
-    return;
-  }
-  const range = parseRange(req.headers.range, length);
-  if (!range || range.start >= length) return reply.code(416).header("Content-Range", `bytes */${length}`).send();
+  // No range (FFmpeg always sends one), several, or one that is not valid is
+  // read as from byte 0. The answer is 206 whatever the request: it runs to the
+  // end of the admitted range (`held.end`), never to the end of the file.
+  const range = parsed.kind === "range" ? parsed : { start: 0, end: length - 1 };
   // The answer runs to the end of the admitted range the read starts in, which
   // is what keeps FFmpeg inside the bytes the run holds. A shorter answer is
   // not continued by every FFmpeg: measured, 8.1.2 and 9.0.2 send a new

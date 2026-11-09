@@ -1,404 +1,136 @@
-# proxy — @torrent-tv/proxy (WebTorrent + ffmpeg)
+Read `../AGENTS.md` first. It holds the project-wide rules (a link to `meta/AGENTS.md` made by meta's setup script; a task worktree sees the same link). This file adds only what is specific to this repository.
 
-Downloads a torrent and streams the chosen file to the browser, transcoding to
-HLS only when needed. See the parent `../AGENTS.md` for the overall architecture
-and [`torrent-tv/.github/CONTRIBUTING.md`](https://github.com/torrent-tv/.github/blob/main/CONTRIBUTING.md)
-for shared commit, version and release rules.
+# proxy — `@torrent-tv/proxy`
 
-## Deployment-agnostic — important
+The proxy downloads a torrent with WebTorrent (in its own worker thread), reads
+what each file states about itself, and serves the chosen file to the browser:
+the bytes as they are, or HLS made by ffmpeg when the browser cannot play a
+track. It keeps a WebSocket tunnel to the server for signalling and its state;
+browser requests arrive over a WebRTC data channel and are forwarded to the
+proxy's own Fastify routes over loopback. It is published to npm and installed
+by `torrent-tv/ha-addon`.
 
-The HA addon is only ONE way to run this; bare npm and Docker are planned. Keep
-all code free of Home-Assistant assumptions. Anything host-specific (GPU
-devices, ffmpeg build, CLI flags) belongs in the `ha-addon` layer. Hardware
-detection must probe at runtime and fall back gracefully; do not assume a
-Linux-only host (e.g. POSIX-only signals must degrade elsewhere).
+## Deployment-agnostic
+
+The Home Assistant add-on is one way to run the proxy; it also runs from npm and
+from this repository's `Dockerfile`. Keep the code free of Home Assistant
+assumptions: anything host-specific (GPU devices, the ffmpeg build, CLI flags of
+one host) belongs in `ha-addon`. Hardware detection probes at runtime and falls
+back; do not assume Linux (a POSIX-only signal must degrade elsewhere).
 
 ## Layout
 
-Browser request and response fields, compatibility defaults, and status meanings
-are recorded in `docs/browser-proxy-contract.md`.
+- `bin/cli.js` — CLI entry and every option (`--help` lists them).
+- `server.js` — the composition root (see the rules below).
+- `routes/<path>/<method>.js` — one folder per URL path, one file per method;
+  thin HTTP translators over `services/server/controllers/`.
+- `services/<component>/` — `media`, `torrent`, `encode`, `viewer`, `storage`,
+  `server`, `transport`, and `identity`. The components and how they talk:
+  [`docs/component-architecture.md`](docs/component-architecture.md); each
+  module and its owner: [`docs/layout.md`](docs/layout.md). The import rules
+  themselves are the `overrides` in `biome.json`.
+- `test/no-torrent/`, `test/with-torrent/` — see "Checks".
+- `docs/` — architecture by subject:
+  `browser-proxy-contract.md` (request and response fields the page relies
+  on), `container-architecture.md`, `download-architecture.md`,
+  `encode-architecture.md`, `encode-run-state.md`, `storage-architecture.md`,
+  `playback-start-forecast.md`, `first-frame-wait-model.md`,
+  `forecast-source-continuity.md`, `original-input-storage.md`, `logs.md`
+  (where every log is), `socks5-egress-research.md` (not implemented).
+- Planned work that is not in this repository yet: remote access (public
+  reachability, per-proxy DNS and TLS, relay) in
+  [meta `research/remote-access-direction-2026-07-11.md`](https://github.com/torrent-tv/meta/blob/main/research/remote-access-direction-2026-07-11.md),
+  company-hosted cloud proxies in
+  [meta `research/cloud-proxy-hosting-2026-07-10.md`](https://github.com/torrent-tv/meta/blob/main/research/cloud-proxy-hosting-2026-07-10.md).
 
-- `bin/cli.js` — CLI entry; resolves `ffmpegBin` (uses `--ffmpeg-bin` if given,
-  else bundled ffmpeg-static, else PATH `ffmpeg`).
-- `server.js` — the composition root: creates Fastify and its hooks (through
-  `services/server/forwarded-response-log.js`), initializes process-wide
-  resources and the torrent pool, calls `measureHost`
-  (`services/encode/measure-host.js`) and `services/server/wire-outputs.js` for
-  the output and encode service graph, constructs every owner below with its
-  ports, runs the start order in `services/server/start-playback.js`, registers
-  each route explicitly, and calls `listen`. It holds no collection, no closure
-  over 40 lines and no algorithm. `test/no-torrent/composition-root-states-no-facts.test.js`
-  (the #277 check) refuses state, long closures and the `outputParts` count in
-  `server.js` and `wire-outputs.js`. `wire-outputs.js` is a subordinate
-  assembler for that graph; it does not create the HTTP server or register
-  routes. It exposes `parts.viewerChanges` (an event, emitted `"change"` when a
-  viewer changes) and `parts.playedOutputsOf(sourceKey, fileIndex)` (the outputs
-  a present viewer plays, with their timeline, choices and segment sizes).
-- `routes/<path>/<method>.js` — same convention as the server repo.
-  - `routes/stream/get.js` — byte-range torrent file streaming (HTTP 206).
-  - `routes/api/playback-plan/post.js` — codec/container/duration probe result.
-  - `routes/transcode/session-file/get.js` — serves HLS playlist/segments;
-    long-polls while a segment is being produced, returns retryable 503 (never
-    202 — hls.js can't consume it).
-- `services/`:
-  - `torrent/demand/` — what anybody wants, in BYTES: `Window` (claimant, file, byte
-    range, urgency), `Urgency` (BLOCKED / NEAR / AHEAD / TAIL / BEHIND),
-    `DemandRegister` (live windows by claimant), `pieces.js` (the one place
-    bytes become piece numbers). No WebTorrent, no piece store, no pieces.
-  - `torrent/download/` — `SwarmSelection`, the ONLY thing that calls `select`,
-    `deselect` or `critical`, and `registry.js`, which holds one per torrent and
-    owns the cross-torrent rule that withholds the speculative levels while
-    anything urgent is missing anywhere. `TailRepeat` owns the bounded late-tail
-    decision for `requiredPieces()`; it uses the worker-side
-    `WebTorrentTailRepeatAdapter`, the only live code that reads private piece
-    buffers or wire request queues or changes reservations for this exception.
-    See `docs/download-architecture.md`.
-  - `encode/output/` — domain layer: `OutputSpec`, `VideoOutput`, `AudioOutput`,
-    `CutGrid`. What a session PRODUCES — which tracks, in what form, cut how,
-    packaged how — and therefore its identity: two outputs whose parameters
-    agree ARE the same output, and the encoded result is reused by definition.
-    Nothing about a VIEWER appears in it (not the consumer id, not where they
-    started, not their viewport), and nothing about the request that does not
-    change a byte of the result. `server/ViewerRequests.js` builds one and keys
-    the output on it.
-  - **`media/` — THE MEDIA LAYER, one directory, and it answers ONE question:
-    what does a FILE say about itself.** Its containers, its tracks, where its
-    keyframes are, how long it runs, and the plan for playing it. Every fact in
-    it is born when a header is read, dies when the file is forgotten, and is
-    addressed by the file — which is the test that put them together. It used to
-    be four places at two levels (`container/`, `tracks/`, half of
-    `orchestrators/`, and `playback-planner.js` loose in `services/`), so the
-    layer could not be put under an import rule and the rule was written per
-    directory instead.
-    Inside it, the DOMAIN is `media/container/` and `media/tracks/`: they import
-    nothing but each other, this proxy's own logger included. The application
-    files sit flat beside them — `ContainerOrchestrator`, `KeyframeTables`,
-    `SubtitleOrchestrator`, `playback-planner.js`, `probe-packets.js`,
-    `ffmpeg-banner.js`, `audio-inventory.js` — and may reach their own domain and
-    the logger and nothing else. What a torrent CONTAINS, which clusters may be
-    read, where a viewer stands, what an encoder costs: all handed in. Both
-    reaches that existed are gone — `torrent-worker/subtitle-cues.js` is given to
-    `SubtitleOrchestrator` by `server.js`, and `torrent/Contents.js` to the
-    planner — so this layer can be exercised with plain values, no torrent, no
-    thread and no disk. Checked by breaking it in every direction.
-  - **Which thread does a piece of work is decided by what it gives the viewer,
-    measured — not by a rule** (user, 2026-10-11, torrent-tv/meta#183). Today
-    containers are parsed on the main thread from `readRange(start, end)` over
-    the pieces in shared memory, and the torrent thread serves bytes, lists
-    which ranges of a file are held whole and reads them without fetching
-    (`torrent/worker/held-bytes.js`). That is a current placement, open to
-    change where a measurement shows a gain. What does not change: ONE owner
-    per fact — one container orchestrator, its readings kept once, never a
-    second independent parse — and only the viewers' priority map tells the
-    torrent what to download. Pinned by
-    `test/no-torrent/the-torrent-thread-serves-bytes.test.js`.
-  - `media/container/` — domain: `Container` (abstract, RFC 9559 / ISO 14496-12),
-    `MatroskaContainer` / `Mp4Container` / `AviContainer`, `ContainerFactory`
-    (sniff 16 bytes → precise subclass), `KeyframeTable`. See
-    `docs/container-architecture.md`.
-  - `media/tracks/` — domain: `ContainerTrack` (base: TrackNumber, declaredIndex,
-    language/BCP47, isEnabled/isDefault) → `VideoTrack` / `AudioTrack` /
-    `SubtitleTrack` → `TextSubtitleTrack` / `ImageSubtitleTrack`,
-    `ExternalSubtitleFile`. Spec-accurate flags (FlagForced only on subtitles per
-    RFC 9559 §5.1.4.1, FlagOriginal/Commentary only on audio, tkhd
-    track_enabled / alternate_group, elng BCP47).
-  - `media/` application files: `ContainerOrchestrator` (detect + the ONE
-    container per file, `containerFor`/`getTracks`/`getMediaInfo`/`getKeyframeIndex`;
-    the container keeps its own reading of each element it states — the Segment
-    layout, Tracks, Cues, MP4's `moov` — once it has been read), `KeyframeTables`,
-    `SubtitleOrchestrator` (the track list and the cues behind
-    `Container` tracks, warm/push — it is handed the walk, and `server.js` is
-    what puts the two together), `SubtitleCues` (the plan, the found-order
-    cursor, one walk of a file at a time, taking back withdrawn cues). It uses
-    the file's one container — it no longer builds its own. The walk itself is
-    `MatroskaContainer.readHeldCues` over `container/matroska-clusters.js` (which
-    also finds clusters the Cues table does not name) and
-    `Mp4Container.readHeldSamples`; what the torrent supplies is `held-bytes.js`
-    — which ranges are downloaded whole, and a read of one that never fetches
-    and answers at once with nothing where the range is not whole.
-  - **A read whose bytes have not arrived is not an answer about the file.**
-    Every container read is strict (`container/unavailable.js`): every byte, or
-    `BytesUnavailable`. A value, a proven absence, or a refusal of ours with its
-    reason may be kept; "not here yet" never is — not by a container, not by
-    `ContainerOrchestrator`, not by `KeyframeTables`, not by `SubtitleCues`.
-    **`KeyframeTables` is where a file's keyframe table lives and the only thing
-    that reads one.** The table is `container/KeyframeTable.js`, ONE object per
-    file, handed out rather than copied — so a read that lands after a session
-    was made still reaches it, which a value could not. It answers two questions
-    that a bag of probe fields could not tell apart: `answered` (a reader came
-    back) and `readable` (it came back with times). The first distinguishes a
-    file that must be re-encoded for ever from a passing shortage of bytes off
-    the swarm. One read per file whoever asks, the second asker joins the first,
-    preparation waits for the file's statement without an elapsed-time decision,
-    and a read that threw — `BytesUnavailable` included —
-    is never recorded as an answer; it is read again when pieces of the file
-    arrive (`readAgainIfUnanswered`). It is the ONLY store of the keyframe
-    answer; the container keeps the Cues reading the times are taken from. The second reader is the packet probe in
-    `media/probe-packets.js`, which scans packet records through ffprobe rather than parsing a container index; the fuller of the
-    two answers is the one that stands (`media/probe-packets.js`).
-  - `server/controllers/` — interface layer: `PlaybackController` / `SubtitleController`
-    (thin adapters over orchestrators; routes depend on controllers, not services).
-    `routes/*` are now thin HTTP translators. A controller reaches every layer
-    below it THROUGH its orchestrator and never around it, which biome checks —
-    so what an orchestrator needs from another layer is composed in `server.js`
-    and passed in.
-  - Everything a container states about ITSELF lives in its own class: the
-    track table, the Cues, the keyframe times they name, the cluster positions,
-    the blocks inside a cluster, the MP4 sample table, and the walk of what is
-    downloaded. `services/container-index/` is gone; `container/ebml-reader.js`
-    is the format's byte-level grammar, not its statements, and is the only
-    piece kept apart. `ContainerFactory` is the ONE place that decides what a
-    file is — by sniffing the header, since that is what the muxer wrote — and
-    that is it. `ContainerFactory.readKeyframeIndex` is gone: it existed only for
-    the session manager's own HTTP read of a container, which is deleted.
-  - `docs/download-architecture.md` — the two axes of downloading: what is
-    wanted (`demand/`) against what the swarm is told (`download/`), why urgency
-    is not a number given to the library, and why the speculative levels are
-    withdrawn rather than lowered.
-  - **The storage layer — ONE layer, FOUR directories.** Bytes on a medium with
-    a limit is the property they share; what holds them are three different
-    things with different lifetimes, different addresses and different THREADS,
-    so they are not flattened into one:
-      - `storage/piece-store/` — the torrent's pieces: memory tier, spill tier, and the
-        order they leave in (`shared-piece-store.js`, `piece-lru.js`,
-        `piece-disk-store.js`). Lives in the torrent WORKER thread.
-      - `storage/segment-store/` — the segments an encoder has produced
-        (`SegmentStore.js`), addressed by the output's own key. Main thread.
-        It keeps bytes and what is read from them; whether a piece is whole is
-        decided by the encoding (`encode/piece-completeness.js`).
-        It executes publication and deletion but owns no idle or eviction
-        policy. `encode/output/OutputRetention` owns the unused period and
-        removal order; `server/OutputLifecycle` coordinates current viewer
-        demand, writers and reads before applying that policy.
-      - `storage/files/` — files downloaded whole and kept as files
-        (`CompletedFiles.js`, `piece-from-whole-file.js`). Worker thread.
-      - `storage/` — THE ONE BUDGET: how much of this machine the proxy may
-        take, and how that is divided between everything that holds bytes.
-        `MachineBudget.js` is the single owner; `allowance.js` the rule;
-        `machine-memory.js` and `free.js` read the machine; `wire.js` says who
-        the claimants are and which RESOURCE each takes; `keep.js` and
-        `returns.js` say how long material nobody is using is kept. It holds no
-        bytes itself.
-        **One budget does not mean one number.** Memory cannot be paid for with
-        disk, so what is divided is divided per resource — and "disk" is one
-        resource per DEVICE, read with `statSync(dir).dev`, because two
-        filesystems cannot pay for each other either (`/tmp` and `/data` on the
-        addon host are two). What there is ONE of is the owner, the policy and
-        the place that reads the machine. One owner because the claimants TRADE
-        across resources: pieces that do not fit in memory are spilled to disk,
-        so what memory is given decides how much disk is needed — 14 400 MB
-        spilled in fifty minutes while the store held 312-424 MB.
-        The policy is the operator's, stated once at startup — `--budget
-        adaptive|share|fixed`, `--budget-share`, `--budget-bytes`,
-        `--min-memory-bytes`, `--min-disk-bytes` — and those are the only
-        chosen numbers in the proxy, because they are chosen by the person whose
-        machine it is. The default is the measured one.
-    They may import each other and nothing above, which `biome` checks as an
-    EXCEPTION to `../**` rather than as a list of forbidden layers — a layer is
-    not a directory, the blanket form cannot say "my siblings", and a list of
-    names misses whatever it forgets.
-  - `docs/storage-architecture.md` — the three things that write to one disk, the
-    two rules that remove material (nobody needs it, or there is no room), the
-    order the viewers give that removal, why a spilled piece is a file of its
-    own, and what is still not solved.
-  - `docs/encode-architecture.md` — who decides where encoders go, and the
-    answer is one authority: `EncodePlan`, from what is made, what is being
-    made, what is wanted and what the host can hold. Why no viewer reaches it,
-    why the priority map is read at two scopes (per FILE for the swarm, per
-    OUTPUT for the encoders), and what each of the eight other places that used
-    to place or kill an encoder now states instead.
-  - `docs/logs.md` — where to find logs, and the fact that the BROWSER's own log
-    is in TWO places split by phase: on the droplet while a transport is being
-    acquired and at unload, on THIS proxy for the whole of a viewing
-    (`/data/client-<start>-<session>-<torrent>.log`, one file per session).
-    Read both before concluding anything from a half-session.
-  - `media/playback-planner.js` — single ffmpeg probe returns audioCodec,
-    videoCodec, container, durationSeconds. `mode` is advisory; the browser
-    decides. `media/probe-packets.js` beside it is the OTHER reading of the same
-    file, by scanning packet records through ffprobe, for containers that state no index.
-  - `server/` — what a request does, one operation at a time, and nothing
-    that lives longer than the operation: `ViewerRequests` (open an output of a
-    file and be placed on it, state a position, report progress),
-    `SegmentServing` (answer a playlist, init or segment request from the store,
-    or hold it until the piece is whole), `OutputLifecycle` (dispose an output
-    nobody is on, all of them at shutdown, adopt what an earlier process left),
-    and `wire-outputs.js`, which builds the components and hands each the narrow
-    host it reads. `hls-session-manager.js` is gone (2.87.0): each of its members
-    is a method of the component that owns it. The operations own no long-lived
-    fact: the init served for an output is kept by `SegmentStore`, the bytes read
-    for an output by `EncodeRuns`, the cold-start measurement by `ColdStarts`.
-    They import no component's implementation — only the name of an output and
-    of its playlist (`encode/output/index.js`) and the keeping period
-    (`storage/keep.js`); biome checks it. A held request waits for the store's
-    publication event, as long as the requester states (`X-Hold-Ms`) and no
-    longer than it stays.
-  - **Owners of the logic that left `server.js` (torrent-tv/meta#270), each with
-    its layer.** A module imports only what its layer's biome rule allows; the
-    rest is a constructor port.
-    - media layer, `media/`: `segment-reading.js` (what a segment reads:
-      `trackFor`, `selectTracks`, `readingInterval`, `segmentReading`; pure),
-      `SegmentSourceRanges.js` (the one resolver of a segment's source byte
-      ranges, forgotten with its source), `WorkTagsReport.js` (the work-tags
-      log, once per file), `SubtitleWalk.js` (the held file, the fresh cues,
-      the subtitle orchestrator's construction).
-    - torrent layer, `torrent/`: `PlaybackResolution.js` (the segment → bytes
-      projection of a played file, handed to `DownloadMaps` as
-      `resolvePlayback`; `clear` and `forget` are called by `server.js`). It reads `segment-reading.js` and `SegmentSourceRanges.js`
-      through ports and keeps the order of awaits and the `isCurrent()` checks.
-    - server layer, `server/`: `MediaReadParams.js` (the media read parameters,
-      `paramsFor`), `start-playback.js` (the start order: viewer changes are
-      subscribed before the adoption of segments left behind), `PreparationReads.js`
-      (the source preparation's `inspect` port and `publishNative`),
-      `forwarded-response-log.js` (the `[forecast-http]` and `[http-response]`
-      hooks, and nothing for other requests), `torrent-pool-ports.js` (the
-      torrent-pool adapters of the `wireOutputs` call).
-    - encode layer, `encode/`: `EncodeInputResolution.js` (which input an
-      encoder run reads: the original input or packets, and the soundtrack
-      walk; imports nothing), `measure-host.js` (the startup host measurements,
-      taken only when transcoding is on).
-    - viewer layer, `viewer/`: `watched-addresses.js` (prepared and watched
-      addresses, moved out of `wire-outputs.js`).
-    - storage, `storage/processor-share.js`: `watchedFiles` (the download share
-      grouped by file, the first output's length, the summed encode cost).
-    `test/no-torrent/` holds a test for each, written before it moved, and the
-    composition-root check above.
-  - `encode/` beside the orchestrator: `OutputOpening` (which output answers a
-    request for a file, made if it is not here yet — without knowing who asked),
-    `EncodeRuns` (build a run where the plan places it, follow it, account for
-    its end, and what its input has received), `EncoderSelection` (the encoder
-    in use and the move to software), `Renditions` (the steps of a picture and
-    its soundtracks, the master playlist, and which rung a viewer's page says it
-    plays), `OutputTimes` (where each segment begins and how the cut table is
-    corrected), `CushionReport` (how much film is ready in front of the
-    viewers), `output-key-format.js` (which container a key names).
-  - `viewer/`: every viewer has a name (`Viewers.of` refuses an empty one); the
-    relation to outputs is stored only in `Viewer.outputs` and read the other way
-    by `Viewers.forOutput`. A quality request belongs to one viewer and exists
-    only in AUTO (`Viewer.askQuality`). The playback start forecast
-    (`playback-readiness.js`) is the viewer's, because it predicts how the
-    viewer's browser will play; `ViewerRequests` is handed it by
-    `wire-outputs.js`. `media-time.js` is exact media time and the rule by which
-    every Media Source engine joins buffered ranges — see
-    `docs/playback-start-forecast.md`.
-  - `torrent/` reaches the piece store by what it does (`piece-store-of.js`) and
-    is handed the store's class by `torrent/worker/worker.js`, where that thread
-    is assembled. `transport/` imports nothing of another component; `bin/cli.js`
-    hands it the memory reading and the rule for which captures are kept.
-  - `encode/hwaccel.js` — detect best H.264 encoder (NVENC/QSV/VAAPI/V4L2M2M) with a
-    STRICT startup test: encode `testsrc2` through the real HLS pipeline, then
-    verify each segment decodes independently (catches non-IDR/corrupted hw
-    output). Falls back to software libx264. Runtime fallback to software if a
-    hw encode later fails. v4l2m2m is gated by this test (fails on HA Yellow).
-  - `transport/data-channel-handler.js` — forwards WebRTC data-channel requests to the
-    local HTTP server (loopback), so the same routes serve both transports.
+## Rules every change must keep
 
-## Gotchas
-
-- Do NOT use `-hls_playlist_type event` — it breaks duration/seek. VOD only.
-- A transitive dep (`ip-set`, via webtorrent) ships a hostile
-  `preinstall: npx only-allow pnpm` that breaks `npm install`. The addon works
-  around it with `--ignore-scripts` + a targeted rebuild of `node-datachannel`;
-  if you ever change install flow, keep that in mind.
-
-## Planned: public reachability (remote access)
-
-Decided direction — full plan in the parent `../AGENTS.md`. Proxy-side pieces:
-
-- **Auto port mapping** — IMPLEMENTED (`services/transport/port-mapper.js`, changelog
-  2.9.16). UPnP IGD / NAT-PMP via `@silentbot1/nat-api` (now a direct dep; the
-  same lib WebTorrent uses for the torrent port). Maps TCP 9090 with a 2 h
-  auto-renewed lease, removed on shutdown (lease expiry covers hard kills).
-  Best-effort + start/stop timeouts; `--no-port-mapping` opts out;
-  `getMappedEndpoint()` exposes the external endpoint. NOT yet done: mapping the
-  **UDP** port WebRTC actually uses (it binds ephemeral UDP ports, so this TCP
-  mapping does not yet help WebRTC — roadmap step 3 in the parent AGENTS.md).
-  Also pending (next iteration): a success log line in `transport/port-mapper.js` `stop()`
-  (`removed mapping for TCP <port>`) — today stop() only logs on failure, so a
-  clean unmap on shutdown is silent.
-- **Report endpoint to server** — ✅ DONE (proxy 2.9.17). The mapped endpoint
-  is sent over the tunnel (`tunnel-client.sendEndpoint` → `proxy-endpoint`) on
-  mapping success and on every tunnel (re)connect; the server dial-back-verifies
-  reachability (server 0.8.22, roadmap step 2).
-- **HTTPS listener**: serve the existing routes over TLS with a per-proxy
-  certificate delivered by the server through the tunnel (persist cert+key
-  locally; ~90-day renewals are pushed the same way). Add CORS headers for the
-  web-app origin so hls.js / `<video>` can fetch cross-origin.
-- Plain HTTPS becomes the preferred video transport; WebRTC data channel stays
-  as fallback for hosts where no port could be opened.
-- **Later roadmap steps** (single staged roadmap in parent `../AGENTS.md`,
-  WebRTC-first ordering): step 3 map the WebRTC UDP port (fixed
-  `portRangeBegin`/`End` + UPnP-map UDP); step 4 birthday-paradox port
-  prediction (open ~256 UDP sockets, inject predicted-port ICE candidates) for
-  symmetric NAT; step 5 IPv6-first (audit the candidate filter — do not drop
-  *global* v6) + STUN NAT pre-classification reported to the registry; then
-  the DNS+TLS path (steps 6–7); step 8 relay-then-upgrade (deferred).
-- Future: ed25519 proxy identity (sign announcements), BEP 44 endpoint
-  announcements via the `bittorrent-dht` already bundled with WebTorrent.
-
-All of this must stay deployment-agnostic (HA addon, bare npm, Docker).
-
-## Storage lifecycle
-
-Memory and disk claimants are registered with `services/storage/wire.js` and
-receive shares from `MachineBudget`. Disk is accounted per physical device.
-Each representation keeps its own lifecycle and eviction rule; current owners,
-identity keys, shared demand, expiry, and field evidence are documented in
-`docs/storage-architecture.md`.
-
-Reusable torrents, generated segments, and completed source files use the
-shared `IDLE_KEEP_MS` period. Completed files also reserve concurrent writes,
-hold active reads against eviction, and remove interrupted `.partial` files
-at startup. Operation-only encode inputs and FFmpeg cache files are released
-when their requests or runs end.
-
-## Cloud proxy
-
-The same proxy code also runs as the company-hosted fallback when the user
-pool can't serve a viewer. Keep the proxy host-agnostic so it runs unchanged on
-rented infra (flat-rate/unmetered bandwidth — Hetzner dedicated / OVH; NOT
-metered-egress clouds). Provider/economics analysis in the parent
-`../AGENTS.md` "Cloud proxy" section.
+- **`server.js` composes and does nothing else.** It holds no collection, no
+  closure over 40 lines and no algorithm; `services/server/wire-outputs.js`
+  assembles the output and encode graph under the same rule. What each of them
+  does, step by step: [`docs/layout.md`](docs/layout.md), "Entry and
+  composition". `test/no-torrent/composition-root-states-no-facts.test.js`
+  refuses violations in both files.
+- **Layers import only what their `biome.json` rule allows.** What a module
+  needs from another layer is a constructor port, composed in `server.js` or
+  `wire-outputs.js`. A controller reaches every layer below it through its
+  orchestrator.
+- **One owner per fact.** One container per file (`ContainerOrchestrator`), one
+  keyframe table per file (`KeyframeTables`), one budget for the machine
+  (`MachineBudget`), one place that tells the swarm what to fetch
+  (`services/torrent/download/SwarmSelection`). Only the viewers' priority map
+  states download demand (`docs/download-architecture.md`).
+- **A read whose bytes have not arrived is not an answer about the file.** Every
+  container read returns every requested byte or throws `BytesUnavailable`
+  (`services/media/container/unavailable.js`); "not here yet" is never kept as
+  a value, an empty track list or an unsupported format
+  (`docs/container-architecture.md`).
+- **The media layer is exercised with plain values.** `services/media/container/`
+  and `services/media/tracks/` import only each other; the files beside them
+  reach their own domain and the logger. Torrent contents, held bytes, viewer
+  position and encoder cost are handed in.
+- **Which thread does a piece of work is decided by measurement.** Today
+  containers are parsed on the main thread from bytes in shared memory and the
+  torrent thread serves bytes (`test/no-torrent/the-torrent-thread-serves-bytes.test.js`).
+  A move needs a measured gain for the viewer and keeps one owner per fact.
+- **The only chosen numbers are the operator's.** `--budget adaptive|share|fixed`,
+  `--budget-share`, `--budget-bytes`, `--min-memory-bytes`, `--min-disk-bytes`;
+  the default is measured (`docs/storage-architecture.md`). A new holder of
+  bytes registers in `services/storage/wire.js`.
+- **HLS is VOD.** The playlist lists every segment and `#EXT-X-ENDLIST`
+  (`services/encode/output/playlists.js`); never use `-hls_playlist_type event`,
+  which loses duration and seeking. A segment that is not ready yet is held or
+  answered with a retryable 503, never 202 (hls.js cannot consume it).
+- **fMP4 fragments are stamped with their own position on serve.** ffmpeg writes
+  `tfdt` = 0 in every run that starts after a seek and puts the offset in that
+  run's own init segment, while the player fetches one init per session; no
+  ffmpeg option avoids it. `services/encode/segment-formats/` rewrites `tfdt`;
+  do not remove that. Everything that depends on the segment format
+  (`--segment-format fmp4|mpegts`) lives behind that interface.
+- **Hardware encoders pass a strict test before use.** `services/encode/hwaccel.js`
+  encodes `testsrc2` through the real HLS pipeline and checks that every segment
+  decodes on its own; otherwise libx264, and a hardware failure at runtime moves
+  to software. `h264_v4l2m2m` fails that test on HA Yellow.
 
 ## Checks: with a torrent and without
 
-A check never starts a real torrent outside the Home Assistant host. The checks
-are split by that one property, in two folders:
+No check starts a real torrent outside the Home Assistant host, and the checks
+are split by that property:
 
 1. `test/no-torrent/` — every check that does not need a real torrent. `npm test`
-   runs only these (`test/no-torrent/**/*.test.js`), in CI and on a development
-   machine. Two things keep them from reaching a torrent:
-   1. `scripts/check-tests-start-no-torrent.mjs`, run by CI before the tests,
-      reads them and refuses a line that constructs TorrentPool, WebTorrent or
-      the torrent worker, imports WebTorrent, or names the proxy entry point;
-   2. `test/no-torrent/support/refuse-torrent.cjs`, loaded by `npm test` with
-      `--require`, replaces WebTorrent with a class whose constructor throws, and
-      refuses to load a DHT, tracker or local-discovery package. It is in force
-      in every test process and in every worker thread a check creates, so a
-      torrent reached through any chain of calls is a failure, never a swarm.
-      `test/no-torrent/refuse-torrent.test.js` fails if the guard is not loaded.
+   runs `biome lint .` and then only `test/no-torrent/**/*.test.js`, in CI and on
+   a development machine. Two guards keep them from a torrent:
+   `scripts/check-tests-start-no-torrent.mjs` (run by CI before the tests)
+   refuses a line that constructs `TorrentPool`, WebTorrent or the torrent
+   worker, imports WebTorrent, or names the proxy entry point; and
+   `test/no-torrent/support/refuse-torrent.cjs`, loaded with `--require`, makes
+   WebTorrent throw on construction and refuses DHT, tracker and
+   local-discovery packages in every test process and worker thread.
+   `test/no-torrent/refuse-torrent.test.js` fails if the guard is not loaded.
 2. `test/with-torrent/` — checks that need a real torrent. Nothing loads them in
    CI or locally; they run only on the Home Assistant host. The folder holds no
-   check yet; the command that runs it comes with the first one and refuses to
-   start outside the add-on (`SUPERVISOR_TOKEN`). See its `README.md`.
+   check yet; see its `README.md`.
 
-## Repository changesets and release path
+## Gotchas
 
-Every pull request adds `.changeset/<branch with / as ->.md` (lower-case file
-name) holding one or two bullets for a viewer, each `- **New**: …`,
-`- **Fix**: …` or `- **Chore**: …`. Continuation lines are indented by two
-spaces; there are no blank lines. Nothing else may live in `.changeset/` (no
-README). A changeset is never edited after merge and never deleted: the release
-notes are the changesets added since the last tag. CI (`check-changesets`)
-refuses a pull request without one. `CHANGELOG.md` is frozen at 2.107.64.
+- Every install of the proxy runs with lifecycle scripts off
+  (`--ignore-scripts`), and the two native modules are then built and checked
+  by `scripts/install-native.sh`. Why scripts stay off (`ip-set`):
+  [`ha-addon` AGENTS.md, Gotchas](https://github.com/torrent-tv/ha-addon/blob/main/AGENTS.md#gotchas).
+- `utp-native` is our fork, `@torrent-tv/utp-native`, chosen by `overrides` in
+  `package.json`. The add-on reads that override and refuses any other build.
 
-`.github/workflows/main.yml` runs lint, tests and
-`scripts/check-tests-start-no-torrent.mjs`, then publishes
-`@torrent-tv/proxy` through npm trusted publishing. After npm serves that exact
-version, the release updates `torrent-tv/ha-addon`'s pinned `PROXY_VERSION` and
-changelog. Its workflow builds and releases the add-on; each Home Assistant
-host still updates its installed add-on separately.
+## Changesets and release path
 
-`.github/workflows/dependencies.yml` updates dependencies daily within the
-ranges, runs the same checks and pushes to `main`.
+The shared flow, the changeset bullets and the frozen `CHANGELOG.md` are in the
+organization's
+[`CONTRIBUTING.md`](https://github.com/torrent-tv/.github/blob/main/CONTRIBUTING.md).
+What is particular to this repository:
 
-\n
+- A changeset's file name is lower case; its continuation lines are indented
+  by two spaces; it has no blank lines; nothing else lives in `.changeset/`. A
+  changeset is never edited or deleted after merge.
+- `.github/workflows/main.yml` runs the shared checks (commit headers, branch
+  name, line endings, workflows, changesets), the no-torrent check, `npm test`,
+  and a `docker build` (the image runs `--help` in its last stage). Then it
+  publishes to npm and installs the version into `ha-addon`.

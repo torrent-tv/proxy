@@ -4,9 +4,11 @@ import { handleMediaGet } from "../../routes/media/get.js";
 
 function replyFor() {
   return {
-    status: 200, headers: {}, raw: { destroyed: false },
+    status: 200, sentHeaders: {}, raw: { destroyed: false },
     code(value) { this.status = value; return this; },
-    header(name, value) { this.headers[name] = value; return this; },
+    header(name, value) { this.sentHeaders[name.toLowerCase()] = value; return this; },
+    headers(values) { for (const [name, value] of Object.entries(values)) this.header(name, value); return this; },
+    getHeaders() { return { ...this.sentHeaders }; },
     send(value) { this.body = value; return this; }
   };
 }
@@ -36,7 +38,7 @@ test("a media read serves existing bytes through bounded storage reads", async (
   for await (const chunk of reply.body) chunks.push(chunk);
   assert.equal(Buffer.concat(chunks).toString(), "2345678");
   assert.equal(reply.status, 206);
-  assert.equal(reply.headers["Content-Range"], "bytes 2-8/10");
+  assert.equal(reply.sentHeaders["content-range"], "bytes 2-8/10");
   assert.deepEqual(pool.reads, [[2, 5], [6, 8]]);
 });
 
@@ -74,26 +76,40 @@ test("unknown media does not create a torrent and invalid ranges read nothing", 
   assert.deepEqual(pool.reads, []);
 });
 
-test("suffix ranges return the final bytes and malformed ranges read nothing", async () => {
+test("suffix ranges return the final bytes and an empty suffix reads nothing", async () => {
   const pool = poolOver(Buffer.from("0123456789"));
   const reply = replyFor();
   await handleMediaGet(request("bytes=-3"), reply, { torrentPool: pool });
   const chunks = [];
   for await (const chunk of reply.body) chunks.push(chunk);
   assert.equal(Buffer.concat(chunks).toString(), "789");
-  assert.equal(reply.headers["Content-Range"], "bytes 7-9/10");
-  for (const range of ["bytes=-0", "bytes=", "bytes=1-2-3", "bytes=1-2,4-5", "bytes=1e2-200"]) {
-    const invalid = replyFor();
-    await handleMediaGet(request(range), invalid, { torrentPool: pool });
-    assert.equal(invalid.status, 416);
-  }
+  assert.equal(reply.sentHeaders["content-range"], "bytes 7-9/10");
+  const empty = replyFor();
+  await handleMediaGet(request("bytes=-0"), empty, { torrentPool: pool });
+  assert.equal(empty.status, 416);
   assert.deepEqual(pool.reads, [[7, 9]]);
+});
+
+// RFC 9110 lets a server ignore a Range it cannot read: a malformed or
+// multi-range header is answered as a request for the whole file.
+test("malformed and multi-range headers are answered as the whole media file", async () => {
+  for (const range of ["bytes=", "bytes=1-2-3", "bytes=1-2,4-5", "bytes=1e2-200"]) {
+    const pool = poolOver(Buffer.from("0123456789"));
+    const reply = replyFor();
+    await handleMediaGet(request(range), reply, { torrentPool: pool });
+    assert.equal(reply.status, 200, range);
+    assert.equal(reply.sentHeaders["content-range"], undefined, range);
+    assert.equal(reply.sentHeaders["content-length"], "10", range);
+    const chunks = [];
+    for await (const chunk of reply.body) chunks.push(chunk);
+    assert.equal(Buffer.concat(chunks).toString(), "0123456789", range);
+  }
 });
 
 test("HEAD reports media length without reading or demanding bytes", async () => {
   const pool = poolOver(Buffer.from("0123456789"), () => false);
   const reply = replyFor();
   await handleMediaGet({ ...request(), method: "HEAD" }, reply, { torrentPool: pool });
-  assert.equal(reply.headers["Content-Length"], "10");
+  assert.equal(reply.sentHeaders["content-length"], "10");
   assert.deepEqual(pool.reads, []);
 });

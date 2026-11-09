@@ -1,0 +1,1 @@
+- **Chore**: Repository guidance is shorter: `AGENTS.md` keeps the rules every change must keep, and the module layout and the component design move to `docs/layout.md` and `docs/component-architecture.md`.

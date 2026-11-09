@@ -158,7 +158,7 @@ Deliberately not covered:
 
 ## 2. Tests (test writer, separate commit)
 
-- [ ] 2.1 Failing tests for AC-1..AC-3 under `test/no-torrent/`, committed
+- [x] 2.1 Failing tests for AC-1..AC-3 under `test/no-torrent/`, committed
       alone as `test(proxy): …`.
 
 ## 3. Implementation (implementer, from the test commit)
@@ -167,10 +167,10 @@ Deliberately not covered:
 - [x] 3.2 `data-channel-handler.js` uses it (design §2).
 - [x] 3.3 Delete the tunnel relay in `tunnel-client.js` (design §3).
 - [x] 3.4 Changeset (design §5). `npm test` exits 0.
-- [ ] 3.5 Server: delete `relay()` and its dead state (design §4), changelog
+- [x] 3.5 Server: delete `relay()` and its dead state (design §4), changelog
       entry; `npm test` exits 0 in server.
 
 ## 4. Release and field check
 
-- [ ] 4.1 Proxy released and installed in the add-on, then server released.
-- [ ] 4.2 AC-4 on the Home Assistant host.
+- [x] 4.1 Proxy released and installed in the add-on, then server released.
+- [x] 4.2 AC-4 on the Home Assistant host.

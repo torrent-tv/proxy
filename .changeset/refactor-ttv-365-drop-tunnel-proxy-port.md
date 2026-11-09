@@ -1,0 +1,1 @@
+- **Chore**: The tunnel client no longer declares or receives the unused `proxyPort` option left behind when #281 removed the tunnel relay; `bin/cli.js` stops passing it, and the data channel handler keeps its own `proxyPort`. The `loopback-forward` OpenSpec tasks are ticked. No behaviour change.

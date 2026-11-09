@@ -628,7 +628,6 @@ try {
     serverUrl,
     proxyId: clientId,
     token,
-    proxyPort: actualPort,
     name: clientName,
     baseUrl: directBaseUrl,
     onSignal(sessionId, signal) {

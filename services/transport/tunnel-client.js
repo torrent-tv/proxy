@@ -30,8 +30,6 @@ import { WebSocket } from "ws";
  *   Stable ID used to identify this proxy on the server.
  * @property {string}  token
  *   Auth token sent as the `x-proxy-id` / `x-proxy-token` headers during the WS handshake.
- * @property {number}  proxyPort
- *   Local port the proxy's Fastify server is listening on.
  * @property {string}  [name]
  *   Display name, sent with every connection so that whichever server instance
  *   the connection reaches knows it without a separate registration request.
@@ -113,7 +111,6 @@ export function createTunnelClient({
   serverUrl,
   proxyId,
   token,
-  proxyPort,
   name = "",
   baseUrl = "",
   onSignal,

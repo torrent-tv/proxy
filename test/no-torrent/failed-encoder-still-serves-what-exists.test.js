@@ -12,6 +12,8 @@
  * whatever has become of the encoder since. The failure belongs where a file is
  * absent: there it is the truthful answer, and holding the request instead only
  * spends the viewer's patience.
+ *
+ * An output fails only on a terminal input fact (torrent-tv/meta#341).
  */
 
 import test from "node:test";
@@ -26,6 +28,7 @@ import { fakeProcess, silentLogger } from "./helpers/encode-run.js";
 import { waitForSessionFile } from "../../services/server/transcode-session-files.js";
 import { outputSpec } from "./helpers/output-spec.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
+import { fakeEncodeInputs } from "./helpers/admitted-input.js";
 import { outputOn } from "./helpers/output.js";
 
 const SESSION_ID = "3333333344445555";
@@ -35,14 +38,35 @@ const OUTPUT_KEY = "failed-serves:fmt=fmp4:grid=uniform:video-only:v=0/copy";
 // init FILE at all — the header is lifted out of the first piece — which is the
 // case `#initFromFirstSegment` answers `null` for instead of throwing `ENOENT`.
 const KEYFRAME_OUTPUT_KEY = "failed-serves-kf:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
+// The terminal input fact, in the shape the encode-input owner answers it.
+const TERMINAL = {
+  kind: "terminal",
+  reason: "source-input-exceeds-memory-capacity",
+  message: "one piece is larger than memory"
+};
 
 /**
  * One output with segment #0 finished on disk and its encoder dead.
  *
+ * @param {object} [options]
+ * @param {boolean} [options.failed] - Its input failed for good and its last run ended failed.
+ * @param {() => boolean} [options.inputFailed] - Whether the encode-input owner answers the
+ *   output's input as terminal, asked at each question; `failed` by default.
  * @returns {Promise<{ manager: object, dirPath: string, outputKey: string }>}
  */
-async function outputWhoseEncoderDied({ failed = true, segments = [0], cutsAtGivenTimes = false } = {}) {
-  const manager = managerWithOwnStore({ planless: true }).manager;
+async function outputWhoseEncoderDied({
+  failed = true,
+  inputFailed = () => failed,
+  segments = [0],
+  cutsAtGivenTimes = false
+} = {}) {
+  const manager = managerWithOwnStore({
+    planless: true,
+    encodeInputs: {
+      ...fakeEncodeInputs(),
+      failureOf: (output) => (output.id === SESSION_ID && inputFailed() ? TERMINAL : null)
+    }
+  }).manager;
   const outputKey = cutsAtGivenTimes ? KEYFRAME_OUTPUT_KEY : OUTPUT_KEY;
   manager.segmentStore.useFormat(outputKey, fmp4Format);
   const dirPath = manager.segmentStore.directoryFor(outputKey);
@@ -125,7 +149,7 @@ test("a segment that is not there says the encoder failed, instead of being held
   const answer = await manager.serving.getFileStream(SESSION_ID, "segment-00003.mp4", { consumerId: "viewer-a" });
 
   assert.equal(answer.kind, "failed", "nothing is going to write it, and the viewer is owed the reason");
-  assert.match(answer.message, /255/);
+  assert.match(answer.message, /source-input-exceeds-memory-capacity/);
 });
 
 test("the playlist is a fact of the timeline and outlives the encoder", async (t) => {
@@ -147,7 +171,8 @@ test("a failure reaches a request that was ALREADY waiting", async (t) => {
   // wake, by the requester going or by its own deadline — and a failure is none
   // of those, so it sat out the whole deadline for a piece nothing was going to
   // make, and where the page states no deadline, until the viewer disconnected.
-  const { manager, dirPath } = await outputWhoseEncoderDied({ failed: false });
+  let inputFailed = false;
+  const { manager, dirPath } = await outputWhoseEncoderDied({ failed: false, inputFailed: () => inputFailed });
   t.after(async () => {
     await manager.lifecycle.disposeAll();
     await rm(dirPath, { recursive: true, force: true });
@@ -176,6 +201,8 @@ test("a failure reaches a request that was ALREADY waiting", async (t) => {
   // The wait must EXIST before it can be said to have been woken.
   await untilWaitsAreRegistered(manager.segmentStore, OUTPUT_KEY);
 
+  // The input fails for good, and the run reading it ends.
+  inputFailed = true;
   child.exit(255);
 
   // Bounded, because a regression here would otherwise HANG for the whole
@@ -210,48 +237,6 @@ async function settledWithin(promise, withinMs) {
     new Promise((resolve) => setTimeout(() => resolve(STILL_WAITING), withinMs))
   ]);
 }
-
-test("a run that exits 0 having produced less than promised also reaches a waiting request", async (t) => {
-  // ffmpeg exits 0 both at the end of the file and when its input stops
-  // delivering, so a run that stopped short claims success. That ending is
-  // terminal all the same — and it was the one branch of the exit handler that
-  // returned before anybody waiting was told.
-  const { manager, dirPath } = await outputWhoseEncoderDied({ failed: false });
-  t.after(async () => {
-    await manager.lifecycle.disposeAll();
-    await rm(dirPath, { recursive: true, force: true });
-  });
-  const session = manager.outputs.get(SESSION_ID);
-  const child = fakeProcess();
-  const run = new EncodeRun({
-    address: OUTPUT_KEY,
-    encoder: { name: "libx264", kind: "software" },
-    from: 3,
-    to: 4,
-    buildArgs: () => [],
-    spawn: () => child,
-    logger: silentLogger,
-    lastSegmentIndex: () => 4,
-    because: "a check asked for it",
-    onEnded: (ended) => manager.encodeRuns.noteRunEnded(session, run, ended)
-  });
-  manager.encodeOrchestrator.adopt(OUTPUT_KEY, run);
-
-  const held = waitForSessionFile(manager.serving, SESSION_ID, "segment-00003.mp4", {
-    holdMs: 30_000,
-    consumerId: "viewer-a"
-  });
-  await untilWaitsAreRegistered(manager.segmentStore, OUTPUT_KEY);
-
-  // Zero, having made none of the two segments it was given.
-  child.exit(0);
-
-  const answer = await settledWithin(held, 5_000);
-
-  assert.equal(manager.encodeRuns.hasFailed(session), true, "stopping short is a failure, not a finished file");
-  assert.notEqual(answer, STILL_WAITING, "it was left to sit out its whole hold");
-  assert.equal(answer.kind, "failed", "a wait nothing will satisfy must be told");
-});
 
 test("one run of two ending in failure tells nobody — the other is still making it", async (t) => {
   // The condition is the OUTPUT's state, not this run's ending. A run that
@@ -321,5 +306,5 @@ test("an init that will never be made says so instead of warming up for ever", a
   const answer = await manager.serving.getFileStream(SESSION_ID, "init.mp4", { consumerId: "viewer-a" });
 
   assert.equal(answer.kind, "failed", "nothing is going to produce the header it would come from");
-  assert.match(answer.message, /255/);
+  assert.match(answer.message, /source-input-exceeds-memory-capacity/);
 });

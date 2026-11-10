@@ -1,4 +1,102 @@
-Releases after 2.107.64 are described at https://github.com/torrent-tv/proxy/releases; this file is no longer updated. A pull request describes its change in `.changeset/` (see `AGENTS.md`, Changesets).
+# @torrent-tv/proxy
+
+## 2.107.80
+
+### Patch Changes
+
+- c7f63aa: CI no longer scans commits for secrets itself; the repository relies on GitHub secret scanning with push protection, and its secret baseline and `pre-commit` hook are removed.
+
+## 2.107.79
+
+### Patch Changes
+
+- 9140b09: CI calls the shared actions from their repository's new name, torrent-tv/workflows.
+
+## 2.107.78
+
+### Patch Changes
+
+- d37330c: Update dependencies: 1 package(s) changed in the lock file.
+
+## 2.107.77
+
+### Patch Changes
+
+- 471d481: CI checks commit headers with the standard commitlint action, every commit included, and branch names inline; text files are stored with LF endings.
+
+## 2.107.76
+
+### Patch Changes
+
+- 352b709: CI rejects a pushed commit that contains a secret not listed in the audited `.secrets.baseline`, and a `pre-commit` hook makes the same check before a commit is made.
+
+## 2.107.75
+
+### Patch Changes
+
+- 84e8203: The specification of starting a run only inside its input, and of ending production only on a terminal input fact, is now part of the proxy's main specs.
+
+## 2.107.74
+
+### Patch Changes
+
+- 4074c61: The tunnel client no longer declares or receives the unused `proxyPort` option left behind when #281 removed the tunnel relay; `bin/cli.js` stops passing it, and the data channel handler keeps its own `proxyPort`. The `loopback-forward` OpenSpec tasks are ticked. No behaviour change.
+
+## 2.107.73
+
+### Patch Changes
+
+- 15a1486: After a seek, the proxy no longer starts an encoder past the end of the input it was given (a run such as `#188..#187` that makes nothing), and a run that ends without a terminal input failure no longer makes the next segment answer 500: the request is held until the next run makes it.
+
+## 2.107.72
+
+### Patch Changes
+
+- d6357d2: Repository guidance is shorter: `AGENTS.md` keeps the rules every change must keep, and the module layout and the component design move to `docs/layout.md` and `docs/component-architecture.md`.
+
+## 2.107.71
+
+### Patch Changes
+
+- 45b8763: One script, `scripts/install-native.sh`, now builds and checks the native modules (node-datachannel, our utp-native) for every image that installs the proxy, and ships in the npm package; the Docker image checks itself with `--help` while it is built.
+
+## 2.107.70
+
+### Patch Changes
+
+- db99501: Byte ranges on `/stream`, `/media` and `/encode-input` are read one way (RFC 9110): `bytes=-500` is the last 500 bytes, a range past the end is answered 416 with `Content-Range: bytes */<length>` (`/stream` used to serve the whole file), and a multi-range header is answered as the whole file.
+  HEAD answers and the `/stream` body answer keep the CORS and private-network headers.
+
+## 2.107.69
+
+### Patch Changes
+
+- 6580962: The proxy no longer forwards requests that arrive over the server tunnel; every relayed request passes one path allowlist and body cap.
+
+## 2.107.68
+
+### Patch Changes
+
+- fb6fc51: CI keeps the binaries `npm ci` downloads (node-datachannel, ffmpeg, node headers) in a cache and retries `npm ci`, so a GitHub download outage no longer fails every pull request.
+
+## 2.107.67
+
+### Patch Changes
+
+- b497dc1: Update dependencies: ws 8.22.1 → 8.22.2; 3 package(s) changed in the lock file.
+
+## 2.107.66
+
+### Patch Changes
+
+- 049a88a: Tests now build every serving manager through `managerWithOwnStore` (a store root of its own, no shared default root that `disposeAll` removes under other test processes), every hand-written output through `outputOn`, and the Renditions host through `renditionsHost`. The viewer relations of the Renditions host are now one exported function, `viewerRelationsFor` in `services/viewer/choices.js`, used by `wire-outputs.js` and by the test helper; the viewers are created before the Renditions that read them. No behaviour change.
+
+## 2.107.65
+
+### Patch Changes
+
+- 41fc84f: Releases are now made from tags; release notes come from each pull request's changeset, and the version no longer appears in a commit on main.
+- f0f4e86: Correct repository guidance for the current release and proxy pinning paths.
 
 ## 2.107.64
 

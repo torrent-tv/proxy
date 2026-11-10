@@ -1,1 +1,0 @@
-- **Chore**: CI calls the shared actions from their repository's new name, torrent-tv/workflows.

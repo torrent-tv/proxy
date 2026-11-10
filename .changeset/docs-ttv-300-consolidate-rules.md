@@ -1,1 +1,0 @@
-- **Chore**: Correct repository guidance for the current release and proxy pinning paths.

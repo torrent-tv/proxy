@@ -1,8 +1,25 @@
 name: Dependencies
 
-# Daily: update dependencies within the ranges in package.json, apply non-breaking
-# security fixes, run the checks, push to main and start the main workflow,
-# which releases the update when it changes what is published.
+# Daily, and on demand. No pull request: the run raises what Dependabot alerts
+# name and what a minor update allows, tests every commit it prepares, and pushes
+# the commits that passed to main as the release App. The push starts `Main`,
+# which versions each commit, checks it and publishes it to npm (see main.yml).
+#
+#  1. Each open Dependabot alert is raised to its first patched version, written
+#     as an exact version. A package that no run can fix fails the run: so does
+#     an alert with no patched version, until it is dismissed with a reason.
+#  2. Patch and minor updates of the dependencies (npm-check-updates), then of the
+#     packages below them (npm update). Major updates are not applied.
+#
+# npm users install the proxy from the exact versions in package.json; the lock
+# file is not published. So an update that changes `dependencies` is a
+# `fix(deps)` commit and an update of the lock file or of a development
+# dependency is a `chore(deps)` commit. Every commit carries a changeset, so each
+# one is released as a version.
+#
+# The job that runs package code and tests has no write token and no secret. The
+# job that holds the release App token runs no package code (torrent-tv/meta#336).
+# The rules are in openspec/changes/release-with-changesets/design.md.
 
 on:
   schedule:
@@ -11,24 +28,41 @@ on:
 
 concurrency:
   group: dependencies
+  cancel-in-progress: false
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 jobs:
   update:
     name: Update
     runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      # Reads the Dependabot alerts. `security-events` does not cover them: a probe
+      # on torrent-tv/infra answered 403 with it and 200 with this one (run 42828339350).
+      vulnerability-alerts: read
+    outputs:
+      base: ${{ steps.base.outputs.base }}
+      commits: ${{ steps.collect.outputs.commits }}
+      unfixed: ${{ steps.collect.outputs.unfixed }}
+      failed: ${{ steps.collect.outputs.failed }}
+    env:
+      RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+      # The tests that read a media file use the system ffprobe, installed below.
+      FFPROBE_BIN: /usr/bin/ffprobe
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
-          ref: main
-      - uses: actions/setup-node@v7
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24
-      # The same cached system ffprobe that the main workflow's checks read. The
-      # installer package crashes on MPEG-TS packet inspection.
+          node-version-file: .node-version
+      - name: Node and npm are the pinned versions
+        run: bash scripts/check.sh tools
+      # The installer's Linux ffprobe crashes on MPEG-TS packet inspection, so the checks
+      # read the system one, from the same cached packages as main.yml.
       - name: Skip the Azure Ubuntu mirror
         run: sudo sed -i '/azure.archive.ubuntu.com/d' /etc/apt/apt-mirrors.txt
       - name: Update the Ubuntu package index
@@ -40,7 +74,7 @@ jobs:
         run: node scripts/packet-timing-reference-cache-key.mjs
       - name: Restore packet timing package cache
         id: packet-timing-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@v6.1.0
         with:
           path: ${{ runner.temp }}/apt-archives
           key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
@@ -58,19 +92,306 @@ jobs:
           sudo apt-get -o Dir::Cache::archives="$RUNNER_TEMP/apt-archives" autoclean
           sudo rm -rf "$RUNNER_TEMP/apt-archives/partial" "$RUNNER_TEMP/apt-archives/lock"
       - name: Save packet timing package cache
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@v6.1.0
         with:
           path: ${{ runner.temp }}/apt-archives
           key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
-      - uses: torrent-tv/workflows/actions/update-dependencies@main
+      # The helpers below need only the tools of the lock file; the install scripts that
+      # build the native modules run when each prepared commit is checked.
+      - run: npm ci --ignore-scripts
+      - name: Record the base and the helpers
+        id: base
+        run: |
+          set -euo pipefail
+          git config user.name 'torrent-tv-release[bot]'
+          git config user.email '337444158+torrent-tv-release[bot]@users.noreply.github.com'
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          : > "$RUNNER_TEMP/unfixed.txt"
+          : > "$RUNNER_TEMP/failed.txt"
+          # Helpers of the steps below. `commit` makes one commit of the files a dependency
+          # update may write, its body wrapped to 100 characters (`body-max-line-length` of
+          # commitlint's conventional config is an error above that, and the Checks run on the
+          # pushed commit); `changeset` writes its standard changeset (a patch release).
+          cat > "$RUNNER_TEMP/lib.sh" <<'LIB'
+          package=$(node -p 'require("./package.json").name')
+          changeset() {
+            printf -- '---\n"%s": patch\n---\n\n%s\n' "$package" "$2" > ".changeset/$1.md"
+          }
+          commit() {
+            git add -A -- package.json package-lock.json .changeset
+            if [ -n "${2:-}" ]; then
+              git commit --quiet --no-verify -m "$1" -m "$(printf '%s\n' "$2" | fold -s -w 100)"
+            else
+              git commit --quiet --no-verify -m "$1"
+            fi
+            echo "committed: $1"
+          }
+          LIB
+
+      - name: Raise the packages that Dependabot alerts name
+        # The token that reads the alerts is given to this step only: the install scripts and
+        # tests of newly resolved packages run in the steps below, without it.
         env:
-          FFPROBE_BIN: /usr/bin/ffprobe
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/lib.sh"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/dependabot/alerts?state=open&per_page=100" | jq 'add // []' > "$RUNNER_TEMP/alerts.json"
+          echo "$(jq length "$RUNNER_TEMP/alerts.json") open Dependabot alerts"
+          ALERTS_FILE="$RUNNER_TEMP/alerts.json" ALERTS_RESULT="$RUNNER_TEMP/alerts-result.json" node --input-type=module - <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+          import { dirname, join } from 'node:path';
+
+          const { default: semver } = await import('semver');
+          const alerts = JSON.parse(readFileSync(process.env.ALERTS_FILE, 'utf8'));
+          const quiet = ['--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'];
+          const npm = (dir, ...args) => execFileSync('npm', [...args, ...quiet], { cwd: dir, stdio: ['ignore', 'inherit', 'inherit'] });
+          const read = (file) => JSON.parse(readFileSync(file, 'utf8'));
+          const copies = (dir, name) =>
+            Object.entries(read(join(dir, 'package-lock.json')).packages ?? {})
+              .filter(([path]) => path === `node_modules/${name}` || path.endsWith(`/node_modules/${name}`))
+              .map(([path, entry]) => ({ path, version: entry.version }));
+
+          const changes = [];
+          const unfixed = [];
+          const handled = [];
+          for (const alert of alerts) {
+            const { ecosystem, name } = alert.dependency.package;
+            const dir = dirname(alert.dependency.manifest_path);
+            const patched = alert.security_vulnerability.first_patched_version?.identifier ?? null;
+            const range = alert.security_vulnerability.vulnerable_version_range.replaceAll(',', ' ');
+            const id = alert.security_advisory.ghsa_id;
+            const label = `#${alert.number} ${id} ${name} ${range}`;
+            const reason =
+              ecosystem !== 'npm' ? `ecosystem ${ecosystem} is not npm`
+              : !existsSync(join(dir, 'package-lock.json')) ? `${dir} holds no package-lock.json`
+              : !patched ? 'no patched version exists'
+              : '';
+            if (reason) {
+              unfixed.push(`${label}: ${reason}`);
+              continue;
+            }
+            const before = copies(dir, name).map((c) => c.version);
+            if (before.some((v) => semver.satisfies(v, range))) {
+              const pkg = read(join(dir, 'package.json'));
+              const kind = ['dependencies', 'devDependencies', 'optionalDependencies'].find((k) => pkg[k]?.[name]);
+              const top = copies(dir, name).find((c) => c.path === `node_modules/${name}`);
+              if (kind && top && semver.satisfies(top.version, range)) {
+                // A direct dependency inside the vulnerable range: raise it, as an exact version.
+                const flag = { dependencies: '--save-prod', devDependencies: '--save-dev', optionalDependencies: '--save-optional' }[kind];
+                npm(dir, 'install', `${name}@${patched}`, '--save-exact', flag);
+              } else {
+                npm(dir, 'update', name);
+              }
+              // A copy that still matches the range is held at the patched version by an override
+              // that names the vulnerable range, so a copy outside it keeps its version.
+              if (copies(dir, name).some((c) => semver.satisfies(c.version, range))) {
+                const file = join(dir, 'package.json');
+                const pkg2 = read(file);
+                pkg2.overrides = { ...pkg2.overrides, [`${name}@${range}`]: patched };
+                writeFileSync(file, `${JSON.stringify(pkg2, null, 2)}\n`);
+                npm(dir, 'install');
+              }
+            }
+            handled.push({ label, dir, name, range, id, before });
+          }
+          // Every copy of every alerted package is checked again against its range.
+          for (const h of handled) {
+            const after = copies(h.dir, h.name).map((c) => c.version);
+            if (after.some((v) => semver.satisfies(v, h.range))) {
+              unfixed.push(`${h.label}: ${after.join(', ')} still match`);
+            } else if (h.before.join() !== after.join()) {
+              changes.push(`Raise ${h.name} ${[...new Set(h.before)].join(', ')} -> ${[...new Set(after)].join(', ')} (${h.id}).`);
+            }
+          }
+          writeFileSync(process.env.ALERTS_RESULT, JSON.stringify({ changes, unfixed }, null, 2));
+          NODE
+          jq -r '.unfixed[]' "$RUNNER_TEMP/alerts-result.json" >> "$RUNNER_TEMP/unfixed.txt"
+          if git diff --quiet -- package.json package-lock.json; then
+            echo "no alert changed a file"
+          else
+            n=$(jq '.changes | length' "$RUNNER_TEMP/alerts-result.json")
+            summary=$(jq -r '.changes | join("\n")' "$RUNNER_TEMP/alerts-result.json")
+            changeset "deps-alerts-$RUN_KEY" "${summary:-Fix Dependabot alerts.}"
+            commit "fix(deps): fix $n Dependabot alert(s) #ttv-386" "$(jq -r '.changes[]' "$RUNNER_TEMP/alerts-result.json")"
+          fi
+
+      - name: Update dependencies within minor versions
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/lib.sh"
+          # ncu keeps the exact form of a pinned version; --target minor stops before a major.
+          # Held back: WebTorrent 2.8.5 accepts uint8-util ^2.2.5, but the 2.3.x it would be
+          # moved to breaks WebTorrent (`arr2hex`), which no check that starts no real torrent
+          # can see; both are pinned on purpose (knip.jsonc, CHANGELOG 2.9.44, commit 37ebe441).
+          npx --no-install ncu --upgrade --target minor --dep prod,dev,optional --reject uint8-util,webtorrent
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm update --package-lock-only --ignore-scripts --no-audit --no-fund
+          if git diff --quiet -- package.json package-lock.json; then
+            echo "no updates"
+            exit 0
+          fi
+          # The commit is `fix` when shipped content changed: the lock file is not published,
+          # so only a change of the `dependencies` of package.json is, else `chore`.
+          read -r type summary < <(node --input-type=module - <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { readFileSync } from 'node:fs';
+          const old = JSON.parse(execFileSync('git', ['show', 'HEAD:package-lock.json'], { encoding: 'utf8' }));
+          const now = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          const oldPkg = JSON.parse(execFileSync('git', ['show', 'HEAD:package.json'], { encoding: 'utf8' }));
+          const nowPkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const before = old.packages ?? {};
+          const after = now.packages ?? {};
+          const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(Boolean);
+          const changed = keys.filter((k) => before[k]?.version !== after[k]?.version);
+          const shipped = ['dependencies', 'optionalDependencies'].some((field) => JSON.stringify(oldPkg[field] ?? {}) !== JSON.stringify(nowPkg[field] ?? {}));
+          const direct = [];
+          for (const field of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+            for (const [name, spec] of Object.entries(nowPkg[field] ?? {})) {
+              if (oldPkg[field]?.[name] !== spec) direct.push(`${name} ${oldPkg[field]?.[name]} -> ${spec}`);
+            }
+          }
+          const text = `Update dependencies: ${direct.join(', ') || 'none directly'}; ${changed.length} package(s) changed in the lock file.`;
+          console.log(`${shipped ? 'fix' : 'chore'} ${text.replaceAll('\n', ' ')}`);
+          NODE
+          )
+          type=${type:?no type from the lock comparison}
+          changeset "deps-$RUN_KEY" "$summary"
+          commit "$type(deps): update dependencies #ttv-386" "$summary"
+
+      - name: Test every commit, oldest first
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          set -uo pipefail
+          # Each prepared commit becomes a published version, so each one is tested on its own
+          # tree, oldest first. The first failure stops the testing: only the commits before it
+          # are kept. An update that breaks the checks never holds back an alert fix, which
+          # comes first.
+          good=$BASE
+          for c in $(git rev-list --reverse "$BASE..HEAD"); do
+            header=$(git log -1 --format=%s "$c")
+            git switch --quiet --detach "$c"
+            if ! bash scripts/check.sh all; then
+              echo "bash scripts/check.sh all failed on $header" >> "$RUNNER_TEMP/failed.txt"
+              echo "::error::the checks failed on \"$header\"; it and the commits after it are not pushed"
+              break
+            fi
+            echo "checks passed on: $header"
+            good=$c
+          done
+          echo "$good" > "$RUNNER_TEMP/good"
+
+      - name: Collect the commits that passed
+        id: collect
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+        run: |
+          set -euo pipefail
+          good=$(cat "$RUNNER_TEMP/good")
+          rm -rf patches
+          n=$(git rev-list --count "$BASE..$good")
+          if [ "$n" -gt 0 ]; then
+            git format-patch --quiet -o patches "$BASE..$good"
+          fi
+          echo "$n commits passed"
+          delimiter="end-$(openssl rand -hex 8)"
+          {
+            echo "commits=$n"
+            echo "unfixed<<$delimiter"; cat "$RUNNER_TEMP/unfixed.txt"; echo "$delimiter"
+            echo "failed<<$delimiter"; cat "$RUNNER_TEMP/failed.txt"; echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7.0.2
+        if: steps.collect.outputs.commits != '0'
         with:
-          github-token: ${{ github.token }}
-          # npm users install the proxy from the ranges in package.json; the lock file
-          # is not published, so an update of the lock file alone releases nothing.
-          ships-lockfile: "false"
-          changeset: "true"
-          extra-check: node scripts/check-tests-start-no-torrent.mjs
-          # The standing task every dependency commit names (torrent-tv/meta#386).
-          task: "#ttv-386"
+          name: dependency-commits
+          path: patches
+          retention-days: 1
+
+  push:
+    name: Push to main
+    needs: update
+    if: github.ref == 'refs/heads/main' && needs.update.outputs.commits != '0'
+    runs-on: ubuntu-26.04
+    environment: production
+    # This job runs no package code: the patches come from a job that did, so they
+    # may touch only the files a dependency update writes.
+    permissions:
+      contents: read
+    steps:
+      - id: token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.update.outputs.base }}
+          token: ${{ steps.token.outputs.token }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: dependency-commits
+          path: patches
+      - name: Apply the patches and push
+        env:
+          BASE: ${{ needs.update.outputs.base }}
+        run: |
+          set -euo pipefail
+          git config user.name 'torrent-tv-release[bot]'
+          git config user.email '337444158+torrent-tv-release[bot]@users.noreply.github.com'
+          # The patches come from a job that ran package code; they may write only these files.
+          for patch in patches/*.patch; do
+            paths=$(git apply --numstat "$patch" | cut -f3)
+            bad=$(printf '%s\n' "$paths" | grep -vxE 'package\.json|package-lock\.json|\.changeset/[A-Za-z0-9._-]+\.md' || true)
+            if [ -n "$bad" ]; then
+              echo "::error::$patch writes paths a dependency update may not write: $bad"
+              exit 1
+            fi
+          done
+          git am --quiet patches/*.patch
+          n=$(git rev-list --count "$BASE..HEAD")
+          base=$BASE
+          for attempt in 1 2 3; do
+            if git push --quiet origin HEAD:refs/heads/main; then
+              echo "pushed $n commits ${base:0:7}..$(git rev-parse --short HEAD)"
+              exit 0
+            fi
+            echo "main moved (attempt $attempt); rebasing onto it"
+            git fetch --quiet origin main
+            # HEAD is detached at the old base, so `git pull --rebase` would have no upstream and
+            # could replay commits that main rewrote meanwhile: name the old base explicitly.
+            if ! git rebase --quiet --onto origin/main "$base"; then
+              echo "::error::the rebase onto main stopped: $(git diff --name-only --diff-filter=U | paste -sd, -)"
+              git rebase --abort
+              exit 1
+            fi
+            base=$(git rev-parse origin/main)
+          done
+          echo "::error::main moved on each of 3 attempts"
+          exit 1
+
+  result:
+    name: Result
+    needs: [update, push]
+    if: always()
+    runs-on: ubuntu-26.04
+    permissions: {}
+    env:
+      UPDATE: ${{ needs.update.result }}
+      PUSH: ${{ needs.push.result }}
+      UNFIXED: ${{ needs.update.outputs.unfixed }}
+      FAILED: ${{ needs.update.outputs.failed }}
+    steps:
+      - name: The run fails while an alert is open or a check failed
+        run: |
+          # The commits that passed are on main already; one that did not pass, or one
+          # alert no run can fix, does not hold back the others, but keeps the run red.
+          status=0
+          if [ "$UPDATE" != success ]; then echo "::error::the update job ended $UPDATE"; status=1; fi
+          if [ "$PUSH" = failure ] || [ "$PUSH" = cancelled ]; then echo "::error::the push job ended $PUSH"; status=1; fi
+          if [ -n "$UNFIXED" ]; then echo "::error::open Dependabot alerts no run can fix:"; printf '%s\n' "$UNFIXED"; status=1; fi
+          if [ -n "$FAILED" ]; then echo "::error::the check that failed on a prepared commit: $FAILED"; status=1; fi
+          exit "$status"

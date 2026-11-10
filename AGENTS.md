@@ -122,18 +122,48 @@ are split by that property:
   `package.json`. `scripts/install-native.sh` reads that override and fails
   when any other build survives.
 
-## Changesets and release path
+## Checks scripts, changesets and release path
 
-The shared flow, the changeset bullets and the frozen `CHANGELOG.md` are in the
+`scripts/check.sh` runs the same checks as CI one by one: `tools` (Node and npm
+are the versions of `.node-version` and `packageManager`), `pins` (every
+dependency, dev dependency and override is an exact version), `install`
+(`npm ci` with its install scripts, retried), `guard` (the no-torrent guard),
+`test` (`npm test`), `image` (`docker build`) and `all`, which
+`dependencies.yml` runs on every commit it prepares. `install`, `test` and
+`image` run under `timeout` with a limit named at the top of the script, and
+say so when they stop one: `node --test` gives its test processes no limit, so a
+test that waits for an event that never comes holds the run for ever. The shared
+flow is in the
 organization's
 [`CONTRIBUTING.md`](https://github.com/torrent-tv/workflows/blob/main/CONTRIBUTING.md).
-What is particular to this repository:
 
-- A changeset's file name is lower case; its continuation lines are indented
-  by two spaces; it has no blank lines; nothing else lives in `.changeset/`. A
-  changeset is never edited or deleted after merge.
-- `.github/workflows/main.yml` runs the shared checks (commit headers, secrets
-  in commits, branch name, workflows, changesets), the
-  no-torrent check, `npm test`, and a `docker build` (the image runs `--help`
-  in its last stage). Then it
-  publishes to npm and installs the version into `ha-addon`.
+- Every pull request adds a changeset in the standard `@changesets/cli` format
+  (`npx changeset`, or a file `.changeset/<branch with / as ->.md`): front
+  matter `"@torrent-tv/proxy": patch` (or `minor`; never `major`), then one
+  sentence a viewer understands. CI (`changeset status --since=origin/main`)
+  refuses a pull request without one. A commit never edits or renames a
+  changeset an earlier commit added: the release replays each commit and would
+  stop on it.
+- `package.json` and `package-lock.json` hold the released version; nobody edits
+  it. After a merge to `main` the `version` job amends each commit that added a
+  changeset with its version and its `CHANGELOG.md` entry (`changeset version`)
+  and force-pushes `main` with a lease as the release App; three changeset
+  commits give three versions. The next run checks the commits (one `Checks` leg
+  per changeset commit of a pull request, so each published version was tested),
+  builds the image, and then, for each version, `publish` publishes
+  `@torrent-tv/proxy@<version>` to npm from that version's commit
+  (`changeset publish`, npm trusted publishing: npmjs.com accepts the OIDC token of
+  `torrent-tv/proxy`, `main.yml`, environment `production`; no npm token exists),
+  tags it (`changeset git-tag`) and creates the GitHub Release from the
+  `CHANGELOG.md` section. Its last step starts `dependencies.yml` of
+  `torrent-tv/ha-addon` with the newest version (`proxy-version`); that workflow
+  waits until npm serves it and installs it into the add-on. `rebase-prs`
+  rebases the open pull requests onto the rewritten `main`. Re-running a failed
+  job is safe: each step finishes only what is missing.
+- `dependencies.yml` raises Dependabot alerts and minor updates daily, with a
+  changeset per commit, and pushes the commits that passed (`fix(deps)` when
+  `dependencies` in `package.json` changes, else `chore(deps)`). WebTorrent and
+  uint8-util are held back on purpose (see the comment in the workflow). An alert
+  that does not apply is dismissed in Dependabot with a reason, not listed in a file.
+  The rules, the states of a commit and the unknowns:
+  [`openspec/changes/release-with-changesets/design.md`](openspec/changes/release-with-changesets/design.md).

@@ -2,7 +2,7 @@
 
 Parent: torrent-tv/meta#336, step 2 (proxy). Step 1 (the actions
 `check-changesets`, `release-plan`, `release-tag` and the `changeset` input of
-`update-dependencies`) is merged in `torrent-tv/.github` (`bc381ae`).
+`update-dependencies`) is merged in `torrent-tv/workflows` (`bc381ae`).
 
 ## Problem
 
@@ -66,6 +66,6 @@ test under `services/`, `routes/`, `bin/`, `utils/`, `test/` changes.
   branch): step 3. Until then `addon-install-proxy` commits
   `fix|feat(proxy): install proxy X` to ha-addon `main` as today.
 - Removing `release-prepare`, `release-finish`, `check-changelog`,
-  `addon-install-proxy` and their scripts from `torrent-tv/.github`: step 4.
+  `addon-install-proxy` and their scripts from `torrent-tv/workflows`: step 4.
 - The server's switch: its own step-2 pull request.
 - Rewriting the history in `CHANGELOG.md`.

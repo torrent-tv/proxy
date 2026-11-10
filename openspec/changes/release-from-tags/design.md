@@ -1,6 +1,6 @@
 # Design: Release the proxy from tags and changesets
 
-Line numbers at proxy `2a3b3033` (2.107.64), `torrent-tv/.github` `bc381ae`.
+Line numbers at proxy `2a3b3033` (2.107.64), `torrent-tv/workflows` `bc381ae`.
 
 ## Facts
 
@@ -31,7 +31,7 @@ Line numbers at proxy `2a3b3033` (2.107.64), `torrent-tv/.github` `bc381ae`.
 1. **No README in `.changeset/`** (Fact 4): it would fail the PR check and
    the first release. The format is explained in `AGENTS.md` "Changesets",
    and the frozen `CHANGELOG.md` line points there. Exempting a README needs a
-   change in `torrent-tv/.github`, which step 2 does not make.
+   change in `torrent-tv/workflows`, which step 2 does not make.
 2. **Re-run guard on publication** (Fact 3): `npm view <pkg>@<version>
    gitHead` tells a re-run after a failed tag push (same commit: skip
    publication, tag) from a version published from another commit (fail, and
@@ -98,7 +98,7 @@ version. A source checkout reports `0.0.0-development`, which is accurate.
       # The version is the newest v* tag plus the step the commits ask for; it is
       # written into package.json and package-lock.json of this workspace only.
       - id: release
-        uses: torrent-tv/.github/actions/release-plan@main
+        uses: torrent-tv/workflows/actions/release-plan@main
         with:
           version-files: package.json,package-lock.json
           bump: ${{ inputs.bump || 'auto' }}
@@ -125,7 +125,7 @@ version. A source checkout reports `0.0.0-development`, which is accurate.
           fi
 
       - if: steps.release.outputs.released == 'true'
-        uses: torrent-tv/.github/actions/release-tag@main
+        uses: torrent-tv/workflows/actions/release-tag@main
         with:
           tag: ${{ steps.release.outputs.tag }}
           notes-file: ${{ steps.release.outputs.notes-file }}
@@ -145,7 +145,7 @@ version. A source checkout reports `0.0.0-development`, which is accurate.
           permission-actions: read
 
       - if: steps.release.outputs.released == 'true'
-        uses: torrent-tv/.github/actions/addon-install-proxy@main
+        uses: torrent-tv/workflows/actions/addon-install-proxy@main
         with:
           github-token: ${{ steps.addon-token.outputs.token }}
           proxy-version: ${{ steps.release.outputs.version }}
@@ -158,7 +158,7 @@ Checks step, replacing `main.yml:84-88`:
 
 ```yaml
       - name: Pull request adds a changeset
-        uses: torrent-tv/.github/actions/check-changesets@main
+        uses: torrent-tv/workflows/actions/check-changesets@main
 ```
 
 `workflow_dispatch` input, `main.yml:14-18`: `description: Least release step

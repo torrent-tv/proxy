@@ -62,7 +62,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/apt-archives
           key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
-      - uses: torrent-tv/.github/actions/update-dependencies@main
+      - uses: torrent-tv/workflows/actions/update-dependencies@main
         env:
           FFPROBE_BIN: /usr/bin/ffprobe
         with:

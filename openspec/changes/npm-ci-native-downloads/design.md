@@ -121,7 +121,7 @@ Estimates (to confirm on the first CI run):
    tarball is in the restored `_prebuilds` and Fact 2 says it then makes no
    request.
 8. **The shared actions do not change**: the install step is this repository's
-   own; `torrent-tv/.github` has no install action.
+   own; `torrent-tv/workflows` has no install action.
 
 ## `scripts/retry.mjs`
 

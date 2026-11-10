@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.86
+
+### Patch Changes
+
+- A changeset that was already released can no longer come back through a pull request, and every changeset must now be one plain sentence.
+
 ## 2.107.85
 
 ### Patch Changes

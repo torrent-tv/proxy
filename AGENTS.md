@@ -128,7 +128,9 @@ are split by that property:
 are the versions of `.node-version` and `packageManager`), `pins` (every
 dependency, dev dependency and override is an exact version), `install`
 (`npm ci` with its install scripts, retried), `guard` (the no-torrent guard),
-`test` (`npm test`), `image` (`docker build`) and `all`, which
+`test` (`npm test`), `image` (`docker build`), `copies` and `changeset-format` (a
+pull request carries no copy of a commit on `main` and adds one plain-sentence
+changeset each), `changesets-selftest` (both on bad input) and `all`, which
 `dependencies.yml` runs on every commit it prepares. `install`, `test` and
 `image` run under `timeout` with a limit named at the top of the script, and
 say so when they stop one: `node --test` gives its test processes no limit, so a

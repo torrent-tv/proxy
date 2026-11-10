@@ -126,7 +126,7 @@ are split by that property:
 
 The shared flow, the changeset bullets and the frozen `CHANGELOG.md` are in the
 organization's
-[`CONTRIBUTING.md`](https://github.com/torrent-tv/.github/blob/main/CONTRIBUTING.md).
+[`CONTRIBUTING.md`](https://github.com/torrent-tv/workflows/blob/main/CONTRIBUTING.md).
 What is particular to this repository:
 
 - A changeset's file name is lower case; its continuation lines are indented

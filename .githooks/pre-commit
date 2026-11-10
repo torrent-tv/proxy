@@ -3,10 +3,10 @@
 # .secrets.baseline does not list (detect-secrets 1.5.0). CI makes the same
 # check on every pushed commit; this hook only reports it earlier.
 # Enable once per clone: git config core.hooksPath .githooks (githooks in
-# torrent-tv/.github). The install command below is also in torrent-tv/.github
+# torrent-tv/workflows). The install command below is also in torrent-tv/workflows
 # CONTRIBUTING.md, "Secrets"; every copy changes together.
 if ! command -v detect-secrets-hook >/dev/null 2>&1; then
-  echo "pre-commit: detect-secrets-hook is not installed; install detect-secrets 1.5.0 from a clone of torrent-tv/.github:" >&2
+  echo "pre-commit: detect-secrets-hook is not installed; install detect-secrets 1.5.0 from a clone of torrent-tv/workflows:" >&2
   echo "  python3 -m venv ~/.local/share/detect-secrets" >&2
   echo "  ~/.local/share/detect-secrets/bin/pip install --require-hashes -r actions/check-secrets/requirements.txt" >&2
   echo "  mkdir -p ~/.local/bin && ln -sf ~/.local/share/detect-secrets/bin/detect-secrets ~/.local/share/detect-secrets/bin/detect-secrets-hook ~/.local/bin/" >&2

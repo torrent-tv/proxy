@@ -129,7 +129,7 @@ work, or left as it is (with the reason).
 - Bounded maps (piece LRU, completed-files order, logger repeat map,
   wait-trace) each bound a different store.
 - Release, version and changelog writing has one implementation in
-  `torrent-tv/.github`; audit has one implementation.
+  `torrent-tv/workflows`; audit has one implementation.
 - Server route validation is uniform; signalling relay, proxy scoring and
   event names have one owner each; no `px` in CSS.
 - `/health` and `/healthz` have different consumers; both stay (#308 shares

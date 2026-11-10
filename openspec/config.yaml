@@ -4,4 +4,4 @@ context: |
   @torrent-tv/proxy downloads torrents and streams selected media to browsers,
   transcoding only tracks the browser cannot play natively.
   Repository rules: AGENTS.md.
-  Shared commit and release rules: torrent-tv/.github/CONTRIBUTING.md.
+  Shared commit and release rules: torrent-tv/workflows/CONTRIBUTING.md.

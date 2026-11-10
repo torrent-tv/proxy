@@ -87,6 +87,6 @@ changes; `Dockerfile`, `package.json` (`allowScripts` included) and
   `--ignore-scripts` and already retry node-datachannel).
 - `.github/workflows/dependencies.yml` and the shared `update-dependencies`
   action, which install too; a separate issue if they fail the same way.
-- The shared actions in `torrent-tv/.github` (`check-workflows` is meta#337).
+- The shared actions in `torrent-tv/workflows` (`check-workflows` is meta#337).
 - Mirroring the binaries elsewhere (`FFMPEG_BINARIES_URL`,
   `npm_config_node_datachannel_binary_host`).

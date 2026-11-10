@@ -82,7 +82,7 @@ jobs:
       - name: Commit messages follow Conventional Commits
         uses: wagoid/commitlint-github-action@v6.2.1
       - name: No secrets in commits
-        uses: torrent-tv/.github/actions/check-secrets@main
+        uses: torrent-tv/workflows/actions/check-secrets@main
       - name: Branch name names a task
         if: github.event_name == 'pull_request'
         run: '[[ "$GITHUB_HEAD_REF" =~ ^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)/ttv-[1-9][0-9]*-[a-z0-9][a-z0-9.-]*$ ]]'
@@ -102,7 +102,7 @@ jobs:
             -ignore input\s.client-id.\sis\snot\sdefined\sin\saction\s.actions/create-github-app-token@
             -ignore missing\sinput\s.app-id.\swhich\sis\srequired\sby\saction\s.actions/create-github-app-token@
       - name: Pull request adds a changeset
-        uses: torrent-tv/.github/actions/check-changesets@main
+        uses: torrent-tv/workflows/actions/check-changesets@main
       # npm ci fetches three things outside the npm registry, with no retry of its
       # own worth the name: node-datachannel's binary and ffmpeg-static's ffmpeg
       # from GitHub releases, and node's headers from nodejs.org to compile
@@ -191,7 +191,7 @@ jobs:
       # The version is the newest v* tag plus the step the commits ask for; it is
       # written into package.json and package-lock.json of this workspace only.
       - id: release
-        uses: torrent-tv/.github/actions/release-plan@main
+        uses: torrent-tv/workflows/actions/release-plan@main
         with:
           version-files: package.json,package-lock.json
           bump: ${{ inputs.bump || 'auto' }}
@@ -218,7 +218,7 @@ jobs:
           fi
 
       - if: steps.release.outputs.released == 'true'
-        uses: torrent-tv/.github/actions/release-tag@main
+        uses: torrent-tv/workflows/actions/release-tag@main
         with:
           tag: ${{ steps.release.outputs.tag }}
           notes-file: ${{ steps.release.outputs.notes-file }}
@@ -238,7 +238,7 @@ jobs:
           permission-actions: read
 
       - if: steps.release.outputs.released == 'true'
-        uses: torrent-tv/.github/actions/addon-install-proxy@main
+        uses: torrent-tv/workflows/actions/addon-install-proxy@main
         with:
           github-token: ${{ steps.addon-token.outputs.token }}
           proxy-version: ${{ steps.release.outputs.version }}

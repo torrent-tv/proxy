@@ -1,0 +1,1 @@
+- **Chore**: CI no longer scans commits for secrets itself; the repository relies on GitHub secret scanning with push protection, and its secret baseline and `pre-commit` hook are removed.

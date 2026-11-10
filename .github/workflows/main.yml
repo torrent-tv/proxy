@@ -36,14 +36,16 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # One step per check, so the run shows which check ran and which one failed.
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         id: node
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: npm
+      - name: Node and npm are the pinned versions
+        run: bash scripts/check.sh tools
       # The installer's Linux ffprobe crashes on MPEG-TS packet inspection.
       # The runner tries this stalled mirror before archive.ubuntu.com.
       - name: Skip the Azure Ubuntu mirror
@@ -57,7 +59,7 @@ jobs:
         run: node scripts/packet-timing-reference-cache-key.mjs
       - name: Restore packet timing package cache
         id: packet-timing-cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@v6.1.0
         with:
           path: ${{ runner.temp }}/apt-archives
           key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
@@ -75,7 +77,7 @@ jobs:
           sudo apt-get -o Dir::Cache::archives="$RUNNER_TEMP/apt-archives" autoclean
           sudo rm -rf "$RUNNER_TEMP/apt-archives/partial" "$RUNNER_TEMP/apt-archives/lock"
       - name: Save packet timing package cache
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@v6.1.0
         with:
           path: ${{ runner.temp }}/apt-archives
           key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
@@ -99,6 +101,8 @@ jobs:
             -ignore label\s.ubuntu-26\.04.\sis\sunknown
             -ignore input\s.client-id.\sis\snot\sdefined\sin\saction\s.actions/create-github-app-token@
             -ignore missing\sinput\s.app-id.\swhich\sis\srequired\sby\saction\s.actions/create-github-app-token@
+      - name: Dependencies are pinned exactly
+        run: bash scripts/check.sh pins
       - name: Pull request adds a changeset
         uses: torrent-tv/workflows/actions/check-changesets@main
       # npm ci fetches three things outside the npm registry, with no retry of its
@@ -108,7 +112,7 @@ jobs:
       # (torrent-tv/meta#338). With an unchanged lockfile they come from here.
       - name: Restore native download cache
         id: native-downloads
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@v6.1.0
         with:
           path: |
             ~/.npm/_prebuilds
@@ -134,7 +138,7 @@ jobs:
           fi
       - name: Save native download cache
         if: steps.native-downloads.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@v6.1.0
         with:
           path: |
             ~/.npm/_prebuilds
@@ -143,11 +147,11 @@ jobs:
           key: native-downloads-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json') }}
       # No check may start a real torrent; this is the static half of that rule.
       - name: Tests start no real torrent
-        run: node scripts/check-tests-start-no-torrent.mjs
+        run: bash scripts/check.sh guard
       - name: Lint and tests
         env:
           FFPROBE_BIN: /usr/bin/ffprobe
-        run: npm test
+        run: bash scripts/check.sh test
 
   # The README offers the Dockerfile as a way to run the proxy; nothing built it,
   # and it stopped working unnoticed. The image checks itself in its final stage
@@ -157,9 +161,9 @@ jobs:
     needs: checks
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Build the image for amd64
-        run: docker build -t torrent-tv-proxy .
+        run: bash scripts/check.sh image
 
   release:
     name: Release
@@ -178,12 +182,12 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           registry-url: https://registry.npmjs.org
 
       # The version is the newest v* tag plus the step the commits ask for; it is
@@ -226,7 +230,7 @@ jobs:
       - name: Token for the add-on only
         id: addon-token
         if: steps.release.outputs.released == 'true'
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

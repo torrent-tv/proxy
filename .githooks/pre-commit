@@ -1,0 +1,27 @@
+#!/bin/sh
+# Rejects a commit whose added, modified or type-changed files hold a secret that
+# .secrets.baseline does not list (detect-secrets 1.5.0). CI makes the same
+# check on every pushed commit; this hook only reports it earlier.
+# Enable once per clone: git config core.hooksPath .githooks (githooks in
+# torrent-tv/.github). The install command below is also in torrent-tv/.github
+# CONTRIBUTING.md, "Secrets"; every copy changes together.
+if ! command -v detect-secrets-hook >/dev/null 2>&1; then
+  echo "pre-commit: detect-secrets-hook is not installed; install detect-secrets 1.5.0 from a clone of torrent-tv/.github:" >&2
+  echo "  python3 -m venv ~/.local/share/detect-secrets" >&2
+  echo "  ~/.local/share/detect-secrets/bin/pip install --require-hashes -r actions/check-secrets/requirements.txt" >&2
+  echo "  mkdir -p ~/.local/bin && ln -sf ~/.local/share/detect-secrets/bin/detect-secrets ~/.local/share/detect-secrets/bin/detect-secrets-hook ~/.local/bin/" >&2
+  echo "  and put ~/.local/bin on PATH" >&2
+  exit 1
+fi
+if [ ! -f .secrets.baseline ]; then
+  echo "pre-commit: .secrets.baseline is missing; every commit carries it (detect-secrets scan > .secrets.baseline, then detect-secrets audit .secrets.baseline)" >&2
+  exit 1
+fi
+if [ -z "$(git diff --cached --name-only --diff-filter=AMT)" ]; then
+  exit 0
+fi
+if ! git diff --cached --name-only -z --diff-filter=AMT | xargs -0 detect-secrets-hook --baseline .secrets.baseline --; then
+  echo "pre-commit: commit rejected; remove the secret, or mark a false positive: detect-secrets scan --baseline .secrets.baseline, detect-secrets audit .secrets.baseline, git add .secrets.baseline" >&2
+  exit 1
+fi
+exit 0

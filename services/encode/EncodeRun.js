@@ -127,6 +127,14 @@ export class EncodeRun {
   #closedTimings = new Map();
   /** When the encoder named each closed piece on its channel, until it is published. */
   #namedAt = new Map();
+  /**
+   * What the run's own clock said when the encoder named each closed piece, until
+   * it is published: the moment, the run's own working time and the monotonic
+   * time. A piece's speed reading is taken from this, not from when it is
+   * published (torrent-tv/meta#414).
+   * @type {Map<string, { at: number, workingMs: number, monotonicAt: number }>}
+   */
+  #closedAt = new Map();
   #publicationError = null;
   #publicationCode = null;
   #inputTruncated = false;
@@ -186,14 +194,16 @@ export class EncodeRun {
   #stoppedBeforeFirstOutput = 0;
   #stoppedBeforeFirstNamed = 0;
 
-  /** The film made and the run's own working time, as of the last progress report. */
-  #workSample = null;
+  /**
+   * Where the run's last speed reading ended: the film end of its piece on the
+   * output's timeline (the run's own start before any), the run's working time
+   * when that piece was named closed, and the monotonic time of that moment.
+   * The next reading is measured from here.
+   */
+  #lastReadingEnd = null;
 
-  /** Baseline work sample for this run's next speed reading. */
-  #pieceSample = null;
-
-  /** A closed, published piece is waiting for a usable progress sample. */
-  #speedMeasurementPending = false;
+  /** When the run was built, which the idle time of the first reading is counted from. */
+  #builtAt = 0;
 
   /** @type {{ speed: number, at: number } | null} */
   #speedReading = null;
@@ -268,6 +278,10 @@ export class EncodeRun {
    *   that writes it, so it arrives as a plain function rather than this class
    *   knowing any naming.
    * @param {number} [params.startSeconds] - Where this run begins on the source timeline.
+   * @param {(index: number) => number | null} [params.pieceEndSeconds] - Where
+   *   piece `index` ends on the same timeline `startSeconds` is taken from; its
+   *   owner knows the timeline. A speed reading is the film between two such
+   *   ends. Not finite: the piece gives no reading.
    * @param {number | null} [params.totalSeconds] - Source duration when known.
    */
   constructor({
@@ -293,6 +307,7 @@ export class EncodeRun {
     usesExplicitCuts = false,
     indexOfName,
     startSeconds = 0,
+    pieceEndSeconds,
     totalSeconds = null,
     monotonicNow,
     because = "no reason was given"
@@ -310,7 +325,9 @@ export class EncodeRun {
     this.progress = new RunProgress({ startSeconds, totalSeconds, now: this.now, monotonicNow: this.monotonicNow });
     /** Where this run's time went: its own work, or waiting, or stopped. */
     this.clock = new RunClock({ now: this.now });
-    this.#pieceSample = { at: this.now(), monotonicAt: this.monotonicNow(), producedSeconds: 0, workingMs: 0 };
+    this.#builtAt = this.now();
+    this.#lastReadingEnd = { filmEndSeconds: startSeconds, workingMs: 0, monotonicAt: this.monotonicNow() };
+    this.pieceEndSeconds = typeof pieceEndSeconds === "function" ? pieceEndSeconds : () => null;
     this.onEnded = typeof onEnded === "function" ? onEnded : () => {};
     this.onProgress = typeof onProgress === "function" ? onProgress : () => {};
     this.onProduced = typeof onProduced === "function" ? onProduced : () => {};
@@ -461,17 +478,6 @@ export class EncodeRun {
   /** An input read of this run has its bytes. */
   inputWaitEnds() {
     this.clock.inputWaitEnds();
-    if (this.#speedReading === null && this.#workSample !== null) {
-      // Progress made while an input read was waiting belongs to the wait, not
-      // to the encoder's rate. Start the first measurement from the latest
-      // progress known when the input resumes.
-      this.#pieceSample = {
-        ...this.#workSample,
-        at: this.now(),
-        monotonicAt: this.monotonicNow(),
-        workingMs: this.clock.workingMs()
-      };
-    }
   }
 
   /** @returns {boolean} Whether an input read of this run is waiting for bytes now. */
@@ -601,17 +607,9 @@ export class EncodeRun {
   }
 
   #reportProgress(report) {
+    // Progress reports tell how far the encoder is; they do not enter the speed
+    // reading, which is taken from the pieces it closed (torrent-tv/meta#414).
     this.progress.note(report);
-    if (Number.isFinite(report.processedSeconds) || typeof report.outTime === "string") {
-      const at = this.now();
-      this.#workSample = {
-        at,
-        monotonicAt: this.progress.updatedAtMonotonic,
-        producedSeconds: Math.max(0, this.progress.processedSeconds - this.progress.startPositionSeconds),
-        workingMs: this.clock.workingMs(at)
-      };
-      if (this.#speedMeasurementPending) this.#measureSpeed();
-    }
     this.onProgress(this.progress.snapshot());
   }
 
@@ -651,7 +649,9 @@ export class EncodeRun {
       if (name.length === 0) {
         continue;
       }
-      this.#namedAt.set(name, this.now());
+      const namedAt = this.now();
+      this.#namedAt.set(name, namedAt);
+      this.#closedAt.set(name, { at: namedAt, workingMs: this.clock.workingMs(namedAt), monotonicAt: this.monotonicNow() });
       if (this.#publicationError) continue;
       if (this.#stopping) {
         // Flushed by our stop. Never published; it tells where the piece closed
@@ -704,6 +704,9 @@ export class EncodeRun {
   }
 
   #publishClosed(name, following = null, { quiet = false, tentative = false } = {}) {
+      // Read before the `finally` below deletes it: a reading is dated by the
+      // close of its piece, not by its publication.
+      const closedAt = this.#closedAt.get(name) ?? null;
       // ITS SERVED NAME, which is what whoever owns the disk gives it in answer.
       // ffmpeg writes a piece under a working name and reports that; the piece
       // becomes servable by being renamed, and everything below works in the
@@ -735,12 +738,12 @@ export class EncodeRun {
         if (!tentative || served) {
           this.#closedTimings.delete(name);
           this.#namedAt.delete(name);
+          this.#closedAt.delete(name);
         }
       }
 
       if (!served) return false;
-      this.#speedMeasurementPending = true;
-      this.#measureSpeed();
+      this.#measureSpeed(this.indexOfName(served), closedAt);
       if (!this.#stopping) {
         this.#provenName = served;
       }
@@ -760,27 +763,46 @@ export class EncodeRun {
   }
 
   /**
-   * A published piece is measured against this run's last baseline over its
-   * own working time. The initial baseline is the run start, advanced to the
-   * latest known progress when input resumes, so a one-piece run can be
-   * measured even when FFmpeg reports progress only once. Input waits remain
-   * excluded by RunClock.
+   * A published piece gives a reading: the film between its end on the
+   * output's timeline and where the last reading ended (the run's start for
+   * the first), over the run's own working time between the moments the two
+   * pieces were named closed. Input waits and stops are not working time
+   * (`RunClock`); progress reports do not enter it. No reading when the end of
+   * the piece is unknown or no film or no working time lies between the two.
+   *
+   * @param {number | null} index - The published piece's number.
+   * @param {{ at: number, workingMs: number, monotonicAt: number } | null} closedAt - When it was named closed.
    */
-  #measureSpeed() {
-    const sample = this.#workSample;
-    if (sample === null) {
+  #measureSpeed(index, closedAt) {
+    if (closedAt === null) {
       return;
     }
-    const work = workDeltaBetween(this.#pieceSample, sample);
-    if (work !== null) {
-      this.#speedReading = { speed: work.workSeconds / work.workingSeconds, at: sample.at, ...work,
-        captureOwner: "proxy-encoder", captureClock: "performance", captureClockEpoch: performance.timeOrigin,
-        captureStartedAtMonotonic: this.#pieceSample.monotonicAt,
-        captureCompletedAtMonotonic: sample.monotonicAt };
-      this.#pieceSample = sample;
-      this.#speedMeasurementPending = false;
-      this.onSpeedMeasured(this.speedReading);
+    const filmEndSeconds = Number(this.pieceEndSeconds(index));
+    if (!Number.isFinite(filmEndSeconds)) {
+      return;
     }
+    const last = this.#lastReadingEnd;
+    const work = workDeltaBetween(
+      { producedSeconds: last.filmEndSeconds, workingMs: last.workingMs },
+      { producedSeconds: filmEndSeconds, workingMs: closedAt.workingMs });
+    if (work === null) {
+      return;
+    }
+    const first = this.#speedReading === null;
+    this.#speedReading = { speed: work.workSeconds / work.workingSeconds, at: closedAt.at, ...work,
+      captureOwner: "proxy-encoder", captureClock: "performance", captureClockEpoch: performance.timeOrigin,
+      captureStartedAtMonotonic: last.monotonicAt,
+      captureCompletedAtMonotonic: closedAt.monotonicAt };
+    this.#lastReadingEnd = { filmEndSeconds, workingMs: closedAt.workingMs, monotonicAt: closedAt.monotonicAt };
+    if (first) {
+      const idleSeconds = Math.max(0, (closedAt.at - this.#builtAt) / 1000 - work.workingSeconds);
+      this.logger.info(
+        `encode-run #${this.from}..#${this.to} on ${this.address}: first speed reading ` +
+        `${this.#speedReading.speed.toFixed(2)}x — ${work.workSeconds.toFixed(3)}s of film to the close of #${index} ` +
+        `over ${work.workingSeconds.toFixed(3)}s of its own work, ${idleSeconds.toFixed(3)}s waiting for input or ` +
+        "stopped left out");
+    }
+    this.onSpeedMeasured(this.speedReading);
   }
 
   /**

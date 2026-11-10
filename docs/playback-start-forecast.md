@@ -121,6 +121,14 @@ cross-host clock subtraction. A fact whose epoch or capture marks cannot be
 reconciled has an unknown age. These records do not enable numeric first-frame
 ETA; that ETA remains unavailable.
 
+A speed reading is the film between the ends of two published pieces (the run's
+start for the first reading) over the run's own working time between the moments
+the encoder named them closed; input waits and stops are not working time, and
+`-progress` reports do not enter it (torrent-tv/meta#414). The run is told where
+a piece ends on the output's timeline (`pieceEndSeconds`, given by `EncodeRuns`);
+a piece whose end is unknown gives no reading. Each run logs its first reading
+once (`encode-run #A..#B on <address>: first speed reading …`).
+
 The encoder rate trend uses measured speed readings first. While none exists,
 `predictedEncodeSpeedOf` supplies the output's stored encode prediction. At the
 initial offer, `EncodeCost.notePredictionFor` uses the selected mode's startup

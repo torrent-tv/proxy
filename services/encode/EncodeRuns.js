@@ -1154,6 +1154,11 @@ export class EncodeRuns {
       // judged finished — see getFileStream.
       usesExplicitCuts: Boolean(admittedInput || (cutTimes && cutTimes.length > 0)),
       startSeconds,
+      // Where piece `index` ends on the timeline `startSeconds` is taken from:
+      // the speed reading is the film between two such ends (torrent-tv/meta#414).
+      pieceEndSeconds: (index) => Number.isInteger(index) && index >= 0 && index + 1 < session.timeline.published.length
+        ? session.timeline.publishedStartOf(index + 1)
+        : Number(session.file.durationSeconds) || null,
       totalSeconds: Number(session.file.durationSeconds) || null,
       spawn: (spawnArgs) =>
         spawn(this.#host.ffmpegBin, spawnArgs, {

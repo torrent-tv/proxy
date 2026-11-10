@@ -195,6 +195,13 @@ migration commits add headings but change no version, so they are not released.
 - Proof on bad input: `bash scripts/check.sh changesets-selftest` (the step "Changeset checks fail on
   bad input") builds the exact copy case in a scratch repository, shows that the earlier range
   comparison passes it and that `copies` fails it, and runs each format rule on a bad and a good file.
+  The step runs before the two checks it proves, so a refusal never hides it. The self-test clears every
+  variable of `git rev-parse --local-env-vars`, and a case shows that a repository named by
+  `GIT_OBJECT_DIRECTORY` and `GIT_COMMON_DIR` stays unchanged.
+- Known limits of the format check (reviewed 2026-11-10, not the measured defect): two sentences in one
+  paragraph pass, because the number of sentences is not decidable from the text; `__name` and a wrapped
+  line starting with `- ` are refused. Of the copy check: a copy whose author date was reset
+  (`rebase --ignore-date`, `commit --amend --reset-author`) or whose subject was reworded is not seen.
 
 ## Blockers and unknowns
 

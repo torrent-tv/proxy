@@ -149,7 +149,7 @@ changeset_problem() {
     }
     $0 !~ /[^[:space:]]/ { if (lines > 0) gap = 1; next }
     gap { print "the text has more than one paragraph"; bad = 1; exit }
-    $0 ~ /^[[:space:]]*([-*+>|]|#+|[0-9]+[.)])([[:space:]]|$)/ || $0 ~ /^[[:space:]]*(\*\*|__|```)/ || $0 ~ /^(    |\t)/ {
+    $0 ~ /^[[:space:]]*([-*+>|]|#+|[0-9]+[.)])([[:space:]]|$)/ || $0 ~ /^[[:space:]]*(\*\*|__|```|~~~)/ || $0 ~ /^[[:space:]]*[*_]+[A-Za-z]+[*_]+:/ || $0 ~ /^(    |\t)/ {
       print "the text is not one plain sentence; this line starts like a list, heading, bold label, quote or code: " $0
       bad = 1; exit
     }
@@ -195,10 +195,16 @@ changesets_selftest() (
   local scratch failures=0 base pre
   scratch=$(mktemp -d)
   trap 'rm -rf "$scratch"' EXIT
-  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_EDITOR=true \
-    GIT_AUTHOR_NAME=selftest GIT_AUTHOR_EMAIL=selftest@example.com \
-    GIT_COMMITTER_NAME=selftest GIT_COMMITTER_EMAIL=selftest@example.com
+  isolate_git() {
+    # Every variable that points git at a repository (`git rev-parse --local-env-vars`: GIT_DIR,
+    # GIT_OBJECT_DIRECTORY, GIT_COMMON_DIR, ...) is cleared, so that no object or ref of the
+    # self-test reaches the repository that runs it. This runs before any other git command.
+    unset $(git rev-parse --local-env-vars)
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_EDITOR=true \
+      GIT_AUTHOR_NAME=selftest GIT_AUTHOR_EMAIL=selftest@example.com \
+      GIT_COMMITTER_NAME=selftest GIT_COMMITTER_EMAIL=selftest@example.com
+  }
+  isolate_git
 
   expect() {
     # expect pass|fail <what> <command...>
@@ -292,6 +298,10 @@ changesets_selftest() (
   expect fail "a heading" accepts "${front}# A film opens faster\n"
   expect fail "a quote" accepts "${front}> A film opens faster.\n"
   expect fail "a code block" accepts "${front}\`\`\`\nA film opens faster.\n\`\`\`\n"
+  expect fail "a tilde code block" accepts "${front}~~~\nA film opens faster.\n~~~\n"
+  expect fail "an italic label" accepts "${front}*Fix*: A film opens faster.\n"
+  expect fail "an underscore label" accepts "${front}_Fix_: A film opens faster.\n"
+  expect pass "a sentence that starts with a number and a unit" accepts "${front}2 films now open faster.\n"
   expect fail "two paragraphs" accepts "${front}A film opens faster.\n\nA film starts sooner.\n"
   expect fail "a package and no sentence" accepts "${front}"
   expect fail "no front matter" accepts "A film opens faster.\n"
@@ -310,6 +320,28 @@ changesets_selftest() (
   note one-sentence "A film opens faster."
   commit 2026-11-10T21:41:00+00:00 "fix(open): one sentence #ttv-3"
   expect pass "the changeset check on a pull request with one sentence" changeset_format origin/main HEAD
+
+  # The self-test writes nothing into a repository that the environment points git at.
+  git init -q "$scratch/foreign"
+  git -C "$scratch/foreign" -c user.name=x -c user.email=x@example.com commit -q --allow-empty -m foreign
+  foreign_state() { { find "$scratch/foreign/.git/objects" -type f | sort; git -C "$scratch/foreign" for-each-ref; } | cksum; }
+  local before
+  before=$(foreign_state)
+  (
+    export GIT_DIR="$scratch/foreign/.git" GIT_OBJECT_DIRECTORY="$scratch/foreign/.git/objects" \
+      GIT_COMMON_DIR="$scratch/foreign/.git" GIT_INDEX_FILE="$scratch/foreign/.git/index"
+    isolate_git
+    mkdir "$scratch/probe"
+    cd "$scratch/probe"
+    git init -q
+    printf 'probe\n' > probe.txt
+    git add probe.txt
+    commit 2026-11-10T22:00:00+00:00 "chore: probe"
+  )
+  expect pass "a repository named by GIT_OBJECT_DIRECTORY and GIT_COMMON_DIR is left unchanged" \
+    test "$(foreign_state)" = "$before"
+  expect pass "the probe commit went into its own repository" \
+    test -n "$(git -C "$scratch/probe" log --format=%h)"
 
   [ "$failures" -eq 0 ]
 )

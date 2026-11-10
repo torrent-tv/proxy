@@ -187,10 +187,11 @@ test("the helpers of the serving manager exist", () => {
 });
 
 /**
- * A line of a helper that waits a fixed time: a promise resolved by a timer, a `sleep`, an interval.
+ * A line of a helper that waits a fixed time: a promise resolved by a timer (any callback name), a `sleep`,
+ * an interval, the promise timers of `node:timers/promises` (`delay`) and `scheduler.wait`.
  * A timer that only REJECTS after a limit (`within`) is a backstop, not a wait, and is not matched.
  */
-const FIXED_WAIT = /setTimeout\(\s*(\(\)\s*=>\s*)?resolve\b|\bsleep\(|setInterval\(/;
+const FIXED_WAIT = /setTimeout\(\s*(\(\)\s*=>\s*)?[\w$]+\s*[,)]|\bsleep\(|setInterval\(|node:timers\/promises|scheduler\.wait\(/;
 
 /**
  * @param {string[]} lines
@@ -221,7 +222,7 @@ test("no helper waits a fixed time unless the period is marked CHOSEN with its r
     const lines = readFileSync(path.join(dir, name), "utf8").split("\n");
     const chosen = [...chosenConstants(lines)];
     return lines.flatMap((line, at) => {
-      if (!FIXED_WAIT.test(line) || line.includes("CHOSEN") || chosen.some((constant) => line.includes(constant))) {
+      if (!FIXED_WAIT.test(line) || line.includes("CHOSEN") || chosen.some((constant) => new RegExp(`\\b${constant}\\b`).test(line))) {
         return [];
       }
       return [`helpers/${name}:${at + 1}: ${line.trim()}`];

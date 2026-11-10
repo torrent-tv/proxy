@@ -7,8 +7,8 @@
 /**
  * CHOSEN, not measured: the period at which `until` asks its check again. The
  * check is any caller-supplied predicate (a file on disk, a counter), so no
- * event can express the fact in general; callers that have an event use it
- * instead. The period only bounds how late the answer is noticed.
+ * single event can express the fact in general. The period only bounds how
+ * late the answer is noticed.
  */
 const POLL_MS = 5;
 

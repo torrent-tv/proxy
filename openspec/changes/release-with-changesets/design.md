@@ -208,6 +208,19 @@ migration commits add headings but change no version, so they are not released.
   line starting with `- ` are refused. Of the copy check: a copy whose author date was reset
   (`rebase --ignore-date`, `commit --amend --reset-author`) or whose subject was reworded is not seen.
 
+### The message of a prepared commit is tested before the push (2026-11-11, torrent-tv/meta#425)
+
+- Measured defect: the dependency job prepared a commit whose body had a line of 120 characters (proxy
+  pull request 63, review finding 2). The tests passed and the job pushed it; the commitlint step of
+  `Checks` refused it on `main` afterwards, because `body-max-line-length` is 100. Nothing tested the
+  message before the push, and a pushed commit cannot be taken back.
+- The step "Test every commit, oldest first" now writes the message of each prepared commit to a file and
+  runs the repository's `.githooks/commit-msg` on it, which refuses what the commitlint step would refuse
+  (header, subject, line length), before the installation and `scripts/check.sh all`. A refused message is
+  handled like a failed check: that commit and the ones after it are not pushed, `commit message rejected
+  on <header>` goes into the failed list, the header is escaped as a workflow-command value in the error
+  line, and the run ends red.
+
 ## Blockers and unknowns
 
 1. Not run before the merge: `version` on this repository's `main` (it ran in a scratch clone of this

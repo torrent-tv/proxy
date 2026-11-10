@@ -112,11 +112,16 @@ migration commits add headings but change no version, so they are not released.
 ### Publication
 
 - `publish` is a job of its own (`needs: [checks, build]`), in the environment `production`, with
-  `id-token: write` and `contents: write`, in the concurrency group `publish` (queued, never
+  `id-token: write` and `contents: read`, in the concurrency group `publish` (queued, never
   cancelled). For each new version, oldest first, it publishes from that version's commit
   (`git switch --detach`, `changeset publish --no-git-tag`) unless npm has the version, tags it
   with `changeset git-tag`, pushes the tag and creates the Release from the CHANGELOG section.
   The package comes before the tag.
+- The checkout, the tag push and the Release use the release App token with `contents: write`
+  and `workflows: write`. A version commit may change workflow files, GitHub refuses a tag that
+  reaches one from an App without `workflows` permission, and `GITHUB_TOKEN` can never have it
+  (measured 2026-11-10: infra `v0.0.10` was refused, message in torrent-tv/meta#336). No
+  workflow listens to tags, so the push starts no run.
 - A version that npm holds from another commit fails the step, naming both commits, as the
   release before it did.
 - npm serves a version only after it has processed it (6.5 minutes for 2.89.8). A re-run inside

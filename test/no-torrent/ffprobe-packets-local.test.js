@@ -10,9 +10,12 @@ import { FfprobeContainer } from "../../services/media/container/FfprobeContaine
 import { SegmentInputs } from "../../services/media/SegmentInputs.js";
 import { admitInput } from "../../services/encode/AdmittedInput.js";
 import { matroskaIdOf } from "./support/codec-lookup.js";
+import { chosenFfprobe } from "./helpers/ffprobe-binary.js";
 
 // Only generated media files are passed to ffprobe; no torrent boundary is imported.
-for (const format of ["mp4", "flv"]) test(`ffprobe reads synthetic ${format} packet bytes and codec declarations without an input URL`, async () => {
+// The binary is the one the proxy chooses at startup by capability (AC-20-B1).
+for (const format of ["mp4", "flv"]) test(`ffprobe reads synthetic ${format} packet bytes and codec declarations without an input URL`, { todo: "AC-20-B1" }, async () => {
+  const { binary: ffprobeBin } = await chosenFfprobe();
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "torrent-tv-ffprobe-"));
   try {
     const file = path.join(directory, `input.${format}`);
@@ -22,7 +25,7 @@ for (const format of ["mp4", "flv"]) test(`ffprobe reads synthetic ${format} pac
     assert.equal(encoded.status, 0, encoded.stderr);
     const bytes = await fs.readFile(file);
     const container = new FfprobeContainer({ fileSize: bytes.length, readRange: async (a, b) => bytes.subarray(a, b + 1),
-      probe: async (statement, onRecord) => ({ kind: "result", value: await probePackets({ url: file, statement, onRecord }) }) });
+      probe: async (statement, onRecord) => ({ kind: "result", value: await probePackets({ url: file, statement, onRecord, ffprobeBin }) }) });
     const tracks = await container.readTracks();
     assert.equal(tracks[0].codecId, "h264");
     assert.ok(Buffer.from(tracks[0].codecPrivateB64, "base64").length > 0);

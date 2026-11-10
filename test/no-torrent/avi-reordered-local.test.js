@@ -9,16 +9,23 @@ import { AviContainer } from "../../services/media/container/AviContainer.js";
 import { matroskaInput } from "../../services/encode/MatroskaInput.js";
 import { matroskaIdOf } from "./support/codec-lookup.js";
 
+const XVID_FIXTURE = new URL("./fixtures/avi-xvid-bframes.avi", import.meta.url);
+
 // Generated lavfi files only. No torrent boundary is imported or invoked.
+// The libxvid case reads a committed file made by libxvid (fixtures/avi-xvid-bframes.avi.md):
+// not every ffmpeg build has that encoder.
 // Packets are reassembled only for an AVI without an index; an indexed AVI is
 // read from the original file (original-input-avi.test.js).
 for (const codec of ["mpeg4", "libxvid", "libx264", "libx265"]) test(`AVI ${codec} B pictures retain presentation order without idx1`, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ttv-avi-reordered-"));
   try {
     const file = path.join(directory, "source.avi");
-    const made = spawnSync(ffmpegBin, ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-      "testsrc2=size=64x64:rate=10", "-t", "3", "-c:v", codec, "-bf", "2", ...(codec === "libx265" ? ["-x265-params", "b-adapt=0", "-vtag", "HEVC"] : []), file], { windowsHide: true, encoding: "utf8" });
-    assert.equal(made.status, 0, made.stderr);
+    if (codec === "libxvid") await fs.copyFile(XVID_FIXTURE, file);
+    else {
+      const made = spawnSync(ffmpegBin, ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+        "testsrc2=size=64x64:rate=10", "-t", "3", "-c:v", codec, "-bf", "2", ...(codec === "libx265" ? ["-x265-params", "b-adapt=0", "-vtag", "HEVC"] : []), file], { windowsHide: true, encoding: "utf8" });
+      assert.equal(made.status, 0, made.stderr);
+    }
     let bytes = await fs.readFile(file);
     {
       let at = 12;

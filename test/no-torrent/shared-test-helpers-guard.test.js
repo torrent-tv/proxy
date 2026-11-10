@@ -187,11 +187,33 @@ test("the helpers of the serving manager exist", () => {
 });
 
 /**
- * Every use of a timer in a helper, whatever its shape: `setTimeout`, `setInterval`, `sleep`,
- * `scheduler.wait`, `t.setTimeout`, and any import of the promise timers (`timers/promises`, with
- * or without `node:`). A helper waits for an event; a timer is refused unless it is marked.
+ * Every use of a timer in a helper, whatever its shape: the names `setTimeout` and `setInterval`
+ * (called or not), `sleep(`, `scheduler.wait`, `Atomics.wait`, and any import of `timers` or
+ * `timers/promises` (with or without `node:`). A helper waits for an event; a timer is refused unless
+ * it is marked. The guard stops accidental waits; deliberately evasive code is a review matter.
  */
-const TIMER_USE = /\b(setTimeout|setInterval|sleep)\s*\(|\bscheduler\.wait\s*\(|\btimers\/promises\b/;
+const TIMER_NAME = /\b(setTimeout|setInterval)\b|\bsleep\s*\(|\bscheduler\.wait\b|\bAtomics\.wait\b/;
+const TIMER_IMPORT = /["'](node:)?timers(\/promises)?["']/;
+/** The only shape a BACKSTOP may mark: a timer whose callback rejects (the limit in `within`). */
+const REJECTING_TIMER = /\bsetTimeout\(\s*\(\)\s*=>\s*reject\(/;
+
+/**
+ * @param {string} line
+ * @returns {{ code: string, comment: string }} the line with string contents blanked and comments cut off
+ */
+function splitLine(line) {
+  const blanked = line.replace(/(["'`])(?:\\.|(?!\1).)*\1/g, (one) => `${one[0]}${one[0]}`);
+  if (/^\s*(\/\*|\*|\/\/)/.test(line)) {
+    return { code: "", comment: line };
+  }
+  const at = blanked.search(/\/\/|\/\*/);
+  return at === -1 ? { code: blanked, comment: "" } : { code: blanked.slice(0, at), comment: blanked.slice(at) };
+}
+
+/** @returns {boolean} the marker is a whole word inside a comment of the line */
+function marked(line, marker) {
+  return new RegExp(`\\b${marker}\\b`).test(splitLine(line).comment);
+}
 
 /**
  * @param {string[]} lines
@@ -208,7 +230,7 @@ function chosenConstants(lines) {
     while (from > 0 && /^\s*(\/\*\*?|\*|\/\/)/.test(lines[from - 1])) {
       from -= 1;
     }
-    if (lines.slice(from, at + 1).some((one) => one.includes("CHOSEN"))) {
+    if (lines.slice(from, at + 1).some((one) => marked(one, "CHOSEN"))) {
       names.add(declared[1]);
     }
   });
@@ -222,10 +244,13 @@ test("no helper uses a timer unless it is marked CHOSEN (a period) or BACKSTOP (
     const lines = readFileSync(path.join(dir, name), "utf8").split("\n");
     const chosen = [...chosenConstants(lines)];
     return lines.flatMap((line, at) => {
-      if (!TIMER_USE.test(line) || line.includes("CHOSEN") || line.includes("BACKSTOP") || chosen.some((constant) => new RegExp(`\\b${constant}\\b`).test(line))) {
-        return [];
-      }
-      return [`helpers/${name}:${at + 1}: ${line.trim()}`];
+      const { code } = splitLine(line);
+      const timer = TIMER_NAME.test(code) || TIMER_IMPORT.test(line.replace(/\/\/.*$/, ""));
+      const allowed =
+        marked(line, "CHOSEN") ||
+        (marked(line, "BACKSTOP") && REJECTING_TIMER.test(code)) ||
+        chosen.some((constant) => new RegExp(`\\b${constant}\\b`).test(code));
+      return timer && !allowed ? [`helpers/${name}:${at + 1}: ${line.trim()}`] : [];
     });
   });
   assert.deepEqual(offenders, [], "events first: wait for the event; a period that no event can express is a named constant under a comment marking it CHOSEN, with the reason; the one limit that only rejects carries BACKSTOP and its reason");

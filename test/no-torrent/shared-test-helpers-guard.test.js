@@ -187,11 +187,11 @@ test("the helpers of the serving manager exist", () => {
 });
 
 /**
- * A line of a helper that waits a fixed time: a promise resolved by a timer (any callback name), a `sleep`,
- * an interval, the promise timers of `node:timers/promises` (`delay`) and `scheduler.wait`.
- * A timer that only REJECTS after a limit (`within`) is a backstop, not a wait, and is not matched.
+ * Every use of a timer in a helper, whatever its shape: `setTimeout`, `setInterval`, `sleep`,
+ * `scheduler.wait`, `t.setTimeout`, and any import of the promise timers (`timers/promises`, with
+ * or without `node:`). A helper waits for an event; a timer is refused unless it is marked.
  */
-const FIXED_WAIT = /setTimeout\(\s*(\(\)\s*=>\s*)?[\w$]+\s*[,)]|\bsleep\(|setInterval\(|node:timers\/promises|scheduler\.wait\(/;
+const TIMER_USE = /\b(setTimeout|setInterval|sleep)\s*\(|\bscheduler\.wait\s*\(|\btimers\/promises\b/;
 
 /**
  * @param {string[]} lines
@@ -215,18 +215,18 @@ function chosenConstants(lines) {
   return names;
 }
 
-test("no helper waits a fixed time unless the period is marked CHOSEN with its reason", async () => {
+test("no helper uses a timer unless it is marked CHOSEN (a period) or BACKSTOP (a limit that only rejects)", async () => {
   const dir = path.join(TESTS, "helpers");
   const names = (await readdir(dir)).filter((name) => name.endsWith(".js")).sort();
   const offenders = names.flatMap((name) => {
     const lines = readFileSync(path.join(dir, name), "utf8").split("\n");
     const chosen = [...chosenConstants(lines)];
     return lines.flatMap((line, at) => {
-      if (!FIXED_WAIT.test(line) || line.includes("CHOSEN") || chosen.some((constant) => new RegExp(`\\b${constant}\\b`).test(line))) {
+      if (!TIMER_USE.test(line) || line.includes("CHOSEN") || line.includes("BACKSTOP") || chosen.some((constant) => new RegExp(`\\b${constant}\\b`).test(line))) {
         return [];
       }
       return [`helpers/${name}:${at + 1}: ${line.trim()}`];
     });
   });
-  assert.deepEqual(offenders, [], "events first: wait for the event; a period that no event can express is a named constant under a comment marking it CHOSEN, with the reason");
+  assert.deepEqual(offenders, [], "events first: wait for the event; a period that no event can express is a named constant under a comment marking it CHOSEN, with the reason; the one limit that only rejects carries BACKSTOP and its reason");
 });

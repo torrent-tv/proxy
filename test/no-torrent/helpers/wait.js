@@ -44,7 +44,7 @@ export async function until(check, what, { limitMs = 10_000 } = {}) {
 export function within(promise, limitMs, what) {
   let timer;
   const limit = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`gave up after ${limitMs} ms waiting for ${what}`)), limitMs);
+    timer = setTimeout(() => reject(new Error(`gave up after ${limitMs} ms waiting for ${what}`)), limitMs); // BACKSTOP: a limit that only rejects, so a wait that never ends fails; nothing waits for it
   });
   return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
 }

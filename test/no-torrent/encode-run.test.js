@@ -171,7 +171,7 @@ test("a process that could not be started ends like any other failure", () => {
   assert.match(ends[0].because, /ENOENT/);
 });
 
-test("its speed is the film of the piece it closed over its own working time, including for a one-piece run", { todo: "AC-8" }, () => {
+test("its speed is the film of the piece it closed over its own working time, including for a one-piece run", () => {
   const clock = { at: 1000 };
   let monotonic = 100;
   const process_ = new FakeProcess();
@@ -216,7 +216,7 @@ test("its speed is the film of the piece it closed over its own working time, in
   assert.equal(readings[0].captureCompletedAtMonotonic, 250);
 });
 
-test("a one-piece run is measured from the film of its piece after its input wait", { todo: "AC-8" }, () => {
+test("a one-piece run is measured from the film of its piece after its input wait", () => {
   const clock = { at: 1000 };
   const process_ = new FakeProcess();
   process_.stdout = new EventEmitter();
@@ -537,7 +537,7 @@ function runOnAClock({ from, to, startSeconds, pieceEndSeconds, publishesAlone =
 
 const FIELD_END = new Map([[9, 104.167]]);
 
-test("a one-piece copy is read from the film of its piece, not from the progress report before its last input read ended", { todo: "AC-1" }, () => {
+test("a one-piece copy is read from the film of its piece, not from the progress report before its last input read ended", () => {
   // H1: ffmpeg's last report before the input read that ended the waiting said
   // 10.40 s; a reading taken from reports saw only the tail of the piece.
   const field = runOnAClock({ from: 9, to: 9, startSeconds: 93.75, pieceEndSeconds: index => FIELD_END.get(index) });
@@ -560,7 +560,7 @@ test("a one-piece copy is read from the film of its piece, not from the progress
   assert.equal(field.run.speedReading.speed, reading.speed);
 });
 
-test("a piece published when the next is named is measured to the moment it was named closed", { todo: "AC-1" }, () => {
+test("a piece published when the next is named is measured to the moment it was named closed", () => {
   const ends = new Map([[4, 40], [5, 50]]);
   const field = runOnAClock({ from: 4, to: 5, startSeconds: 30, publishesAlone: false,
     pieceEndSeconds: index => ends.get(index) });
@@ -573,7 +573,7 @@ test("a piece published when the next is named is measured to the moment it was 
   assert.equal(field.run.speedReading.at, field.started + 2000, "dated by the close");
 });
 
-test("a one-piece copy whose only progress report before publication says 0.04 s is read from the film of its piece", { todo: "AC-2" }, () => {
+test("a one-piece copy whose only progress report before publication says 0.04 s is read from the film of its piece", () => {
   // H2: the reading was taken at publication from a report made before the
   // piece closed, which counted almost no film.
   const field = runOnAClock({ from: 9, to: 9, startSeconds: 93.75, pieceEndSeconds: index => FIELD_END.get(index) });
@@ -588,7 +588,7 @@ test("a one-piece copy whose only progress report before publication says 0.04 s
   assert.equal(field.readings.length, 1, "no report after the close adds one");
 });
 
-test("the second piece of a run is measured from the first, input waits left out", { todo: "AC-3" }, () => {
+test("the second piece of a run is measured from the first, input waits left out", () => {
   const ends = new Map([[4, 40], [5, 50]]);
   const field = runOnAClock({ from: 4, to: 5, startSeconds: 30, pieceEndSeconds: index => ends.get(index) });
   field.wait(500);
@@ -606,7 +606,7 @@ test("the second piece of a run is measured from the first, input waits left out
 });
 
 for (const unknown of [undefined, null, Number.NaN, Number.POSITIVE_INFINITY]) {
-  test(`a piece whose end is ${String(unknown)} gives no reading, whatever progress says`, { todo: "AC-4" }, () => {
+  test(`a piece whose end is ${String(unknown)} gives no reading, whatever progress says`, () => {
     const field = runOnAClock({ from: 9, to: 9, startSeconds: 93.75, pieceEndSeconds: () => unknown });
     field.work(500);
     field.report(5);
@@ -619,7 +619,7 @@ for (const unknown of [undefined, null, Number.NaN, Number.POSITIVE_INFINITY]) {
   });
 }
 
-test("a piece that ends at or before the run's start gives no reading", { todo: "AC-4" }, () => {
+test("a piece that ends at or before the run's start gives no reading", () => {
   const ends = new Map([[9, 93.75], [10, 90]]);
   const field = runOnAClock({ from: 9, to: 10, startSeconds: 93.75, pieceEndSeconds: index => ends.get(index) });
   field.work(1000);
@@ -632,7 +632,7 @@ test("a piece that ends at or before the run's start gives no reading", { todo: 
   assert.deepEqual(field.readings, []);
 });
 
-test("a piece named closed with no working time since the last reading gives none, and the next is measured from where the last reading was", { todo: "AC-4" }, () => {
+test("a piece named closed with no working time since the last reading gives none, and the next is measured from where the last reading was", () => {
   const ends = new Map([[4, 10], [5, 20]]);
   const field = runOnAClock({ from: 4, to: 5, startSeconds: 0, pieceEndSeconds: index => ends.get(index) });
   // #4 is named while the input read still waits: all of its second is idle.
@@ -647,7 +647,7 @@ test("a piece named closed with no working time since the last reading gives non
   assert.equal(field.readings.length, 1);
 });
 
-test("the first reading of a run is logged once, with the film and the time it is made of", { todo: "AC-6" }, () => {
+test("the first reading of a run is logged once, with the film and the time it is made of", () => {
   const lines = [];
   const field = runOnAClock({ from: 9, to: 9, startSeconds: 93.75, pieceEndSeconds: index => FIELD_END.get(index),
     logger: { info: line => lines.push(line), warn: line => lines.push(line) } });
@@ -661,7 +661,7 @@ test("the first reading of a run is logged once, with the film and the time it i
     "over 1\\.284s of its own work, 0\\.4(?:00)?s waiting for input or stopped left out$"));
 });
 
-test("a run that publishes three pieces logs its first reading once, for the first piece", { todo: "AC-6" }, () => {
+test("a run that publishes three pieces logs its first reading once, for the first piece", () => {
   const lines = [];
   const ends = new Map([[4, 40], [5, 50], [6, 60]]);
   const field = runOnAClock({ from: 4, to: 6, startSeconds: 30, pieceEndSeconds: index => ends.get(index),

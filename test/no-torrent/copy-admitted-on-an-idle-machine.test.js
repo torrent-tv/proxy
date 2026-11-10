@@ -105,7 +105,7 @@ function theFieldRun(session) {
   return run;
 }
 
-test("a copy read at 8.1x with 16 % left to encoders is admitted on an idle machine with 83 % to spare", { todo: "AC-7" }, async () => {
+test("a copy read at 8.1x with 16 % left to encoders is admitted on an idle machine with 83 % to spare", async () => {
   const { session, cost } = theCopiedOutput();
   const run = theFieldRun(session);
 

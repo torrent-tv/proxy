@@ -11,8 +11,9 @@
  * A run's work sample states the film made and the milliseconds of the run's
  * OWN work, with input waits and stops taken out (`RunClock`). Two samples of
  * one run give its processing speed over the stretch between them; the run
- * takes them when it closes pieces (`EncodeRun.speedReading`), so there is no
- * window to choose.
+ * takes them at the moments it names pieces closed, with the end of each piece
+ * on the output's timeline as its film (`EncodeRun.speedReading`), so there is
+ * no window to choose and no progress report enters.
  */
 
 /**

@@ -83,7 +83,7 @@ async function aRunBuiltByEncodeRuns(t) {
   return run;
 }
 
-test("a run built by EncodeRuns is told the end of each piece on its output's timeline", { todo: "AC-5", timeout: 10_000 }, async (t) => {
+test("a run built by EncodeRuns is told the end of each piece on its output's timeline", { timeout: 10_000 }, async (t) => {
   const run = await aRunBuiltByEncodeRuns(t);
   assert.equal(typeof run.pieceEndSeconds, "function", "the run has no way to ask where a piece ends");
   assert.equal(run.pieceEndSeconds(188), TIMES[189]);
@@ -91,7 +91,7 @@ test("a run built by EncodeRuns is told the end of each piece on its output's ti
   assert.equal(run.pieceEndSeconds(262), TIMES[263]);
 });
 
-test("the end of the last piece is the film's duration", { todo: "AC-5", timeout: 10_000 }, async (t) => {
+test("the end of the last piece is the film's duration", { timeout: 10_000 }, async (t) => {
   const run = await aRunBuiltByEncodeRuns(t);
   assert.equal(typeof run.pieceEndSeconds, "function", "the run has no way to ask where a piece ends");
   assert.equal(run.pieceEndSeconds(PIECES - 1), FILM_SECONDS);

@@ -26,7 +26,7 @@ stdout, closed-piece names on fd 3) and a fake clock; `EncodeCost` and
        plan" (skill `writing-tests`), write tests for AC-1…AC-7 marked `todo`,
        rewrite the two tests of design §5, show each new test fails for its
        AC's reason, commit `test(proxy): AC-1 … AC-7 speed readings from closed pieces #ttv-414`.
-2. [ ] Implementer (fresh, worktree from the test commit): design §3.1–3.5 in
+2. [x] Implementer (fresh, worktree from the test commit): design §3.1–3.5 in
        that order, removing the `todo` markers of the tests it makes pass;
        `npm test` exits 0.
 3. [ ] Reviewer approves on the current head; CI green; merge by rebase.

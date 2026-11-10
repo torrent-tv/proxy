@@ -120,6 +120,10 @@ For `EncodeRun` readings (all with a fake clock; waits are `inputWaitBegins` /
 5. Wiring (AC-5): the run from #188 on a copied output with uneven cuts is
    told the end of #188, #189 and #262 on its timeline, and of the last piece
    the file's duration.
+6. Wiring negative (AC-4): the run's `pieceEndSeconds` answers `null` for
+   piece -1 and for pieces at or past the segment count (`run-is-told-where-its-pieces-end.test.js`);
+   only the last piece on the timeline has the file's duration. Fails before
+   the fix because it answers the film's duration.
 
 Cases deliberately not covered:
 

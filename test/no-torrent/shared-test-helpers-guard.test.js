@@ -214,7 +214,7 @@ function chosenConstants(lines) {
   return names;
 }
 
-test("no helper waits a fixed time unless the period is marked CHOSEN with its reason", { todo: "AC-helper-sleep-guard" }, async () => {
+test("no helper waits a fixed time unless the period is marked CHOSEN with its reason", async () => {
   const dir = path.join(TESTS, "helpers");
   const names = (await readdir(dir)).filter((name) => name.endsWith(".js")).sort();
   const offenders = names.flatMap((name) => {

@@ -22,8 +22,7 @@ import { fakeProcess as fakeEncoder, measureSpeed, startRunOn } from "./helpers/
 import assert from "node:assert/strict";
 import { SourceFile } from "../../services/media/SourceFile.js";
 import { Timeline } from "../../services/encode/output/Timeline.js";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { mkdir, rm } from "node:fs/promises";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { outputOn } from "./helpers/output.js";
 import { Output } from "../../services/encode/output/Output.js";
@@ -159,16 +158,23 @@ function fillingReports(viewer, linkMbps) {
   }
 }
 
-async function produceSegments(session, bytesEach) {
+async function produceSegments(manager, session, bytesEach) {
+  const store = manager.segmentStore;
   // Where the run in force writes.
-  const runDir = session.dirPath;
-  await mkdir(runDir, { recursive: true });
+  await mkdir(session.dirPath, { recursive: true });
+  // Published the way the encoder's closing of a piece publishes it: the store
+  // is told of each piece by `publish`, not left to learn of a file by the
+  // platform's directory watch, which on macOS reports a write some
+  // milliseconds after it.
   for (let index = 0; index < 4; index += 1) {
-    await writeFile(
-      path.join(runDir, session.segmentFormat.segmentFileName(index)),
-      Buffer.alloc(bytesEach)
-    );
+    const served = store.publish(session.outputKey, `making-0-${String(index).padStart(5, "0")}.mp4`, fmp4Format,
+      { bytes: Buffer.alloc(bytesEach) });
+    assert.equal(served, fmp4Format.segmentFileName(index), "the store published the piece");
   }
+  // What the decision reads is what the store holds: all four pieces, each of
+  // the size written.
+  assert.deepEqual([...store.sizesOf(session.outputKey)], Array.from({ length: 4 }, (_, index) => [index, bytesEach]),
+    "the store holds all four pieces before anything is decided");
 }
 
 test("a picture that cannot be kept up with is asked for as another VARIANT, and its size is left alone", async (t) => {
@@ -417,7 +423,7 @@ test("a COPIED picture too thick for the viewer's link is asked for as a smaller
 
   // Four seconds of segment at 2 MB is ~4 Mbit/s of stream. The viewer reports
   // a link that cannot carry it and a buffer that is running dry.
-  await produceSegments(session, 2_000_000);
+  await produceSegments(manager, session, 2_000_000);
   drainingReports(manager.viewers.of(session, "viewer"), 1.0);
 
   await manager.quality.noteViewerReported(session.id, "viewer");
@@ -440,7 +446,7 @@ test("with two viewers each link decides for its own viewer, not the worst for b
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  await produceSegments(session, 2_000_000);
+  await produceSegments(manager, session, 2_000_000);
   // One viewer is comfortable and reported LAST, which under a single field was
   // the whole of what the budget saw. The other cannot carry the stream and is
   // running dry.
@@ -473,7 +479,7 @@ test("a reading stops counting when the person leaves, not when it gets old", as
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  await produceSegments(session, 2_000_000);
+  await produceSegments(manager, session, 2_000_000);
   // A LINK READING DOES NOT EXPIRE. It is the last thing known about that link,
   // and how fast a link is does not change because nobody measured it for a
   // minute — the page keeps its own last figure for the same reason. What ends
@@ -558,7 +564,7 @@ test("a re-encoded picture too thick for the viewer's link is asked for as a sma
   });
   const keyBefore = session.outputKey;
 
-  await produceSegments(session, 2_000_000);
+  await produceSegments(manager, session, 2_000_000);
   manager.viewers.of(session, "viewer").qualityMode = "auto";
   drainingReports(manager.viewers.of(session, "viewer"), 1.0);
 
@@ -584,7 +590,7 @@ test("a stream that publishes no variants is left alone, and said so once", asyn
     await rm(dirPath, { recursive: true, force: true });
   });
 
-  await produceSegments(session, 2_000_000);
+  await produceSegments(manager, session, 2_000_000);
   drainingReports(manager.viewers.of(session, "viewer"), 1.0);
 
   await manager.quality.noteViewerReported(session.id, "viewer");
@@ -659,7 +665,7 @@ test("a thin link whose buffer is filling moves nothing: the trend, not the read
     await new Promise((resolve) => setImmediate(resolve));
     await rm(dirPath, { recursive: true, force: true });
   });
-  await produceSegments(session, 2_000_000);
+  await produceSegments(manager, session, 2_000_000);
   fillingReports(manager.viewers.of(session, "viewer"), 1.0);
 
   await manager.quality.noteViewerReported(session.id, "viewer");
@@ -677,7 +683,7 @@ test("a step up being prepared is dropped once the viewer's buffer starts runnin
     await rm(dirPath, { recursive: true, force: true });
   });
   session.variantHeight = 480;
-  await produceSegments(session, 200_000);
+  await produceSegments(manager, session, 200_000);
   const viewer = manager.viewers.get("viewer");
   viewer.askQuality(540, "room to spare", Date.now());
   drainingReports(viewer, 80);

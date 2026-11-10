@@ -10,12 +10,14 @@ import { FfprobeContainer } from "../../services/media/container/FfprobeContaine
 import { SegmentInputs } from "../../services/media/SegmentInputs.js";
 import { admitInput } from "../../services/encode/AdmittedInput.js";
 import { matroskaIdOf } from "./support/codec-lookup.js";
-import { chosenFfprobe } from "./helpers/ffprobe-binary.js";
+import { ffprobeForTest } from "./helpers/ffprobe-binary.js";
 
 // Only generated media files are passed to ffprobe; no torrent boundary is imported.
 // The binary is the one the proxy chooses at startup by capability (AC-20-B1).
-for (const format of ["mp4", "flv"]) test(`ffprobe reads synthetic ${format} packet bytes and codec declarations without an input URL`, { todo: "AC-20-B1" }, async () => {
-  const { binary: ffprobeBin } = await chosenFfprobe();
+for (const format of ["mp4", "flv"]) test(`ffprobe reads synthetic ${format} packet bytes and codec declarations without an input URL`, { todo: "AC-20-B1" }, async (t) => {
+  const ffprobe = await ffprobeForTest();
+  if (ffprobe.skip) return t.skip(ffprobe.skip);
+  const { binary: ffprobeBin } = ffprobe;
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "torrent-tv-ffprobe-"));
   try {
     const file = path.join(directory, `input.${format}`);

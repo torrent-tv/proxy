@@ -16,11 +16,12 @@ import "./thread-pool.js";
 import { Command } from "commander";
 import { mkdirSync } from "node:fs";
 import os from "node:os";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import ffmpegStatic from "ffmpeg-static";
 import nodeDataChannel from "node-datachannel";
 import { startProxyServer } from "../server.js";
+import { ffprobeCandidates, selectFfprobe } from "../services/media/ffprobe-selection.js";
 import { registerClient } from "../services/transport/registry-api.js";
 import { createTunnelClient } from "../services/transport/tunnel-client.js";
 import { createWebRtcManager } from "../services/transport/webrtc-manager.js";
@@ -189,6 +190,44 @@ const memoryBytes =
     : undefined;
 const bundledFfmpegBin = typeof ffmpegStatic === "string" ? ffmpegStatic : "";
 const ffmpegBin = options.ffmpegBin ? String(options.ffmpegBin) : bundledFfmpegBin || "ffmpeg";
+
+/**
+ * The path of the ffprobe binary bundled by `@ffprobe-installer/ffprobe`, or null when
+ * the package cannot be loaded on this platform.
+ *
+ * @returns {string | null}
+ */
+function bundledFfprobeBin() {
+  try {
+    const { path } = require("@ffprobe-installer/ffprobe");
+    return typeof path === "string" && path !== "" ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+// How long one run of a candidate ffprobe (`-version`, `-sections`) may take before it is
+// killed and the candidate does not qualify. CHOSEN, not measured: both print at once.
+const FFPROBE_RUN_LIMIT_MS = 10_000;
+
+/**
+ * Run `binary args` and resolve what it printed; reject when it cannot be started.
+ *
+ * @param {string} binary
+ * @param {string[]} args
+ * @returns {Promise<{ status: number | null, stdout: string, stderr: string }>}
+ */
+function runProcess(binary, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: FFPROBE_RUN_LIMIT_MS });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
 
 /**
  * Verify that the ffmpeg binary is reachable and exits cleanly.
@@ -398,11 +437,16 @@ try {
   if (transcodeAudio) {
     assertFfmpegAvailability();
   }
+  // Chosen once, here, by what each candidate can do; a host with none that qualifies
+  // stops with FfprobeUnavailableError (one logged line) instead of refusing every probe.
+  const ffprobe = await selectFfprobe({ candidates: ffprobeCandidates({ bundledBinary: bundledFfprobeBin() }), run: runProcess, logger });
+  logger.info(`ffprobe: using ${ffprobe.source} ${ffprobe.binary} (version ${ffprobe.version}), which names section stream_side_data`);
   const started = await startProxyServer({
     host: bindHost,
     port: localPort,
     transcodeAudio,
     ffmpegBin,
+    ffprobeBin: ffprobe.binary,
     memoryBytes,
     segmentFormat: options.segmentFormat,
     stateDir,

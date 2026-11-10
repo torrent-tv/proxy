@@ -14,7 +14,7 @@ import { ffprobeForTest } from "./helpers/ffprobe-binary.js";
 
 // Only generated media files are passed to ffprobe; no torrent boundary is imported.
 // The binary is the one the proxy chooses at startup by capability (AC-20-B1).
-for (const format of ["mp4", "flv"]) test(`ffprobe reads synthetic ${format} packet bytes and codec declarations without an input URL`, { todo: "AC-20-B1" }, async (t) => {
+for (const format of ["mp4", "flv"]) test(`ffprobe reads synthetic ${format} packet bytes and codec declarations without an input URL`, async (t) => {
   const ffprobe = await ffprobeForTest();
   if (ffprobe.skip) return t.skip(ffprobe.skip);
   const { binary: ffprobeBin } = ffprobe;

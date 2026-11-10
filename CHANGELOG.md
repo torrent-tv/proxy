@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.84
+
+### Patch Changes
+
+- The proxy now uses whichever ffprobe on the host can read the stream details it needs, and stops at startup with one clear message when none can.
+
 ## 2.107.83
 
 ### Patch Changes

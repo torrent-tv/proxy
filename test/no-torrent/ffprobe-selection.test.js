@@ -65,14 +65,14 @@ function fakeLogger() {
   return { logger, lines };
 }
 
-test("the bundled binary is chosen when its sections name stream_side_data", { todo: "AC-20-B1" }, async () => {
+test("the bundled binary is chosen when its sections name stream_side_data", async () => {
   const { selectFfprobe } = await load();
   const { run } = fakeRun({ [BUNDLED.binary]: { version: "20230721-c2b3861", sections: SECTIONS_WITH } });
   const chosen = await selectFfprobe({ candidates: [BUNDLED, ON_PATH], run, logger: fakeLogger().logger });
   assert.deepEqual(chosen, { source: "bundled", binary: BUNDLED.binary, version: "20230721-c2b3861" });
 });
 
-test("a candidate after the chosen one is never run", { todo: "AC-20-B1" }, async () => {
+test("a candidate after the chosen one is never run", async () => {
   const { selectFfprobe } = await load();
   const { run, calls } = fakeRun({ [BUNDLED.binary]: { version: "20230721-c2b3861", sections: SECTIONS_WITH }, [ON_PATH.binary]: new Error("must not be run") });
   await selectFfprobe({ candidates: [BUNDLED, ON_PATH], run, logger: fakeLogger().logger });
@@ -80,7 +80,7 @@ test("a candidate after the chosen one is never run", { todo: "AC-20-B1" }, asyn
   assert.ok(calls.some(([, args]) => args.includes("-version")) && calls.some(([, args]) => args.includes("-sections")));
 });
 
-test("the binary on PATH is chosen when the bundled one lacks the section", { todo: "AC-20-B1" }, async () => {
+test("the binary on PATH is chosen when the bundled one lacks the section", async () => {
   const { selectFfprobe } = await load();
   const { run } = fakeRun({
     [BUNDLED.binary]: { version: "n4.4.1", sections: SECTIONS_WITHOUT },
@@ -90,13 +90,13 @@ test("the binary on PATH is chosen when the bundled one lacks the section", { to
   assert.deepEqual(chosen, { source: "PATH", binary: "ffprobe", version: "6.1.1" });
 });
 
-test("a section name that only begins with stream_side_data does not qualify a binary", { todo: "AC-20-B1" }, async () => {
+test("a section name that only begins with stream_side_data does not qualify a binary", async () => {
   const { selectFfprobe, FfprobeUnavailableError } = await load();
   const { run } = fakeRun({ [BUNDLED.binary]: { version: "n4.4.1", sections: SECTIONS_WITHOUT } });
   await assert.rejects(selectFfprobe({ candidates: [BUNDLED], run, logger: fakeLogger().logger }), FfprobeUnavailableError);
 });
 
-test("the binary on PATH is chosen when the bundled one cannot be run", { todo: "AC-20-B1" }, async () => {
+test("the binary on PATH is chosen when the bundled one cannot be run", async () => {
   const { selectFfprobe } = await load();
   const { run } = fakeRun({
     [BUNDLED.binary]: Object.assign(new Error("spawn EACCES"), { code: "EACCES" }),
@@ -106,7 +106,7 @@ test("the binary on PATH is chosen when the bundled one cannot be run", { todo: 
   assert.equal(chosen.source, "PATH");
 });
 
-test("a binary whose -sections exits non-zero does not qualify, whatever it printed", { todo: "AC-20-B1" }, async () => {
+test("a binary whose -sections exits non-zero does not qualify, whatever it printed", async () => {
   const { selectFfprobe } = await load();
   const { run } = fakeRun({
     [BUNDLED.binary]: { version: "20230721-c2b3861", sections: SECTIONS_WITH, sectionsStatus: 1 },
@@ -116,7 +116,7 @@ test("a binary whose -sections exits non-zero does not qualify, whatever it prin
   assert.equal(chosen.source, "PATH");
 });
 
-test("when no candidate qualifies one line names each with its version and the missing section, and the prerequisite is declared", { todo: "AC-20-B1" }, async () => {
+test("when no candidate qualifies one line names each with its version and the missing section, and the prerequisite is declared", async () => {
   const { selectFfprobe, FfprobeUnavailableError } = await load();
   const { run } = fakeRun({
     [BUNDLED.binary]: { version: "n4.4.1", sections: SECTIONS_WITHOUT },
@@ -132,7 +132,7 @@ test("when no candidate qualifies one line names each with its version and the m
   assert.equal(lines[0].line.split("stream_side_data").length - 1, 2, "the missing section is named for each of the two candidates");
 });
 
-test("an unrunnable candidate is named in the single line with the reason it could not be run", { todo: "AC-20-B1" }, async () => {
+test("an unrunnable candidate is named in the single line with the reason it could not be run", async () => {
   const { selectFfprobe } = await load();
   const { run } = fakeRun({
     [BUNDLED.binary]: { version: "n4.4.1", sections: SECTIONS_WITHOUT },
@@ -144,7 +144,7 @@ test("an unrunnable candidate is named in the single line with the reason it cou
   assert.ok(lines[0].line.includes("spawn ffprobe ENOENT"));
 });
 
-test("with no candidate at all the prerequisite is declared with one line", { todo: "AC-20-B1" }, async () => {
+test("with no candidate at all the prerequisite is declared with one line", async () => {
   const { selectFfprobe, FfprobeUnavailableError } = await load();
   const { run, calls } = fakeRun({});
   const { logger, lines } = fakeLogger();
@@ -153,7 +153,7 @@ test("with no candidate at all the prerequisite is declared with one line", { to
   assert.equal(calls.length, 0);
 });
 
-test("the candidates are the bundled binary first and ffprobe on PATH second", { todo: "AC-20-B1" }, async () => {
+test("the candidates are the bundled binary first and ffprobe on PATH second", async () => {
   const { ffprobeCandidates } = await load();
   assert.deepEqual(ffprobeCandidates({ bundledBinary: "/modules/ffprobe" }), [
     { source: "bundled", binary: "/modules/ffprobe" },
@@ -161,12 +161,12 @@ test("the candidates are the bundled binary first and ffprobe on PATH second", {
   ]);
 });
 
-test("with no bundled binary the only candidate is ffprobe on PATH", { todo: "AC-20-B1" }, async () => {
+test("with no bundled binary the only candidate is ffprobe on PATH", async () => {
   const { ffprobeCandidates } = await load();
   assert.deepEqual(ffprobeCandidates({ bundledBinary: null }), [{ source: "PATH", binary: "ffprobe" }]);
 });
 
-test("a probe is never started without the binary chosen at startup", { todo: "AC-20-B1" }, () => {
+test("a probe is never started without the binary chosen at startup", () => {
   const spawned = [];
   const silentChild = () => {
     const child = new EventEmitter();

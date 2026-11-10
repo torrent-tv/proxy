@@ -185,3 +185,47 @@ test("the helpers of the serving manager exist", () => {
     assert.doesNotThrow(() => readFileSync(path.join(TESTS, "helpers", name)), `helpers/${name} does not exist`);
   }
 });
+
+/**
+ * A line of a helper that waits a fixed time: a promise resolved by a timer, a `sleep`, an interval.
+ * A timer that only REJECTS after a limit (`within`) is a backstop, not a wait, and is not matched.
+ */
+const FIXED_WAIT = /setTimeout\(\s*(\(\)\s*=>\s*)?resolve\b|\bsleep\(|setInterval\(/;
+
+/**
+ * @param {string[]} lines
+ * @returns {Set<string>} names of the constants declared under a comment that says CHOSEN
+ */
+function chosenConstants(lines) {
+  const names = new Set();
+  lines.forEach((line, at) => {
+    const declared = /^const (\w+) = /.exec(line);
+    if (declared === null) {
+      return;
+    }
+    let from = at;
+    while (from > 0 && /^\s*(\/\*\*?|\*|\/\/)/.test(lines[from - 1])) {
+      from -= 1;
+    }
+    if (lines.slice(from, at + 1).some((one) => one.includes("CHOSEN"))) {
+      names.add(declared[1]);
+    }
+  });
+  return names;
+}
+
+test("no helper waits a fixed time unless the period is marked CHOSEN with its reason", { todo: "AC-helper-sleep-guard" }, async () => {
+  const dir = path.join(TESTS, "helpers");
+  const names = (await readdir(dir)).filter((name) => name.endsWith(".js")).sort();
+  const offenders = names.flatMap((name) => {
+    const lines = readFileSync(path.join(dir, name), "utf8").split("\n");
+    const chosen = [...chosenConstants(lines)];
+    return lines.flatMap((line, at) => {
+      if (!FIXED_WAIT.test(line) || line.includes("CHOSEN") || chosen.some((constant) => line.includes(constant))) {
+        return [];
+      }
+      return [`helpers/${name}:${at + 1}: ${line.trim()}`];
+    });
+  });
+  assert.deepEqual(offenders, [], "events first: wait for the event; a period that no event can express is a named constant under a comment marking it CHOSEN, with the reason");
+});

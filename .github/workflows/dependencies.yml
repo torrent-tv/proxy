@@ -273,6 +273,18 @@ jobs:
           for c in $(git rev-list --reverse "$BASE..HEAD"); do
             header=$(git log -1 --format=%s "$c")
             git switch --quiet --detach "$c"
+            # The message is what the commit-msg hook of the repository would read (the same rules
+            # as commitlint, which checks the commit on main after the push), tested before the
+            # commit is kept.
+            git log -1 --format=%B "$c" > "$RUNNER_TEMP/commit-msg"
+            if ! sh .githooks/commit-msg "$RUNNER_TEMP/commit-msg"; then
+              echo "commit message rejected on $header" >> "$RUNNER_TEMP/failed.txt"
+              shown=${header//'%'/%25}
+              shown=${shown//$'\r'/%0D}
+              shown=${shown//$'\n'/%0A}
+              echo "::error::the commit message of \"$shown\" is refused; it and the commits after it are not pushed"
+              break
+            fi
             if ! bash scripts/check.sh all; then
               echo "bash scripts/check.sh all failed on $header" >> "$RUNNER_TEMP/failed.txt"
               echo "::error::the checks failed on \"$header\"; it and the commits after it are not pushed"

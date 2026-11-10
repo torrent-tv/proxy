@@ -97,7 +97,7 @@ test("the end of the last piece is the film's duration", { timeout: 10_000 }, as
   assert.equal(run.pieceEndSeconds(PIECES - 1), FILM_SECONDS);
 });
 
-test("a piece that is not on the timeline has no end", { timeout: 10_000, todo: "AC-4" }, async (t) => {
+test("a piece that is not on the timeline has no end", { timeout: 10_000 }, async (t) => {
   const run = await aRunBuiltByEncodeRuns(t);
   assert.equal(typeof run.pieceEndSeconds, "function", "the run has no way to ask where a piece ends");
   for (const index of [-1, PIECES, PIECES + 1]) {

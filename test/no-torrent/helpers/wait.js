@@ -25,6 +25,25 @@ export async function until(check, what, { limitMs = 10_000 } = {}) {
 }
 
 /**
+ * What a wait that must end is given: it ends, or this check fails and names it.
+ * A promise that never settles otherwise holds the whole run, because the run
+ * has no limit of its own (`node --test` passes `--test-timeout=0`).
+ *
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} limitMs
+ * @param {string} what - named in the error when the limit passes
+ * @returns {Promise<T>}
+ */
+export function within(promise, limitMs, what) {
+  let timer;
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`gave up after ${limitMs} ms waiting for ${what}`)), limitMs);
+  });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+
+/**
  * Lets queued microtasks and immediates run, `turns` times over.
  *
  * @param {number} [turns]

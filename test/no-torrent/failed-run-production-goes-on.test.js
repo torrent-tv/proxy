@@ -33,6 +33,7 @@ import { fakeProcess, silentLogger } from "./helpers/encode-run.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { outputOn } from "./helpers/output.js";
 import { outputSpec } from "./helpers/output-spec.js";
+import { untilWatchIsLive } from "./helpers/store-watch.js";
 
 const SESSION_ID = "3410000000000341";
 const OUTPUT_KEY = "production-goes-on:fmt=fmp4:grid=uniform:video-only:v=0/copy";
@@ -120,6 +121,7 @@ test("the only run ending short with no input failure has not failed the output"
 
 test("a request held while the only run ends short is served when a later run publishes the segment", { timeout: 10_000 }, async (t) => {
   const { manager, session } = anOutput(t);
+  await untilWatchIsLive(manager.segmentStore, OUTPUT_KEY, session.dirPath);
   const child = itsOnlyRun(manager, session);
   const held = waitForRequestedFile({}, {}, manager.serving, SESSION_ID, "segment-00003.mp4", "viewer-a");
   await untilHeld(manager);
@@ -134,6 +136,7 @@ test("a request held while the only run ends short is served when a later run pu
 
 test("a request after the only run ended short is held, not failed, and served once the segment is published", { timeout: 10_000 }, async (t) => {
   const { manager, session } = anOutput(t);
+  await untilWatchIsLive(manager.segmentStore, OUTPUT_KEY, session.dirPath);
   itsOnlyRun(manager, session).exit(0);
   const answering = served(manager, "segment-00003.mp4");
   await untilHeld(manager);

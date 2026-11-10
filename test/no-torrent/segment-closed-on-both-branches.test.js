@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { SegmentStore } from "../../services/storage/segment-store/SegmentStore.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
+import { untilWatchIsLive } from "./helpers/store-watch.js";
 
 const KEY = "torrent:abc:fmt=fmp4:grid=uniform@0:video-only:v=libx264/854x480";
 
@@ -41,6 +42,7 @@ test("a piece that simply appears ends the wait that began before it", async (t)
   });
 
   const dir = store.directoryFor(KEY);
+  await untilWatchIsLive(store, KEY, dir);
   // The wait begins on a segment nobody has written yet — the cold case, and
   // the only one the deadline used to decide.
   const waited = store.waitFor(KEY, 7, BACKSTOP_MS);
@@ -106,6 +108,7 @@ test("a directory removed from outside and made again is watched again", async (
   // first. The watch held on that path watches a directory that is gone.
   rmSync(store.directoryFor(KEY), { recursive: true, force: true });
   const dir = store.directoryFor(KEY);
+  await untilWatchIsLive(store, KEY, dir);
   const waited = store.waitFor(KEY, 3, BACKSTOP_MS);
 
   writeFileSync(path.join(dir, fmp4Format.segmentFileName(3)), Buffer.alloc(64));

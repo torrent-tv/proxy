@@ -4,7 +4,7 @@
  * `build` job only builds the image, and the release needs it
  * (torrent-tv/meta#302, design Decisions 3 and 4: AC-1, AC-4).
  *
- * `Dockerfile` and `.github/workflows/main.yml` are read as text. A
+ * `Dockerfile`, `scripts/check.sh` and `.github/workflows/main.yml` are read as text. A
  * Dockerfile instruction is its lines joined across trailing backslashes,
  * with comment lines dropped, as Docker reads it. Nothing is built or run.
  */
@@ -136,9 +136,10 @@ test("the final stage starts the proxy CLI with --help as user app", () => {
 
 test("job build builds the image", () => {
   assert.ok(
-    jobLines("build").some((line) => /\bdocker build\b/.test(line)),
-    "job build runs no docker build"
+    jobLines("build").some((line) => /\bbash scripts\/check\.sh image\b/.test(line)),
+    "job build does not run scripts/check.sh image"
   );
+  assert.match(sourceOf("scripts/check.sh"), /^image\(\) \{[^}]*\bdocker build\b/m, "scripts/check.sh image runs no docker build");
 });
 
 test("job build starts no container, since the image checks itself", () => {

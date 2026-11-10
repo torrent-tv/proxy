@@ -147,7 +147,7 @@ test("setup-node in the checks job has id node, so the cache key can name the no
 
 test("the native download cache is restored with an exact key and no fallback", () => {
   const { step } = stepNamed(checksSteps(), "Restore native download cache");
-  assert.match(String(step.get("uses")), /^actions\/cache\/restore@v6$/);
+  assert.match(String(step.get("uses")), /^actions\/cache\/restore@v6\.\d+\.\d+$/);
   const inputs = withOf(step);
   assert.deepEqual(pathEntries(inputs.get("path")), [...CACHE_PATHS].sort());
   const key = normalizedKey(inputs.get("key"));
@@ -161,7 +161,7 @@ test("the native download cache is saved under the same paths and key, and only 
   const steps = checksSteps();
   const restore = withOf(stepNamed(steps, "Restore native download cache").step);
   const { step } = stepNamed(steps, "Save native download cache");
-  assert.match(String(step.get("uses")), /^actions\/cache\/save@v6$/);
+  assert.match(String(step.get("uses")), /^actions\/cache\/save@v6\.\d+\.\d+$/);
   const inputs = withOf(step);
   assert.deepEqual(pathEntries(inputs.get("path")), pathEntries(restore.get("path")));
   assert.equal(normalizedKey(inputs.get("key")), normalizedKey(restore.get("key")));

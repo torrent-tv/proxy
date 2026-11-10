@@ -171,7 +171,7 @@ test("a process that could not be started ends like any other failure", () => {
   assert.match(ends[0].because, /ENOENT/);
 });
 
-test("its speed is film made over its own working time, including for a one-piece run", () => {
+test("its speed is the film of the piece it closed over its own working time, including for a one-piece run", { todo: "AC-8" }, () => {
   const clock = { at: 1000 };
   let monotonic = 100;
   const process_ = new FakeProcess();
@@ -190,21 +190,18 @@ test("its speed is film made over its own working time, including for a one-piec
     now: () => clock.at,
     monotonicNow: () => monotonic,
     publishesAlone: true,
+    pieceEndSeconds: () => 3.5,
     onSpeedMeasured: (reading) => readings.push(reading),
     onClosed: (name, following) => { closedPairs.push([name, following]); return name; }
   });
   assert.equal(run.speedX, 0, "nothing measured yet");
-  const report = (seconds) => process_.stdout.emit("data", `out_time_ms=${seconds * 1_000_000}\n`);
   const closed = (name) => process_.stdio[3].emit("data", `${name}\n`);
   // The input waits for the swarm for 30 s; that is not the run's work.
   run.inputWaitBegins();
   clock.at += 30_000;
-  monotonic = 150;
-  report(0.5);
   run.inputWaitEnds();
   clock.at += 1000;
   monotonic = 250;
-  report(4);
   closed("a");
   assert.equal(run.speedX, 3.5, "3.5 s of film over 1 s of work, excluding the input wait");
   assert.deepEqual(closedPairs, [["a", null]], "a completed piece is published on its own");
@@ -215,11 +212,11 @@ test("its speed is film made over its own working time, including for a one-piec
   assert.equal(readings[0].captureOwner, "proxy-encoder");
   assert.equal(readings[0].captureClock, "performance");
   assert.equal(readings[0].captureClockEpoch, performance.timeOrigin);
-  assert.equal(readings[0].captureStartedAtMonotonic, 150);
+  assert.equal(readings[0].captureStartedAtMonotonic, 100, "the first reading begins where the run began");
   assert.equal(readings[0].captureCompletedAtMonotonic, 250);
 });
 
-test("one positive progress report measures a one-piece run after its input wait", () => {
+test("a one-piece run is measured from the film of its piece after its input wait", { todo: "AC-8" }, () => {
   const clock = { at: 1000 };
   const process_ = new FakeProcess();
   process_.stdout = new EventEmitter();
@@ -231,16 +228,15 @@ test("one positive progress report measures a one-piece run after its input wait
     encoder: new SoftwareEncoder(), from: 0, to: 0,
     buildArgs: () => [], spawn: () => process_, logger: { info() {}, warn() {} },
     now: () => clock.at, publishesAlone: true,
+    pieceEndSeconds: () => 4,
     onSpeedMeasured: reading => readings.push(reading),
     onClosed: name => { closed.push(name); return name; }
   });
-  const report = seconds => process_.stdout.emit("data", `out_time_ms=${seconds * 1_000_000}\n`);
   run.inputWaitBegins();
   clock.at += 30_000;
-  process_.stdio[3].emit("data", "segment-00000.mp4\n");
   run.inputWaitEnds();
   clock.at += 2000;
-  report(4);
+  process_.stdio[3].emit("data", "segment-00000.mp4\n");
   assert.equal(run.speedX, 2, "4 s of film over 2 s of active encoder work");
   assert.deepEqual(closed, ["segment-00000.mp4"]);
   assert.deepEqual(readings.map(({ speed, at, workSeconds, workingSeconds }) =>
@@ -473,4 +469,209 @@ test("a stop ordered while an exited run publishes its last piece leaves the end
   assert.equal(ends[0].dyingMs, null, "a run that exited by itself did not die on command");
   assert.deepEqual(process_.signals, [], "nothing is signalled after the process exited");
   assert.ok(!lines.some(line => /no such edge/.test(line)), lines.join("\n"));
+});
+
+// Speed readings from the pieces a run closed (torrent-tv/meta#414).
+//
+// A reading is the film between the ends of two published pieces over the
+// run's own working time between the moments the encoder named them closed.
+// The field run of 2026-11-10: a one-piece copy of #9 that began at 93.750 s,
+// whose piece ends at 104.167 s, was named closed 1.684 s after the run was
+// made, 0.4 s of which its input spent waiting.
+
+const FIELD_ADDRESS = "torrent:cfbe:fmt=fmp4:grid=kf@0:video-only:v=0/copy";
+const PIECE_NAME = /(\d+)\.mp4$/;
+
+/** @param {number} seconds @param {number} expected */
+const near = (seconds, expected) => Math.abs(seconds - expected) < 1e-9;
+
+/**
+ * A run over a fake process and a clock the check drives. Pieces are named
+ * `making-0-<index>.mp4`; they are published as soon as they are named closed,
+ * or, for a run that is not `publishesAlone`, when the next one is named.
+ *
+ * @param {object} what
+ * @param {number} what.from
+ * @param {number} what.to
+ * @param {number} what.startSeconds
+ * @param {boolean} [what.publishesAlone]
+ * @param {(index: number) => unknown} what.pieceEndSeconds
+ * @param {{ info: (line: string) => void, warn: (line: string) => void }} [what.logger]
+ */
+function runOnAClock({ from, to, startSeconds, pieceEndSeconds, publishesAlone = true, logger = { info() {}, warn() {} } }) {
+  const clock = { at: 1000 };
+  let monotonic = 100;
+  const process_ = new FakeProcess();
+  process_.stdout = new EventEmitter();
+  process_.stdio = [null, process_.stdout, null, new EventEmitter()];
+  const readings = [];
+  const run = new EncodeRun({
+    address: FIELD_ADDRESS, encoder: new SoftwareEncoder(), from, to, startSeconds,
+    buildArgs: () => [], spawn: () => process_, logger,
+    now: () => clock.at, monotonicNow: () => monotonic,
+    publishesAlone,
+    indexOfName: name => Number(PIECE_NAME.exec(name)?.[1]),
+    pieceEndSeconds,
+    onSpeedMeasured: reading => readings.push(reading),
+    onClosed: name => name
+  });
+  return {
+    run, readings, started: clock.at,
+    /** Time passes with the encoder working. */
+    work: ms => { clock.at += ms; monotonic += ms; },
+    /** The input read waits for the swarm for `ms`; `during` happens half way through. */
+    wait: (ms, during = () => {}) => {
+      run.inputWaitBegins();
+      clock.at += ms / 2; monotonic += ms / 2;
+      during();
+      clock.at += ms / 2; monotonic += ms / 2;
+      run.inputWaitEnds();
+    },
+    /** ffmpeg says how much film it has made, from the start of the run. */
+    report: seconds => process_.stdout.emit("data", `out_time_ms=${Math.round(seconds * 1_000_000)}\n`),
+    /** The encoder names a piece closed. */
+    close: index => process_.stdio[3].emit("data", `making-0-${String(index).padStart(5, "0")}.mp4\n`),
+    process: process_
+  };
+}
+
+const FIELD_END = new Map([[9, 104.167]]);
+
+test("a one-piece copy is read from the film of its piece, not from the progress report before its last input read ended", { todo: "AC-1" }, () => {
+  // H1: ffmpeg's last report before the input read that ended the waiting said
+  // 10.40 s; a reading taken from reports saw only the tail of the piece.
+  const field = runOnAClock({ from: 9, to: 9, startSeconds: 93.75, pieceEndSeconds: index => FIELD_END.get(index) });
+  // The input waits 0.4 s in all; the last of its reads is answered after
+  // the report that counts nearly the whole piece.
+  field.wait(200);
+  field.work(100);
+  field.wait(200, () => field.report(10.40));
+  field.work(1184);
+  field.close(9);
+  const reading = field.run.speedReading;
+  assert.ok(reading, "the published piece gave a reading");
+  assert.ok(near(reading.workSeconds, 10.417), `film ${reading.workSeconds}`);
+  assert.equal(reading.workingSeconds, 1.284);
+  assert.ok(near(reading.speed, 10.417 / 1.284), `speed ${reading.speed}`);
+  assert.equal(reading.at, field.started + 1684, "taken at the moment the piece was named closed");
+  assert.deepEqual(field.readings.length, 1);
+  // What ffmpeg reports after the piece closed is not part of any reading.
+  field.report(10.417);
+  assert.equal(field.run.speedReading.speed, reading.speed);
+});
+
+test("a piece published when the next is named is measured to the moment it was named closed", { todo: "AC-1" }, () => {
+  const ends = new Map([[4, 40], [5, 50]]);
+  const field = runOnAClock({ from: 4, to: 5, startSeconds: 30, publishesAlone: false,
+    pieceEndSeconds: index => ends.get(index) });
+  field.work(2000);
+  field.close(4);
+  assert.equal(field.run.speedReading, null, "#4 waits for the file after it");
+  field.work(1000);
+  field.close(5);
+  assert.equal(field.run.speedX, 5, "10 s of film over the 2.0 s of work up to the close of #4, not the 3.0 s up to its publication");
+  assert.equal(field.run.speedReading.at, field.started + 2000, "dated by the close");
+});
+
+test("a one-piece copy whose only progress report before publication says 0.04 s is read from the film of its piece", { todo: "AC-2" }, () => {
+  // H2: the reading was taken at publication from a report made before the
+  // piece closed, which counted almost no film.
+  const field = runOnAClock({ from: 9, to: 9, startSeconds: 93.75, pieceEndSeconds: index => FIELD_END.get(index) });
+  field.wait(400, () => field.report(0.04));
+  field.work(1284);
+  field.close(9);
+  const reading = field.run.speedReading;
+  assert.ok(reading, "the published piece gave a reading");
+  assert.ok(near(reading.workSeconds, 10.417), `film ${reading.workSeconds}`);
+  assert.equal(reading.workingSeconds, 1.284);
+  assert.ok(near(reading.speed, 10.417 / 1.284), `speed ${reading.speed}`);
+  assert.equal(field.readings.length, 1, "no report after the close adds one");
+});
+
+test("the second piece of a run is measured from the first, input waits left out", { todo: "AC-3" }, () => {
+  const ends = new Map([[4, 40], [5, 50]]);
+  const field = runOnAClock({ from: 4, to: 5, startSeconds: 30, pieceEndSeconds: index => ends.get(index) });
+  field.wait(500);
+  field.work(2000);
+  field.close(4);
+  assert.equal(field.run.speedX, 5, "10 s of film from the run's start over 2.0 s of work");
+  field.wait(300);
+  field.work(1000);
+  field.close(5);
+  assert.equal(field.run.speedX, 10, "10 s of film between the two ends over 1.0 s between the two closes");
+  const second = field.run.speedReading;
+  assert.equal(second.workSeconds, 10);
+  assert.equal(second.workingSeconds, 1);
+  assert.deepEqual(field.readings.map(reading => reading.speed), [5, 10], "one reading per published piece");
+});
+
+for (const unknown of [undefined, null, Number.NaN, Number.POSITIVE_INFINITY]) {
+  test(`a piece whose end is ${String(unknown)} gives no reading, whatever progress says`, { todo: "AC-4" }, () => {
+    const field = runOnAClock({ from: 9, to: 9, startSeconds: 93.75, pieceEndSeconds: () => unknown });
+    field.work(500);
+    field.report(5);
+    field.work(784);
+    field.report(10.4);
+    field.close(9);
+    assert.equal(field.run.speedReading, null);
+    assert.equal(field.run.speedX, 0);
+    assert.deepEqual(field.readings, [], "nothing is told to whoever prices the output");
+  });
+}
+
+test("a piece that ends at or before the run's start gives no reading", { todo: "AC-4" }, () => {
+  const ends = new Map([[9, 93.75], [10, 90]]);
+  const field = runOnAClock({ from: 9, to: 10, startSeconds: 93.75, pieceEndSeconds: index => ends.get(index) });
+  field.work(1000);
+  field.report(3);
+  field.close(9);
+  field.work(1000);
+  field.report(6);
+  field.close(10);
+  assert.equal(field.run.speedReading, null, "no film between the start and either end");
+  assert.deepEqual(field.readings, []);
+});
+
+test("a piece named closed with no working time since the last reading gives none, and the next is measured from where the last reading was", { todo: "AC-4" }, () => {
+  const ends = new Map([[4, 10], [5, 20]]);
+  const field = runOnAClock({ from: 4, to: 5, startSeconds: 0, pieceEndSeconds: index => ends.get(index) });
+  // #4 is named while the input read still waits: all of its second is idle.
+  field.run.inputWaitBegins();
+  field.work(1000);
+  field.close(4);
+  field.run.inputWaitEnds();
+  assert.equal(field.run.speedReading, null, "film made over no working time is not a speed");
+  field.work(2000);
+  field.close(5);
+  assert.equal(field.run.speedX, 10, "20 s of film from the start over the 2 s of work there has been");
+  assert.equal(field.readings.length, 1);
+});
+
+test("the first reading of a run is logged once, with the film and the time it is made of", { todo: "AC-6" }, () => {
+  const lines = [];
+  const field = runOnAClock({ from: 9, to: 9, startSeconds: 93.75, pieceEndSeconds: index => FIELD_END.get(index),
+    logger: { info: line => lines.push(line), warn: line => lines.push(line) } });
+  field.wait(400);
+  field.work(1284);
+  field.close(9);
+  const said = lines.filter(line => line.includes("first speed reading"));
+  assert.equal(said.length, 1, lines.join("\n"));
+  assert.match(said[0], new RegExp(
+    `^encode-run #9\\.\\.#9 on ${FIELD_ADDRESS}: first speed reading 8\\.11x — 10\\.417s of film to the close of #9 ` +
+    "over 1\\.284s of its own work, 0\\.4(?:00)?s waiting for input or stopped left out$"));
+});
+
+test("a run that publishes three pieces logs its first reading once, for the first piece", { todo: "AC-6" }, () => {
+  const lines = [];
+  const ends = new Map([[4, 40], [5, 50], [6, 60]]);
+  const field = runOnAClock({ from: 4, to: 6, startSeconds: 30, pieceEndSeconds: index => ends.get(index),
+    logger: { info: line => lines.push(line), warn: line => lines.push(line) } });
+  for (const index of [4, 5, 6]) {
+    field.work(2000);
+    field.close(index);
+  }
+  assert.equal(field.readings.length, 3, "every piece is a reading");
+  const said = lines.filter(line => line.includes("first speed reading"));
+  assert.equal(said.length, 1, lines.join("\n"));
+  assert.match(said[0], /to the close of #4 over 2\.000s of its own work/);
 });

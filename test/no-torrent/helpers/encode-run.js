@@ -23,6 +23,13 @@ const MEASURED_STEP_MS = 1000;
 const MEASURED_STEPS = 3;
 
 /**
+ * What a run's measurement has said so far: the film end of every piece named
+ * and not yet published (the run asks for it when it publishes), where the
+ * last piece ended, and when it was named. @type {WeakMap<EncodeRun, { queue: number[], end: number, namedAt: number }>}
+ */
+const measurements = new WeakMap();
+
+/**
  * The clock each run built by `startRunOn` reads: standing while a measurement
  * is said, the wall clock otherwise. @type {WeakMap<EncodeRun, { at: number | null }>}
  */
@@ -56,7 +63,8 @@ export function measureSpeed(run, speedX, clock = null, waitedMs = 0) {
     wall.at = Math.max(
       Date.now() - (MEASURED_STEP_MS + waitedMs) * MEASURED_STEPS,
       run.startedAt,
-      run.speedReading?.at ?? Number.NEGATIVE_INFINITY
+      run.speedReading?.at ?? Number.NEGATIVE_INFINITY,
+      measurements.get(run)?.namedAt ?? Number.NEGATIVE_INFINITY
     );
     measureSpeed(run, speedX, wall, waitedMs);
     wall.at = null;
@@ -64,6 +72,12 @@ export function measureSpeed(run, speedX, clock = null, waitedMs = 0) {
   }
   const { stdout, stdio } = run.process;
   let produced = run.progress.processedSeconds - run.progress.startPositionSeconds;
+  // Where each piece ends on the output's timeline is what the run is told by
+  // its owner when it publishes the piece (`pieceEndSeconds`); a measurement
+  // says it for the pieces it names, in the order they are named.
+  const said = measurements.get(run) ?? { queue: [], end: run.progress.startPositionSeconds, namedAt: -Infinity };
+  measurements.set(run, said);
+  run.pieceEndSeconds = () => said.queue.shift() ?? Number.NaN;
   for (let step = 0; step < MEASURED_STEPS; step += 1) {
     if (waitedMs > 0) {
       run.inputWaitBegins();
@@ -72,6 +86,9 @@ export function measureSpeed(run, speedX, clock = null, waitedMs = 0) {
     }
     clock.at += MEASURED_STEP_MS;
     produced += (speedX * MEASURED_STEP_MS) / 1000;
+    said.end += (speedX * MEASURED_STEP_MS) / 1000;
+    said.queue.push(said.end);
+    said.namedAt = clock.at;
     say(stdout, `out_time_ms=${Math.round(produced * 1_000_000)}\n`);
     say(stdio[3], `measured-${step}\n`);
   }

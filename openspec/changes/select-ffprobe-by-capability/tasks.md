@@ -22,7 +22,9 @@ Acceptance criteria (ids used by the tests):
       `server.js` to the `probePackets` port; add the `run` over `spawn` with a timeout.
 - [ ] 1.4 `docs/layout.md` (entry, composition and media sections) names the module; a changeset.
 - [ ] 1.5 Remove the `todo` markers of `test/no-torrent/ffprobe-selection.test.js` and of the two
-      cases of `test/no-torrent/ffprobe-packets-local.test.js` in the code commit.
+      cases of `test/no-torrent/ffprobe-packets-local.test.js` in the code commit. After it the two
+      `ffprobe-packets-local` cases pass where a qualifying ffprobe exists, are skipped with the
+      reason where none does and `CI` is not set, and fail where `CI` is set and none does.
 
 ## 2. Test plan
 
@@ -33,9 +35,10 @@ Files in scope and the tests that cover each:
 | File | Tests |
 | --- | --- |
 | `services/media/ffprobe-selection.js` (new) | `test/no-torrent/ffprobe-selection.test.js` (unit, AC-20-B1) |
-| `services/media/probe-packets.js` | the last case of `ffprobe-selection.test.js` (AC-20-B1); `ffprobe-packets-local.test.js` (a real ffprobe on a generated file), which now takes its binary from `test/no-torrent/helpers/ffprobe-binary.js` (`chosenFfprobe()`, one `selectFfprobe` over the real bundled binary and PATH, made once per process) and is marked `todo` until the code exists |
+| `services/media/probe-packets.js` | the last case of `ffprobe-selection.test.js` (AC-20-B1); `ffprobe-packets-local.test.js` (a real ffprobe on a generated file), which now takes its binary from `test/no-torrent/helpers/ffprobe-binary.js` (`ffprobeForTest()`: one `selectFfprobe` over the real bundled binary and PATH, made once per process; no qualifying binary means the case is skipped with a logged reason, or fails where `CI` is set) and is marked `todo` until the code exists |
+| `test/no-torrent/helpers/ffprobe-binary.js` (`decideFfprobe`) | `test/no-torrent/ffprobe-prerequisite.test.js` (unit, AC-20-B1, passing: the helper is test code) |
 | `test/no-torrent/auto-quality-step.test.js` | itself, the fix (AC-20-A) |
-| `test/no-torrent/avi-reordered-local.test.js` and a new fixture | itself, the fix (AC-20-B2) |
+| `test/no-torrent/avi-reordered-local.test.js`, `test/no-torrent/fixtures/avi-xvid-bframes.avi` and its sidecar | itself, the fix (AC-20-B2) |
 
 Files out of scope:
 
@@ -125,20 +128,31 @@ a `-sections` print larger than a buffer (the output of every measured build is 
    to 24 of 25 runs failing); after the fix 25 of 25 runs pass; with the old fixture restored in place of the new one, 7 of 26 cases
    fail on the precondition assertion in 6 of 6 runs.
 5. Exit: `npm test` in this repository.
-6. **Unknown, for the coordinator.** The test writer's Mac has no `ffprobe` on PATH, and the
-   bundled darwin-arm64 binary is 4.4.1 (and, in the shared `node_modules` used here, not
-   executable). With the code of part 1, `chosenFfprobe()` in `ffprobe-packets-local.test.js`
-   therefore fails on such a Mac with the proxy's one-line message (shown in a run of a throwaway
-   implementation: both candidates named, `stream_side_data` not checked), and the full `npm test`
-   does not exit 0 there until an ffprobe that qualifies is on PATH. AC-20 on the Mac needs that
-   prerequisite installed, or a decision that the two cases are declared skipped when the
-   prerequisite is absent. The tests do not decide it.
+6. **A host with no qualifying ffprobe** (decided by the coordinator, 2026-11-10). The test writer's
+   Mac has no `ffprobe` on PATH, and the bundled darwin-arm64 binary is 4.4.1. A check that needs
+   the selected ffprobe (the two cases of `ffprobe-packets-local.test.js`, and any later one)
+   calls `ffprobeForTest()`. When `selectFfprobe` finds no qualifying binary the check is skipped
+   with `t.skip(reason)`: the reason names the missing prerequisite (an ffprobe whose
+   `-sections` names `stream_side_data`) and carries the one-line message of
+   `FfprobeUnavailableError`, which `selectFfprobe` has also logged. Never silently. Where `CI` is
+   set (a non-empty value; CHOSEN, not measured) the same outcome throws, so the case fails and a
+   CI runner cannot hide a regression of the selection behind a skip. The guard is tested by
+   `ffprobe-prerequisite.test.js` (4 passing cases over `decideFfprobe`): a chosen binary is used
+   with or without `CI`; no binary and no `CI` gives a skip whose reason holds `missing
+   prerequisite`, `stream_side_data` and the selection's line; no binary with `CI` throws; an empty
+   `CI` is not `CI`. Proof that the guard fails on bad input (2026-11-10): with the `CI` throw
+   removed the CI case fails (1 of 4), and with the reason cut to the word `skipped` the reason
+   case fails (1 of 4). End to end with a throwaway `selectFfprobe` on this Mac: without `CI` both
+   cases are skipped with that reason (`skipped 2`, `fail 0`).
 
-## 3. Group B2 (test-only), not done in the test commit
+## 3. Group B2 (test-only), done
 
-- [ ] 3.1 On a host whose ffmpeg has libxvid (the CI Linux runner or the Home Assistant host),
-      run: `ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=64x64:rate=10 -t 3 -c:v libxvid -bf 2 avi-xvid-bframes.avi`;
-      commit the file to `test/no-torrent/fixtures/` with `avi-xvid-bframes.avi.md` holding the
-      command, `ffmpeg -version` first line and build, and `sha256sum` of the file.
-- [ ] 3.2 Change the case in `avi-reordered-local.test.js` so that `libxvid` reads that file and
-      the other codecs encode as today (AC-20-B2); the case must pass on the Mac.
+- [x] 3.1 The AVI was made on a Linux GitHub runner (`ubuntu-26.04`, 2026-11-10) by a throwaway probe
+      branch with its own workflow, never on the PR branch (the branch, its run and its worktree
+      are deleted), with the binary of `ffmpeg-static@5.3.0` the tests use there. Committed in
+      `test/no-torrent/fixtures/avi-xvid-bframes.avi` (35892 bytes, sha256
+      `01dfde0f...6e36`) with `avi-xvid-bframes.avi.md` (command, ffmpeg version and build,
+      sha256). `.gitattributes` marks `*.avi` in that folder binary.
+- [x] 3.2 The `libxvid` case copies that file instead of encoding; the other codecs encode as
+      today. Solo run on the Mac: 25 of 25 pass (4 cases each). Linux: it does not need a libxvid
+      encoder; the CI run of the pull request is the check.

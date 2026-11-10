@@ -1,8 +1,12 @@
 /**
  * @file The ffprobe binary a check that runs a real ffprobe uses: the one the
  * proxy would choose at startup, by `selectFfprobe`, from the bundled binary and
- * `ffprobe` on PATH. The choice is made once per test process. A host with no
- * qualifying ffprobe fails the check with the proxy's own one-line message.
+ * `ffprobe` on PATH. The choice is made once per test process.
+ *
+ * A host with no qualifying ffprobe cannot run such a check: the check is skipped,
+ * with a reason that names the missing prerequisite and carries the proxy's own
+ * one-line message, never silently. Where `CI` is set the skip is a failure, so a
+ * CI runner cannot hide a regression of the selection behind a skip.
  */
 
 import { spawn } from "node:child_process";
@@ -41,4 +45,36 @@ export function chosenFfprobe() {
   chosen ??= import(SELECTION).then(({ selectFfprobe, ffprobeCandidates }) =>
     selectFfprobe({ candidates: ffprobeCandidates({ bundledBinary: bundledBinary() }), run, logger: console }));
   return chosen;
+}
+
+/**
+ * What a check that needs ffprobe does with the outcome of the selection.
+ *
+ * @param {{ chosen: { binary: string } | null, missing: string | null, env?: Record<string, string | undefined> }} outcome
+ *   `missing` is the message of `FfprobeUnavailableError` when no candidate qualified.
+ *   `env.CI` counts as set when it is a non-empty string (GitHub Actions sets `true`);
+ *   that rule is CHOSEN, not measured.
+ * @returns {{ binary: string } | { skip: string }}
+ * @throws {Error} When no candidate qualified and `CI` is set.
+ */
+export function decideFfprobe({ chosen, missing, env = process.env }) {
+  if (chosen) return { binary: chosen.binary };
+  const reason = `missing prerequisite: an ffprobe whose -sections names stream_side_data (${missing})`;
+  if (env.CI) throw new Error(`${reason}; a check that needs it is not skipped where CI is set`);
+  return { skip: reason };
+}
+
+/**
+ * The ffprobe binary for a check, or the reason the check is skipped.
+ *
+ * @param {{ env?: Record<string, string | undefined> }} [options]
+ * @returns {Promise<{ binary: string } | { skip: string }>}
+ */
+export async function ffprobeForTest({ env = process.env } = {}) {
+  try {
+    return decideFfprobe({ chosen: await chosenFfprobe(), missing: null, env });
+  } catch (error) {
+    if (error?.name !== "FfprobeUnavailableError") throw error;
+    return decideFfprobe({ chosen: null, missing: error.message, env });
+  }
 }

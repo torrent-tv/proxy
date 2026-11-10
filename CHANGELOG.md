@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.88
+
+### Patch Changes
+
+- Test helpers can no longer wait a fixed time without a marked reason, so tests wait for events instead.
+
 ## 2.107.87
 
 ### Patch Changes

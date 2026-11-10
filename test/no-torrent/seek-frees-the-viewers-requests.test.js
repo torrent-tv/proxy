@@ -28,7 +28,8 @@ import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { waitForSessionFile } from "../../services/server/transcode-session-files.js";
 import { fmp4Format } from "../../services/encode/segment-formats/fmp4.js";
-import { settle } from "./helpers/wait.js";
+import { settle, within } from "./helpers/wait.js";
+import { untilWatchIsLive } from "./helpers/store-watch.js";
 import { managerWithOwnStore } from "./helpers/manager.js";
 import { outputOn } from "./helpers/output.js";
 
@@ -38,8 +39,8 @@ const STEP_ID = "3333333344445555";
 const STEP_KEY = "seek-frees:fmt=fmp4:grid=uniform:video-only:v=0/libx264/960x540";
 const SOUND_ID = "4444444455556666";
 const SOUND_KEY = "seek-frees:fmt=fmp4:grid=uniform:audio-only:a=0/0/aac";
-/** Long enough that running out of it is a failure and never the measurement. */
-const HOLD_MS = 30_000;
+/** A wait that has not ended by then is a failure of the check, named, and never the measurement. */
+const BACKSTOP_MS = 10_000;
 
 /**
  * Wait until the store really holds this many waits on an output.
@@ -91,10 +92,7 @@ function filmWithThreeOutputs() {
  * @returns {Promise<{ kind: string }>}
  */
 function holdFor(manager, consumerId, sessionId = SESSION_ID) {
-  return waitForSessionFile(manager.serving, sessionId, "segment-00000.mp4", {
-    holdMs: HOLD_MS,
-    consumerId
-  });
+  return waitForSessionFile(manager.serving, sessionId, "segment-00000.mp4", { consumerId });
 }
 
 test("a seek frees the seeker's requests on every output they watch", async (t) => {
@@ -119,11 +117,9 @@ test("a seek frees the seeker's requests on every output they watch", async (t) 
   await untilWaitsAreRegistered(manager, STEP_KEY, 1);
   await untilWaitsAreRegistered(manager, SOUND_KEY, 1);
 
-  const startedAt = Date.now();
   assert.equal(manager.viewerRequests.requestSeek(SESSION_ID, 50, "viewer-a"), true);
 
-  const released = await Promise.all([onPicture, onStep, onSound]);
-  const heldMs = Date.now() - startedAt;
+  const released = await within(Promise.all([onPicture, onStep, onSound]), BACKSTOP_MS, "the seeker's three requests to be freed");
 
   for (const [index, answer] of released.entries()) {
     assert.equal(
@@ -132,7 +128,6 @@ test("a seek frees the seeker's requests on every output they watch", async (t) 
       `the request on output ${index} was made for a position its viewer has left`
     );
   }
-  assert.ok(heldMs < HOLD_MS / 2, `they were freed after ${heldMs}ms, which is the hold running out`);
 
   // A grace before asserting that something did NOT happen: it can only ever
   // pass too easily, never fail by luck.
@@ -150,17 +145,18 @@ test("the request that was kept is served when its segment appears", async (t) =
     }
   });
 
+  await untilWatchIsLive(manager.segmentStore, OUTPUT_KEY, session.dirPath);
   const seeker = holdFor(manager, "viewer-a");
   const stayer = holdFor(manager, "viewer-b");
   await untilWaitsAreRegistered(manager, OUTPUT_KEY, 2);
   manager.viewerRequests.requestSeek(SESSION_ID, 50, "viewer-a");
-  assert.equal((await seeker).kind, "superseded");
+  assert.equal((await within(seeker, BACKSTOP_MS, "the seeker's request to be freed")).kind, "superseded");
 
   // The piece the viewer who stayed was waiting for, written as a run writes
   // it: under its served name, which is the whole of what says it is closed.
   await writeFile(path.join(session.dirPath, fmp4Format.segmentFileName(0)), Buffer.alloc(256, 0x5a));
 
-  const answer = await stayer;
+  const answer = await within(stayer, BACKSTOP_MS, "the kept request to be served");
 
   assert.equal(answer.kind, "file", `a wake is a re-check, not a cancellation — got ${answer.kind}`);
   for await (const chunk of answer.stream) assert.ok(chunk.length > 0);

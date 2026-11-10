@@ -172,6 +172,30 @@ migration commits add headings but change no version, so they are not released.
   runner and the tests 39 s on a Mac. Proven on bad input: with a limit of 3 s and an `npm` that sleeps,
   the step logs the error, exits 124 and leaves no child process.
 
+### Copy and format checks of the changesets (2026-11-10, found by the acceptance check)
+
+- Measured defect: `proxy` released the note of one changeset in two versions (2.107.82 and
+  2.107.83). A branch cut from the old tip of `main` in the 22 s between a merge and the force-push
+  of `version` kept the old commit; a plain `git rebase origin/main` kept it too, because its patch no
+  longer equals the rewritten commit (the version files differ), and it added the changeset again. The
+  step "Pull request carries no copy of a commit on main" compared only `origin/main..HEAD` with
+  `HEAD..origin/main`, which is empty once the branch sits on top of `main`.
+- A check of the path (`git log origin/main --diff-filter=A -- <changeset>`) does not see it either:
+  the rewritten commit never holds the changeset, so `main` has never added that path (measured on
+  `.changeset/docs-ttv-336-link-shared-rules.md`). The step compares each commit of the pull request
+  with the whole history of `main` by author e-mail, author time and subject, which a rewrite and a
+  rebase keep. `bash scripts/check.sh copies <base> <head>`.
+- Measured defect: a changeset in the old `- **Fix**: ...` format was released as
+  `- - **Fix**: ...` (proxy 2.107.85). The step "Changesets of the pull request are one plain
+  sentence" (`bash scripts/check.sh changeset-format <base> <head>`) refuses a changeset whose text
+  starts like a list, heading, bold label, quote or code, has more than one paragraph, has no text, or
+  has text and no package. An empty changeset (`changeset add --empty`) is allowed only where
+  `CHANGESET_EMPTY_ALLOWED=yes` (ha-addon). The rule is in `torrent-tv/workflows` CONTRIBUTING.md,
+  "Versions and releases", item 1.
+- Proof on bad input: `bash scripts/check.sh changesets-selftest` (the step "Changeset checks fail on
+  bad input") builds the exact copy case in a scratch repository, shows that the earlier range
+  comparison passes it and that `copies` fails it, and runs each format rule on a bad and a good file.
+
 ## Blockers and unknowns
 
 1. Not run before the merge: `version` on this repository's `main` (it ran in a scratch clone of this

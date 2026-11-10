@@ -331,19 +331,17 @@ jobs:
         if: github.event_name == 'pull_request' && matrix.head
         run: npx --no-install changeset status --since=origin/main
       - name: Pull request carries no copy of a commit on main
-        # A rewrite of main leaves a branch made before it with the old copies of the
-        # commits; a plain rebase onto main would bring their changesets back.
+        # The release rewrites main; a branch cut from the old tip in the seconds before the
+        # rewrite still holds the old commit, and a plain rebase puts it back on top of main
+        # with its already released changeset (torrent-tv/meta#336). Every commit of the pull
+        # request is compared with the whole history of main.
         if: github.event_name == 'pull_request' && matrix.head
-        run: |
-          copies=$(comm -12 \
-            <(git log --format='%ae %at %s' "origin/main..$HEAD_SHA" | sort) \
-            <(git log --format='%ae %at %s' "$HEAD_SHA..origin/main" | sort))
-          if [ -n "$copies" ]; then
-            echo "::error::the pull request carries commits that main holds under other hashes:"
-            printf '%s\n' "$copies"
-            echo "Run: git fetch origin && git rebase --fork-point origin/main"
-            exit 1
-          fi
+        run: bash scripts/check.sh copies origin/main "$HEAD_SHA"
+      - name: Changesets of the pull request are one plain sentence
+        if: github.event_name == 'pull_request' && matrix.head
+        run: bash scripts/check.sh changeset-format origin/main "$HEAD_SHA"
+      - name: Changeset checks fail on bad input
+        run: bash scripts/check.sh changesets-selftest
       - name: Commits do not change an existing changeset
         # The rewrite replays each commit onto a parent that already lost the
         # changesets of the commits before it; a later edit of one would conflict.

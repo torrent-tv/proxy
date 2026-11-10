@@ -64,3 +64,7 @@ one and its first release run.
       `torrent-tv-release[bot]` with a header ending in `#ttv-386` or `#ttv-387` and only
       `package.json`, `package-lock.json` and `.changeset/*.md`, and every `force_push` has actor
       `torrent-tv-release[bot]`.
+- [x] 2.10 The copy check compares each commit of a pull request with the whole history of `main`,
+      and a changeset must be one plain sentence. Check: `bash scripts/check.sh changesets-selftest`
+      exits 0 (the earlier range comparison passes the copy, `copies` fails it; each format rule fails
+      its bad input), and the step "Changeset checks fail on bad input" passes in `Checks`.

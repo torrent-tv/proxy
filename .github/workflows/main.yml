@@ -25,6 +25,10 @@ jobs:
   checks:
     name: Checks
     runs-on: ubuntu-26.04
+    # The commit check lists a pull request's commits through the API.
+    permissions:
+      contents: read
+      pull-requests: read
     # A newer push to a pull request makes its older checks pointless; every push to
     # main gets a group of its own, so no check of main is ever replaced.
     concurrency:
@@ -76,15 +80,27 @@ jobs:
           path: ${{ runner.temp }}/apt-archives
           key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
       - name: Commit messages follow Conventional Commits
-        uses: torrent-tv/.github/actions/check-commits@main
+        uses: wagoid/commitlint-github-action@v6.2.1
       - name: No secrets in commits
         uses: torrent-tv/.github/actions/check-secrets@main
       - name: Branch name names a task
-        uses: torrent-tv/.github/actions/check-branch@main
-      - name: Shell scripts and Dockerfiles use LF
-        uses: torrent-tv/.github/actions/check-line-endings@main
+        if: github.event_name == 'pull_request'
+        run: '[[ "$GITHUB_HEAD_REF" =~ ^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)/ttv-[1-9][0-9]*-[a-z0-9][a-z0-9.-]*$ ]]'
+      # actionlint 1.7.12 predates three documented things; drop each ignore once
+      # actionlint knows it: the `queue` key of `concurrency` (queue: max keeps every
+      # pending run), the `ubuntu-26.04` runner label, and the `client-id` input of
+      # actions/create-github-app-token, which replaces `app-id`.
+      # The runner passes `args` to docker without shell quoting, so a space inside a
+      # pattern is written `\s` and a quote `.` (each pattern is a regular expression).
       - name: Workflows are valid
-        uses: torrent-tv/.github/actions/check-workflows@main
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: >-
+            -color
+            -ignore unexpected\skey\s.queue.\sfor\s.concurrency.\ssection
+            -ignore label\s.ubuntu-26\.04.\sis\sunknown
+            -ignore input\s.client-id.\sis\snot\sdefined\sin\saction\s.actions/create-github-app-token@
+            -ignore missing\sinput\s.app-id.\swhich\sis\srequired\sby\saction\s.actions/create-github-app-token@
       - name: Pull request adds a changeset
         uses: torrent-tv/.github/actions/check-changesets@main
       # npm ci fetches three things outside the npm registry, with no retry of its

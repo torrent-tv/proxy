@@ -1,19 +1,27 @@
 #!/bin/sh
-# Rejects a commit whose header does not follow Conventional Commits or does not
-# end with a task reference: <type>(<scope>)!: <subject> #ttv-<issue>.
-# Enable once per clone: git config core.hooksPath .githooks
-header=$(head -n 1 "$1")
-case "$header" in
-  Merge\ *|fixup!\ *|squash!\ *) exit 0 ;;
-esac
-if ! printf '%s\n' "$header" | grep -Eq '^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([^()]+\))?!?: [^ ].*$'; then
-  echo "commit-msg: \"$header\" is not a Conventional Commits header" >&2
-  echo "  <type>(<scope>)!: <subject> #ttv-<issue>; type: feat fix perf refactor docs test build ci chore style revert" >&2
+# Rejects a commit message that the Checks step (wagoid/commitlint-github-action with
+# commitlint.config.mjs) would reject for its header or line lengths. No commit is
+# exempt: merges, reverts, fixups and workflow commits included.
+#   <type>(<scope>)!: <subject> #ttv-<issue>   at most 100 characters; the subject
+#   starts with a lower-case letter (text in `...`, "..." or '...' aside) and does
+#   not end with "."; no body or footer line longer than 100 characters.
+# Enable once per clone: git config core.hooksPath .githooks (githooks in the
+# shared actions repository). Every copy changes together.
+msg=$(sed -e '/^# -\{24\} >8 -\{24\}$/,$d' -e '/^#/d' "$1")
+header=$(printf '%s\n' "$msg" | head -n 1)
+if ! printf '%s\n' "$header" | grep -Eq '^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([^()]+\))?!?: .+ #ttv-[1-9][0-9]*$'; then
+  echo "commit-msg: \"$header\" is not <type>(<scope>)!: <subject> #ttv-<issue>" >&2
+  echo "  type: feat fix perf refactor docs test build ci chore style revert; e.g. fix(subtitles): keep the track #ttv-12" >&2
   exit 1
 fi
-if ! printf '%s\n' "$header" | grep -Eq '[[:space:]]#ttv-[1-9][0-9]*$'; then
-  echo "commit-msg: \"$header\" does not end with a task reference" >&2
-  echo "  end the header with #ttv-<issue number in torrent-tv/meta>, e.g. fix(subtitles): keep the track #ttv-12" >&2
+subject=$(printf '%s\n' "$header" | sed -E 's/^[a-z]+(\([^()]+\))?!?: //; s/ #ttv-[1-9][0-9]*$//')
+case "$subject" in *.) echo "commit-msg: the subject ends with \".\"" >&2; exit 1 ;; esac
+if printf '%s\n' "$subject" | sed -E "s/\`[^\`]*\`//g; s/\"[^\"]*\"//g; s/'[^']*'//g; s/^ +//" | grep -q '^[A-Z]'; then
+  echo "commit-msg: the subject starts with a capital letter; start it with a lower-case word" >&2
+  exit 1
+fi
+if printf '%s\n' "$msg" | awk 'length($0) > 100 { found = 1 } END { exit !found }'; then
+  echo "commit-msg: a line is longer than 100 characters (header, body or footer)" >&2
   exit 1
 fi
 exit 0

@@ -110,6 +110,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @property {number}  port           - Preferred listen port.
  * @property {boolean} transcodeAudio - Whether HLS audio transcoding is enabled.
  * @property {string}  ffmpegBin      - Path to the ffmpeg executable.
+ * @property {string}  ffprobeBin     - Path to the ffprobe executable chosen at startup (`services/media/ffprobe-selection.js`).
  * @property {number}  [memoryBytes]  - Per-torrent budget for pieces held in memory (undefined = store default).
  * @property {string}  [segmentFormat] - HLS output container: "fmp4" (default) or "mpegts".
  * @property {string}  [stateDir] - Where to keep what this host has measured about itself.
@@ -122,7 +123,7 @@ function buildPortCandidates(startPort, maxAttempts = 51) {
  * @returns {Promise<{ app: import("fastify").FastifyInstance, port: number }>}
  */
 export async function startProxyServer({
-  host, port, transcodeAudio, ffmpegBin, memoryBytes, segmentFormat, stateDir, onSubtitleCues, onChaptersChanged, diagnostics, budgetPolicy,
+  host, port, transcodeAudio, ffmpegBin, ffprobeBin, memoryBytes, segmentFormat, stateDir, onSubtitleCues, onChaptersChanged, diagnostics, budgetPolicy,
   deliverySink = false,
   // Whether a memory high-water earns a heap snapshot (`--heap-snapshots`).
   heapSnapshots = false,
@@ -324,7 +325,7 @@ export async function startProxyServer({
     },
     packetMemory: (sourceKey, fileIndex) => indexMemory.forFile(sourceKey, fileIndex),
     readProbe: request => probeReads.read(request),
-    probePackets,
+    probePackets: request => probePackets({ ...request, ffprobeBin }),
     baseUrl: () => localBaseUrl,
     observeWait: (sourceKey, event, fields) => waitTrace.source(sourceKey, event, fields),
     reads: { revision: (...a) => mediaReads.revision(...a), memoryRevision: () => mediaReads.memoryRevision(),

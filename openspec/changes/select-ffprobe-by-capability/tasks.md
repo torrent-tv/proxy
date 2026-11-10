@@ -1,6 +1,6 @@
 # Tasks: select-ffprobe-by-capability
 
-Parent: torrent-tv/meta#336, stage 6 (proxy), AC 20. Branch `fix/ttv-336-stable-tests`.
+Parent: torrent-tv/meta#336, stage 6 (proxy), AC 20. Branch `fix/ttv-336-ffprobe-by-capability`.
 Acceptance criteria (ids used by the tests):
 
 - **AC-20-A**: `auto-quality-step.test.js` passes 25 of 25 solo runs on the Mac and on the CI
@@ -13,15 +13,15 @@ Acceptance criteria (ids used by the tests):
 
 ## 1. Code (implementer)
 
-- [ ] 1.1 `services/media/ffprobe-selection.js`: `selectFfprobe`, `ffprobeCandidates`,
+- [x] 1.1 `services/media/ffprobe-selection.js`: `selectFfprobe`, `ffprobeCandidates`,
       `FfprobeUnavailableError` (design.md, Decision 3).
-- [ ] 1.2 `services/media/probe-packets.js`: remove `bundledProbe()` and the default of
+- [x] 1.2 `services/media/probe-packets.js`: remove `bundledProbe()` and the default of
       `ffprobeBin`; throw `TypeError` when it is missing.
-- [ ] 1.3 `bin/cli.js`: build the candidates from `@ffprobe-installer/ffprobe`, make the choice
+- [x] 1.3 `bin/cli.js`: build the candidates from `@ffprobe-installer/ffprobe`, make the choice
       once before `startProxyServer`, pass `ffprobeBin` through `startProxyServer` and
       `server.js` to the `probePackets` port; add the `run` over `spawn` with a timeout.
-- [ ] 1.4 `docs/layout.md` (entry, composition and media sections) names the module; a changeset.
-- [ ] 1.5 Remove the `todo` markers of `test/no-torrent/ffprobe-selection.test.js` and of the two
+- [x] 1.4 `docs/layout.md` (entry, composition and media sections) names the module; a changeset.
+- [x] 1.5 Remove the `todo` markers of `test/no-torrent/ffprobe-selection.test.js` and of the two
       cases of `test/no-torrent/ffprobe-packets-local.test.js` in the code commit. After it the two
       `ffprobe-packets-local` cases pass where a qualifying ffprobe exists, are skipped with the
       reason where none does and `CI` is not set, and fail where `CI` is set and none does.

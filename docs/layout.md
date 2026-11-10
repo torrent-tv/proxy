@@ -9,7 +9,9 @@ import is enforced by the `overrides` in `biome.json`.
 ## Entry and composition
 
 - `bin/cli.js` — CLI entry. Resolves `ffmpegBin` (`--ffmpeg-bin`, else the
-  bundled `ffmpeg-static`, else `ffmpeg` on `PATH`) and hands `transport/` the
+  bundled `ffmpeg-static`, else `ffmpeg` on `PATH`), chooses `ffprobeBin` once
+  before `startProxyServer` (`services/media/ffprobe-selection.js`; a host with
+  no qualifying ffprobe stops with `FfprobeUnavailableError`), and hands `transport/` the
   memory reading and the rule for which captures are kept. `bin/thread-pool.js`
   sets the size of libuv's thread pool before anything blocks on it.
 - `server.js` — the composition root. Creates Fastify and its hooks (through
@@ -89,7 +91,10 @@ The request and response fields the page relies on:
     `readingInterval`, `segmentReading`; pure), `SegmentSourceRanges.js` (the one
     resolver of a segment's source byte ranges, forgotten with its source),
     `WorkTagsReport.js` (the work-tags log, once per file), `ChapterOrchestrator`,
-    `audio-inventory.js`, `ffmpeg-banner.js`.
+    `audio-inventory.js`, `ffmpeg-banner.js`, `ffprobe-selection.js` (the one
+    owner of which ffprobe binary is used: the first candidate, the bundled one
+    then `ffprobe` on `PATH`, whose `-sections` names `stream_side_data`;
+    `probe-packets.js` takes the chosen binary and never picks one).
 
 ## `services/torrent/`
 

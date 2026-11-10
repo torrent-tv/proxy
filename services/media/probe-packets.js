@@ -1,20 +1,12 @@
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
-import { accessSync, constants } from "node:fs";
 import { ffprobeRecord } from "./container/ffprobe-record.js";
 
-const require = createRequire(import.meta.url);
-function bundledProbe() {
-  try {
-    const binary = require("@ffprobe-installer/ffprobe").path;
-    accessSync(binary, constants.X_OK);
-    return binary;
-  }
-  catch { return "ffprobe"; }
-}
-
-/** Read only the strict available-byte endpoint; missing reads abort through ProbeRequests. */
-export function probePackets({ url, statement, signal, onRecord = () => {}, ffprobeBin = bundledProbe(), spawnProcess = spawn }) {
+/**
+ * Read only the strict available-byte endpoint; missing reads abort through ProbeRequests.
+ * `ffprobeBin` is the binary chosen once at startup (`ffprobe-selection.js`); this function never chooses one.
+ */
+export function probePackets({ url, statement, signal, onRecord = () => {}, ffprobeBin, spawnProcess = spawn }) {
+  if (typeof ffprobeBin !== "string" || ffprobeBin === "") throw new TypeError("probePackets needs the ffprobe binary chosen at startup.");
   if (!["streams", "packets"].includes(statement)) throw new TypeError("Unknown ffprobe statement.");
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Probe cancelled."));
   onRecord({ kind: "scan-start" });

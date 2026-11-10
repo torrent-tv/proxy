@@ -86,12 +86,23 @@ statement asks for the entries `stream_side_data=` (`probe-packets.js` line 28).
   fixture (`fs.writeFile` of `segment-<NNNNN>.mp4`) makes the assertion fail in 7 of 26 cases,
   6 of 6 runs (measured by the test writer on the Mac, 2026-11-10), including the three cases that
   passed without the store knowing a piece.
-- **B2.** The libxvid case reads `test/no-torrent/fixtures/avi-xvid-bframes.avi`, a libxvid-made
-  AVI of at most a few hundred kilobytes, instead of encoding. Beside it, a text file
-  `avi-xvid-bframes.avi.md` records the generating command, the ffmpeg version and build that ran
-  it, and the file's sha256. The case reads and compares as today (index removed, presentation
-  order retained, framemd5 equal to ffmpeg's own). Whether built-in `mpeg4 -vtag XVID` is
-  equivalent is **unknown** and not assumed. The generating command is the one the case ran
-  (`-f lavfi -i testsrc2=size=64x64:rate=10 -t 3 -c:v libxvid -bf 2`) on a host whose ffmpeg has
-  libxvid. **The test writer's Mac has no libxvid encoder, no Linux ffmpeg and no container
-  runtime, so the fixture is not made in this change's test commit; see Tasks 3.**
+- **B2.** The libxvid case copies `test/no-torrent/fixtures/avi-xvid-bframes.avi`, a libxvid-made
+  AVI, instead of encoding. Beside it `avi-xvid-bframes.avi.md` records the generating command
+  (`-f lavfi -i testsrc2=size=64x64:rate=10 -t 3 -c:v libxvid -bf 2`), the ffmpeg version and the
+  file's sha256. **Fact** (probe run on a Linux runner, 2026-11-10; ffmpeg `7.0.2-static` of
+  `ffmpeg-static@5.3.0`, which lists the encoder `libxvid`): the file is 35892 bytes, 28
+  pictures `IBBPBPBBPBBPIBBPBPBBPBPBIBBP`, stream FOURCC `xvid` (lower case), and the
+  case's own steps on it (index removed, packets reordered, framemd5 through the Matroska
+  input against ffmpeg's own) find the presentation order reordered and equal hashes. On the same
+  runner the built-in `mpeg4 -bf 2 -vtag XVID` gave 53604 bytes, 30 pictures
+  `IBBPBBPBBPBBIBBPBBPBBPBBIBBPBP`, FOURCC `XVID`, and the same two results (reordered, hashes
+  equal); plain `mpeg4 -bf 2` gave the same size, 53604 bytes, with FOURCC `FMP4`. So for what the
+  case asserts the built-in encoder passes too, but its stream is not the same stream: another
+  picture count and sequence and another FOURCC spelling. The fixture stays libxvid-made, as
+  specified, because the case exists for the libxvid stream.
+- **A host with no qualifying ffprobe.** A real-ffprobe check is skipped with a logged reason when
+  the selection finds none, and fails where `CI` is set (tasks.md 2.4 item 6). `ffprobeForTest()`
+  in `test/no-torrent/helpers/ffprobe-binary.js` owns that rule; it imports the proxy's own
+  `selectFfprobe`, so the checks and production choose the same way. The rule for `CI`
+  (non-empty) is CHOSEN, not measured. Unknown: a developer who exports `CI=false` gets the
+  failing behaviour.

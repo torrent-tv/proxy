@@ -77,6 +77,8 @@ jobs:
           key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
       - name: Commit messages follow Conventional Commits
         uses: torrent-tv/.github/actions/check-commits@main
+      - name: No secrets in commits
+        uses: torrent-tv/.github/actions/check-secrets@main
       - name: Branch name names a task
         uses: torrent-tv/.github/actions/check-branch@main
       - name: Shell scripts and Dockerfiles use LF

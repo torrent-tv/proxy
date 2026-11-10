@@ -1,7 +1,7 @@
 /**
  * @file The proxy image builds its native modules with
  * `scripts/install-native.sh` and checks itself in its final stage; CI's
- * `build` job only builds the image, and the release needs it
+ * `build` job only builds the image, and `publish` needs it
  * (torrent-tv/meta#302, design Decisions 3 and 4: AC-1, AC-4).
  *
  * `Dockerfile`, `scripts/check.sh` and `.github/workflows/main.yml` are read as text. A
@@ -147,8 +147,8 @@ test("job build starts no container, since the image checks itself", () => {
   assert.deepEqual(runs, []);
 });
 
-test("release needs checks and build", () => {
-  const needs = needsOf("release");
-  assert.ok(needs.includes("checks"), `release needs ${JSON.stringify(needs)}`);
-  assert.ok(needs.includes("build"), `release needs ${JSON.stringify(needs)}`);
+test("publish needs checks and build", () => {
+  const needs = needsOf("publish");
+  assert.ok(needs.includes("checks"), `publish needs ${JSON.stringify(needs)}`);
+  assert.ok(needs.includes("build"), `publish needs ${JSON.stringify(needs)}`);
 });

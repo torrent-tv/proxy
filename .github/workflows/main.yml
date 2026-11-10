@@ -1,9 +1,16 @@
 name: Main
 
-# Every push to main runs the checks and then the release. The release publishes
-# @torrent-tv/proxy to npm when the Conventional Commits since the last tag ask for
-# one, tags the merged commit (no release commit is made), and then points the Home
-# Assistant add-on at it.
+# Every push to main is versioned first, then checked and released.
+#  1. `version` finds the commits that still hold a changeset file and rewrites
+#     each one with its version and changelog entry, in place, then force-pushes
+#     main with a lease. The push starts the next run, which finds nothing to
+#     version (state=current) and does the rest.
+#  2. `checks` checks the commit and `build` builds its image; `publish` publishes
+#     @torrent-tv/proxy@<version> to npm for every new version, then tags it and creates
+#     its GitHub Release, and starts the add-on's dependency workflow with the newest
+#     version, which installs it into torrent-tv/ha-addon once npm serves it;
+#     `rebase-prs` rebases the open pull requests onto the rewritten main.
+# The rules are in openspec/changes/release-with-changesets/design.md.
 
 on:
   push:
@@ -11,20 +18,190 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      bump:
-        description: Least release step (a feat still releases minor)
-        type: choice
-        options: [auto, patch, minor]
-        default: auto
 
 permissions:
   contents: read
 
 jobs:
-  checks:
-    name: Checks
+  version:
+    name: Version
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
+    environment: production
+    # One rewrite at a time; a run waits for the one before it.
+    concurrency:
+      group: version
+      cancel-in-progress: false
+      queue: max
+    outputs:
+      state: ${{ steps.version.outputs.state }}
+    steps:
+      - id: token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          # The rewrite replays commits that may change workflow files.
+          permission-workflows: write
+      - uses: actions/checkout@v7.0.1
+        with:
+          token: ${{ steps.token.outputs.token }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Node and npm are the pinned versions
+        run: bash scripts/check.sh tools
+      - run: npm ci --ignore-scripts
+      - name: Version every commit that holds a changeset
+        id: version
+        run: |
+          set -euo pipefail
+          git config user.name 'torrent-tv-release[bot]'
+          git config user.email '337444158+torrent-tv-release[bot]@users.noreply.github.com'
+          state() { echo "state=$1" >> "$GITHUB_OUTPUT"; }
+          git fetch --quiet origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "main moved to $(git rev-parse --short origin/main); its run versions it"
+            state moved
+            exit 0
+          fi
+          # A changeset file left in the tree marks a commit not yet versioned.
+          pending=$(git ls-files .changeset | grep -vxE '\.changeset/(README\.md|config\.json)' || true)
+          if [ -z "$pending" ]; then
+            echo "no pending changesets"
+            state current
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          first=$(git log --reverse --format=%H --diff-filter=A -- $pending | head -n 1)
+          if ! git rev-parse --verify --quiet "$first^" > /dev/null; then
+            echo "::error::$first is the first commit; it cannot be versioned"
+            exit 1
+          fi
+          if [ -n "$(git rev-list --merges "$first^..HEAD")" ]; then
+            echo "::error::the range $first^..HEAD holds a merge commit: $(git rev-list --merges "$first^..HEAD" | tr '\n' ' ')"
+            exit 1
+          fi
+          for c in $(git rev-list "$first^..HEAD"); do
+            if [ -n "$(git tag --points-at "$c" --list 'v*')" ]; then
+              echo "::error::commit $c carries a release tag and cannot be rewritten"
+              exit 1
+            fi
+          done
+          old_tip=$(git rev-parse HEAD)
+          # Replayed for every commit of the range; only a commit that added a changeset is amended.
+          amend="$RUNNER_TEMP/amend.sh"
+          cat > "$amend" <<'AMEND'
+          set -e
+          added=$(git diff-tree --no-commit-id --no-renames --name-only --diff-filter=A -r HEAD -- .changeset | grep -vxE "\.changeset/(README\.md|config\.json)" || true)
+          if [ -z "$added" ]; then exit 0; fi
+          git reset --soft HEAD~1
+          npx --no-install changeset version
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          other=$(git diff --name-only ORIG_HEAD | grep -vxE "package\.json|package-lock\.json|CHANGELOG\.md|\.changeset/.+\.md" || true)
+          if [ -n "$other" ]; then
+            echo "::error::the version step changed paths it may not change: $other"
+            exit 1
+          fi
+          git add -A
+          git commit --quiet --no-verify -C ORIG_HEAD
+          AMEND
+          # A later commit that edits a line next to "version" in package.json conflicts with the
+          # rewritten parent. The rewritten parent differs from the original one only in the
+          # version fields, so the commit's own text is taken and the parent's version is set back.
+          resolve_conflict() {
+            local unmerged other parent_version
+            unmerged=$(git diff --name-only --diff-filter=U)
+            if [ -z "$unmerged" ]; then
+              echo "::error::rebase stopped at a failed step after $(git rev-parse --short HEAD)"
+              return 1
+            fi
+            other=$(printf '%s\n' "$unmerged" | grep -vxE 'package\.json|package-lock\.json' || true)
+            if [ -n "$other" ]; then
+              echo "::error::rebase stopped at $(git rev-parse --short REBASE_HEAD) with a conflict in: $(printf '%s' "$unmerged" | tr '\n' ' ')"
+              return 1
+            fi
+            parent_version=$(git show HEAD:package.json | jq -r .version)
+            for f in $unmerged; do git checkout --theirs -- "$f"; done
+            npm pkg set "version=$parent_version" > /dev/null
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+            git add package.json package-lock.json
+            GIT_EDITOR=true git rebase --continue || true
+          }
+          if ! git rebase --exec "bash $amend" "$first^"; then
+            if [ ! -d "$(git rev-parse --git-path rebase-merge)" ]; then
+              echo "::error::git rebase did not start"
+              exit 1
+            fi
+            until [ ! -d "$(git rev-parse --git-path rebase-merge)" ]; do
+              if ! resolve_conflict; then
+                git rebase --abort
+                exit 1
+              fi
+            done
+          fi
+          new_tip=$(git rev-parse HEAD)
+          if git push --force-with-lease="refs/heads/main:$GITHUB_SHA" origin HEAD:refs/heads/main; then
+            versions=''
+            previous=$(git show "$first^:package.json" | jq -r .version)
+            for c in $(git rev-list --reverse "$first^..HEAD"); do
+              v=$(git show "$c:package.json" | jq -r .version)
+              if [ "$v" != "$previous" ]; then versions="$versions $v"; previous=$v; fi
+            done
+            echo "versioned $(git rev-list --count "$first^..HEAD") commits: ${old_tip:0:7}..${new_tip:0:7}, versions:${versions:- none}"
+            state rewritten
+          else
+            git fetch --quiet origin main
+            if [ "$(git rev-parse origin/main)" = "$GITHUB_SHA" ]; then
+              echo "::error::the push failed and main did not move"
+              exit 1
+            fi
+            echo "main moved during versioning; the run of the new tip versions it"
+            state moved
+          fi
+
+  plan:
+    name: Plan checks
+    runs-on: ubuntu-26.04
+    # Every commit that adds a changeset becomes a published version, so a pull
+    # request runs the checks on each of those commits as well as on its head
+    # (merged with main, as before). A push has the one leg of the pushed commit.
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          legs='{"ref":"","head":true,"name":"Checks"}'
+          if [ -n "$HEAD_SHA" ]; then
+            for c in $(git log --reverse --format=%H "origin/main..$HEAD_SHA"); do
+              added=$(git diff-tree --no-commit-id --no-renames --name-only --diff-filter=A -r "$c" -- .changeset | grep -vxE '\.changeset/(README\.md|config\.json)' || true)
+              if [ -n "$added" ] && [ "$c" != "$HEAD_SHA" ]; then
+                legs="$legs,{\"ref\":\"$c\",\"head\":false,\"name\":\"Checks of ${c:0:7}\"}"
+              fi
+            done
+          fi
+          echo "matrix=[$legs]" >> "$GITHUB_OUTPUT"
+          echo "checks run on: [$legs]"
+
+  checks:
+    name: ${{ matrix.name }}
+    needs: [version, plan]
+    # A pull request has no version job. After a push, only the run that found
+    # nothing to version goes on; the others end in `version`.
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.version.result == 'skipped' || needs.version.outputs.state == 'current') }}
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     # The commit check lists a pull request's commits through the API.
     permissions:
       contents: read
@@ -32,12 +209,15 @@ jobs:
     # A newer push to a pull request makes its older checks pointless; every push to
     # main gets a group of its own, so no check of main is ever replaced.
     concurrency:
-      group: ${{ github.event_name == 'pull_request' && format('checks-{0}', github.ref) || format('checks-{0}', github.run_id) }}
+      group: ${{ github.event_name == 'pull_request' && format('checks-{0}-{1}', github.ref, matrix.ref) || format('checks-{0}-{1}', github.run_id, matrix.ref) }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     # One step per check, so the run shows which check ran and which one failed.
     steps:
       - uses: actions/checkout@v7.0.1
         with:
+          ref: ${{ matrix.ref }}
           fetch-depth: 0
       - uses: actions/setup-node@v7.1.0
         id: node
@@ -82,29 +262,31 @@ jobs:
           path: ${{ runner.temp }}/apt-archives
           key: ${{ runner.arch }}-${{ steps.packet-timing-packages.outputs.key }}
       - name: Commit messages follow Conventional Commits
+        if: matrix.head
         uses: wagoid/commitlint-github-action@v6.2.1
       - name: Branch name names a task
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && matrix.head
         run: '[[ "$GITHUB_HEAD_REF" =~ ^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)/ttv-[1-9][0-9]*-[a-z0-9][a-z0-9.-]*$ ]]'
-      # actionlint 1.7.12 predates three documented things; drop each ignore once
+      # actionlint 1.7.12 predates four documented things; drop each ignore once
       # actionlint knows it: the `queue` key of `concurrency` (queue: max keeps every
       # pending run), the `ubuntu-26.04` runner label, and the `client-id` input of
-      # actions/create-github-app-token, which replaces `app-id`.
+      # actions/create-github-app-token, which replaces `app-id`, and the `vulnerability-alerts`
+      # permission scope that dependencies.yml needs to read Dependabot alerts.
       # The runner passes `args` to docker without shell quoting, so a space inside a
       # pattern is written `\s` and a quote `.` (each pattern is a regular expression).
       - name: Workflows are valid
+        if: matrix.head
         uses: docker://rhysd/actionlint:1.7.12
         with:
           args: >-
             -color
             -ignore unexpected\skey\s.queue.\sfor\s.concurrency.\ssection
             -ignore label\s.ubuntu-26\.04.\sis\sunknown
+            -ignore unknown\spermission\sscope\s.vulnerability-alerts.
             -ignore input\s.client-id.\sis\snot\sdefined\sin\saction\s.actions/create-github-app-token@
             -ignore missing\sinput\s.app-id.\swhich\sis\srequired\sby\saction\s.actions/create-github-app-token@
       - name: Dependencies are pinned exactly
         run: bash scripts/check.sh pins
-      - name: Pull request adds a changeset
-        uses: torrent-tv/workflows/actions/check-changesets@main
       # npm ci fetches three things outside the npm registry, with no retry of its
       # own worth the name: node-datachannel's binary and ffmpeg-static's ffmpeg
       # from GitHub releases, and node's headers from nodejs.org to compile
@@ -145,6 +327,33 @@ jobs:
             ~/.cache/node-gyp
             ~/.cache/torrent-tv/ffmpeg-static
           key: native-downloads-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node.outputs.node-version }}-${{ hashFiles('package-lock.json') }}
+      - name: Pull request adds a changeset
+        if: github.event_name == 'pull_request' && matrix.head
+        run: npx --no-install changeset status --since=origin/main
+      - name: Pull request carries no copy of a commit on main
+        # A rewrite of main leaves a branch made before it with the old copies of the
+        # commits; a plain rebase onto main would bring their changesets back.
+        if: github.event_name == 'pull_request' && matrix.head
+        run: |
+          copies=$(comm -12 \
+            <(git log --format='%ae %at %s' "origin/main..$HEAD_SHA" | sort) \
+            <(git log --format='%ae %at %s' "$HEAD_SHA..origin/main" | sort))
+          if [ -n "$copies" ]; then
+            echo "::error::the pull request carries commits that main holds under other hashes:"
+            printf '%s\n' "$copies"
+            echo "Run: git fetch origin && git rebase --fork-point origin/main"
+            exit 1
+          fi
+      - name: Commits do not change an existing changeset
+        # The rewrite replays each commit onto a parent that already lost the
+        # changesets of the commits before it; a later edit of one would conflict.
+        if: github.event_name == 'pull_request' && matrix.head
+        run: |
+          edited=$(git log --format= --name-only --diff-filter=MR "origin/main..$HEAD_SHA" -- '.changeset/*.md' | grep -vxE '\.changeset/README\.md' || true)
+          if [ -n "$edited" ]; then
+            echo "::error::a commit of the pull request modifies or renames a changeset file: $edited"
+            exit 1
+          fi
       # No check may start a real torrent; this is the static half of that rule.
       - name: Tests start no real torrent
         run: bash scripts/check.sh guard
@@ -159,28 +368,38 @@ jobs:
   build:
     name: Image build
     needs: checks
+    # On a pull request `version` is skipped, and a skipped job anywhere in the chain
+    # would skip this one without a status function.
+    if: ${{ !cancelled() && needs.checks.result == 'success' }}
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Build the image for amd64
         run: bash scripts/check.sh image
 
-  release:
-    name: Release
+  publish:
+    name: Publish
     needs: [checks, build]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
-    environment: production
-    # Every release runs, one at a time, in the order the runs reach the queue. A later
-    # run sees the earlier tag and releases what came after it; a run whose commit a
-    # tag already holds only finishes what is missing.
+    environment:
+      name: production
+      url: https://www.npmjs.com/package/@torrent-tv/proxy
+    # One run publishes at a time, oldest version first, in the order the runs reach
+    # the queue. The package comes before the tag: a tag means npm holds the version.
     concurrency:
-      group: release
+      group: publish
       cancel-in-progress: false
       queue: max
+    # `id-token` is the OIDC token of npm trusted publishing (npmjs.com: torrent-tv/proxy,
+    # workflow main.yml, environment production); no npm token is stored anywhere.
     permissions:
       contents: write
       id-token: write
+    outputs:
+      newest: ${{ steps.release.outputs.newest }}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -189,61 +408,192 @@ jobs:
         with:
           node-version-file: .node-version
           registry-url: https://registry.npmjs.org
-
-      # The version is the newest v* tag plus the step the commits ask for; it is
-      # written into package.json and package-lock.json of this workspace only.
-      - id: release
-        uses: torrent-tv/workflows/actions/release-plan@main
-        with:
-          version-files: package.json,package-lock.json
-          bump: ${{ inputs.bump || 'auto' }}
-
-      - name: Publish to npm
-        if: steps.release.outputs.released == 'true' && steps.release.outputs.already != 'true'
-        # npm trusted publishing (npmjs.com: torrent-tv/proxy, main.yml, environment
-        # production) authenticates this step with the workflow's OIDC token; no npm
-        # token is stored.
+      # Trusted publishing needs npm 11.5.1 or later; the pinned npm is 11.19.1.
+      - name: Node and npm are the pinned versions
+        run: bash scripts/check.sh tools
+      - run: npm ci --ignore-scripts
+      - name: Publish, tag and release every version that has no release
+        id: release
         env:
-          VERSION: ${{ steps.release.outputs.version }}
+          # npm records the provenance of a package published from this workflow.
+          NPM_CONFIG_PROVENANCE: "true"
         run: |
-          npm install --global npm@11
-          # A re-run after a publication whose tag push failed finds the version published
-          # from this very commit (npm records it as gitHead) and only tags it.
-          published=$(npm view "@torrent-tv/proxy@$VERSION" gitHead 2>/dev/null || true)
-          if [ -z "$published" ]; then
-            npm publish --provenance --access public
-          elif [ "$published" = "$(git rev-parse HEAD)" ]; then
-            echo "::notice::@torrent-tv/proxy@$VERSION is already published from this commit; only the tag is pushed"
-          else
-            echo "::error::@torrent-tv/proxy@$VERSION is published from $published but v$VERSION is not tagged; re-run the release of $published first"
-            exit 1
+          set -euo pipefail
+          git config user.name 'torrent-tv-release[bot]'
+          git config user.email '337444158+torrent-tv-release[bot]@users.noreply.github.com'
+          tip=$(git rev-parse HEAD)
+          name=$(jq -r .name package.json)
+          git fetch --quiet --tags origin
+          # A version is a commit that changed the version in package.json and added a
+          # "## <version>" heading to CHANGELOG.md. The range starts at the newest tag's own
+          # commit, so a run that failed after the tag was pushed finishes that release;
+          # versions before it were released earlier. Commits that only move released
+          # sections into CHANGELOG.md (the migration) change no version and are skipped.
+          last=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          range=(HEAD)
+          if [ -n "$last" ]; then range=("$last^..HEAD"); fi
+          candidates=$(git log -G'^## [0-9]' --format=%H --reverse "${range[@]}" -- CHANGELOG.md)
+          commits=''
+          for c in $candidates; do
+            parent=$(git rev-parse --verify --quiet "$c^" || true)
+            if [ -n "$parent" ] && [ "$(git show "$parent:package.json" | jq -r .version)" = "$(git show "$c:package.json" | jq -r .version)" ]; then
+              continue
+            fi
+            commits="$commits $c"
+          done
+          if [ -z "$commits" ]; then
+            echo "no version after ${last:-the first commit}; nothing to release"
+            echo 'newest=' >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-
-      - if: steps.release.outputs.released == 'true'
-        uses: torrent-tv/workflows/actions/release-tag@main
-        with:
-          tag: ${{ steps.release.outputs.tag }}
-          notes-file: ${{ steps.release.outputs.notes-file }}
-          github-token: ${{ github.token }}
-
-      # Unchanged until torrent-tv/meta#336 step 3 replaces them with a dispatch.
-      - name: Token for the add-on only
+          newest=''
+          for c in $commits; do
+            v=$(git show "$c:package.json" | jq -r .version)
+            if git rev-parse --verify --quiet "refs/tags/v$v" > /dev/null && [ "$(git rev-parse "refs/tags/v$v^{commit}")" != "$c" ]; then
+              echo "::error::tag v$v exists and does not point to ${c:0:7}, the commit that versioned it"
+              exit 1
+            fi
+            # The package, published from the version's own commit unless npm has the version.
+            # npm records the commit it was published from as gitHead. npm serves a new version
+            # only after it has processed it (6.5 minutes for 2.89.8), so a re-run inside that
+            # time may not see it: publishing it again is refused as "already published", which
+            # changeset publish passes over.
+            published=$(npm view "$name@$v" gitHead 2>/dev/null || true)
+            if [ -z "$published" ]; then
+              git switch --quiet --detach "$c"
+              npx --no-install changeset publish --no-git-tag
+              git switch --quiet --detach "$tip"
+              echo "published $name@$v from ${c:0:7}"
+            elif [ "$published" = "$c" ]; then
+              echo "$name@$v is published from ${c:0:7} already"
+            else
+              echo "::error::$name@$v is published from $published, not from ${c:0:7}, the commit that versioned it"
+              exit 1
+            fi
+            if git rev-parse --verify --quiet "refs/tags/v$v" > /dev/null; then
+              echo "tag v$v is on ${c:0:7} already"
+            else
+              git switch --quiet --detach "$c"
+              npx --no-install changeset git-tag
+              git switch --quiet --detach "$tip"
+            fi
+            # Pushed with GITHUB_TOKEN: a tag push starts no workflow run.
+            if ! git ls-remote --exit-code --tags origin "refs/tags/v$v" > /dev/null; then
+              git push origin "refs/tags/v$v"
+              echo "pushed tag v$v on ${c:0:7}"
+            fi
+            if gh release view "v$v" > /dev/null 2>&1; then
+              echo "GitHub Release v$v exists already"
+            else
+              git show "$c:CHANGELOG.md" | awk -v heading="## $v" '$0 == heading { keep = 1; next } /^## / { keep = 0 } keep' > "$RUNNER_TEMP/notes-$v.md"
+              gh release create "v$v" --verify-tag --title "v$v" --notes-file "$RUNNER_TEMP/notes-$v.md"
+              echo "created GitHub Release v$v"
+            fi
+            newest=$v
+          done
+          echo "released up to $newest"
+          echo "newest=$newest" >> "$GITHUB_OUTPUT"
+      # The add-on installs the newest proxy once npm serves it; its own dependency workflow
+      # waits for npm. A started run on the default branch only: a dispatch reaches no other.
+      - name: Token to start the add-on's dependency workflow
         id: addon-token
-        if: steps.release.outputs.released == 'true'
+        if: steps.release.outputs.newest != ''
         uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           owner: torrent-tv
           repositories: ha-addon
-          permission-contents: write
-          permission-actions: read
+          permission-actions: write
+      - name: Start the add-on's dependency workflow with the new version
+        if: steps.release.outputs.newest != ''
+        env:
+          GH_TOKEN: ${{ steps.addon-token.outputs.token }}
+          NEWEST: ${{ steps.release.outputs.newest }}
+        run: |
+          set -euo pipefail
+          gh workflow run dependencies.yml -R torrent-tv/ha-addon --ref main -f "proxy-version=$NEWEST"
+          echo "started torrent-tv/ha-addon dependencies.yml with proxy-version=$NEWEST"
+          echo "### Started the add-on's dependency run for proxy $NEWEST" >> "$GITHUB_STEP_SUMMARY"
 
-      - if: steps.release.outputs.released == 'true'
-        uses: torrent-tv/workflows/actions/addon-install-proxy@main
+  rebase-prs:
+    name: Rebase pull requests
+    needs: version
+    if: github.event_name == 'push' && needs.version.outputs.state == 'current'
+    runs-on: ubuntu-26.04
+    environment: production
+    # The rewrite of main left the open pull requests on commits main no longer
+    # has. Each is rebased onto the new tip; one that conflicts is left to its author.
+    concurrency:
+      group: rebase-prs
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - id: token
+        uses: actions/create-github-app-token@v3.3.0
         with:
-          github-token: ${{ steps.addon-token.outputs.token }}
-          proxy-version: ${{ steps.release.outputs.version }}
-          bump: ${{ steps.release.outputs.bump }}
-          notes-file: ${{ steps.release.outputs.notes-file }}
-          task: "#ttv-387"
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          # A pull request that changes a workflow file is rebased too.
+          permission-workflows: write
+      - uses: actions/checkout@v7.0.1
+        with:
+          token: ${{ steps.token.outputs.token }}
+          fetch-depth: 0
+      - name: Rebase each open pull request onto main
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'torrent-tv-release[bot]'
+          git config user.email '337444158+torrent-tv-release[bot]@users.noreply.github.com'
+          git fetch --quiet origin
+          main=$(git rev-parse origin/main)
+          echo "main is $(git rev-parse --short "$main"); rebasing the open pull requests of this repository onto it"
+          gh pr list --base main --state open --limit 1000 --json number,headRefName,headRefOid,isCrossRepository \
+            --jq '.[] | select(.isCrossRepository | not) | [.number, .headRefName, .headRefOid] | @tsv' > "$RUNNER_TEMP/prs.tsv"
+          if [ ! -s "$RUNNER_TEMP/prs.tsv" ]; then
+            echo "no open pull request of this repository"
+            exit 0
+          fi
+          refused=0
+          while IFS=$'\t' read -r number branch head; do
+            if git merge-base --is-ancestor "$main" "$head"; then
+              echo "#$number is up to date"
+              continue
+            fi
+            # Commits of the pull request that main also holds, rewritten: same author e-mail,
+            # author time and subject. The newest of them is where the pull request's own commits
+            # start. With none, the merge base is that point.
+            copies=$(git log --format='%ae %at %s' "$head..$main")
+            fork=''
+            for c in $(git rev-list "$main..$head"); do
+              if printf '%s\n' "$copies" | grep -qxF -- "$(git log -1 --format='%ae %at %s' "$c")"; then
+                fork=$c
+                break
+              fi
+            done
+            fork=${fork:-$(git merge-base "$main" "$head")}
+            git switch --quiet --detach "$head"
+            if ! git rebase --quiet --onto "$main" "$fork"; then
+              paths=$(git diff --name-only --diff-filter=U | paste -sd, -)
+              stopped=$(git rev-parse --short REBASE_HEAD)
+              git rebase --abort
+              echo "#$number: rebase stopped at $stopped, conflict in $paths"
+              gh pr comment "$number" --body "Rebase onto main \`${main:0:7}\` stopped at \`$stopped\`: conflict in \`$paths\`. Rebase with \`git fetch origin && git rebase --fork-point origin/main\`."
+              continue
+            fi
+            new=$(git rev-parse HEAD)
+            if refusal=$(git push --quiet --force-with-lease="refs/heads/$branch:$head" origin "HEAD:refs/heads/$branch" 2>&1); then
+              echo "rebased #$number ${head:0:7} -> ${new:0:7}"
+            elif [ "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" != "$head" ]; then
+              echo "#$number: $branch moved while it was rebased; the next change of main rebases it"
+            else
+              # The branch did not move, so git refused the push itself.
+              echo "::error::#$number: the push of $branch was refused: $refusal"
+              refused=1
+            fi
+          done < "$RUNNER_TEMP/prs.tsv"
+          exit "$refused"

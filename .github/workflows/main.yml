@@ -244,4 +244,4 @@ jobs:
           proxy-version: ${{ steps.release.outputs.version }}
           bump: ${{ steps.release.outputs.bump }}
           notes-file: ${{ steps.release.outputs.notes-file }}
-          task: "#ttv-91"
+          task: "#ttv-387"

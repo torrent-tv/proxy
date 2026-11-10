@@ -132,38 +132,23 @@ dependency, dev dependency and override is an exact version), `install`
 `dependencies.yml` runs on every commit it prepares. `install`, `test` and
 `image` run under `timeout` with a limit named at the top of the script, and
 say so when they stop one: `node --test` gives its test processes no limit, so a
-test that waits for an event that never comes holds the run for ever. The shared
-flow is in the
-organization's
-[`CONTRIBUTING.md`](https://github.com/torrent-tv/workflows/blob/main/CONTRIBUTING.md).
+test that waits for an event that never comes holds the run for ever.
 
-- Every pull request adds a changeset in the standard `@changesets/cli` format
-  (`npx changeset`, or a file `.changeset/<branch with / as ->.md`): front
-  matter `"@torrent-tv/proxy": patch` (or `minor`; never `major`), then one
-  sentence a viewer understands. CI (`changeset status --since=origin/main`)
-  refuses a pull request without one. A commit never edits or renames a
-  changeset an earlier commit added: the release replays each commit and would
-  stop on it.
-- `package.json` and `package-lock.json` hold the released version; nobody edits
-  it. After a merge to `main` the `version` job amends each commit that added a
-  changeset with its version and its `CHANGELOG.md` entry (`changeset version`)
-  and force-pushes `main` with a lease as the release App; three changeset
-  commits give three versions. The next run checks the commits (one `Checks` leg
-  per changeset commit of a pull request, so each published version was tested),
-  builds the image, and then, for each version, `publish` publishes
+Changesets, versions, the release and the daily dependency update are shared by
+every repository and are written once, in the organization's
+[`CONTRIBUTING.md`](https://github.com/torrent-tv/workflows/blob/main/CONTRIBUTING.md#versions-and-releases)
+("Versions and releases", "How a release reaches its users", "Dependencies").
+What is specific to the proxy:
+
+- The changeset front matter names `"@torrent-tv/proxy"`.
+- The release builds the image and, for each version, `publish` publishes
   `@torrent-tv/proxy@<version>` to npm from that version's commit
-  (`changeset publish`, npm trusted publishing: npmjs.com accepts the OIDC token of
-  `torrent-tv/proxy`, `main.yml`, environment `production`; no npm token exists),
-  tags it (`changeset git-tag`) and creates the GitHub Release from the
-  `CHANGELOG.md` section. Its last step starts `dependencies.yml` of
-  `torrent-tv/ha-addon` with the newest version (`proxy-version`); that workflow
-  waits until npm serves it and installs it into the add-on. `rebase-prs`
-  rebases the open pull requests onto the rewritten `main`. Re-running a failed
-  job is safe: each step finishes only what is missing.
-- `dependencies.yml` raises Dependabot alerts and minor updates daily, with a
-  changeset per commit, and pushes the commits that passed (`fix(deps)` when
-  `dependencies` in `package.json` changes, else `chore(deps)`). WebTorrent and
-  uint8-util are held back on purpose (see the comment in the workflow). An alert
-  that does not apply is dismissed in Dependabot with a reason, not listed in a file.
-  The rules, the states of a commit and the unknowns:
+  (`changeset publish`) before it tags it. Its last step starts `dependencies.yml`
+  of `torrent-tv/ha-addon` with the newest version (`proxy-version`); that
+  workflow installs it into the add-on
+  ([how a release reaches its users](https://github.com/torrent-tv/workflows/blob/main/CONTRIBUTING.md#how-a-release-reaches-its-users)).
+- `dependencies.yml` pushes `fix(deps)` when `dependencies` in `package.json`
+  changes, else `chore(deps)`. WebTorrent and uint8-util are held back on
+  purpose (see the comment in the workflow).
+- The rules, the states of a commit and the unknowns:
   [`openspec/changes/release-with-changesets/design.md`](openspec/changes/release-with-changesets/design.md).

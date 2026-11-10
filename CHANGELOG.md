@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.87
+
+### Patch Changes
+
+- A version whose commit changes a workflow file is tagged and released again: the release job now pushes its tag with a token that may touch workflow files.
+
 ## 2.107.86
 
 ### Patch Changes

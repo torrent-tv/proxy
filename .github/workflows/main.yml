@@ -392,15 +392,25 @@ jobs:
     # `id-token` is the OIDC token of npm trusted publishing (npmjs.com: torrent-tv/proxy,
     # workflow main.yml, environment production); no npm token is stored anywhere.
     permissions:
-      contents: write
+      contents: read
       id-token: write
     outputs:
       newest: ${{ steps.release.outputs.newest }}
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
+      # The version commit may change workflow files, and GitHub refuses a tag push that
+      # reaches such a commit from an App without `workflows` permission; GITHUB_TOKEN can
+      # never have it. The release App token carries it, and nothing more than the push of
+      # the tag and the Release need (torrent-tv/meta#336).
+      - id: token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
       - uses: actions/checkout@v7.0.1
         with:
+          token: ${{ steps.token.outputs.token }}
           fetch-depth: 0
       - uses: actions/setup-node@v7.1.0
         with:
@@ -413,6 +423,7 @@ jobs:
       - name: Publish, tag and release every version that has no release
         id: release
         env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
           # npm records the provenance of a package published from this workflow.
           NPM_CONFIG_PROVENANCE: "true"
         run: |
@@ -475,7 +486,7 @@ jobs:
               npx --no-install changeset git-tag
               git switch --quiet --detach "$tip"
             fi
-            # Pushed with GITHUB_TOKEN: a tag push starts no workflow run.
+            # Pushed with the release App token (no workflow listens to tags, so no run starts).
             if ! git ls-remote --exit-code --tags origin "refs/tags/v$v" > /dev/null; then
               git push origin "refs/tags/v$v"
               echo "pushed tag v$v on ${c:0:7}"

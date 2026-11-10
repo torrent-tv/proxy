@@ -1156,9 +1156,13 @@ export class EncodeRuns {
       startSeconds,
       // Where piece `index` ends on the timeline `startSeconds` is taken from:
       // the speed reading is the film between two such ends (torrent-tv/meta#414).
-      pieceEndSeconds: (index) => Number.isInteger(index) && index >= 0 && index + 1 < session.timeline.published.length
-        ? session.timeline.publishedStartOf(index + 1)
-        : Number(session.file.durationSeconds) || null,
+      pieceEndSeconds: (index) => {
+        const count = session.timeline.segmentCount;
+        if (!Number.isInteger(index) || index < 0 || index >= count) return null;
+        return index + 1 < count
+          ? session.timeline.publishedStartOf(index + 1)
+          : Number(session.file.durationSeconds) || null;
+      },
       totalSeconds: Number(session.file.durationSeconds) || null,
       spawn: (spawnArgs) =>
         spawn(this.#host.ffmpegBin, spawnArgs, {

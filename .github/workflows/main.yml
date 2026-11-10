@@ -330,6 +330,8 @@ jobs:
       - name: Pull request adds a changeset
         if: github.event_name == 'pull_request' && matrix.head
         run: npx --no-install changeset status --since=origin/main
+      - name: Changeset checks fail on bad input
+        run: bash scripts/check.sh changesets-selftest
       - name: Pull request carries no copy of a commit on main
         # The release rewrites main; a branch cut from the old tip in the seconds before the
         # rewrite still holds the old commit, and a plain rebase puts it back on top of main
@@ -340,8 +342,6 @@ jobs:
       - name: Changesets of the pull request are one plain sentence
         if: github.event_name == 'pull_request' && matrix.head
         run: bash scripts/check.sh changeset-format origin/main "$HEAD_SHA"
-      - name: Changeset checks fail on bad input
-        run: bash scripts/check.sh changesets-selftest
       - name: Commits do not change an existing changeset
         # The rewrite replays each commit onto a parent that already lost the
         # changesets of the commits before it; a later edit of one would conflict.

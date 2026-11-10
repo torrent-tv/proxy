@@ -72,3 +72,5 @@ jobs:
           ships-lockfile: "false"
           changeset: "true"
           extra-check: node scripts/check-tests-start-no-torrent.mjs
+          # The standing task every dependency commit names (torrent-tv/meta#386).
+          task: "#ttv-386"

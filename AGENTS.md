@@ -132,7 +132,8 @@ What is particular to this repository:
 - A changeset's file name is lower case; its continuation lines are indented
   by two spaces; it has no blank lines; nothing else lives in `.changeset/`. A
   changeset is never edited or deleted after merge.
-- `.github/workflows/main.yml` runs the shared checks (commit headers, branch
-  name, line endings, workflows, changesets), the no-torrent check, `npm test`,
-  and a `docker build` (the image runs `--help` in its last stage). Then it
+- `.github/workflows/main.yml` runs the shared checks (commit headers, secrets
+  in commits, branch name, line endings, workflows, changesets), the
+  no-torrent check, `npm test`, and a `docker build` (the image runs `--help`
+  in its last stage). Then it
   publishes to npm and installs the version into `ha-addon`.

@@ -9,10 +9,7 @@
  *
  * - `npm` logs its working directory, its arguments and
  *   `npm_config_build_from_source`, and writes what a real rebuild or install
- *   would leave behind. `rebuild node-datachannel` succeeds and writes
- *   `node_datachannel.node`, as it did for node-datachannel 0.32.3 (the call
- *   is recorded, so a test can show that it is no longer made);
- *   `rebuild utp-native` fails
+ *   would leave behind. `rebuild utp-native` fails
  *   with FAKE_UTP_BUILD_FAIL=1, else writes `utp_native.node` with
  *   `obj.target` and `.deps`; `install … utp-native@npm:@torrent-tv/utp-native@…`
  *   puts ours at the top.
@@ -50,11 +47,6 @@ after(() => rmSync(root, { recursive: true, force: true }));
 const FAKE_NPM = `#!/bin/sh
 printf '%s|%s|%s\\n' "$PWD" "$*" "\${npm_config_build_from_source:-}" >> "$FAKE_LOG"
 case " $* " in
-  *" rebuild "*node-datachannel*)
-    mkdir -p node_modules/node-datachannel/build/Release
-    : > node_modules/node-datachannel/build/Release/node_datachannel.node
-    exit 0
-    ;;
   *" rebuild "*utp-native*)
     if [ "\${FAKE_UTP_BUILD_FAIL:-}" = "1" ]; then
       echo "fake npm: gyp failed" >&2
@@ -150,7 +142,7 @@ function makeCase({ engines = ">=24", spec = SPEC, top = "ours", packageJson = t
  */
 function run(c, { args = [c.pkg], env = {} } = {}) {
   const inherited = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !/^npm_/i.test(key) && key !== "INSTALL_NATIVE_RETRY_DELAY")
+    Object.entries(process.env).filter(([key]) => !/^npm_/i.test(key))
   );
   const merged = {
     ...inherited,
@@ -228,7 +220,6 @@ test("every npm call runs in the package directory and none is global", () => {
 test("npm calls follow the steps: the install of ours, then the source build", () => {
   const r = run(makeCase({ top: "missing" }));
   const order = r.calls
-    .filter((call) => !isNdc(call))
     .map((call) => (isInstall(call) ? "install" : isUtpBuild(call) ? "utp" : call.argv));
   assert.deepEqual(order, ["install", "utp"], said(r));
 });

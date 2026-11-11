@@ -110,7 +110,7 @@ function makeCase({ engines = ">=24", spec = SPEC, top = "ours", packageJson = t
   for (const dir of [pkg, fakes, state, elsewhere]) mkdirSync(dir, { recursive: true });
 
   if (packageJson) {
-    const manifest = { name: "@torrent-tv/proxy", version: "0.0.0-development", type: "module" };
+    const manifest = { name: "@torrent-tv/proxy", version: "1.0.0", type: "module" };
     if (engines !== null) manifest.engines = { node: engines };
     if (spec !== null) manifest.overrides = { "utp-native": spec };
     writeJson(path.join(pkg, "package.json"), manifest);

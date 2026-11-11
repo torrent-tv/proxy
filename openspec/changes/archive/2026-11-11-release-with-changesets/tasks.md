@@ -123,3 +123,21 @@ one and its first release run.
       and the steps "Workflow tools are pinned exactly", "The dependency job gives no token to package
       code, and each pushing job holds its own", "The dependency job refuses a commit message the hook
       refuses" and "Workflow checks fail on bad input" pass in `Checks`.
+
+## 3. Test plan of the closing stage: no placeholder version (2026-11-11)
+
+Change of the stage: the version `0.0.0-development` leaves the tests (AC 4(c)).
+
+1. Scope and risk. In scope: `test/no-torrent/install-native-script.test.js` (the fake manifest of the
+   case that installs the native package) and `test/no-torrent/no-placeholder-version.test.js` (the
+   check). Out of scope: `scripts/install-native.sh`, which never reads the manifest `version`, so the
+   fixture value changes no behaviour. Risk is low: one positive case and one negative. Nothing touches
+   torrent startup.
+2. Level and command (unit, one file):
+   `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/no-placeholder-version.test.js`
+3. Cases. Positive: with `1.0.0` in the fake manifest the check and `install-native-script.test.js` pass.
+   Negative: with the placeholder in any file of `test/`, comments included, the check fails and names
+   `<file>:<line>`. Boundary: the check builds the name from two parts, so it does not find itself.
+4. Rules and exit. Before the fixture changed, the check failed with the actual value
+   `test/no-torrent/install-native-script.test.js:113`; after it, the check passes. The test uses no
+   timer, no network and no file outside `test/`. Exit is `npm test`.

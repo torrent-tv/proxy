@@ -887,11 +887,13 @@ commit_msg_bot() (
 )
 
 workflow_selftest() (
-  # Builds each case the three checks exist for and shows that the check fails on the bad one and
+  # Builds each case the four checks exist for and shows that the check fails on the bad one and
   # passes on the good one, so a check that stopped seeing them would fail here. The bad inputs of
   # workflow_pins are the forms measured in torrent-tv/meta#423; those of workflow_tokens are a copy of
   # this repository's workflow files changed back to the state before torrent-tv/meta#424 and
-  # before the tag push of 2026-11-10; the bad input of commit_msg_bot is the loop without the hook.
+  # before the tag push of 2026-11-10; those of workflow_refs are a copy of dependencies.yml whose
+  # checkout of the job update has no ref or another one; the bad input of commit_msg_bot is the loop
+  # without the hook.
   local scratch failures=0 case_number=0
   scratch=$(mktemp -d)
   trap 'rm -rf "$scratch"' EXIT
@@ -1092,6 +1094,7 @@ workflow_selftest() (
     fi
   }
   local checkout_of_update='.jobs.update.steps[] | select((.uses // "") | test("^actions/checkout@"))'
+  refs_case pass "this repository's file" ''
   refs_case pass "ref: main on the checkout of the job update, the checkout of the job push keeping its own ref" \
     "($checkout_of_update | .with.ref) = \"main\""
   refs_case fail "a checkout of the job update with no ref" "del($checkout_of_update | .with.ref)" "not main"
@@ -1136,6 +1139,6 @@ case "${1:-}" in
   workflow-refs) workflow_refs "${2:-.github/workflows}" ;;
   commit-msg-bot) commit_msg_bot "${2:-.github/workflows/dependencies.yml}" ;;
   workflow-selftest) workflow_selftest ;;
-  all) tools && pins && workflow_pins && workflow_tokens && commit_msg_bot && install && guard && tests && image ;;
+  all) tools && pins && workflow_pins && workflow_tokens && workflow_refs && commit_msg_bot && install && guard && tests && image ;;
   *) echo "usage: bash scripts/check.sh tools|pins|install|guard|test|image|copies [<base> [<head>]]|changeset-format [<base> [<head>]]|changesets-selftest|workflow-pins|workflow-tokens|workflow-refs|commit-msg-bot|workflow-selftest|all" >&2; exit 2 ;;
 esac

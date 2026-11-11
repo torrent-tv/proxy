@@ -294,6 +294,8 @@ jobs:
         run: bash scripts/check.sh workflow-pins
       - name: The dependency job gives no token to package code, and each pushing job holds its own
         run: bash scripts/check.sh workflow-tokens
+      - name: The dependency job starts from the tip of main
+        run: bash scripts/check.sh workflow-refs
       - name: The dependency job refuses a commit message the hook refuses
         run: bash scripts/check.sh commit-msg-bot
       - name: Workflow checks fail on bad input

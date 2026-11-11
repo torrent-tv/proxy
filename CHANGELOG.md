@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.92
+
+### Patch Changes
+
+- Update dependencies: werift 0.24.4 -> 0.27.0; 34 package(s) changed in the lock file.
+
 ## 2.107.91
 
 ### Patch Changes

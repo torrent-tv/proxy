@@ -5,7 +5,7 @@
 #   bash scripts/check.sh tools | pins | install | guard | test | image
 #   bash scripts/check.sh copies | changeset-format [<base> [<head>]]   (a pull request; main.yml)
 #   bash scripts/check.sh changesets-selftest
-#   bash scripts/check.sh workflow-pins | workflow-tokens | commit-msg-bot [<dir or file>]
+#   bash scripts/check.sh workflow-pins | workflow-tokens | workflow-refs | commit-msg-bot [<dir or file>]
 #   bash scripts/check.sh workflow-selftest
 #   bash scripts/check.sh all
 #
@@ -767,6 +767,47 @@ NODE
   return "$status"
 }
 
+workflow_refs() {
+  # workflow_refs [<dir>]: the job `update` of dependencies.yml starts from the current tip of `main`
+  # (torrent-tv/meta#336). A run that GitHub queued behind another (`concurrency: dependencies`) checks out
+  # the commit that was `github.sha` when it was started, not the tip of `main`: its push is refused, its
+  # rebase stops on files the proxy release changed, and the run fails (ha-addon runs 43013341200 and
+  # 43014115480, 2026-11-11, so proxy 2.107.95 did not reach the add-on until a manual run). So each
+  # `actions/checkout` step of the job `update` has `ref: main` and no other ref. Other jobs are not read.
+  local dir=${1:-.github/workflows} file refs line count status=0
+  file=$dir/dependencies.yml
+  yq_pinned || return 1
+  if [ ! -e "$file" ]; then
+    echo "::error file=$file::dependencies.yml: the file is missing"
+    return 1
+  fi
+  if [ "$(yq '.jobs.update | type' "$file")" != '!!map' ]; then
+    echo "::error file=$file::dependencies.yml: it has no job named update"
+    return 1
+  fi
+  # The number is counted from a list: a string literal at the end of a pipe prints even with no match (yq 4.54.1).
+  count=$(yq '[.jobs.update.steps[] | select((.uses // "") | test("^actions/checkout@"))] | length' "$file") || {
+    echo "::error::yq cannot read $file"
+    return 1
+  }
+  if [ "$count" -eq 0 ]; then
+    echo "::error file=$file::dependencies.yml: job update has no actions/checkout step"
+    return 1
+  fi
+  refs=$(yq '.jobs.update.steps[] | select((.uses // "") | test("^actions/checkout@")) | "ref=" + (.with.ref // "")' "$file") || {
+    echo "::error::yq cannot read $file"
+    return 1
+  }
+  while IFS= read -r line; do
+    if [ "$line" != ref=main ]; then
+      echo "::error file=$file::dependencies.yml: a checkout of job update has ref \"${line#ref=}\", not main; a queued run would start from an old commit, not the tip of main"
+      status=1
+    fi
+  done <<< "$refs"
+  [ "$status" -eq 0 ] && echo "workflow refs: the job update of dependencies.yml starts from the tip of main"
+  return "$status"
+}
+
 commit_msg_bot() (
   # commit_msg_bot [<dependencies.yml>]: the step "Test every commit, oldest first" of the
   # dependency workflow refuses a commit it prepared whose message the repository's commit-msg hook
@@ -1035,6 +1076,42 @@ workflow_selftest() (
   extra_case fail "a row of the GITHUB_TOKEN with other permissions than the job has" 'node scripts/sneaky.mjs' 'extra.yml|extra|github|contents:read'
   extra_case fail "a row of the GITHUB_TOKEN with one permission more than the job has" 'node scripts/sneaky.mjs' 'extra.yml|extra|github|contents:write packages:write'
 
+  # workflow-refs on copies of this repository's dependencies.yml, changed one way each.
+  refs_case() {
+    # refs_case pass|fail <what> <yq expression> [<text the error line must hold>]: a copy of dependencies.yml
+    # with one change; with the text, the leg must also say it, so each refusal is proved by its own branch.
+    local want=$1 what=$2 expression=$3 message=${4:-}
+    case_number=$((case_number + 1))
+    mkdir "$scratch/refs-$case_number"
+    cp .github/workflows/dependencies.yml "$scratch/refs-$case_number/"
+    if [ -n "$expression" ]; then yq -i "$expression" "$scratch/refs-$case_number/dependencies.yml"; fi
+    expect "$want" "workflow-refs: $what" workflow_refs "$scratch/refs-$case_number"
+    if [ -n "$message" ]; then
+      cp "$scratch/out" "$scratch/refs.out"
+      expect pass "workflow-refs: $what: the error line says \"$message\"" grep -qF -- "$message" "$scratch/refs.out"
+    fi
+  }
+  local checkout_of_update='.jobs.update.steps[] | select((.uses // "") | test("^actions/checkout@"))'
+  refs_case pass "ref: main on the checkout of the job update, the checkout of the job push keeping its own ref" \
+    "($checkout_of_update | .with.ref) = \"main\""
+  refs_case fail "a checkout of the job update with no ref" "del($checkout_of_update | .with.ref)" "not main"
+  refs_case fail "a checkout of the job update at \${{ github.sha }}" "($checkout_of_update | .with.ref) = \"\${{ github.sha }}\"" "not main"
+  refs_case fail "a checkout of the job update at \${{ github.ref }}" "($checkout_of_update | .with.ref) = \"\${{ github.ref }}\""
+  refs_case fail "a checkout of the job update at another branch" "($checkout_of_update | .with.ref) = \"release\""
+  refs_case fail "a checkout of the job update at a tag" "($checkout_of_update | .with.ref) = \"v1.0.0\""
+  refs_case fail "a checkout of the job update at an empty ref" "($checkout_of_update | .with.ref) = \"\""
+  refs_case fail "a second checkout of the job update with no ref, the first at main" \
+    "($checkout_of_update | .with.ref) = \"main\" | .jobs.update.steps += [{\"uses\": \"actions/checkout@v7.0.1\"}]" "not main"
+  refs_case fail "the job push at main and the job update with no ref" \
+    "(.jobs.push.steps[] | select((.uses // \"\") | test(\"^actions/checkout@\")) | .with.ref) = \"main\" | del($checkout_of_update | .with.ref)"
+  refs_case fail "a job update with no checkout" "del($checkout_of_update)" "has no actions/checkout step"
+  refs_case fail "a dependency workflow without a job update" '.jobs.refresh = .jobs.update | del(.jobs.update)' "has no job named update"
+  case_number=$((case_number + 1))
+  mkdir "$scratch/refs-$case_number"
+  expect fail "workflow-refs: no dependencies.yml" workflow_refs "$scratch/refs-$case_number"
+  cp "$scratch/out" "$scratch/refs.out"
+  expect pass "workflow-refs: no dependencies.yml: the error line says \"the file is missing\"" grep -qF -- "the file is missing" "$scratch/refs.out"
+
   # commit-msg-bot on the real file, and on the loop without the hook.
   expect pass "commit-msg-bot on this repository's loop" commit_msg_bot .github/workflows/dependencies.yml
   sed 's#sh [^ ]*\.githooks/commit-msg"\{0,1\}#true#' .github/workflows/dependencies.yml > "$scratch/no-hook.yml"
@@ -1056,8 +1133,9 @@ case "${1:-}" in
   changesets-selftest) changesets_selftest ;;
   workflow-pins) workflow_pins "${2:-.github/workflows}" ;;
   workflow-tokens) workflow_tokens "${2:-.github/workflows}" ;;
+  workflow-refs) workflow_refs "${2:-.github/workflows}" ;;
   commit-msg-bot) commit_msg_bot "${2:-.github/workflows/dependencies.yml}" ;;
   workflow-selftest) workflow_selftest ;;
   all) tools && pins && workflow_pins && workflow_tokens && commit_msg_bot && install && guard && tests && image ;;
-  *) echo "usage: bash scripts/check.sh tools|pins|install|guard|test|image|copies [<base> [<head>]]|changeset-format [<base> [<head>]]|changesets-selftest|workflow-pins|workflow-tokens|commit-msg-bot|workflow-selftest|all" >&2; exit 2 ;;
+  *) echo "usage: bash scripts/check.sh tools|pins|install|guard|test|image|copies [<base> [<head>]]|changeset-format [<base> [<head>]]|changesets-selftest|workflow-pins|workflow-tokens|workflow-refs|commit-msg-bot|workflow-selftest|all" >&2; exit 2 ;;
 esac

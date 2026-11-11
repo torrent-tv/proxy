@@ -388,6 +388,27 @@ jobs:
       - name: Build the image for amd64
         run: bash scripts/check.sh image
 
+  # The one CI context the main ruleset requires (torrent-tv/meta#328): the
+  # per-commit legs have names that change with each pull request, so a ruleset
+  # cannot list them; this job fails unless every check job and leg passed.
+  required:
+    name: Required checks
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: [plan, checks, build]
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Every check job of the pull request passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          failed=$(jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"' <<< "$NEEDS")
+          if [ -n "$failed" ]; then
+            echo "::error::not every check job passed: $(paste -sd' ' <<< "$failed")"
+            exit 1
+          fi
+          echo "every check job passed: $(jq -r 'keys | join(" ")' <<< "$NEEDS")"
+
   publish:
     name: Publish
     needs: [checks, build]

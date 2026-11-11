@@ -1,6 +1,6 @@
 # native-build — delta spec
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: node-datachannel is checked, not rebuilt
 `scripts/install-native.sh` SHALL check that `node-datachannel` loads from the

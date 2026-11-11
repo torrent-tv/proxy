@@ -5,8 +5,7 @@
 #   <type>(<scope>)!: <subject> #ttv-<issue>   at most 100 characters; the subject
 #   starts with a lower-case letter (text in `...`, "..." or '...' aside) and does
 #   not end with "."; no body or footer line longer than 100 characters.
-# Enable once per clone: git config core.hooksPath .githooks (githooks in the
-# shared actions repository). Every copy changes together.
+# Enable once per clone: git config core.hooksPath .githooks. Every copy changes together.
 msg=$(sed -e '/^# -\{24\} >8 -\{24\}$/,$d' -e '/^#/d' "$1")
 header=$(printf '%s\n' "$msg" | head -n 1)
 if ! printf '%s\n' "$header" | grep -Eq '^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([^()]+\))?!?: .+ #ttv-[1-9][0-9]*$'; then

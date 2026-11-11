@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.97
+
+### Patch Changes
+
+- A pull request now has one final check that stays red until every other check of it has passed.
+
 ## 2.107.96
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.94
+
+### Patch Changes
+
+- The tests now reject the placeholder version name, so a version source change cannot leave a stale fixture behind.
+
 ## 2.107.93
 
 ### Patch Changes

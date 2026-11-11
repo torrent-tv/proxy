@@ -287,6 +287,17 @@ jobs:
             -ignore missing\sinput\s.app-id.\swhich\sis\srequired\sby\saction\s.actions/create-github-app-token@
       - name: Dependencies are pinned exactly
         run: bash scripts/check.sh pins
+      # The workflow files are checked like any other code: exact versions, the tokens each job holds,
+      # and the proof that each check fails on bad input (torrent-tv/meta#336). yq 4.54.1 is the version of
+      # the runner image, as in server's `install` job.
+      - name: Workflow tools are pinned exactly
+        run: bash scripts/check.sh workflow-pins
+      - name: The dependency job gives no token to package code, and each pushing job holds its own
+        run: bash scripts/check.sh workflow-tokens
+      - name: The dependency job refuses a commit message the hook refuses
+        run: bash scripts/check.sh commit-msg-bot
+      - name: Workflow checks fail on bad input
+        run: bash scripts/check.sh workflow-selftest
       # npm ci fetches three things outside the npm registry, with no retry of its
       # own worth the name: node-datachannel's binary and ffmpeg-static's ffmpeg
       # from GitHub releases, and node's headers from nodejs.org to compile

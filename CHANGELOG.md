@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.90
+
+### Patch Changes
+
+- The dependency job now refuses a commit whose message the commit-msg hook refuses, and CI checks the exact pins, the tokens and the commit messages of the workflow files.
+
 ## 2.107.89
 
 ### Patch Changes

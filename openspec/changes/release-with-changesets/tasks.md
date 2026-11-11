@@ -73,3 +73,8 @@ one and its first release run.
       a stub `scripts/check.sh`, the step keeps the commit before one whose body has a line of 120
       characters and stops there, and passes a commit made by the helper `commit` (folded body); the leg
       `commit-msg-bot` of the next commit runs exactly that.
+- [x] 2.12 The workflow files are checked: `workflow-pins`, `workflow-tokens`, `commit-msg-bot` and their proof on
+      bad input. Check: `bash scripts/check.sh workflow-selftest` exits 0, the three legs exit 0 on `main`,
+      and the steps "Workflow tools are pinned exactly", "The dependency job gives no token to package
+      code, and each pushing job holds its own", "The dependency job refuses a commit message the hook
+      refuses" and "Workflow checks fail on bad input" pass in `Checks`.

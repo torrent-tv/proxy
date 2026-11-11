@@ -145,9 +145,9 @@ expect() {
 }
 
 # The checks on the changesets a pull request adds, and the proof that they fail on bad input
-# (torrent-tv/meta#336). The rules are in torrent-tv/workflows CONTRIBUTING.md, "Versions and
-# releases". This block is the same in proxy, server, ha-addon and infra; only CHANGESET_DIR and
-# CHANGESET_EMPTY_ALLOWED, set at the top of the file, differ.
+# (torrent-tv/meta#336). The rules are in ../AGENTS.md ("Process" rule 10). This block is the
+# same in proxy, server, ha-addon and infra; only CHANGESET_DIR and CHANGESET_EMPTY_ALLOWED, set
+# at the top of the file, differ.
 
 copies() {
   # copies <base> <head>: no commit of <base>..<head> is a copy of a commit anywhere in the
@@ -374,10 +374,9 @@ YQ_VERSION=4.54.1
 
 # The checks of the workflow files in .github/workflows, and the proof that they fail on bad input
 # (torrent-tv/meta#336, lessons meta#423, meta#424, meta#425 and the one on the token of a job that
-# pushes). The rules are in AGENTS.md ("Security" rule 6) and in torrent-tv/workflows
-# CONTRIBUTING.md ("Versions and releases"). This block is the same in proxy, server, ha-addon and
-# infra; only WORKFLOW_PUSHES, DEPENDENCY_TOKEN_STEPS and DEPENDENCY_WORKDIR, set at the top of the
-# file, differ.
+# pushes). The rules are in ../AGENTS.md ("Security" rule 6, "Process" rule 10). This block is the
+# same in proxy, server, ha-addon and infra; only WORKFLOW_PUSHES, DEPENDENCY_TOKEN_STEPS and
+# DEPENDENCY_WORKDIR, set at the top of the file, differ.
 
 yq_pinned() {
   # The runner image provides yq; the version is the one server's `install` job checks. A different

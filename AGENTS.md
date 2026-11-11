@@ -144,9 +144,7 @@ say so when they stop one: `node --test` gives its test processes no limit, so a
 test that waits for an event that never comes holds the run for ever.
 
 Changesets, versions, the release and the daily dependency update are shared by
-every repository and are written once, in the organization's
-[`CONTRIBUTING.md`](https://github.com/torrent-tv/workflows/blob/main/CONTRIBUTING.md#versions-and-releases)
-("Versions and releases", "How a release reaches its users", "Dependencies").
+every repository and are written once, in [`../AGENTS.md`](../AGENTS.md) ("Process" rule 10).
 What is specific to the proxy:
 
 - The changeset front matter names `"@torrent-tv/proxy"`.
@@ -154,8 +152,7 @@ What is specific to the proxy:
   `@torrent-tv/proxy@<version>` to npm from that version's commit
   (`changeset publish`) before it tags it. Its last step starts `dependencies.yml`
   of `torrent-tv/ha-addon` with the newest version (`proxy-version`); that
-  workflow installs it into the add-on
-  ([how a release reaches its users](https://github.com/torrent-tv/workflows/blob/main/CONTRIBUTING.md#how-a-release-reaches-its-users)).
+  workflow installs it into the add-on.
 - `dependencies.yml` pushes `fix(deps)` when `dependencies` in `package.json`
   changes, else `chore(deps)`. WebTorrent and uint8-util are held back on
   purpose (see the comment in the workflow).

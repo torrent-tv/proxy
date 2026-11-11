@@ -21,8 +21,10 @@ COPY package.json package-lock.json ./
 # Install scripts are off for the whole tree: ip-set (a dependency of
 # webtorrent) runs `npx only-allow pnpm` in `preinstall`, which aborts a plain
 # npm install, and ffmpeg-static would download an ffmpeg this image does not
-# use. The two native modules that need theirs are built, and checked, by
-# scripts/install-native.sh — the one build every image of the proxy runs.
+# use. node-datachannel needs no step of its own: `npm ci` installs its binary
+# as a per-platform package. scripts/install-native.sh, the one script every
+# image of the proxy runs, checks that this node loads that binary and builds
+# utp-native.
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY scripts/install-native.sh scripts/install-native.sh
 RUN sh scripts/install-native.sh /app
@@ -50,7 +52,7 @@ WORKDIR /app
 # The image checks itself: `--help` loads every module of the main thread,
 # node-datachannel's native binding included, and exits before anything is
 # started or connected, so the build fails when this node cannot load what the
-# first stage built.
+# first stage installed and built.
 RUN node /app/bin/cli.js --help > /dev/null
 
 # 9090/tcp is the HTTP API; WebRTC uses the same port number over UDP. Reaching

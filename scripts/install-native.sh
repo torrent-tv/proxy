@@ -1,15 +1,14 @@
 #!/bin/sh
-# Builds and checks the proxy's two native modules in an installed proxy:
-# node-datachannel (WebRTC) and utp-native (our fork, uTP to peers). Every
-# image that installs the proxy runs this one script after its install with
-# `--ignore-scripts` (torrent-tv/meta#302).
+# Checks that node-datachannel (WebRTC) loads and builds utp-native (our fork,
+# uTP to peers) in an installed proxy. Every image that installs the proxy runs
+# this one script after its install with `--ignore-scripts`
+# (torrent-tv/meta#302).
 #
 #   sh scripts/install-native.sh <package dir>
 #
 # <package dir> holds the installed proxy: its package.json and node_modules/.
-# INSTALL_NATIVE_RETRY_DELAY is the wait in seconds between node-datachannel
-# attempts (default 10). npm and node are taken from PATH, and every npm call
-# runs in the package directory, never with --global.
+# npm and node are taken from PATH, and every npm call runs in the package
+# directory, never with --global.
 
 set -eu
 
@@ -59,26 +58,26 @@ if [ "$major" -lt "$floor" ]; then
 fi
 echo "install-native: node v$version (floor $floor)"
 
-# 2. node-datachannel fetches a prebuilt binary; one failed request ends the
-# rebuild, so it is tried up to five times. Without the binary the proxy has no
-# WebRTC.
-delay=${INSTALL_NATIVE_RETRY_DELAY:-10}
-attempt=1
-while ! npm rebuild node-datachannel; do
-  if [ "$attempt" -ge 5 ]; then
-    break
-  fi
-  echo "install-native: node-datachannel attempt $attempt of 5 failed; retrying in ${delay}s" >&2
-  sleep "$delay"
-  attempt=$((attempt + 1))
-done
-binary_found=
-for binary in node_modules/node-datachannel/build/Release/*.node; do
-  if [ -f "$binary" ]; then
-    binary_found=1
-  fi
-done
-[ -n "$binary_found" ] || fatal "node-datachannel has no native binary; the proxy would have no WebRTC"
+# 2. node-datachannel ships its binary as an optional per-platform npm package
+# that `npm ci` installs by itself, so there is nothing to build or fetch here.
+# The one fact this step needs is that this node loads the binding the install
+# left, and only the package's own loader answers it. Without the binding the
+# proxy has no WebRTC.
+if ndc=$(node -e '
+const fs = require("node:fs");
+try {
+  const ndc = require("node-datachannel");
+  const version = JSON.parse(fs.readFileSync("node_modules/node-datachannel/package.json", "utf8")).version;
+  process.stdout.write(version + " " + ndc.getLibraryVersion());
+} catch (error) {
+  process.stdout.write(String((error && error.message) || error).split("\n")[0]);
+  process.exit(1);
+}
+'); then
+  echo "install-native: node-datachannel ${ndc% *}: binding loads (libdatachannel ${ndc#* })"
+else
+  fatal "node-datachannel binding does not load: ${ndc:-no error message}"
+fi
 
 # 3. The proxy pins our utp-native fork through overrides.
 spec=$(json_field package.json overrides utp-native)

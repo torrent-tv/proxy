@@ -1,5 +1,10 @@
 ## Context
 
+Superseded in part by `openspec/changes/node-datachannel-platform-package/`
+(torrent-tv/meta#336): step 2 below, the `node-datachannel` retry loop and
+`INSTALL_NATIVE_RETRY_DELAY` are replaced by a load check; everything else
+stands.
+
 Issue: torrent-tv/meta#302. Lines below are at proxy `2b58e9b`, ha-addon
 `4172553`; re-locate by name.
 
@@ -45,8 +50,8 @@ Argument: the directory holding the installed proxy (`package.json` and
 `node_modules/`). Missing argument, or no `package.json` in it: usage on
 stderr, exit 2.
 
-Environment: `INSTALL_NATIVE_RETRY_DELAY` — seconds between
-`node-datachannel` attempts, default `10`. Nothing else is configurable.
+Environment: none is read (`INSTALL_NATIVE_RETRY_DELAY` existed here and is
+removed, see the note at the top).
 
 Steps, in this order; any `FATAL` line goes to stderr and exits 1:
 
@@ -57,7 +62,9 @@ Steps, in this order; any `FATAL` line goes to stderr and exits 1:
    dot. Below the floor: `FATAL: install-native: this proxy requires Node N or
    newer; found v<version>`. Otherwise prints
    `install-native: node v<version> (floor N)`.
-2. **node-datachannel.** Up to 5 attempts of `npm rebuild node-datachannel`;
+2. **node-datachannel (superseded: it is now a load check that requires the
+   package and prints `install-native: node-datachannel <v>: binding loads
+   (libdatachannel <x>)`; there is no rebuild, retry or sleep).** Up to 5 attempts of `npm rebuild node-datachannel`;
    after each failed attempt but the last, prints to stderr
    `install-native: node-datachannel attempt <k> of 5 failed; retrying in <d>s`
    and sleeps `<d>` = `INSTALL_NATIVE_RETRY_DELAY`. Stops at the first

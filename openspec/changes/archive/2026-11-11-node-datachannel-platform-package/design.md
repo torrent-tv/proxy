@@ -72,7 +72,7 @@ because the nested copy under `webrtc-polyfill` is still in the tree.
 
 The proxy `Dockerfile` comment, proxy `AGENTS.md` "Gotchas" (it says the script
 "builds and checks the two native modules") and
-`openspec/changes/native-build-one-script/design.md` (steps and messages of the
+`openspec/changes/archive/2026-11-11-native-build-one-script/design.md` (steps and messages of the
 old step 2) are corrected where they describe the rebuild. The add-on
 `Dockerfile` comment is a separate pull request.
 

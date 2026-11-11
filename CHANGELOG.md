@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.95
+
+### Patch Changes
+
+- The changelog now says that release 2.107.83 repeats 2.107.82 and changes nothing, and the specifications of three finished changes are archived.
+
 ## 2.107.94
 
 ### Patch Changes
@@ -70,7 +76,7 @@
 
 ### Patch Changes
 
-- Project rules about releases, versions and dependencies are now written once in the shared contributing guide and linked from this repository's agent rules.
+- This release repeats 2.107.82 and changes nothing.
 
 ## 2.107.82
 

@@ -124,10 +124,10 @@ commit removes the markers.
       UTC).
 - [x] 2.3 Comments that describe the old behaviour: `Dockerfile` (the `npm ci` comment and the
       `--help` comment name node-datachannel's binding), `AGENTS.md` "Gotchas",
-      `openspec/changes/native-build-one-script/design.md` (steps 2 and the retry text; mark it
+      `openspec/changes/archive/2026-11-11-native-build-one-script/design.md` (steps 2 and the retry text; mark it
       superseded by this change).
       Shown: commit 81628506 corrected the `Dockerfile` comments and `AGENTS.md` "Gotchas";
-      `openspec/changes/native-build-one-script/design.md` is marked superseded in part by this
+      `openspec/changes/archive/2026-11-11-native-build-one-script/design.md` is marked superseded in part by this
       change (line 3).
 - [x] 2.4 Remove the `todo` markers of the four tests in
       `test/no-torrent/install-native-script.test.js` without changing their bodies.

@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.96
+
+### Patch Changes
+
+- The dependency workflow now starts from the newest commit of main, so a run that waited in the queue no longer fails on a conflict with the run before it.
+
 ## 2.107.95
 
 ### Patch Changes

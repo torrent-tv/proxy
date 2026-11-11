@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.89
+
+### Patch Changes
+
+- The proxy now takes its WebRTC binary from the per-platform packages of node-datachannel 0.33.6 and checks at install that it loads.
+
 ## 2.107.88
 
 ### Patch Changes

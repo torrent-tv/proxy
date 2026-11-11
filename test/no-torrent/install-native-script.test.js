@@ -269,7 +269,7 @@ test("a package without engines.node is refused with exit 1", () => {
 
 // ---------------------------------------------------------------- 2. node-datachannel
 
-test("a node-datachannel whose binding loads is reported with its version and its libdatachannel version", { todo: "AC-21" }, () => {
+test("a node-datachannel whose binding loads is reported with its version and its libdatachannel version", () => {
   const r = run(makeCase());
   assert.equal(r.status, 0, said(r));
   assert.match(
@@ -279,7 +279,7 @@ test("a node-datachannel whose binding loads is reported with its version and it
   );
 });
 
-test("a node-datachannel whose require throws ends with a FATAL carrying the first line of the error and exit 1", { todo: "AC-21" }, () => {
+test("a node-datachannel whose require throws ends with a FATAL carrying the first line of the error and exit 1", () => {
   const r = run(makeCase({ top: "missing", ndc: "throws" }));
   assert.notEqual(r.status, 0, said(r));
   const fatal = r.stderr.split("\n").filter((line) => line.startsWith("FATAL: install-native:"));
@@ -291,7 +291,7 @@ test("a node-datachannel whose require throws ends with a FATAL carrying the fir
   assert.equal(r.calls.filter((call) => isInstall(call) || isUtpBuild(call)).length, 0, said(r));
 });
 
-test("an absent node-datachannel package ends with a FATAL naming the package and exit 1", { todo: "AC-21" }, () => {
+test("an absent node-datachannel package ends with a FATAL naming the package and exit 1", () => {
   const r = run(makeCase({ ndc: "absent" }));
   assert.notEqual(r.status, 0, said(r));
   assert.match(r.stderr, /^FATAL: install-native: .*node-datachannel/m, said(r));
@@ -299,7 +299,7 @@ test("an absent node-datachannel package ends with a FATAL naming the package an
   assert.doesNotMatch(r.stdout, /binding loads/, said(r));
 });
 
-test("the script never rebuilds node-datachannel", { todo: "AC-22" }, () => {
+test("the script never rebuilds node-datachannel", () => {
   const r = run(makeCase());
   assert.equal(r.calls.filter(isNdc).length, 0, said(r));
 });

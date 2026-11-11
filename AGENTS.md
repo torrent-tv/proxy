@@ -115,7 +115,9 @@ are split by that property:
 
 - Both images that install the proxy, this repository's `Dockerfile` and the
   add-on's, install with lifecycle scripts off (`--ignore-scripts`) and then run
-  `scripts/install-native.sh`, which builds and checks the two native modules.
+  `scripts/install-native.sh`, which checks that `node-datachannel` loads (its
+  binary is a per-platform npm package that `npm ci` installs; nothing is built
+  or fetched for it) and builds `utp-native`.
   Why scripts stay off (`ip-set`):
   [`ha-addon` AGENTS.md, Gotchas](https://github.com/torrent-tv/ha-addon/blob/main/AGENTS.md#gotchas).
 - `utp-native` is our fork, `@torrent-tv/utp-native`, chosen by `overrides` in

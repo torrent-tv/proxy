@@ -31,7 +31,7 @@ proxy update reaches Home Assistant.
   `INSTALL_NATIVE_RETRY_DELAY` are removed; a load check takes their place.
 - Comments that describe the old behaviour are corrected: proxy `Dockerfile`,
   proxy `AGENTS.md` "Gotchas", and the superseded
-  `openspec/changes/native-build-one-script/design.md`.
+  `openspec/changes/archive/2026-11-11-native-build-one-script/design.md`.
 - The add-on `Dockerfile` comment is a separate pull request in `ha-addon`.
 
 ## Capabilities
@@ -48,6 +48,6 @@ None.
 ## Impact
 
 - proxy: `package.json`, `package-lock.json`, `scripts/install-native.sh`,
-  `Dockerfile` (comments), `AGENTS.md`, `openspec/changes/native-build-one-script/design.md`,
+  `Dockerfile` (comments), `AGENTS.md`, `openspec/changes/archive/2026-11-11-native-build-one-script/design.md`,
   `test/no-torrent/install-native-script.test.js`, `.changeset/`.
 - ha-addon: `torrent_tv_proxy/Dockerfile` comment, separate pull request.

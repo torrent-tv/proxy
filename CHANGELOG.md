@@ -70,7 +70,7 @@
 
 ### Patch Changes
 
-- Project rules about releases, versions and dependencies are now written once in the shared contributing guide and linked from this repository's agent rules.
+- This release repeats 2.107.82 and changes nothing.
 
 ## 2.107.82
 

@@ -195,7 +195,9 @@ Dockerfile and workflow (AC-1, AC-4):
 
 ## 2. Tests (failing, one commit)
 
-- [ ] 2.1 Tests from the plan, committed failing: `test(proxy): …`
+- [x] 2.1 Tests from the plan, committed failing: `test(proxy): …`
+      Shown: plan c9dfbf4b and tests 5ce38c71 (`test/no-torrent/install-native-{script,package,image}.test.js`),
+      recorded on meta#302 (https://github.com/torrent-tv/meta/issues/302#issuecomment-6745593471); two of those tests pass before the code, by design (plan 1.4).
 
 ## 3. Implementation (one or more commits, tests untouched)
 
@@ -208,7 +210,17 @@ Dockerfile and workflow (AC-1, AC-4):
 
 ## 4. After merge (coordinator)
 
-- [ ] 4.1 Throwaway PR with a broken Dockerfile fails `Image build` (AC-4)
-- [ ] 4.2 Proxy release published; add-on `PROXY_VERSION` points at it
-- [ ] 4.3 Add-on PR: Dockerfile runs the script, `run.sh` drops `UV_THREADPOOL_SIZE` (AC-1, AC-7)
-- [ ] 4.4 Add-on released; HA update log shows the provenance line, proxy starts (AC-6)
+- [x] 4.1 Throwaway PR with a broken Dockerfile fails `Image build` (AC-4)
+      Shown: proxy#54 (`cli.js` imports a missing module; the final-stage `--help` fails, run 42665567281)
+      failed `Image build` while `Checks` passed, and was closed unmerged (https://github.com/torrent-tv/meta/issues/302#issuecomment-6746965370).
+- [x] 4.2 Proxy release published; add-on `PROXY_VERSION` points at it
+      Shown: proxy#53 merged and released as 2.107.71, which ships `scripts/install-native.sh`; the add-on
+      installed that version (https://github.com/torrent-tv/meta/issues/302#issuecomment-6746965370, 6747430850).
+- [x] 4.3 Add-on PR: Dockerfile runs the script, `run.sh` drops `UV_THREADPOOL_SIZE` (AC-1, AC-7)
+      Shown: ha-addon#6 (e4c2c2e, f89cb26, 19835db); `grep -c "node-datachannel: build attempt"` is 0 in both
+      Dockerfiles; its `Image builds` job logs `install-native: node v24.22.1 (floor 24)` and `utp-native: our
+      build at ...` (https://github.com/torrent-tv/meta/issues/302#issuecomment-6746965370, 6747430850).
+- [x] 4.4 Add-on released; HA update log shows the provenance line, proxy starts (AC-6)
+      Shown: add-on 0.100.74 (proxy 2.107.71) updated on the Home Assistant host on 2026-11-09. The Supervisor
+      keeps no output of a successful build, so the provenance line was read from one more build of the
+      add-on's Dockerfile on the host, and `/healthz` answered `{"ok":true,"version":"2.107.71"}` (https://github.com/torrent-tv/meta/issues/302#issuecomment-6747430850).

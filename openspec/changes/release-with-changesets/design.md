@@ -221,6 +221,65 @@ migration commits add headings but change no version, so they are not released.
   on <header>` goes into the failed list, the header is escaped as a workflow-command value in the error
   line, and the run ends red.
 
+### Checks of the workflow files (2026-11-11, torrent-tv/meta#423, #424, #425)
+
+Each check is a leg of `scripts/check.sh`, a step of `Checks` and a part of `all`; `workflow-selftest`
+(the step "Workflow checks fail on bad input") builds the bad inputs and fails when a check stops
+seeing one. They need yq 4.54.1, the version of the runner image that server's `install` job checks.
+
+- `workflow-pins` (Security rule 6): refuses a `uses:` that is not `owner/repo@vX.Y.Z`, `@<40 hex>`,
+  `docker://image:X.Y.Z`, a digest or `./path`; any `node-version:` (only `node-version-file:`); a
+  `docker/setup-buildx-action` step without `driver-opts: image=moby/buildkit:vX.Y.Z` or `driver: docker`;
+  an `npm install`, `npx` or `npm exec` that names a package other than `name@X.Y.Z` (for `npx -p <spec>`
+  and `npx --package=<spec>` the spec is checked and the command after it is not; a version in a
+  variable passes where the same script tests it against `^[0-9]+\.[0-9]+\.[0-9]+$`; `npx --no-install`
+  installs nothing); a `docker pull` or `docker run` of an image without `:X.Y.Z` or a digest. Base
+  images in Dockerfiles are not read.
+- `workflow-tokens`: in `dependencies.yml` the job `update`, which runs the install scripts and tests of
+  packages it has just resolved, has no token in its `env`, in a `with`, or kept by a checkout; the steps
+  that hold one are exactly `DEPENDENCY_TOKEN_STEPS` (they read public data). Every job that pushes
+  is a row of `WORKFLOW_PUSHES`; a job pushes when a `run:` has `git push` (also `git -C <dir> push`),
+  `gh release create` or `changeset git-tag`, or a `gh api` write (`-X POST|PATCH|PUT|DELETE`, or `-f`
+  fields) to a git, contents, merges, releases or branches endpoint, or calls a script (`node`, `bash` or
+  `sh <path>`) whose text pushes (`git push`, `git("push"`, `["git", ..., "push"]`; one level, and not
+  `scripts/check.sh`, which holds the patterns as data), so infra's `deploy`, which pushes in
+  `scripts/deploy.mjs`, needs its row. An App token for a row has exactly the listed `permission-*` inputs, its checkout
+  uses that token, every `gh` step reads it, and nothing names the plain `GITHUB_TOKEN`. A push of a
+  commit that changes a workflow file needs `permission-workflows: write`, which `GITHUB_TOKEN` never has
+  (run 42919325834: the tag push of `publish` was refused until the token had it). The one row with the
+  token `github` lists the job's own `permissions`.
+- `commit-msg-bot`: takes the step "Test every commit, oldest first" and the helper `commit` from
+  `dependencies.yml`, runs them in a scratch repository with a stub `npm` and a stub `scripts/check.sh`,
+  and requires that a commit with a body line of 120 characters is refused and the commit before it kept,
+  and that a commit made by the helper (folded body) passes.
+- Proof on bad input: `workflow-selftest` runs `workflow-pins` on each refused form and on the forms that
+  pass (each of the 8 places where `workflow-pins` refuses was switched off by itself in a copy of
+  `check.sh`, and the self-test then failed on a case written for it; the two `npx` package options,
+  `-p` and `--package=`, each have a refused and a passing case), `workflow-tokens` on copies of this repository's workflow files with one change each (the token
+  back in the job env, on the testing step, without `workflows`, with an extra permission, a checkout
+  without the App token, the plain token in the env of the workflow, in the env of a pushing job and in
+  its script, `gh` without an App token, a pushing job missing from the table, a table row without a job,
+  each row deleted in turn, an unlisted job that pushes by `git -C`, by `gh api` (method on the next line
+  too) or through a node or shell script, in a `.yaml` file, and a `github` row whose permissions differ
+  from the job's, a secret in the env of `dependencies.yml`, a step listed as holding a token that holds
+  none, a row whose job has no App token step with its id, a plain token in the env of a step that does
+  not run `gh`, `git push` in a quoted or a template string of a called script, no `dependencies.yml` and
+  no job `update`), and `commit-msg-bot` on a copy of the loop whose hook call is replaced by `true`. Each
+  of the 17 places where `workflow-tokens` refuses was switched off by itself in a copy of `check.sh`,
+  and the self-test then failed on a case written for it; where two rules would refuse the same input, the
+  case uses input that only one of them refuses (a secret instead of the GITHUB_TOKEN, a table without the
+  rows of the missing file).
+- Limits, read from the code and not covered: `workflow-pins` does not read `container:` or
+  `services.*.image`, `runs-on: *-latest`, `pip install`, `curl ... | sh`, `yarn dlx`, `sh -c "npx ..."`,
+  or the base images of Dockerfiles (open in torrent-tv/meta#423); a `docker run` option with a value
+  that is not in its list is read as the image (it fails safe); the proof of a version in a variable is
+  textual (the test is in the same script, not on the path to the install); when the runner image changes
+  yq, `Checks` and the dependency job fail until `YQ_VERSION` is changed in a commit. `workflow-tokens`
+  does not see a push by a script run directly (`./scripts/x.sh`), by `node` with flags before the path,
+  by `cd ... && node ...`, by `npm run`, by a module that the called script imports or a script that a
+  script calls, by a wrapper such as `run("push")`, by `curl` to the API, by `gh pr merge` or by a `uses:`
+  action. `echo "... git push ..."` counts as a push and so fails safe.
+
 ## Blockers and unknowns
 
 1. Not run before the merge: `version` on this repository's `main` (it ran in a scratch clone of this

@@ -132,7 +132,11 @@ dependency, dev dependency and override is an exact version), `install`
 (`npm ci` with its install scripts, retried), `guard` (the no-torrent guard),
 `test` (`npm test`), `image` (`docker build`), `copies` and `changeset-format` (a
 pull request carries no copy of a commit on `main` and adds one plain-sentence
-changeset each), `changesets-selftest` (both on bad input) and `all`, which
+changeset each), `changesets-selftest` (both on bad input), `workflow-pins` (every action, image, Node version and npm or docker install in a workflow is an exact
+version), `workflow-tokens` (the dependency job `update` gives no token to package code, and each job
+that pushes holds the App token with the permissions it needs, listed in `WORKFLOW_PUSHES`; it reads the
+workflows with yq 4.54.1), `commit-msg-bot` (the dependency job runs the commit-msg hook on each commit
+it prepares), `workflow-selftest` (all three on bad input) and `all`, which
 `dependencies.yml` runs on every commit it prepares. `install`, `test` and
 `image` run under `timeout` with a limit named at the top of the script, and
 say so when they stop one: `node --test` gives its test processes no limit, so a

@@ -141,3 +141,53 @@ Change of the stage: the version `0.0.0-development` leaves the tests (AC 4(c)).
 4. Rules and exit. Before the fixture changed, the check failed with the actual value
    `test/no-torrent/install-native-script.test.js:113`; after it, the check passes. The test uses no
    timer, no network and no file outside `test/`. Exit is `npm test`.
+
+## 4. Test plan of the closing stage: the dependency job starts from the tip of main (2026-11-11)
+
+Change of the stage: the job `update` of `.github/workflows/dependencies.yml` checks out `main`
+(`ref: main`), so a run queued by `concurrency: dependencies` does not start from the commit that was
+`github.sha` when it was started (AC-REF). The defect, with its measurements: ha-addon runs 43013341200
+and 43014115480 (2026-11-11). The second one was queued behind the first, checked out the dispatch-time
+commit, had its push refused, its rebase stopped on `torrent_tv_proxy` package files, and it ended
+`failure`; proxy 2.107.95 reached the add-on only by a manual run. The same file is in proxy, server,
+ha-addon and infra.
+
+1. Scope and risk. In scope: the leg `workflow-refs` of `scripts/check.sh` and its synthetic cases in
+   `workflow-selftest`, both in the block "The checks of the workflow files", which is byte-identical in the
+   four repositories. Out of scope: the checkout of the job `push` (it takes `needs.update.outputs.base`,
+   the commit the patches were made on, on purpose), the other legs (unchanged), and the behaviour of
+   GitHub's `concurrency` (a platform fact, not our code). Risk is low: no torrent startup, no runtime
+   code; a wrong leg either lets a stale checkout through (the defect) or refuses a correct file. Depth:
+   one positive case and every negative form listed in part 3, each refusal proved by its own message.
+2. Level and command (unit of the shell leg, with the fixtures built by `yq` in a scratch directory):
+   `bash scripts/check.sh workflow-refs` (the real file) and `bash scripts/check.sh workflow-selftest`
+   (the proof that the leg fails on bad input and passes on good). The runner needs `yq` at the
+   `YQ_VERSION` of the script. Exit is `bash scripts/check.sh all`, the command `dependencies.yml` and
+   `main.yml` run.
+3. Cases, each one `refs_case pass|fail` in `workflow_selftest`. Positive: `ref: main` on the `update`
+   checkout while the `push` checkout keeps its own ref. Negative: the `update` checkout with no `ref`;
+   with `${{ github.sha }}`; with `${{ github.ref }}`; with another branch; with a tag; with an empty `ref`;
+   a second `update` checkout with no `ref` after a first one at `main` (every checkout is read); the
+   `push` checkout at `main` while the `update` one has none (the right job is read); the job `update`
+   without a checkout (the error line says `has no actions/checkout step`; the matches are counted with
+   `[...] | length`, because in yq 4.54.1 a string literal at the end of a pipe prints even with no match);
+   a workflow without the job `update` and no `dependencies.yml` (each error line is checked). Boundary: an
+   empty string and a missing key are both refused. Not covered: a checkout through a local action or a
+   `git fetch` in a `run:` (the file has none; a new form is a new case with the change that adds it).
+4. Rules and exit. The test commit keeps `bash scripts/check.sh all` and `workflow-selftest` green: it
+   leaves the leg out of `all` and `main.yml` and has no case that runs the leg on the repository's own
+   `dependencies.yml`, because that case fails until the fix. The failing demonstration is the leg called by
+   name: before the fix, `bash scripts/check.sh workflow-refs` exits 1 in each repository with
+   `a checkout of job update has ref "", not main`; after it, it exits 0. The synthetic cases pass already, and
+   show the leg failing on bad input and passing on `ref: main`; turning the "no checkout" branch of the leg
+   into `return 0` makes `workflow-selftest` fail. The implementer commit adds exactly these lines:
+   1. `dependencies.yml`, the `update` checkout: `ref: main` under `with:`.
+   2. `scripts/check.sh`, `all`: `workflow_tokens && workflow_refs && commit_msg_bot` in place of
+      `workflow_tokens && commit_msg_bot`.
+   3. `.github/workflows/main.yml`, job `checks`, after the tokens step:
+      `- name: The dependency job starts from the tip of main` with
+      `run: bash scripts/check.sh workflow-refs`.
+   4. `scripts/check.sh`, `workflow_selftest`, first line of the cases of `refs_case`:
+      `refs_case pass "this repository's file" ''`.
+   The cases use no network and no file outside their scratch directory. The leg is a check, not a
+   `node:test` test, so it has no `todo` marker.

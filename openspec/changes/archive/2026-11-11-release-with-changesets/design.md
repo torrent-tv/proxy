@@ -2,7 +2,8 @@
 
 Facts were read from the files and runs named, or measured; each says which. Analysis is
 marked. The steps `version`, `plan`, `checks`, `rebase-prs` and `dependencies.yml` are
-copies of the server's (torrent-tv/server `main`, `openspec/changes/release-with-changesets/design.md`,
+copies of the server's (torrent-tv/server `main`,
+`openspec/changes/archive/2026-11-11-release-with-changesets/design.md`,
 and infra's, which describes their rules); only what differs for the proxy is written out here.
 
 ## Facts

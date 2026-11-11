@@ -105,23 +105,46 @@ commit removes the markers.
 
 ## 2. Implementation tasks (implementer)
 
-1. `package.json`: `node-datachannel` `0.32.3` to `0.33.6` in
-   `dependencies`; refresh `package-lock.json` with the repository's pinned npm
-   (`npm install --package-lock-only --ignore-scripts`). `werift` stays. The
-   `allowScripts` entry `node-datachannel@0.32.3` stays (the nested copy under
-   `webrtc-polyfill`).
-2. `scripts/install-native.sh`: replace step 2 as in `design.md` Decision 1;
-   remove `INSTALL_NATIVE_RETRY_DELAY` and its header paragraph; update the
-   header line "builds and checks" so it says what the script does now.
-3. Comments that describe the old behaviour: `Dockerfile` (the `npm ci` comment
-   and the `--help` comment name node-datachannel's binding), `AGENTS.md`
-   "Gotchas", `openspec/changes/native-build-one-script/design.md` (steps 2 and
-   the retry text; mark it superseded by this change).
-4. Remove the `todo` markers of the four tests in
-   `test/no-torrent/install-native-script.test.js` without changing their
-   bodies.
-5. A changeset in `.changeset/`.
-6. `npm test` exits 0. Nothing here starts a torrent; `--help` of a local build
-   is allowed.
-7. ha-addon `Dockerfile` comment: a separate pull request after the proxy
-   release.
+- [x] 2.1 `package.json`: `node-datachannel` `0.32.3` to `0.33.6` in `dependencies`; refresh
+      `package-lock.json` with the repository's pinned npm (`npm install --package-lock-only
+      --ignore-scripts`). `werift` stays. The `allowScripts` entry `node-datachannel@0.32.3`
+      stays (the nested copy under `webrtc-polyfill`).
+      Shown: `package.json` on `main` has `node-datachannel` `0.33.6`, exact, and the lock file
+      was made with `--ignore-scripts` (merged proxy#71, commit 81628506; released as 2.107.89).
+      `werift` stayed at 0.24.4 in that pull request; the dependency run of 2026-11-11 raised it
+      to 0.27.0 (proxy run 42989425984, released as 2.107.92).
+- [x] 2.2 `scripts/install-native.sh`: replace step 2 as in `design.md` Decision 1; remove
+      `INSTALL_NATIVE_RETRY_DELAY` and its header paragraph; update the header line "builds and
+      checks" so it says what the script does now.
+      Shown: step 2 of `scripts/install-native.sh` on `main` loads the package and logs
+      `install-native: node-datachannel <v>: binding loads (libdatachannel <x>)`; `npm rebuild
+      node-datachannel` and `INSTALL_NATIVE_RETRY_DELAY` occur nowhere in the script (`grep -c`
+      prints 0). The image build log of proxy#71 shows `install-native: node-datachannel 0.33.6:
+      binding loads (libdatachannel 0.24.6)` (meta#336, implementer result, 2026-11-11 00:15
+      UTC).
+- [x] 2.3 Comments that describe the old behaviour: `Dockerfile` (the `npm ci` comment and the
+      `--help` comment name node-datachannel's binding), `AGENTS.md` "Gotchas",
+      `openspec/changes/native-build-one-script/design.md` (steps 2 and the retry text; mark it
+      superseded by this change).
+      Shown: commit 81628506 corrected the `Dockerfile` comments and `AGENTS.md` "Gotchas";
+      `openspec/changes/native-build-one-script/design.md` is marked superseded in part by this
+      change (line 3).
+- [x] 2.4 Remove the `todo` markers of the four tests in
+      `test/no-torrent/install-native-script.test.js` without changing their bodies.
+      Shown: `test/no-torrent/install-native-script.test.js` on `main` holds no `todo` marker;
+      commit 81628506 removed the four markers and left the bodies alone, and 5c1a7ac8 later
+      dropped the rebuild leftovers of the fake `npm`.
+- [x] 2.5 A changeset in `.changeset/`.
+      Shown: the changeset of commit 81628506 is versioned as 2.107.89 in `CHANGELOG.md` ("The
+      proxy now takes its WebRTC binary from the per-platform packages of node-datachannel
+      0.33.6 and checks at install that it loads.").
+- [x] 2.6 `npm test` exits 0. Nothing here starts a torrent; `--help` of a local build is
+      allowed.
+      Shown: Checks and Image build of proxy#71 passed; on this Mac `npm test` passed with 3283
+      tests and 0 failures and nothing started a torrent (meta#336, implementer result,
+      2026-11-11 00:15 UTC). Proxy#71 and the follow-up proxy#72 are merged.
+- [x] 2.7 ha-addon `Dockerfile` comment: a separate pull request after the proxy release.
+      Shown: ha-addon#18 (`docs(addon): describe node-datachannel as a platform package, not a
+      build #ttv-336`) is merged (2026-11-11 00:40 UTC) after the proxy release that carries
+      proxy#71; it also corrected the add-on `AGENTS.md` and the `Dockerfile` line about
+      utp-native.

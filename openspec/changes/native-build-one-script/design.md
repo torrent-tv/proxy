@@ -1,6 +1,6 @@
 ## Context
 
-Superseded in part by `openspec/changes/node-datachannel-platform-package/`
+Superseded in part by `openspec/changes/archive/2026-11-11-node-datachannel-platform-package/`
 (torrent-tv/meta#336): step 2 below, the `node-datachannel` retry loop and
 `INSTALL_NATIVE_RETRY_DELAY` are replaced by a load check; everything else
 stands.

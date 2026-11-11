@@ -9,15 +9,18 @@
  *
  * - `npm` logs its working directory, its arguments and
  *   `npm_config_build_from_source`, and writes what a real rebuild or install
- *   would leave behind. `rebuild node-datachannel` fails as many times as
- *   FAKE_NDC_FAILURES says and then writes the binary (none with
- *   FAKE_NDC_NO_BINARY=1); `rebuild utp-native` fails with
- *   FAKE_UTP_BUILD_FAIL=1, else writes `utp_native.node` with `obj.target`
- *   and `.deps`; `install … utp-native@npm:@torrent-tv/utp-native@…` puts
- *   ours at the top.
+ *   would leave behind. `rebuild node-datachannel` succeeds and writes
+ *   `node_datachannel.node`, as it did for node-datachannel 0.32.3 (the call
+ *   is recorded, so a test can show that it is no longer made);
+ *   `rebuild utp-native` fails
+ *   with FAKE_UTP_BUILD_FAIL=1, else writes `utp_native.node` with
+ *   `obj.target` and `.deps`; `install … utp-native@npm:@torrent-tv/utp-native@…`
+ *   puts ours at the top.
  * - `node` answers `-p process.versions.node` (and `--version`) with
  *   FAKE_NODE_VERSION and hands every other call to the real node.
- * - `sleep` logs its argument and returns at once.
+ * - `node_modules/node-datachannel` is a fake package: it loads and reports
+ *   its libdatachannel version, throws a two-line error when it is required,
+ *   or is absent.
  *
  * The real `npm` never runs, nothing touches the network and no torrent is
  * involved.
@@ -34,6 +37,12 @@ import { fileURLToPath } from "node:url";
 const PROXY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const SCRIPT = path.join(PROXY, "scripts/install-native.sh");
 const SPEC = "npm:@torrent-tv/utp-native@2.5.3-ttv.9";
+const NDC_VERSION = "0.33.6";
+const NDC_LIBRARY_VERSION = "0.24.6";
+const NDC_ERROR_FIRST_LINE = "fake binding: libstdc++.so.6: cannot open shared object file";
+const NDC_ERROR_SECOND_LINE = "fake binding: second line of the loader message";
+const NDC_LOADS = `module.exports = { getLibraryVersion: () => "${NDC_LIBRARY_VERSION}" };\n`;
+const NDC_THROWS = `throw new Error("${NDC_ERROR_FIRST_LINE}\\n${NDC_ERROR_SECOND_LINE}");\n`;
 
 const root = mkdtempSync(path.join(tmpdir(), "ttv-install-native-"));
 after(() => rmSync(root, { recursive: true, force: true }));
@@ -42,18 +51,8 @@ const FAKE_NPM = `#!/bin/sh
 printf '%s|%s|%s\\n' "$PWD" "$*" "\${npm_config_build_from_source:-}" >> "$FAKE_LOG"
 case " $* " in
   *" rebuild "*node-datachannel*)
-    count=$(cat "$FAKE_STATE/ndc" 2>/dev/null || echo 0)
-    count=$((count + 1))
-    echo "$count" > "$FAKE_STATE/ndc"
-    if [ "$count" -le "\${FAKE_NDC_FAILURES:-0}" ]; then
-      echo "fake npm: node-datachannel download failed" >&2
-      exit 1
-    fi
-    if [ "\${FAKE_NDC_NO_BINARY:-}" != "1" ]; then
-      mkdir -p node_modules/node-datachannel/build/Release/obj.target/node_datachannel node_modules/node-datachannel/build/Release/.deps
-      : > node_modules/node-datachannel/build/Release/node_datachannel.node
-      : > node_modules/node-datachannel/build/Release/obj.target/node_datachannel/binding.o
-    fi
+    mkdir -p node_modules/node-datachannel/build/Release
+    : > node_modules/node-datachannel/build/Release/node_datachannel.node
     exit 0
     ;;
   *" rebuild "*utp-native*)
@@ -90,11 +89,6 @@ fi
 exec "$REAL_NODE" "$@"
 `;
 
-const FAKE_SLEEP = `#!/bin/sh
-echo "$1" >> "$FAKE_SLEEP_LOG"
-exit 0
-`;
-
 let next = 0;
 
 /** @param {string} file @param {unknown} value */
@@ -111,9 +105,10 @@ function writeJson(file, value) {
  *   spec?: string | null,
  *   top?: "ours" | "foreign" | "missing",
  *   packageJson?: boolean,
+ *   ndc?: "loads" | "throws" | "absent",
  * }} [options]
  */
-function makeCase({ engines = ">=24", spec = SPEC, top = "ours", packageJson = true } = {}) {
+function makeCase({ engines = ">=24", spec = SPEC, top = "ours", packageJson = true, ndc = "loads" } = {}) {
   next += 1;
   const base = path.join(root, `case-${next}`);
   const pkg = path.join(base, "package");
@@ -128,14 +123,18 @@ function makeCase({ engines = ">=24", spec = SPEC, top = "ours", packageJson = t
     if (spec !== null) manifest.overrides = { "utp-native": spec };
     writeJson(path.join(pkg, "package.json"), manifest);
   }
-  writeJson(path.join(pkg, "node_modules/node-datachannel/package.json"), { name: "node-datachannel", version: "0.32.3" });
+  if (ndc !== "absent") {
+    const dir = path.join(pkg, "node_modules/node-datachannel");
+    writeJson(path.join(dir, "package.json"), { name: "node-datachannel", version: NDC_VERSION, main: "index.js" });
+    writeFileSync(path.join(dir, "index.js"), ndc === "loads" ? NDC_LOADS : NDC_THROWS);
+  }
   if (top === "ours") {
     writeJson(path.join(pkg, "node_modules/utp-native/package.json"), { name: "@torrent-tv/utp-native", version: "2.5.3-ttv.9" });
   } else if (top === "foreign") {
     writeJson(path.join(pkg, "node_modules/utp-native/package.json"), { name: "utp-native", version: "2.5.3" });
   }
 
-  for (const [name, body] of [["npm", FAKE_NPM], ["node", FAKE_NODE], ["sleep", FAKE_SLEEP]]) {
+  for (const [name, body] of [["npm", FAKE_NPM], ["node", FAKE_NODE]]) {
     writeFileSync(path.join(fakes, name), body);
     chmodSync(path.join(fakes, name), 0o755);
   }
@@ -159,9 +158,7 @@ function run(c, { args = [c.pkg], env = {} } = {}) {
     REAL_NODE: process.execPath,
     FAKE_LOG: path.join(c.state, "npm.log"),
     FAKE_STATE: c.state,
-    FAKE_SLEEP_LOG: path.join(c.state, "sleep.log"),
     FAKE_NODE_VERSION: "24.11.0",
-    INSTALL_NATIVE_RETRY_DELAY: "0",
     ...env,
   };
   for (const [key, value] of Object.entries(merged)) if (value === undefined) delete merged[key];
@@ -176,7 +173,6 @@ function run(c, { args = [c.pkg], env = {} } = {}) {
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
     calls,
-    sleeps: lines(path.join(c.state, "sleep.log")),
   };
 }
 
@@ -229,10 +225,12 @@ test("every npm call runs in the package directory and none is global", () => {
   }
 });
 
-test("npm calls follow the steps: node-datachannel, then the install of ours, then the source build", () => {
+test("npm calls follow the steps: the install of ours, then the source build", () => {
   const r = run(makeCase({ top: "missing" }));
-  const order = r.calls.map((call) => (isNdc(call) ? "ndc" : isInstall(call) ? "install" : isUtpBuild(call) ? "utp" : call.argv));
-  assert.deepEqual(order, ["ndc", "install", "utp"], said(r));
+  const order = r.calls
+    .filter((call) => !isNdc(call))
+    .map((call) => (isInstall(call) ? "install" : isUtpBuild(call) ? "utp" : call.argv));
+  assert.deepEqual(order, ["install", "utp"], said(r));
 });
 
 // ---------------------------------------------------------------- 1. node floor
@@ -271,53 +269,39 @@ test("a package without engines.node is refused with exit 1", () => {
 
 // ---------------------------------------------------------------- 2. node-datachannel
 
-test("node-datachannel is rebuilt once when the first attempt succeeds, with no retry line", () => {
+test("a node-datachannel whose binding loads is reported with its version and its libdatachannel version", { todo: "AC-21" }, () => {
   const r = run(makeCase());
-  assert.equal(r.calls.filter(isNdc).length, 1, said(r));
-  assert.doesNotMatch(r.stderr, /node-datachannel attempt/, said(r));
-});
-
-test("node-datachannel failing twice is retried until the third attempt succeeds", () => {
-  const r = run(makeCase(), { env: { FAKE_NDC_FAILURES: "2" } });
   assert.equal(r.status, 0, said(r));
-  assert.equal(r.calls.filter(isNdc).length, 3, said(r));
-  assert.match(r.stderr, /^install-native: node-datachannel attempt 1 of 5 failed; retrying in 0s$/m, said(r));
-  assert.match(r.stderr, /^install-native: node-datachannel attempt 2 of 5 failed; retrying in 0s$/m, said(r));
-  assert.doesNotMatch(r.stderr, /attempt 3 of 5 failed/, said(r));
+  assert.match(
+    r.stdout,
+    new RegExp(`^install-native: node-datachannel ${NDC_VERSION.replaceAll(".", "\\.")}: binding loads \\(libdatachannel ${NDC_LIBRARY_VERSION.replaceAll(".", "\\.")}\\)$`, "m"),
+    said(r)
+  );
 });
 
-test("node-datachannel succeeding on the fifth attempt is enough", () => {
-  const r = run(makeCase(), { env: { FAKE_NDC_FAILURES: "4" } });
-  assert.equal(r.status, 0, said(r));
-  assert.equal(r.calls.filter(isNdc).length, 5, said(r));
-});
-
-test("node-datachannel failing all five attempts ends with the no-WebRTC FATAL and exit 1", () => {
-  const r = run(makeCase(), { env: { FAKE_NDC_FAILURES: "5" } });
-  assert.equal(r.status, 1, said(r));
-  assert.equal(r.calls.filter(isNdc).length, 5, said(r));
-  assert.match(r.stderr, /attempt 4 of 5 failed; retrying in 0s$/m, said(r));
-  assert.doesNotMatch(r.stderr, /attempt 5 of 5 failed; retrying/, said(r));
-  assert.match(r.stderr, /^FATAL: install-native: node-datachannel has no native binary; the proxy would have no WebRTC$/m, said(r));
-});
-
-test("after node-datachannel fails for good no utp-native step runs", () => {
-  const r = run(makeCase({ top: "missing" }), { env: { FAKE_NDC_FAILURES: "5" } });
-  assert.equal(r.status, 1, said(r));
+test("a node-datachannel whose require throws ends with a FATAL carrying the first line of the error and exit 1", { todo: "AC-21" }, () => {
+  const r = run(makeCase({ top: "missing", ndc: "throws" }));
+  assert.notEqual(r.status, 0, said(r));
+  const fatal = r.stderr.split("\n").filter((line) => line.startsWith("FATAL: install-native:"));
+  assert.equal(fatal.length, 1, said(r));
+  assert.ok(fatal[0].includes("node-datachannel"), said(r));
+  assert.ok(fatal[0].includes(NDC_ERROR_FIRST_LINE), said(r));
+  assert.ok(!fatal[0].includes(NDC_ERROR_SECOND_LINE), said(r));
+  assert.doesNotMatch(r.stdout, /binding loads/, said(r));
   assert.equal(r.calls.filter((call) => isInstall(call) || isUtpBuild(call)).length, 0, said(r));
 });
 
-test("a node-datachannel rebuild that leaves no .node file ends with the no-WebRTC FATAL and exit 1", () => {
-  const r = run(makeCase(), { env: { FAKE_NDC_NO_BINARY: "1" } });
-  assert.equal(r.status, 1, said(r));
-  assert.match(r.stderr, /^FATAL: install-native: node-datachannel has no native binary; the proxy would have no WebRTC$/m, said(r));
+test("an absent node-datachannel package ends with a FATAL naming the package and exit 1", { todo: "AC-21" }, () => {
+  const r = run(makeCase({ ndc: "absent" }));
+  assert.notEqual(r.status, 0, said(r));
+  assert.match(r.stderr, /^FATAL: install-native: .*node-datachannel/m, said(r));
+  assert.doesNotMatch(r.stderr, /no native binary/, said(r));
+  assert.doesNotMatch(r.stdout, /binding loads/, said(r));
 });
 
-test("without INSTALL_NATIVE_RETRY_DELAY a retry waits 10 seconds", () => {
-  const r = run(makeCase(), { env: { FAKE_NDC_FAILURES: "1", INSTALL_NATIVE_RETRY_DELAY: undefined } });
-  assert.equal(r.status, 0, said(r));
-  assert.match(r.stderr, /^install-native: node-datachannel attempt 1 of 5 failed; retrying in 10s$/m, said(r));
-  assert.deepEqual(r.sleeps, ["10"], said(r));
+test("the script never rebuilds node-datachannel", { todo: "AC-22" }, () => {
+  const r = run(makeCase());
+  assert.equal(r.calls.filter(isNdc).length, 0, said(r));
 });
 
 // ---------------------------------------------------------------- 3. utp-native spec
@@ -433,13 +417,10 @@ test("obj.target and .deps under every build/Release are removed and the binarie
   const c = makeCase();
   const r = run(c);
   assert.equal(r.status, 0, said(r));
-  for (const module of ["utp-native", "node-datachannel"]) {
-    const release = path.join(c.pkg, "node_modules", module, "build/Release");
-    assert.equal(existsSync(path.join(release, "obj.target")), false, `${module} obj.target\n${said(r)}`);
-    assert.equal(existsSync(path.join(release, ".deps")), false, `${module} .deps\n${said(r)}`);
-  }
-  assert.equal(existsSync(path.join(c.pkg, "node_modules/utp-native/build/Release/utp_native.node")), true, said(r));
-  assert.equal(existsSync(path.join(c.pkg, "node_modules/node-datachannel/build/Release/node_datachannel.node")), true, said(r));
+  const release = path.join(c.pkg, "node_modules/utp-native/build/Release");
+  assert.equal(existsSync(path.join(release, "obj.target")), false, `obj.target\n${said(r)}`);
+  assert.equal(existsSync(path.join(release, ".deps")), false, `.deps\n${said(r)}`);
+  assert.equal(existsSync(path.join(release, "utp_native.node")), true, said(r));
 });
 
 test("an obj.target directory not directly under build/Release is kept", () => {

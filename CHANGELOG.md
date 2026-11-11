@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.93
+
+### Patch Changes
+
+- The OpenSpec changes for the release flow, the ffprobe choice and the node-datachannel package are archived, and their requirements are merged into the specifications.
+
 ## 2.107.92
 
 ### Patch Changes

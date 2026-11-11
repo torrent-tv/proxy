@@ -37,33 +37,78 @@ one and its first release run.
 - [x] 2.3 `npm test` and `npx changeset status --since=origin/main` pass here, except the failures
       the Mac has without the Home Assistant host's tools (design.md, Fact 10). `bash scripts/check.sh test`
       stops itself after 900 s and says so (design.md, Fact 11).
-- [ ] 2.3b The Checks run of the pull request passes, `Workflows are valid` included.
-- [ ] 2.4 After the merge: a `force_push` on `refs/heads/main` by `torrent-tv-release[bot]` follows
+- [x] 2.3b The Checks run of the pull request passes, `Workflows are valid` included.
+      Shown: Checks run 42897488543 of the pull request, success (meta#336 acceptance check,
+      comment 6781047118).
+- [x] 2.4 After the merge: a `force_push` on `refs/heads/main` by `torrent-tv-release[bot]` follows
       the `pr_merge`; this pull request's changeset commit is on `main` with its author, author time
       and header unchanged, `package.json` `2.107.81`, `## 2.107.81` in `CHANGELOG.md`, the changeset
       deleted, and no commit `chore(release)`. Check:
       `gh api "repos/torrent-tv/proxy/activity?ref=refs/heads/main"`, `git show --stat <sha>`.
-- [ ] 2.5 The run of that push: `version` logs `no pending changesets`; `checks` and `build` pass;
+      Shown: proxy#63 `pr_merge` 2026-11-10 20:44:47 UTC, `force_push` by
+      `torrent-tv-release[bot]` 6e73c701 -> 93163ea1 at 20:45:10; 93163ea1 keeps author, author
+      time and header of the pull request commit 766557bb, changes `package.json`,
+      `package-lock.json` and `CHANGELOG.md` (`## 2.107.81`), holds no changeset and no
+      `chore(release)` follows (comment 6781047118, AC 1).
+- [x] 2.5 The run of that push: `version` logs `no pending changesets`; `checks` and `build` pass;
       `publish` publishes `@torrent-tv/proxy@2.107.81` with provenance and `gitHead` equal to the
       rewritten commit, tag `v2.107.81` is on it and its GitHub Release body equals the
       `CHANGELOG.md` section. Check: run URL,
       `npm view @torrent-tv/proxy@2.107.81 gitHead dist.attestations`, `git rev-list -n 1 v2.107.81`,
       `gh release view v2.107.81 --json body`.
-- [ ] 2.6 `publish` logs `started torrent-tv/ha-addon dependencies.yml with proxy-version=2.107.81`;
+      Shown: run 42898344338: `version` logs `no pending changesets`, `checks` pass (`tests 3254
+      pass 3254 fail 0`), `publish` logs `published @torrent-tv/proxy@2.107.81 from 93163ea`,
+      `pushed tag v2.107.81 on 93163ea` and `created GitHub Release v2.107.81`; `npm view
+      @torrent-tv/proxy@2.107.81 gitHead` is 93163ea149dc... with provenance
+      `https://slsa.dev/provenance/v1`; the release body equals the `CHANGELOG.md` section
+      (comment 6781047118, AC 1).
+- [x] 2.6 `publish` logs `started torrent-tv/ha-addon dependencies.yml with proxy-version=2.107.81`;
       ha-addon's `Dependencies` run (event `workflow_dispatch`) logs `npm serves @torrent-tv/proxy@2.107.81`
       and pushes `fix(proxy): install proxy 2.107.81 #ttv-387`.
-- [ ] 2.7 Window: the time from `pr_merge` to `force_push`, with the `version` job's step times, is
+      Shown: the `publish` job of run 42898344338 logs `started torrent-tv/ha-addon
+      dependencies.yml with proxy-version=2.107.81`; ha-addon run 42898937642
+      (`workflow_dispatch`) logs `npm serves @torrent-tv/proxy@2.107.81 after 123 s` and pushes
+      `fix(proxy): install proxy 2.107.81 #ttv-387` (ha-addon 55858e2) (comment 6781047118, AC
+      3). The same chain repeated for 2.107.92: proxy run 42989922601 logs `started
+      torrent-tv/ha-addon dependencies.yml with proxy-version=2.107.92`, ha-addon run
+      42990439482 logs `npm serves @torrent-tv/proxy@2.107.92 after 260 s` and pushed ha-addon
+      9ddc69b.
+- [x] 2.7 Window: the time from `pr_merge` to `force_push`, with the `version` job's step times, is
       recorded on torrent-tv/meta#336.
-- [ ] 2.8 The first `Dependencies` run after the merge ends in one of two ways: it logs `no updates`
+      Shown: `pr_merge` 20:44:47, `force_push` 20:45:10 (23 s); `version` job from 20:44:55: app
+      token 1 s, checkout 3 s, setup-node 1 s, `npm ci` 5 s, version 3 s; recorded on
+      torrent-tv/meta#336 as "Version window (AC 15)" (comment 6781047118).
+- [x] 2.8 The first `Dependencies` run after the merge ends in one of two ways: it logs `no updates`
       and `0 open Dependabot alerts` and pushes nothing, or it pushes its commits as the release App
       with the headers of the plan, each versioned, checked and published. `update` has only
       `contents: read` and `vulnerability-alerts: read`, no environment and no `secrets.`; `push` has no
       `npm`, `npx` or test command. The `node-datachannel` 0.33.6 and `werift` 0.27.0 bump it proposes
       (design.md, Fact 9) is for the owner to accept or hold back.
-- [ ] 2.9 Every commit on `main` after this change either matches a merged pull request commit or is by
+      Shown: `Dependencies` run 42989425984 (`workflow_dispatch`, 2026-11-11 08:44 UTC, success)
+      logged `0 open Dependabot alerts`, tested one prepared commit (`tests 3285 pass 3285`,
+      `checks passed on: fix(deps): update dependencies #ttv-386`) and pushed it as
+      `torrent-tv-release[bot]` (`pushed 1 commits d74e921..8ae6c2ad`). The push run 42989870775
+      versioned it in place: `force_push` 8ae6c2ad -> 43f1179d, `## 2.107.92` in `CHANGELOG.md`
+      (werift 0.24.4 -> 0.27.0), `publish` of run 42989922601 logged `published
+      @torrent-tv/proxy@2.107.92 from 43f1179`, tag `v2.107.92` and the GitHub Release; `npm
+      view @torrent-tv/proxy@2.107.92 gitHead` is 43f1179d. The owner ruled the werift 0.24.4 ->
+      0.27.0 update a non-breaking one and the `ncu --target minor` behaviour correct (comment
+      6791127421), and approved step 5, the push to `main` without a pull request (comment
+      6791321249). `update` has only `contents: read` and `vulnerability-alerts: read`, no
+      environment and no `secrets.`, and `push` has no `npm`, `npx` or test command (comment
+      6781047118, AC 9(b)).
+- [x] 2.9 Every commit on `main` after this change either matches a merged pull request commit or is by
       `torrent-tv-release[bot]` with a header ending in `#ttv-386` or `#ttv-387` and only
       `package.json`, `package-lock.json` and `.changeset/*.md`, and every `force_push` has actor
       `torrent-tv-release[bot]`.
+      Shown: on 2026-11-11 every commit after c7f63aa2 is a merged pull request commit (author
+      unchanged, committer the coordinator or the release App after versioning) or the release
+      App's own 43f1179d `fix(deps): update dependencies #ttv-386` (`package.json`,
+      `package-lock.json`, and `CHANGELOG.md`, which `changeset version` writes); every
+      `force_push` since the switch merge (proxy#63, 2026-11-10 20:44:47 UTC) has actor
+      `torrent-tv-release[bot]` (11 of 11), the other entries are 10 `pr_merge` by the
+      coordinator and one `push` by the release App (comment 6781047118, AC 5, checked again
+      against `origin/main` 43f1179d).
 - [x] 2.10 The copy check compares each commit of a pull request with the whole history of `main`,
       and a changeset must be one plain sentence. Check: `bash scripts/check.sh changesets-selftest`
       exits 0 (the earlier range comparison passes the copy, `copies` fails it; each format rule fails

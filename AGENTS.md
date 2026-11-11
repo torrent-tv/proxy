@@ -159,4 +159,4 @@ What is specific to the proxy:
   changes, else `chore(deps)`. WebTorrent and uint8-util are held back on
   purpose (see the comment in the workflow).
 - The rules, the states of a commit and the unknowns:
-  [`openspec/changes/release-with-changesets/design.md`](openspec/changes/release-with-changesets/design.md).
+  [`openspec/changes/archive/2026-11-11-release-with-changesets/design.md`](openspec/changes/archive/2026-11-11-release-with-changesets/design.md).

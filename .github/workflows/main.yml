@@ -10,7 +10,7 @@ name: Main
 #     its GitHub Release, and starts the add-on's dependency workflow with the newest
 #     version, which installs it into torrent-tv/ha-addon once npm serves it;
 #     `rebase-prs` rebases the open pull requests onto the rewritten main.
-# The rules are in openspec/changes/release-with-changesets/design.md.
+# The rules are in openspec/changes/archive/2026-11-11-release-with-changesets/design.md.
 
 on:
   push:

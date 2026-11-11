@@ -19,7 +19,7 @@ name: Dependencies
 #
 # The job that runs package code and tests has no write token and no secret. The
 # job that holds the release App token runs no package code (torrent-tv/meta#336).
-# The rules are in openspec/changes/release-with-changesets/design.md.
+# The rules are in openspec/changes/archive/2026-11-11-release-with-changesets/design.md.
 
 on:
   schedule:

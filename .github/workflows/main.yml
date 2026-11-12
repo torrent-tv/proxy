@@ -226,6 +226,18 @@ jobs:
           cache: npm
       - name: Node and npm are the pinned versions
         run: bash scripts/check.sh tools
+      # The runner image's yq changes without notice: on 2026-11-12 some runners had 4.54.1 and
+      # others 4.54.3, and `check.sh` refuses any version but YQ_VERSION. So the job installs yq
+      # 4.54.1 itself, checked against the SHA-256 the release publishes (Security rule 6).
+      - name: yq is the pinned version
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/yq-bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/yq-bin/yq" \
+            https://github.com/mikefarah/yq/releases/download/v4.54.1/yq_linux_amd64
+          echo "8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f  $RUNNER_TEMP/yq-bin/yq" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/yq-bin/yq"
+          echo "$RUNNER_TEMP/yq-bin" >> "$GITHUB_PATH"
       # The installer's Linux ffprobe crashes on MPEG-TS packet inspection.
       # The runner tries this stalled mirror before archive.ubuntu.com.
       - name: Skip the Azure Ubuntu mirror
@@ -288,8 +300,8 @@ jobs:
       - name: Dependencies are pinned exactly
         run: bash scripts/check.sh pins
       # The workflow files are checked like any other code: exact versions, the tokens each job holds,
-      # and the proof that each check fails on bad input (torrent-tv/meta#336). yq 4.54.1 is the version of
-      # the runner image, as in server's `install` job.
+      # and the proof that each check fails on bad input (torrent-tv/meta#336). yq 4.54.1 is installed
+      # by the step above, the version server's `install` job checks.
       - name: Workflow tools are pinned exactly
         run: bash scripts/check.sh workflow-pins
       - name: The dependency job gives no token to package code, and each pushing job holds its own

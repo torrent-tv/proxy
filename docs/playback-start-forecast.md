@@ -74,6 +74,24 @@ packet or frame. Exact near scheduling protects the upcoming work; the suffix
 accounts for a source, encoder or link that cannot keep pace over time. New
 exact ranges and measurements replace estimates on later polls.
 
+Each delivered fragment is in the page only once the page has processed it:
+its bytes times the track's measured browser processing rate
+(`services/viewer/browser-processing.js`). That rate is the page's own work over
+the bytes of the fragments it reports from its last 30 s: for each fragment,
+the time during which the page was parsing it or executing one of its appends
+after its load ended (the length of the union of those spans). A moment when
+an append executes while the parse runs, or when appends to the picture and the
+sound buffer execute together, counts once. An append's wait in its buffer's
+queue or behind the picture is not counted, nor is an append that ended after
+the fragment was buffered, which belongs to a later load of it. hls.js asks for a
+stream's next fragment only after the previous one is buffered, so a track's
+next transfer starts when that processing ends, while the link serves the other
+track. In the suffix a measured track finishes no earlier than its own bits at
+the full link rate plus its own processing. Without a usable sample for a
+track, nothing is charged for it and the result names the track
+`browser-processing-unmeasured`; the result's `browserProcessing` states each
+track's rate and sample count, or that reason.
+
 Readiness is held by the greatest lateness from the exact near schedule or the
 aggregate resource finish against the media already ahead of the viewer. Slow
 service adds startup wait when prepared media cannot cover the estimated work.
@@ -85,8 +103,10 @@ field measurements. They do not require scheduling every remaining segment.
 
 Critical review: future rates can change, average byte density is an initial
 mapping rather than an exact packet index, initial audio sample-work scaling
-does not model every decoder's nonlinear cost, and client receive/append time
-is not separately measured. These are approximation limits, not hidden weights.
+does not model every decoder's nonlinear cost, and the browser's processing
+rate is measured on fragments already buffered, so a track is unmeasured until
+the page has buffered one of its fragments, and the init's loading and append
+are not charged. These are approximation limits, not hidden weights.
 Actual progress, segment sizes and link observations refine the prediction.
 The client countdown uses elapsed local monotonic time; expiration cannot
 authorize playback. Only the proxy's readiness and real track coverage can.

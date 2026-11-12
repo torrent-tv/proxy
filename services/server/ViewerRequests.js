@@ -1003,9 +1003,11 @@ export class ViewerRequests {
         clockOffsetSeconds: placedByPlayer ? playerOffset : 0,
         clientRanges: bufferCaptureValid ? viewerReading?.bufferedRanges?.[output === session ? "video" : "audio"] ??
           viewerReading?.bufferedRanges?.media : null,
-        // Browser-observed append and fragment-parse samples are retained for
-        // the full model's service schedule; they are not yet used as numeric
-        // predecessors in the partial continuity calculation.
+        // Browser-observed append and fragment-parse samples. The forecast
+        // measures the page's processing of this track's fragments from its
+        // fragment samples and the page's whole append report
+        // (`browserAppends`): a muxed fragment appends to both buffers, so
+        // this track's buffer alone does not hold all its appends.
         appendService: bufferCaptureValid && viewerReading?.appendSessionId === session.id && viewerReading?.appendService?.[trackName]
           ? { ...viewerReading.appendService[trackName], epoch: viewerReading.appendEpoch,
             epochStartedAt: viewerReading.appendEpochStartedAt, snapshotAt: viewerReading.appendSnapshotAt,
@@ -1016,6 +1018,8 @@ export class ViewerRequests {
             epochStartedAt: viewerReading.appendEpochStartedAt, snapshotAt: viewerReading.appendSnapshotAt,
             receivedAt: viewerReading.appendServiceReceivedAt }
           : null,
+        browserAppends: bufferCaptureValid && viewerReading?.appendSessionId === session.id &&
+          viewerReading?.appendService ? viewerReading.appendService : null,
         sourceIds,
         processedSeconds: encoderCaptureValid ? trackProgress?.processedSeconds : null,
         startupRemainingSeconds: !encoderCaptureValid ? null : processingStarted ? 0 : Math.max(0,

@@ -265,7 +265,11 @@ and optional part index. These generated playlists use
 `#EXT-X-MEDIA-SEQUENCE:0`, so a complete fragment with no part index maps to
 the output segment with the same index. The proxy retains that mapping in the
 first-required-stage diagnostic as observed work only. It does not use the
-completed span as a future service duration or as an ETA.
+completed span as a future service duration or as an ETA. Separately, the
+start forecast measures each track's processing rate from these samples: a
+buffered fragment's parse after its load ended and its appends' `executeMs`
+(the append's own execution, without its queue or block wait; `null` or absent
+from a page that does not measure it), over the fragment's bytes.
 
 The progress response may include `playbackReadiness`:
 

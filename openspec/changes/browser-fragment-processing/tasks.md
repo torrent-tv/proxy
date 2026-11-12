@@ -1,0 +1,253 @@
+# Tasks: browser-fragment-processing (torrent-tv/meta#260, parent #185)
+
+Branch `claude/project-thread-9f2a6v`. Pass/fail command: `npm test` in the
+proxy (lint plus every `test/no-torrent` test, under the refuse-torrent
+preload). No check here starts a real torrent: everything is exercised with
+plain values (`predictPlaybackReadiness`, `browserProcessingOf`, `Viewer`) or
+the existing fakes of `ViewerRequests` tests.
+
+## Acceptance criteria
+
+| id | criterion | check |
+|---|---|---|
+| AC-1 | `browserProcessingOf` (design §2): a fragment of 1500 bytes with ages loadEnd 1000, parseStart 1100, parseEnd 900, bufferingEnd 850 and one media append on the picture buffer with the same `fragmentId`, `ageMs` 850 and `executeMs` 50 → `{ secondsPerByte: 0.0001, fragments: 1, bytes: 1500, seconds: 0.15 }`. A fragment of 1000 bytes with ages loadEnd 100, parseStart 100, parseEnd 60, bufferingEnd 20 and one append with `ageMs` 20 and `executeMs` 50 (it executes while the parse runs) → work 80 ms, not 90 ms. An append whose execute span began before the load ended counts only from the load end. | unit, `test/no-torrent/browser-processing.test.js` |
+| AC-2 | A muxed fragment with ages loadEnd 100, parseStart 100, parseEnd 90, appends on `video` with (`ageMs`, `executeMs`) (70, 20) and (40, 30), and on `audio` (75, 15), under one `fragmentId` → work 60 ms (the union; the sound append overlaps the picture). Two appends on separate buffers that execute at the same time count once. Two fragments of 1000 and 3000 bytes with work 10 and 50 ms → 60/4000 ms per byte (total over total, not a mean of ratios). | unit, same file |
+| AC-3 | A fragment is skipped when: `bufferingEnd` is null; `loadEnd`, `parseStart` or `parseEnd` is null; no append sample has its `fragmentId`; one of its append samples has `executeMs` null or absent, or `ageMs` null, negative or not finite; an append sample under its `fragmentId` with `ageMs` below its `bufferingEnd` (a later load's append) is left out, not charged (ages loadEnd 1000, parse 1000 → 990, bufferingEnd 950, own append 960 → 950, later append 40 → 10: work 20 ms, not 50 ms), and such a sample with `executeMs` null does not void the fragment; with 200 fragment samples and 200 append samples of distinct ids, each append sample's `fragmentId` is read at most a small constant number of times (counted with a getter), not once per fragment (cost linear in the samples, design §2 "Cost"; no wall-clock assertion); `bytes` is not a positive integer; its `fragmentId` is shared with another media fragment sample (a fragment loaded again: both are skipped). With no usable fragment, or with `null` inputs, the result is `{ reason: "browser-processing-unmeasured" }`. `init` samples never contribute. | unit, same file |
+| AC-4 | Schedule (design §3.2): one track, link 8 bit/s, a ready fragment of 2 bytes (2 s transfer) and a measured rate giving 1 s of processing → the fragment's completion is 3 s (`firstRequiredStages[0].deliveryCompleteSeconds` 2, `browserProcessingSeconds` 1, `completionSeconds` 3), not 5 s and not 2 s. | unit, `test/no-torrent/playback-readiness.test.js` |
+| AC-5 | Two ready fragments of one track, 1 s transfer and 0.5 s processing each → completions 1.5 s and 3 s; the readiness delay reflects the second at 3 s against the media ahead of it (a case built so the delay differs from the delay with the term absent). | unit, same file |
+| AC-6 | A ready picture fragment and a ready sound fragment (separate tracks), 1 s transfer each, picture processing 0.5 s, sound unmeasured → the sound's delivery ends at 2 s, not 2.5 s. | unit, same file |
+| AC-7 | With no usable sample on any track, `delaySeconds` and `reason` equal the values of the same input without `fragmentService`/`browserAppends`, and `browserProcessing` names each track with `reason: "browser-processing-unmeasured"`; the first required stage has `browserProcessingSeconds: null`, `browserProcessingReason: "browser-processing-unmeasured"`, `completionSeconds: null`. | unit, same file |
+| AC-8 | Suffix (design §3.3): a film longer than the near window, one track, link and output rates chosen so that the track's own transfer of the suffix plus its processing ends later than both production and the aggregate link finish → the suffix delivery constraint uses `link.finish(bits_t) + bits_t/8 × rate`; with the rate absent the delay equals today's. | unit, same file |
+| AC-9 | `Viewer` keeps `executeMs` of append samples (finite ≥ 0, or `null` when absent) and rejects a snapshot with a negative or non-finite `executeMs`, as it rejects other malformed fields. | unit, `test/no-torrent/viewer-states.test.js` |
+| AC-10 | `ViewerRequests` passes the page's whole `appendService` as `browserAppends` to every track only under the existing validity condition (valid buffer capture, same `appendSessionId`), else `null`; the readiness log line contains `browserProcessing`. | unit with the existing `ViewerRequests` fakes |
+| AC-11 | Existing tests that pin the old shape (`appendSeconds`, `appendReason` in `firstRequiredStages`) are updated to the new fields with their intent kept; docs and changeset of design §5 present; `npm test` exits 0 after every commit. | CI, review |
+| AC-12 | Field (HA host only, skill `ha-field-check`), after proxy, add-on and server are released: open a film with a separate soundtrack and one without, wait for playback, seek forward once. Pass: the `playback readiness` log lines after the first buffered fragment show `browserProcessing` with `fragments` > 0 for every required track and a finite `secondsPerByte`; before the first fragment they show `browser-processing-unmeasured`; no new stop after start compared with the stall counters of the page log. Logs saved outside git and attached to the issue. | end to end on HA |
+
+## Tasks
+
+1. [ ] Test writer (fresh): test plan below (skill `writing-tests`), tests for
+       AC-1…AC-10 marked `todo`, each shown failing for its AC's reason;
+       commit `test(readiness): AC-1 … AC-10 browser fragment processing #ttv-260`.
+2. [x] Implementer (fresh, from the test commit): design §2–§5, removing the
+       `todo` markers of the tests it makes pass; AC-11; `npm test` exits 0.
+3. [x] Review finding (proxy#81, 2026-11-12): parse and append spans overlap
+       (design §1 facts 4, 5). Design §2 now takes the union of intervals.
+       Test writer (fresh): AC-1/AC-2/AC-3 cases below for the union, the
+       overlap and the missing `ageMs`, marked `todo`, shown failing; fixtures
+       of the existing tests given explicit append ages. Implementer (fresh):
+       `browserProcessingOf` and the docs' formula sentences to design §2.
+4. [x] Review findings (proxy#82, 2026-11-12 17:01): (1) cost O(fragments ×
+       appends) on page-chosen sample counts; (2) an append of a later load of
+       the same fragment was charged to this load. Design §2 items 3, 4 and
+       "Cost". Test writer (fresh): AC-3 case below and a cost case, marked
+       `todo`, shown failing. Implementer (fresh): index appends by
+       `fragmentId`, leave out appends with `ageMs < bufferingEnd`.
+5. [ ] Reviewer approves on the current head; CI green; merge by rebase.
+6. [ ] Server change `append-execute-span` merged after the add-on carrying
+       this proxy; release; AC-12.
+
+## Test plan
+
+### 1. Scope and risk
+
+1. Files in scope and the tests covering each:
+   1. `services/viewer/browser-processing.js` (new, `browserProcessingOf`):
+      `test/no-torrent/browser-processing.test.js` (AC-1, AC-2, AC-3).
+   2. `services/viewer/playback-readiness.js` (`predictPlaybackReadiness`,
+      `scheduleTransfers`, `scheduleTail`, `firstRequiredStages`, the result's
+      `browserProcessing`): `test/no-torrent/playback-readiness.test.js`
+      (AC-4 to AC-8).
+   3. `services/viewer/Viewer.js` (`appendServiceSnapshot`):
+      `test/no-torrent/viewer-states.test.js` (AC-9).
+   4. `services/server/ViewerRequests.js` (`#playbackReadinessFor`: the
+      `browserAppends` input and the `playback readiness` log line):
+      `test/no-torrent/readiness-browser-processing.test.js` (AC-10).
+2. Out of scope:
+   1. `test/no-torrent/support/whole-film-forecast.js`, the reference model:
+      design §3.1 keeps its own `appendSeconds`, which reads 0 because no test
+      sets it; no test file imports the module today (`grep -rn whole-film
+      test/` finds only its own file and a test name).
+   2. `browserServiceSummary` and `browserServiceFingerprint` in
+      `ViewerRequests.js`: unchanged by the design (the log keeps its sample
+      summary; `browserProcessing` is logged as part of the forecast).
+   3. Docs and changeset (design §5): AC-11, reviewed, not tested.
+   4. The server's `executeMs` field: server change `append-execute-span`,
+      its own test plan.
+3. Risk areas and depth:
+   1. The waiting model (`predictPlaybackReadiness`; high: the start gate
+      opens on it). Every case of part 3: the near window (AC-4, AC-5, AC-6),
+      the unmeasured fallback (AC-7) and the suffix bound (AC-8).
+   2. The measurement of one fragment's processing (high: every charged second
+      comes from it). Every case of part 3 (AC-1 to AC-3).
+   3. Report validation in `Viewer` (medium: untrusted page input). Positive,
+      negative and boundary values of `executeMs` (AC-9).
+   4. Wiring and log in `ViewerRequests` (low: one input and one log field).
+      The main positive case, the two gates that refuse the samples, and the
+      log line (AC-10).
+   5. Torrent startup: not touched. Every test is plain values or the existing
+      `managerWithOwnStore` wiring with `getSourceStats` given; no test reaches
+      `TorrentPool`, WebTorrent or the worker
+      (`node scripts/check-tests-start-no-torrent.mjs` passes on these files).
+
+### 2. Types and levels
+
+All `node:test`, run under the refuse-torrent preload. End to end is AC-12 on
+the Home Assistant host (skill `ha-field-check`), not part of this plan.
+
+| AC | level | command | tests |
+|---|---|---|---|
+| AC-1 | unit | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/browser-processing.test.js` | "a parse that started during the load is clipped to the end of the load"; "a parse that ended before the load ended charges no parse time"; "a fragment buffered at the snapshot with zero parse and execute spans is a measurement of zero work"; "an append that executes while the parse runs counts once"; "an append that began executing before the load ended counts from the load end" |
+| AC-2 | unit | same | "a muxed fragment's appends to separate buffers count as parallel: the union of their spans"; "appends to separate buffers that execute at the same time count that time once"; "a fragment whose only appends went to the other buffer is measured by them"; "a track's rate is its total work over its total bytes, not a mean of per-fragment rates" |
+| AC-3 | unit | same | "a fragment not yet buffered is skipped"; "a fragment without its load end or parse marks is skipped"; "a fragment with no append sample of its identity is skipped"; "a fragment with one append lacking a usable execute span is skipped whole, not counted in part"; "a fragment with one append lacking a usable age is skipped whole"; "an append of a later load of the same fragment is not charged to this load"; "a later load's append without an execute span does not void the fragment"; "an append that ended exactly when the fragment was buffered belongs to it"; "a fragment whose bytes are not a positive integer is skipped"; "both samples of a fragment loaded twice are skipped"; "a fragment without an identity is skipped"; "with no usable fragment the track is unmeasured"; "absent inputs leave the track unmeasured"; "init samples never contribute"; "the cost is linear in the samples, not fragments times appends" |
+| AC-4 | unit | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/playback-readiness.test.js` | "a fragment is in the page at its delivery plus its processing, each counted once"; "the start waits for the processing of the first fragment" |
+| AC-5 | unit | same | "a track's next fragment is requested only after the previous one is processed"; "the start delay counts each fragment's processing before the next request" |
+| AC-6 | unit | same | "the other track uses the link while a fragment is processed" |
+| AC-7 | unit | same | "without a usable sample the forecast charges nothing and names each track unmeasured"; "before the page has buffered a fragment every track is named unmeasured"; "an unmeasured first required fragment states no processing and no completion"; "a measured track names its rate and sample count in the result" (design §3.5, the measured form of the same field) |
+| AC-8 | unit | same | "the suffix finishes a measured track no earlier than its own transfer plus its processing" |
+| AC-9 | unit | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/viewer-states.test.js` | "an append sample keeps the execute span the page measured"; "an append sample from a page that measures no execute span keeps it as null"; "a negative or non-finite execute span makes the append report invalid" |
+| AC-10 | integration (real `wireOutputs` with `ViewerRequests`, `Viewer` reading and source stats given) | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/readiness-browser-processing.test.js` | "the page's whole append report measures the processing of the track it watches"; "samples the page measured for another output measure nothing"; "samples of a report whose buffer capture is not valid measure nothing"; "the readiness log line states each track's processing rate and sample count" |
+| AC-11 | CI, review | `npm test` | none new; see "Existing tests that pin the old shape" |
+| AC-12 | end to end, HA host | skill `ha-field-check` | none here |
+
+### 3. Case coverage
+
+1. `browserProcessingOf`:
+   1. Positive: the AC-1 fragment (parse clipped to 100 ms, 50 ms append
+      after it, 1500 bytes) gives `{ secondsPerByte: 0.0001, fragments: 1,
+      bytes: 1500, seconds: 0.15 }`; an append executing 70 → 20 ms while the
+      parse runs 100 → 60 ms gives 80 ms, not 90 ms; a muxed fragment takes
+      the union of its spans (parse 100 → 90, picture 90 → 70 and 70 → 40,
+      sound 90 → 75: 60 ms); after a parse 100 → 90, picture 80 → 60 and
+      sound 70 → 50 give 40 ms, not 50 (summed) and not 30 (one buffer);
+      an append executing 130 → 80 ms with the load
+      ended at 100 counts 100 → 80; a fragment whose appends are all on the other
+      buffer is measured by them; two fragments give total work over total
+      bytes (60 ms / 4000 bytes, not the mean of 1/100 and 1/60).
+   2. Negative: `bufferingEnd`, `loadEnd`, `parseStart` or `parseEnd` null;
+      no append with the fragment's identity; one of its appends with
+      `executeMs` null, absent, -1 or `NaN` (the fragment is skipped whole,
+      the other buffer's 500 ms is not counted); one of its appends with
+      `ageMs` null, -1 or `NaN`; `bytes` 0, negative,
+      fractional, `NaN`, a string or null; `fragmentId` empty or null; two
+      media samples sharing one `fragmentId` (a fragment loaded again: both
+      skipped); `null` inputs. Each skipped fragment sits beside one usable fragment, so the
+      result shows it skipped and the usable one still measured.
+   3. Boundary: every age 0 and `executeMs` 0 (buffered at the snapshot
+      moment) is a measurement of zero work; a parse wholly before the load
+      end charges 0 parse; no sample at all and no usable sample give
+      `browser-processing-unmeasured`; `init` fragment samples and `init`
+      append samples under a media fragment's identity add nothing.
+2. Schedule (`predictPlaybackReadiness`), link 8 bit/s so one byte is one
+   second of transfer, rates measured from the page's samples:
+   1. Positive: transfer 2 s plus processing 1 s is in the page at 3 s, not
+      5 s and not 2 s, and the start waits 3 s (AC-4); two fragments of one
+      track at 1 s + 0.5 s each complete at 1.5 s and 3 s, the second holds
+      the start (`holdingBy` at 3 s against 1 s of film) and the delay is 2 s
+      against 1 s without the term (AC-5); the sound fragment is delivered at
+      2 s while the picture is processed until 1.5 s (AC-6); the suffix of a
+      film whose first 4 s the page holds is in the page at 8 s of transfer
+      plus 16 s of processing, in the page at 24 s against 12 s of film: a
+      delay of 12 s (AC-8); a measured track is named with its rate and sample count.
+   2. Negative: unusable samples (fragment not buffered) give the same delay
+      and reason as no samples, and name every track
+      `browser-processing-unmeasured`; the first required stage then has
+      `browserProcessingSeconds: null`, the reason and `completionSeconds:
+      null` (AC-7); the suffix without a rate gives today's delay, 0 (AC-8).
+   3. Boundary: a cold start (no fragment sample at all) on two tracks
+      (AC-7); a single-fragment window (AC-4) and a two-fragment window (AC-5).
+3. `Viewer` (`executeMs` on append samples): kept when 12.5 and when 0;
+   `null` when absent, `null` or `undefined`; the whole append report refused
+   (`appendService` null on a fresh viewer) for -1, `NaN`, infinity and the
+   string "12".
+4. `ViewerRequests`: the page's whole `appendService` reaches the forecast (a
+   fragment whose appends executed 20 ms on the picture buffer and 40 ms on
+   the sound buffer is measured at 10 + 40 ms over 1000 bytes, which only the
+   whole report gives); samples reported for another output
+   (`appendSessionId` differs) and samples of a report whose buffer capture is
+   not valid measure nothing; the `playback readiness` log line carries
+   `browserProcessing` with the sample count and rate.
+5. Not covered, with the reason:
+   1. The gate on `browserAppends` alone: `fragmentService` has the same gate
+      today, so with either refused the track is unmeasured; the two gate
+      tests show the combined effect only.
+   2. A suffix bound on two tracks (one measured, one not): the per-track
+      bound is shown on one track; the `max_t` over tracks is not separately
+      exercised.
+
+Existing tests that pin the old shape (AC-11, updated by the implementer, not
+edited here):
+
+1. `test/no-torrent/playback-readiness.test.js`, "keeps the first required
+   segment incomplete while browser stages lack future distributions":
+   deep-equals the first required stage with `appendSeconds: null` and
+   `appendReason`, which design §3.4 replaces by `browserProcessingSeconds`
+   and `browserProcessingReason`.
+2. `test/no-torrent/viewer-states.test.js`, "append service accepts advancing
+   cumulative counters once and rejects stale counters": deep-equals append
+   samples without `executeMs`; with design §4 they carry `executeMs: null`.
+3. `test/no-torrent/playback-readiness.test.js`, "overlaps independent track
+   processing and serves each released fragment on the shared link": its
+   message says append completion has no supported distribution; its
+   assertions hold.
+
+### 4. Rules and exit
+
+1. Every new test fails before the code, run 2026-11-12 on `2aefee5d` plus
+   these tests, each listed under failing tests with its AC:
+   1. AC-1 to AC-3: `Cannot find module
+      '.../services/viewer/browser-processing.js'` (the measurement does not
+      exist; the module is loaded inside each test, so the file still runs).
+      16 tests, 16 todo, 0 fail.
+   2. AC-4: `processing: undefined, expected 1` (no
+      `browserProcessingSeconds`); `delay: 2, expected 3`.
+   3. AC-5: `holdingBy.segment` 0, expected 1 (the second fragment is not
+      delayed by the first's processing); `with the term ...: 1, expected 2`.
+   4. AC-6: `the picture is processed ...: null, expected 1.5` (no processing
+      charged; the sound's 2 s delivery holds today and guards against the
+      link being held during processing).
+   5. AC-7: `browserProcessing` undefined (the delay and reason equality hold
+      today); `browserProcessingSeconds` undefined, expected null;
+      `Cannot read properties of undefined (reading 'length')`.
+   6. AC-8: `measured: 0, expected 12` (unmeasured 0 holds today).
+   7. AC-9: `executeMs` undefined, expected 12.5; undefined, expected null;
+      a report with `executeMs` -1 is accepted (`appendService` not null).
+   8. AC-10: `readiness.browserProcessing` undefined (three tests); the log
+      line's `browserProcessing` undefined.
+   `playback-readiness.test.js`: 72 tests, 62 pass, 10 todo, 0 fail.
+   `viewer-states.test.js`: 24 tests, 21 pass, 3 todo, 0 fail.
+   `readiness-browser-processing.test.js`: 4 tests, 4 todo, 0 fail.
+   9. Task 3 (union of spans), run 2026-11-12 on `ed89a29e` plus these
+      tests: `browser-processing.test.js` 20 tests, 16 pass, 4 todo, 0 fail.
+      The todo tests fail on the old sum: "an append that executes while the
+      parse runs counts once" (AC-1) `seconds 0.09`; "an append that began
+      executing before the load ended counts from the load end" (AC-1)
+      `seconds 0.05`; "appends to separate buffers that execute at the same
+      time count that time once" (AC-2) `seconds 0.03`; "a fragment with one
+      append lacking a usable age is skipped whole" (AC-3)
+      `fragments 2 !== 1`. The existing tests, given explicit append ages, pass on the old sum
+      and on the union; the fixtures of `playback-readiness.test.js` and
+      `readiness-browser-processing.test.js` keep their values (their parse
+      and append spans are disjoint) and are unchanged.
+   10. Task 4 (a later load's appends, linear cost), run 2026-11-12 on
+      `a0f1d114` plus these tests: `browser-processing.test.js` 24 tests,
+      21 pass, 3 todo, 0 fail. The todo tests (AC-3) fail on the current
+      code: "an append of a later load of the same fragment is not charged
+      to this load" `seconds 0.05`; "a later load's append without an
+      execute span does not void the fragment" (the result is `{ reason }`,
+      not measured); "the cost is linear in the samples, not fragments times
+      appends" `fragmentId of 200 append samples read 40000 times`. "an
+      append that ended exactly when the fragment was buffered belongs to
+      it" passes today and guards the boundary. `OTHER_AGE` of the skipped
+      fragments is 850, the default `bufferingEnd`, so their append is the
+      fragment's own and each is still skipped for the reason its test
+      names. The fixtures of `playback-readiness.test.js` and
+      `readiness-browser-processing.test.js` (append `ageMs` 0, `bufferingEnd`
+      0) keep their values and are unchanged.
+2. Deterministic: every forecast takes `now` as input and link and encoder
+   readings as values; the `ViewerRequests` tests give the source stats and
+   the viewer's reading and wait for the progress promise; no timers, no
+   network, each wiring test with its own temp store root.
+3. The `ViewerRequests` tests have a `timeout` of 10 s as a backstop; the
+   others cannot block.
+4. Exit: `npm test` in the proxy (lint plus every `test/no-torrent` test,
+   under the refuse-torrent preload).

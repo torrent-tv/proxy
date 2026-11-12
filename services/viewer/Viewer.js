@@ -101,11 +101,16 @@ function appendServiceSnapshot(value) {
               Number.isSafeInteger(sample.fragmentSequence) && sample.fragmentSequence >= 0) &&
             (sample.partIndex === undefined || sample.partIndex === null ||
               Number.isSafeInteger(sample.partIndex) && sample.partIndex >= 0) &&
-            (sample.fragmentStartSeconds === null || Number.isFinite(sample.fragmentStartSeconds)))) return null;
+            (sample.fragmentStartSeconds === null || Number.isFinite(sample.fragmentStartSeconds)) &&
+            // The append's own execution, without its queue or block wait; a page
+            // that does not measure it sends none (torrent-tv/meta#260).
+            (sample.executeMs === undefined || sample.executeMs === null ||
+              Number.isFinite(sample.executeMs) && sample.executeMs >= 0))) return null;
       snapshot[track][kind] = { bytes: item.bytes, elapsedMs: item.elapsedMs, operations: item.operations,
         samples: item.samples.map(({ bytes, elapsedMs, ageMs, fragmentId, fragmentSequence, partIndex,
-          fragmentStartSeconds }) => ({ bytes, elapsedMs, ageMs, fragmentId,
-          fragmentSequence: fragmentSequence ?? null, partIndex: partIndex ?? null, fragmentStartSeconds })) };
+          fragmentStartSeconds, executeMs }) => ({ bytes, elapsedMs, ageMs, fragmentId,
+          fragmentSequence: fragmentSequence ?? null, partIndex: partIndex ?? null, fragmentStartSeconds,
+          executeMs: executeMs ?? null })) };
     }
   }
   return snapshot;

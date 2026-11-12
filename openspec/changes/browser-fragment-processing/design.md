@@ -37,10 +37,25 @@ server `package-lock.json`.
 3. `frag.stats.parsing.start` can be earlier than `loading.end` when hls.js
    streams a fragment into the transmuxer while it loads; time before the load
    ends is transfer, which the schedule already charges on the link.
-4. A stream controller loads its next fragment only after the previous one is
+4. A fragment's appends can execute before its parse ends. hls.js triggers
+   `BUFFER_APPENDING` from `_handleTransmuxComplete` (`stream-controller.ts`,
+   `bufferFragmentData`), and the operation's `executeStart` is set as soon as
+   the buffer's queue reaches it (`buffer-controller.ts`, `execute`);
+   `frag.stats.parsing.end` is set later, in `_handleTransmuxerFlush`
+   (`base-stream-controller.ts`), on the transmuxer's separate `flush` message
+   (`transmuxer-worker.ts`). So parse and append spans of one fragment can
+   overlap, and their sum can exceed the time the page actually worked.
+5. An append sample's `ageMs` is the age of its `executeEnd`: the page records
+   the sample in its `BUFFER_APPENDED` handler, which hls.js calls
+   synchronously in `onComplete` right after setting `executeEnd`
+   (`buffer-controller.ts`), and both sample sets share one snapshot moment
+   (`server/public/domain/net-report.js`, `appendSnapshotNow`). So an append's
+   execute span is the age interval `[ageMs, ageMs + executeMs]`, on the same
+   clock as the fragment's `eventAgesMs`. No new page field is needed.
+6. A stream controller loads its next fragment only after the previous one is
    buffered (proposal, "Why", 2). The two stream controllers (main and audio)
    are independent; they share the network.
-5. `predictPlaybackReadiness` today: `completion.at = deliveryAt + appendSeconds`
+7. `predictPlaybackReadiness` today: `completion.at = deliveryAt + appendSeconds`
    with `appendSeconds = 0` (no caller supplies it), `scheduleTransfers` sets
    `trackFreeAt = deliveryAt`, `scheduleTail` bounds the suffix by
    `max(latestTrackFinish, link.finish(outputBits, deliveryStart))`.
@@ -66,16 +81,30 @@ these hold; otherwise it is skipped (no partial value):
 2. `f.eventAgesMs.loadEnd`, `parseStart`, `parseEnd` and `bufferingEnd` are
    finite and ≥ 0 (the fragment is fully buffered, so all its appends are done).
 3. At least one media append sample, in either buffer, has the same
-   `fragmentId`, and every such sample has a finite `executeMs` ≥ 0.
+   `fragmentId`, and every such sample has a finite `executeMs` ≥ 0 and a
+   finite `ageMs` ≥ 0.
 
-Its processing, in ms (ages grow into the past, so a later event has a smaller
-age):
+Its processing is the time during which the page was parsing or appending it
+after its load ended: the length of the union of these age intervals, in ms
+(ages grow into the past, so a later event has a smaller age; an interval is
+written `[later, earlier]` and is empty when `later ≥ earlier`):
 
 ```
-parse   = max(0, min(age.parseStart, age.loadEnd) - age.parseEnd)
-append  = max over buffers b of ( sum of executeMs of b's media samples with f.fragmentId )
-work(f) = parse + append
+load    = age.loadEnd
+parse   = [age.parseEnd, min(age.parseStart, load)]
+appends = for each media append sample a, in either buffer, with f.fragmentId:
+          [a.ageMs, min(a.ageMs + a.executeMs, load)]
+work(f) = length of the union of parse and appends
 ```
+
+The union counts each moment once (facts 4 and 5): an append that executes
+while the parse is still running, and appends to the picture and the sound
+buffer that execute at the same time (separate SourceBuffers work in
+parallel), are not added twice. A gap between intervals, such as an append's
+wait in its buffer's queue or behind the picture (fact 2), is not counted.
+Every interval is clipped to start no earlier than the end of the load (fact
+3). `work(f)` therefore never exceeds `age.loadEnd - age.bufferingEnd` when
+every append ended by `FRAG_BUFFERED`, which hls.js guarantees.
 
 The track's result is `seconds = Σ work / 1000`, `bytes = Σ f.bytes`,
 `secondsPerByte = seconds / bytes`, `fragments` = number of used samples. With
@@ -131,7 +160,7 @@ trackDone_t = link.finish(bits_t, deliveryStart') + bits_t / 8 × secondsPerByte
 ```
 
 where `deliveryStart'` is the same start the aggregate link term uses. A track's
-transfers and its processing alternate (fact 4), so its own transfer time at
+transfers and its processing alternate (fact 6), so its own transfer time at
 the full link rate plus its own processing time is a lower bound on its
 completion. `completedAt = max(latestTrackFinish, deliveryAt, max_t trackDone_t)`.
 

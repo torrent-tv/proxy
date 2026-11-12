@@ -79,7 +79,7 @@ test("a fragment buffered at the snapshot with zero parse and execute spans is a
     assertMeasured(result, { secondsPerByte: 0, fragments: 1, bytes: 1500, seconds: 0 });
   });
 
-test("an append that executes while the parse runs counts once", { todo: "AC-1" }, async () => {
+test("an append that executes while the parse runs counts once", async () => {
   // Parse 100 -> 60, append 70 -> 20: the page worked 100 -> 20, 80 ms, not
   // 40 + 50 ms.
   const result = await browserProcessingOf(fragments([fragment({ bytes: 1000, loadEnd: 100, parseStart: 100,
@@ -88,7 +88,7 @@ test("an append that executes while the parse runs counts once", { todo: "AC-1" 
   assertMeasured(result, { secondsPerByte: 0.00008, fragments: 1, bytes: 1000, seconds: 0.08 });
 });
 
-test("an append that began executing before the load ended counts from the load end", { todo: "AC-1" },
+test("an append that began executing before the load ended counts from the load end",
   async () => {
     // Load ended at 100, parse 150 -> 120 wholly before it; append 130 -> 80
     // counts 100 -> 80.
@@ -110,7 +110,7 @@ test("a muxed fragment's appends to separate buffers count as parallel: the unio
     assertMeasured(result, { secondsPerByte: 0.06 / 6000, fragments: 1, bytes: 6000, seconds: 0.06 });
   });
 
-test("appends to separate buffers that execute at the same time count that time once", { todo: "AC-2" },
+test("appends to separate buffers that execute at the same time count that time once",
   async () => {
     const id = "main:0:1:8:32:";
     const result = await browserProcessingOf(
@@ -194,7 +194,7 @@ test("a fragment with one append lacking a usable execute span is skipped whole,
       GOOD_ONLY);
   });
 
-test("a fragment with one append lacking a usable age is skipped whole", { todo: "AC-3" }, async () => {
+test("a fragment with one append lacking a usable age is skipped whole", async () => {
   for (const ageMs of [null, -1, Number.NaN]) {
     const result = await withGood(fragment({ id: "other" }),
       { video: [append("other", 500, OTHER_AGE)], audio: [append("other", 20, ageMs)] });

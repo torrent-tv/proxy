@@ -77,10 +77,12 @@ exact ranges and measurements replace estimates on later polls.
 Each delivered fragment is in the page only once the page has processed it:
 its bytes times the track's measured browser processing rate
 (`services/viewer/browser-processing.js`). That rate is the page's own work over
-the bytes of the fragments it reports from its last 30 s: each fragment's parse
-from the end of its load, plus the larger of its per-SourceBuffer sums of
-append execute spans (separate buffers append in parallel). An append's wait in
-its buffer's queue or behind the picture is not counted. hls.js asks for a
+the bytes of the fragments it reports from its last 30 s: for each fragment,
+the time during which the page was parsing it or executing one of its appends
+after its load ended (the length of the union of those spans). A moment when
+an append executes while the parse runs, or when appends to the picture and the
+sound buffer execute together, counts once. An append's wait in its buffer's
+queue or behind the picture is not counted. hls.js asks for a
 stream's next fragment only after the previous one is buffered, so a track's
 next transfer starts when that processing ends, while the link serves the other
 track. In the suffix a measured track finishes no earlier than its own bits at

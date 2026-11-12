@@ -377,8 +377,9 @@ orchestration. The torrent runs in one worker thread
    cost; per-track processing at the track's measured rate, tracks in
    parallel and each serial in itself, a segment starting only when its whole
    input is held; delivery on one link queue (`transferFinish`); and the
-   page's processing of each fragment (B8 after the fragment's load ended, and
-   the larger per-SourceBuffer sum of its B12 append execute spans), charged as
+   page's processing of each fragment (the union of its B8 parse and its B12
+   append execute spans in every SourceBuffer, after its load ended, so
+   overlapping spans count once), charged as
    its bytes times the track's rate measured from the page's own samples
    (`browserProcessingOf`, fed by `ViewerRequests` with the track's fragment
    samples and the page's whole append report). A track's next transfer

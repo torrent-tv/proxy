@@ -152,7 +152,9 @@ null with their reasons (those separate distributions are still not used), and
 The result of a computed forecast carries `browserProcessing: [{ track,
 secondsPerByte, fragments }` or `{ track, reason }]` in track order. The
 readiness log line (`playback readiness <session> …`) prints it as part of the
-forecast. Nothing else in the answer to the page changes.
+forecast. The answer to the page carries it too, as `playbackReadiness.browserProcessing`
+(`ViewerRequests` removes only `firstRequiredStages` before answering); the page
+does not read it. Nothing else in the answer changes.
 
 ## 4. Validation of `executeMs` (proxy entry)
 

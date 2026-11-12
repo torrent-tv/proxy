@@ -6,28 +6,39 @@
 
 For each output track the forecast SHALL derive a processing rate from the
 page's reported samples: for every fully buffered media fragment whose appends
-all carry an execute span, its work SHALL be its parse span, clipped to start no
-earlier than the end of its load, plus the largest per-SourceBuffer sum of the
-execute spans of its appends. The track's rate SHALL be the total work over the
-total bytes of those fragments. Time before a fragment's load ended SHALL NOT
-count as processing, and an append's queue or block wait SHALL NOT count.
+all carry an execute span and an age, its work SHALL be the length of the union
+of its parse span and the execute spans of its appends in every SourceBuffer,
+each span clipped to start no earlier than the end of its load. The track's
+rate SHALL be the total work over the total bytes of those fragments. Time
+before a fragment's load ended SHALL NOT count as processing, an append's queue
+or block wait SHALL NOT count, and a moment when the page parsed and appended,
+or appended to two buffers, SHALL count once.
 
 #### Scenario: Parse that started during the load is clipped
 - **GIVEN** a fragment of 1500 bytes whose load ended 1000 ms before the
   snapshot, whose parse started 1100 ms and ended 900 ms before it, and whose
-  one append executed in 50 ms
+  one append executed from 900 ms to 850 ms before it
 - **WHEN** the rate is derived
 - **THEN** its work is 100 + 50 = 150 ms and the rate is 0.1 ms per byte
 
-#### Scenario: A muxed fragment appends to two buffers in parallel
-- **GIVEN** a main fragment parsed in 10 ms whose appends executed 20 ms and
-  30 ms on the picture buffer and 15 ms on the sound buffer
+#### Scenario: An append that executes while the parse runs counts once
+- **GIVEN** a fragment of 1000 bytes whose load ended and parse started 100 ms
+  before the snapshot, whose parse ended 60 ms before it, and whose one append
+  executed from 70 ms to 20 ms before it
 - **WHEN** the rate is derived
-- **THEN** its work is 10 + max(50, 15) = 60 ms
+- **THEN** its work is 80 ms, not 40 + 50 = 90 ms
+
+#### Scenario: A muxed fragment appends to two buffers in parallel
+- **GIVEN** a main fragment whose load ended and parse started 100 ms before
+  the snapshot and whose parse ended 90 ms before it, with appends executed
+  from 90 to 70 ms and from 70 to 40 ms before it on the picture buffer and
+  from 90 to 75 ms before it on the sound buffer
+- **WHEN** the rate is derived
+- **THEN** its work is 60 ms
 
 #### Scenario: Samples that do not show the work are not used
 - **GIVEN** fragments without a buffered end, without parse marks, with no
-  matching append, or with an append lacking its execute span
+  matching append, or with an append lacking its execute span or its age
 - **WHEN** the rate is derived
 - **THEN** none of them contributes, and with no usable fragment the track is
   `browser-processing-unmeasured`

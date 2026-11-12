@@ -10,9 +10,9 @@ the existing fakes of `ViewerRequests` tests.
 
 | id | criterion | check |
 |---|---|---|
-| AC-1 | `browserProcessingOf` (design §2): a fragment of 1500 bytes with ages loadEnd 1000, parseStart 1100, parseEnd 900, bufferingEnd 850 and one media append on the picture buffer with the same `fragmentId` and `executeMs` 50 → `{ secondsPerByte: 0.0001, fragments: 1, bytes: 1500, seconds: 0.15 }`. | unit, `test/no-torrent/browser-processing.test.js` |
-| AC-2 | A muxed fragment parsed in 10 ms (parseStart after loadEnd) with appends 20 + 30 ms on `video` and 15 ms on `audio` under one `fragmentId` → work 60 ms. Two fragments of 1000 and 3000 bytes with work 10 and 50 ms → 60/4000 ms per byte (total over total, not a mean of ratios). | unit, same file |
-| AC-3 | A fragment is skipped when: `bufferingEnd` is null; `loadEnd`, `parseStart` or `parseEnd` is null; no append sample has its `fragmentId`; one of its append samples has `executeMs` null or absent; `bytes` is not a positive integer; its `fragmentId` is shared with another media fragment sample (a fragment loaded again: both are skipped). With no usable fragment, or with `null` inputs, the result is `{ reason: "browser-processing-unmeasured" }`. `init` samples never contribute. | unit, same file |
+| AC-1 | `browserProcessingOf` (design §2): a fragment of 1500 bytes with ages loadEnd 1000, parseStart 1100, parseEnd 900, bufferingEnd 850 and one media append on the picture buffer with the same `fragmentId`, `ageMs` 850 and `executeMs` 50 → `{ secondsPerByte: 0.0001, fragments: 1, bytes: 1500, seconds: 0.15 }`. A fragment of 1000 bytes with ages loadEnd 100, parseStart 100, parseEnd 60, bufferingEnd 20 and one append with `ageMs` 20 and `executeMs` 50 (it executes while the parse runs) → work 80 ms, not 90 ms. An append whose execute span began before the load ended counts only from the load end. | unit, `test/no-torrent/browser-processing.test.js` |
+| AC-2 | A muxed fragment with ages loadEnd 100, parseStart 100, parseEnd 90, appends on `video` with (`ageMs`, `executeMs`) (70, 20) and (40, 30), and on `audio` (75, 15), under one `fragmentId` → work 60 ms (the union; the sound append overlaps the picture). Two appends on separate buffers that execute at the same time count once. Two fragments of 1000 and 3000 bytes with work 10 and 50 ms → 60/4000 ms per byte (total over total, not a mean of ratios). | unit, same file |
+| AC-3 | A fragment is skipped when: `bufferingEnd` is null; `loadEnd`, `parseStart` or `parseEnd` is null; no append sample has its `fragmentId`; one of its append samples has `executeMs` null or absent, or `ageMs` null, negative or not finite; `bytes` is not a positive integer; its `fragmentId` is shared with another media fragment sample (a fragment loaded again: both are skipped). With no usable fragment, or with `null` inputs, the result is `{ reason: "browser-processing-unmeasured" }`. `init` samples never contribute. | unit, same file |
 | AC-4 | Schedule (design §3.2): one track, link 8 bit/s, a ready fragment of 2 bytes (2 s transfer) and a measured rate giving 1 s of processing → the fragment's completion is 3 s (`firstRequiredStages[0].deliveryCompleteSeconds` 2, `browserProcessingSeconds` 1, `completionSeconds` 3), not 5 s and not 2 s. | unit, `test/no-torrent/playback-readiness.test.js` |
 | AC-5 | Two ready fragments of one track, 1 s transfer and 0.5 s processing each → completions 1.5 s and 3 s; the readiness delay reflects the second at 3 s against the media ahead of it (a case built so the delay differs from the delay with the term absent). | unit, same file |
 | AC-6 | A ready picture fragment and a ready sound fragment (separate tracks), 1 s transfer each, picture processing 0.5 s, sound unmeasured → the sound's delivery ends at 2 s, not 2.5 s. | unit, same file |
@@ -30,8 +30,14 @@ the existing fakes of `ViewerRequests` tests.
        commit `test(readiness): AC-1 … AC-10 browser fragment processing #ttv-260`.
 2. [x] Implementer (fresh, from the test commit): design §2–§5, removing the
        `todo` markers of the tests it makes pass; AC-11; `npm test` exits 0.
-3. [ ] Reviewer approves on the current head; CI green; merge by rebase.
-4. [ ] Server change `append-execute-span` merged after the add-on carrying
+3. [ ] Review finding (proxy#81, 2026-11-12): parse and append spans overlap
+       (design §1 facts 4, 5). Design §2 now takes the union of intervals.
+       Test writer (fresh): AC-1/AC-2/AC-3 cases below for the union, the
+       overlap and the missing `ageMs`, marked `todo`, shown failing; fixtures
+       of the existing tests given explicit append ages. Implementer (fresh):
+       `browserProcessingOf` and the docs' formula sentences to design §2.
+4. [ ] Reviewer approves on the current head; CI green; merge by rebase.
+5. [ ] Server change `append-execute-span` merged after the add-on carrying
        this proxy; release; AC-12.
 
 ## Test plan
@@ -84,9 +90,9 @@ the Home Assistant host (skill `ha-field-check`), not part of this plan.
 
 | AC | level | command | tests |
 |---|---|---|---|
-| AC-1 | unit | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/browser-processing.test.js` | "a parse that started during the load is clipped to the end of the load"; "a parse that ended before the load ended charges no parse time"; "a fragment buffered at the snapshot with zero parse and execute spans is a measurement of zero work" |
-| AC-2 | unit | same | "a muxed fragment's appends to separate buffers count as parallel: the larger buffer sum"; "a fragment whose only appends went to the other buffer is measured by them"; "a track's rate is its total work over its total bytes, not a mean of per-fragment rates" |
-| AC-3 | unit | same | "a fragment not yet buffered is skipped"; "a fragment without its load end or parse marks is skipped"; "a fragment with no append sample of its identity is skipped"; "a fragment with one append lacking a usable execute span is skipped whole, not counted in part"; "a fragment whose bytes are not a positive integer is skipped"; "both samples of a fragment loaded twice are skipped"; "a fragment without an identity is skipped"; "with no usable fragment the track is unmeasured"; "absent inputs leave the track unmeasured"; "init samples never contribute" |
+| AC-1 | unit | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/browser-processing.test.js` | "a parse that started during the load is clipped to the end of the load"; "a parse that ended before the load ended charges no parse time"; "a fragment buffered at the snapshot with zero parse and execute spans is a measurement of zero work"; "an append that executes while the parse runs counts once"; "an append that began executing before the load ended counts from the load end" |
+| AC-2 | unit | same | "a muxed fragment's appends to separate buffers count as parallel: the union of their spans"; "a fragment whose only appends went to the other buffer is measured by them"; "a track's rate is its total work over its total bytes, not a mean of per-fragment rates" |
+| AC-3 | unit | same | "a fragment not yet buffered is skipped"; "a fragment without its load end or parse marks is skipped"; "a fragment with no append sample of its identity is skipped"; "a fragment with one append lacking a usable execute span is skipped whole, not counted in part"; "a fragment with one append lacking a usable age is skipped whole"; "a fragment whose bytes are not a positive integer is skipped"; "both samples of a fragment loaded twice are skipped"; "a fragment without an identity is skipped"; "with no usable fragment the track is unmeasured"; "absent inputs leave the track unmeasured"; "init samples never contribute" |
 | AC-4 | unit | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/playback-readiness.test.js` | "a fragment is in the page at its delivery plus its processing, each counted once"; "the start waits for the processing of the first fragment" |
 | AC-5 | unit | same | "a track's next fragment is requested only after the previous one is processed"; "the start delay counts each fragment's processing before the next request" |
 | AC-6 | unit | same | "the other track uses the link while a fragment is processed" |
@@ -100,16 +106,20 @@ the Home Assistant host (skill `ha-field-check`), not part of this plan.
 ### 3. Case coverage
 
 1. `browserProcessingOf`:
-   1. Positive: the AC-1 fragment (parse clipped to 100 ms, 50 ms append,
-      1500 bytes) gives `{ secondsPerByte: 0.0001, fragments: 1, bytes: 1500,
-      seconds: 0.15 }`; a muxed fragment takes the larger buffer sum
-      (10 + max(50, 15) ms); a fragment whose appends are all on the other
+   1. Positive: the AC-1 fragment (parse clipped to 100 ms, 50 ms append
+      after it, 1500 bytes) gives `{ secondsPerByte: 0.0001, fragments: 1,
+      bytes: 1500, seconds: 0.15 }`; an append executing 70 → 20 ms while the
+      parse runs 100 → 60 ms gives 80 ms, not 90 ms; a muxed fragment takes
+      the union of its spans (parse 100 → 90, picture 90 → 70 and 70 → 40,
+      sound 90 → 75: 60 ms); an append executing 130 → 80 ms with the load
+      ended at 100 counts 100 → 80; a fragment whose appends are all on the other
       buffer is measured by them; two fragments give total work over total
       bytes (60 ms / 4000 bytes, not the mean of 1/100 and 1/60).
    2. Negative: `bufferingEnd`, `loadEnd`, `parseStart` or `parseEnd` null;
       no append with the fragment's identity; one of its appends with
       `executeMs` null, absent, -1 or `NaN` (the fragment is skipped whole,
-      the other buffer's 500 ms is not counted); `bytes` 0, negative,
+      the other buffer's 500 ms is not counted); one of its appends with
+      `ageMs` null, -1 or `NaN`; `bytes` 0, negative,
       fractional, `NaN`, a string or null; `fragmentId` empty or null; two
       media samples sharing one `fragmentId` (a fragment loaded again: both
       skipped); `null` inputs. Each skipped fragment sits beside one usable fragment, so the

@@ -41,11 +41,11 @@ The fix uses only the page's own measurements; nothing is assumed for a device.
 ## What changes
 
 1. The browser processing of one fragment is measured from the page's samples
-   (design §2): the parse span clipped to start no earlier than the end of the
-   fragment's load, plus, for each SourceBuffer, the sum of the execute spans of
-   that fragment's appends (`executeMs`, added by the paired server change),
-   the largest buffer counting, because separate SourceBuffers append in
-   parallel. A track's rate is the sum of these times over the sum of the
+   (design §2): the time during which the page parsed or appended it after its
+   load ended, that is the length of the union of its parse span and the
+   execute spans of its appends (`executeMs`, added by the paired server
+   change, ending at the append sample's age), so an append during the parse
+   and parallel appends to two SourceBuffers count once. A track's rate is the sum of these times over the sum of the
    fragments' bytes, over the samples the page reports (its last 30 s).
 2. The schedule charges each fragment `bytes × rate` after its delivery and lets
    the track's next transfer start only when that processing ends; the shared

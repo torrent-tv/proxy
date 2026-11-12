@@ -385,3 +385,46 @@ test("a report into an output absent from the live registry is refused rather th
     false
   );
 });
+
+const NO_EXECUTE_SPAN = Symbol("no executeMs field");
+
+/** A report carrying one append sample whose `executeMs` is the value given. */
+function appendSampleReport(executeMs) {
+  const sample = { bytes: 200, elapsedMs: 40, ageMs: 0, fragmentId: "main:0:1:2:0", fragmentSequence: 2,
+    partIndex: null, fragmentStartSeconds: 0 };
+  if (executeMs !== NO_EXECUTE_SPAN) sample.executeMs = executeMs;
+  const empty = { bytes: 0, elapsedMs: 0, operations: 0, samples: [] };
+  return { ...reportCapture(), appendEpoch: "page-one", appendEpochStartedAt: AT, appendSnapshotAt: AT + 200,
+    appendService: { video: { init: empty, media: { bytes: 200, elapsedMs: 40, operations: 1, samples: [sample] } },
+      audio: { init: empty, media: empty } },
+    fragmentService: { video: { init: empty, media: empty }, audio: { init: empty, media: empty } },
+    bufferedAheadSec: 0 };
+}
+
+test("an append sample keeps the execute span the page measured", { todo: "AC-9" }, () => {
+  for (const executeMs of [12.5, 0]) {
+    const viewer = new Viewer("one", AT);
+    viewer.report(appendSampleReport(executeMs), AT);
+
+    assert.equal(viewer.netReport.appendService?.video.media.samples[0].executeMs, executeMs, String(executeMs));
+  }
+});
+
+test("an append sample from a page that measures no execute span keeps it as null", { todo: "AC-9" }, () => {
+  for (const executeMs of [NO_EXECUTE_SPAN, null, undefined]) {
+    const viewer = new Viewer("one", AT);
+    viewer.report(appendSampleReport(executeMs), AT);
+
+    assert.notEqual(viewer.netReport.appendService, null, String(executeMs));
+    assert.equal(viewer.netReport.appendService.video.media.samples[0].executeMs, null, String(executeMs));
+  }
+});
+
+test("a negative or non-finite execute span makes the append report invalid", { todo: "AC-9" }, () => {
+  for (const executeMs of [-1, Number.NaN, Number.POSITIVE_INFINITY, "12"]) {
+    const viewer = new Viewer("one", AT);
+    viewer.report(appendSampleReport(executeMs), AT);
+
+    assert.equal(viewer.netReport.appendService, null, String(executeMs));
+  }
+});

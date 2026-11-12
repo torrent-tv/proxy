@@ -79,9 +79,11 @@ work(f) = parse + append
 
 The track's result is `seconds = Σ work / 1000`, `bytes = Σ f.bytes`,
 `secondsPerByte = seconds / bytes`, `fragments` = number of used samples. With
-no used sample: `{ reason: "browser-processing-unmeasured" }`. Duplicate
-`fragmentId` samples in `fragments` (a fragment loaded again) are each a
-separate measurement of the same kind of work; each is used.
+no used sample: `{ reason: "browser-processing-unmeasured" }`. When several
+media samples in `fragments` share one `fragmentId` (a fragment loaded again),
+none of them is used: the append samples join by `fragmentId` only, so which
+appends belong to which load is not shown, and charging all of them to each
+load would count the same append twice.
 
 This is total work over total bytes, the same aggregation the encoder rate uses
 (`summarizeRate`, work over working time), so one large or one small fragment

@@ -80,9 +80,16 @@ these hold; otherwise it is skipped (no partial value):
 1. `f.bytes` is a positive safe integer; `f.fragmentId` is a non-empty string.
 2. `f.eventAgesMs.loadEnd`, `parseStart`, `parseEnd` and `bufferingEnd` are
    finite and ≥ 0 (the fragment is fully buffered, so all its appends are done).
-3. At least one media append sample, in either buffer, has the same
-   `fragmentId`, and every such sample has a finite `executeMs` ≥ 0 and a
-   finite `ageMs` ≥ 0.
+3. Every media append sample, in either buffer, with the same `fragmentId`
+   has a finite `ageMs` ≥ 0. Of these, the samples of this load are those
+   with `ageMs ≥ age.bufferingEnd`: hls.js records every append of a load
+   (`BUFFER_APPENDED`) before `onUnblocked` sets `frag.stats.buffering.end`
+   after the append queues drain (`buffer-controller.ts`), so an append with
+   a smaller age ended after this load was buffered and belongs to a later
+   load of the same fragment, whose `FRAG_PARSED` sample may not be recorded
+   yet. Such samples are left out, whatever their other fields.
+4. At least one append sample of this load exists, and every one has a finite
+   `executeMs` ≥ 0.
 
 Its processing is the time during which the page was parsing or appending it
 after its load ended: the length of the union of these age intervals, in ms
@@ -92,7 +99,7 @@ written `[later, earlier]` and is empty when `later ≥ earlier`):
 ```
 load    = age.loadEnd
 parse   = [age.parseEnd, min(age.parseStart, load)]
-appends = for each media append sample a, in either buffer, with f.fragmentId:
+appends = for each append sample a of this load (3), in either buffer:
           [a.ageMs, min(a.ageMs + a.executeMs, load)]
 work(f) = length of the union of parse and appends
 ```
@@ -103,8 +110,14 @@ buffer that execute at the same time (separate SourceBuffers work in
 parallel), are not added twice. A gap between intervals, such as an append's
 wait in its buffer's queue or behind the picture (fact 2), is not counted.
 Every interval is clipped to start no earlier than the end of the load (fact
-3). `work(f)` therefore never exceeds `age.loadEnd - age.bufferingEnd` when
-every append ended by `FRAG_BUFFERED`, which hls.js guarantees.
+3), and every append interval ends no later than `age.bufferingEnd` (3), so
+`work(f)` never exceeds `age.loadEnd - age.bufferingEnd`.
+
+Cost: the page chooses how many samples it reports, and the forecast runs on
+every progress request, so the append samples are indexed by `fragmentId` once
+per call and each fragment reads only its own; the work is linear in the
+number of samples plus the sorting of each fragment's own intervals, never
+fragments × appends.
 
 The track's result is `seconds = Σ work / 1000`, `bytes = Σ f.bytes`,
 `secondsPerByte = seconds / bytes`, `fragments` = number of used samples. With

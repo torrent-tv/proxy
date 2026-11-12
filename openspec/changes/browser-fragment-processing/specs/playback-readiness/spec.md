@@ -8,7 +8,10 @@ For each output track the forecast SHALL derive a processing rate from the
 page's reported samples: for every fully buffered media fragment whose appends
 all carry an execute span and an age, its work SHALL be the length of the union
 of its parse span and the execute spans of its appends in every SourceBuffer,
-each span clipped to start no earlier than the end of its load. The track's
+each span clipped to start no earlier than the end of its load. An append
+that ended after the fragment was buffered belongs to a later load of the same
+fragment and SHALL NOT count. The derivation SHALL take time linear in the
+number of reported samples, not their product. The track's
 rate SHALL be the total work over the total bytes of those fragments. Time
 before a fragment's load ended SHALL NOT count as processing, an append's queue
 or block wait SHALL NOT count, and a moment when the page parsed and appended,
@@ -27,6 +30,14 @@ or appended to two buffers, SHALL count once.
   executed from 70 ms to 20 ms before it
 - **WHEN** the rate is derived
 - **THEN** its work is 80 ms, not 40 + 50 = 90 ms
+
+#### Scenario: An append of a later load of the fragment is not charged
+- **GIVEN** a fragment whose load ended 1000 ms before the snapshot, parsed
+  from 1000 to 990 ms and buffered 950 ms before it, with its own append
+  executed from 960 to 950 ms, and a second append under the same fragment
+  identity executed from 40 to 10 ms before the snapshot
+- **WHEN** the rate is derived
+- **THEN** its work is 20 ms, not 50 ms
 
 #### Scenario: A muxed fragment appends to two buffers in parallel
 - **GIVEN** a main fragment whose load ended and parse started 100 ms before

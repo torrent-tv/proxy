@@ -155,6 +155,15 @@ test("a fragment whose bytes are not a positive integer is skipped", { todo: "AC
   }
 });
 
+test("both samples of a fragment loaded twice are skipped", { todo: "AC-3" }, async () => {
+  // The appends join by identity only, so which belong to which load is not shown.
+  const good = fragment({ id: "good" });
+  const result = await browserProcessingOf(fragments([good, fragment({ id: "twice" }), fragment({ id: "twice" })]),
+    appends({ video: [append("good", 50), append("twice", 500), append("twice", 500)] }));
+
+  assertMeasured(result, GOOD_ONLY);
+});
+
 test("a fragment without an identity is skipped", { todo: "AC-3" }, async () => {
   for (const id of ["", null]) {
     const result = await withGood(fragment({ id }), { video: [append(id, 500)] });

@@ -28,7 +28,7 @@ the existing fakes of `ViewerRequests` tests.
 1. [ ] Test writer (fresh): test plan below (skill `writing-tests`), tests for
        AC-1…AC-10 marked `todo`, each shown failing for its AC's reason;
        commit `test(readiness): AC-1 … AC-10 browser fragment processing #ttv-260`.
-2. [ ] Implementer (fresh, from the test commit): design §2–§5, removing the
+2. [x] Implementer (fresh, from the test commit): design §2–§5, removing the
        `todo` markers of the tests it makes pass; AC-11; `npm test` exits 0.
 3. [ ] Reviewer approves on the current head; CI green; merge by rebase.
 4. [ ] Server change `append-execute-span` merged after the add-on carrying

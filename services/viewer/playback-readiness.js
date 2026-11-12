@@ -37,6 +37,7 @@ import {
   toSeconds,
   ZERO
 } from "./media-time.js";
+import { browserProcessingOf } from "./browser-processing.js";
 
 // Match the media element's allowance around a seek target. A fragment's
 // timestamps can extend slightly beyond its nominal playlist boundary.
@@ -253,7 +254,7 @@ function mergeCaptureSummary(previous, capture) {
  *   segmentCount?: number,
  *   bitsPerMediaSecond: number, readings: Array<{ at: number, value: number }>,
  *   clockOffsetSeconds?: number, clientRanges?: Array<{ start: number, end: number }>,
- *   appendService?: object, fragmentService?: object,
+ *   appendService?: object, fragmentService?: object, browserAppends?: object | null,
  *   segments: Array<{ index: number, startSeconds: number, endSeconds: number,
  *     sourceInputs?: Array<{ sourceId: string, ranges: Array<{ start: number, end: number }> }>,
  *     mediaRanges?: { timescale: bigint | null, ranges: Array<{ start: bigint, end: bigint, frame: bigint }> } }>,
@@ -262,7 +263,10 @@ function mergeCaptureSummary(previous, capture) {
  *   readySegmentIndices: number[], segmentSizesBytes: Map<number, number> | object }>} input.tracks
  *   `mediaRanges` are a read piece's ranges on its served timeline, in ticks;
  *   `clockOffsetSeconds` is the `timestampOffset` the page's player applied to
- *   that track; `clientRanges` are what the page reports holding, in seconds.
+ *   that track; `clientRanges` are what the page reports holding, in seconds;
+ *   `fragmentService` is the page's fragment samples of that track and
+ *   `browserAppends` its whole append report, from which the browser's
+ *   processing of the track's fragments is measured ({@link ./browser-processing.js}).
  * @param {Array<{ at: number, value: number }>} input.linkReadings - Bits/s.
  * @returns {object}
  */
@@ -374,7 +378,10 @@ export function predictPlaybackReadiness(input = {}) {
     durationSeconds: Number.isFinite(track.durationSeconds) ? track.durationSeconds : duration,
     segmentCount: Number.isSafeInteger(track.segmentCount) ? track.segmentCount
       : Math.max(0, ...track.segments.map(segment => segment.index + 1)),
-    clockSeconds: Number.isFinite(track.clockOffsetSeconds) ? track.clockOffsetSeconds : 0
+    clockSeconds: Number.isFinite(track.clockOffsetSeconds) ? track.clockOffsetSeconds : 0,
+    // The page's own processing of this track's fragments, in seconds per
+    // byte, or why it is unmeasured: then nothing is charged for it.
+    browser: browserProcessingOf(track.fragmentService ?? null, track.browserAppends ?? null)
   }));
   const missingFirstGeometry = trackState.slice(0, requiredTracks).some(({ segments }) => {
     const first = segments.find(segment => segment.endSeconds > position);
@@ -608,7 +615,7 @@ export function predictPlaybackReadiness(input = {}) {
   const completions = [];
   const productions = [];
   for (const job of jobs) {
-    const { track, trackIndex, segment, sizeBits, encodeWork, sourceByteIntervals, estimatedSourceBytes } = job;
+    const { trackIndex, segment, sizeBits, encodeWork, sourceByteIntervals, estimatedSourceBytes } = job;
     let sourceArrivalAt = 0;
     const plan = { finish: 0 };
     for (const [sourceId, ranges] of sourceByteIntervals) {
@@ -692,18 +699,22 @@ export function predictPlaybackReadiness(input = {}) {
     const sourcePlanned = sourceArrivalAt > 0 && plan.finish >= sourceArrivalAt;
     productions.push({ at: producedAt, trackIndex, segment, requiresSource: sourceArrivalAt > 0, sourceArrivalAt,
       sourcePlanned, runAdmissionAt, runOpenSeconds, productionStartAt, encodeWork });
+    const browser = trackState[trackIndex].browser;
     transferJobs.push({ trackIndex, segment, sizeBits, readyAt: producedAt, sourceArrivalAt, sourcePlanned,
-      order: transferJobs.length, appendSeconds: finiteNonNegative(track.appendSeconds) });
+      order: transferJobs.length,
+      browserSeconds: Number.isFinite(browser.secondsPerByte) ? sizeBits / 8 * browser.secondsPerByte : 0 });
   }
   // A transfer waits only for work that is ready on its own stream and for
   // bytes already being served by the shared link. A video piece whose encode
   // is still running cannot reserve link time ahead of a ready audio piece.
-  // Each stream remains ordered; the single link remains shared.
+  // Each stream remains ordered; the single link remains shared. A fragment
+  // is in the page once the page has processed it, and its stream asks for
+  // the next one only then.
   const transfers = scheduleTransfers(transferJobs, link);
   const transferFinish = transfers.reduce((finish, transfer) => Math.max(finish, transfer.deliveryAt), 0);
   for (const transfer of transfers) {
-    const { trackIndex, segment, deliveryAt, appendSeconds, sourceArrivalAt, sourcePlanned } = transfer;
-    completions.push({ at: deliveryAt + appendSeconds, deliveryAt, appendSeconds, trackIndex, segment, sourceArrivalAt,
+    const { trackIndex, segment, deliveryAt, completionAt, browserSeconds, sourceArrivalAt, sourcePlanned } = transfer;
+    completions.push({ at: completionAt, deliveryAt, browserSeconds, trackIndex, segment, sourceArrivalAt,
       sourcePlanned });
   }
 
@@ -793,11 +804,15 @@ export function predictPlaybackReadiness(input = {}) {
     tailUnmappedTracks = stop?.unmappedTracks ?? tailUnmappedTracks;
   }
   const firstRequiredStages = trackState.slice(0, requiredTracks).map((state, trackIndex) => {
+    // The page's processing of the fragment, or why it is not stated: the
+    // track has no usable sample, so the fragment's completion is unknown.
+    const unmeasuredProcessing = Number.isFinite(state.browser.secondsPerByte) ? {}
+      : { browserProcessingReason: state.browser.reason };
     const first = state.segments.find(segment => segment.endSeconds > position);
     if (!first) return { track: state.track.id ?? trackIndex, segment: null, alreadyBuffered: true,
       sourceArrivalSeconds: 0, runAdmissionSeconds: null, runOpenSeconds: 0, productionStartSeconds: 0,
       productionCompleteSeconds: 0, deliveryCompleteSeconds: 0, browserLoadToParseSeconds: 0,
-      appendRequestToAckSeconds: 0, appendSeconds: 0, completionSeconds: 0 };
+      appendRequestToAckSeconds: 0, browserProcessingSeconds: 0, completionSeconds: 0 };
     if (!Array.isArray(first.ranges) || first.ranges.length === 0) return {
       track: state.track.id ?? trackIndex,
       segment: first.index,
@@ -813,15 +828,15 @@ export function predictPlaybackReadiness(input = {}) {
       browserLoadToParseReason: "fragment-load-to-parse-distribution-unavailable",
       appendRequestToAckSeconds: null,
       appendRequestToAckReason: "append-request-to-ack-distribution-unavailable",
-      appendSeconds: null,
-      appendReason: "append-request-to-ack-distribution-unavailable",
+      browserProcessingSeconds: null,
+      ...unmeasuredProcessing,
       completionSeconds: null
     };
     if (first.ranges.every(range => contains(state.clientRanges, range.start, range.end))) {
       return { track: state.track.id ?? trackIndex, segment: first.index, alreadyBuffered: true,
         sourceArrivalSeconds: 0, runAdmissionSeconds: null, runOpenSeconds: 0, productionStartSeconds: 0,
         productionCompleteSeconds: 0, deliveryCompleteSeconds: 0, browserLoadToParseSeconds: 0,
-        appendRequestToAckSeconds: 0, appendSeconds: 0, completionSeconds: 0 };
+        appendRequestToAckSeconds: 0, browserProcessingSeconds: 0, completionSeconds: 0 };
     }
     const completion = completions.find(item => item.trackIndex === trackIndex && item.segment.index === first.index);
     // HLS playlists for these generated outputs use MEDIA-SEQUENCE:0, so a
@@ -857,7 +872,7 @@ export function predictPlaybackReadiness(input = {}) {
       productionCompleteSeconds: null, deliveryCompleteSeconds: null, browserLoadToParseSeconds: null,
       browserLoadToParseReason: "fragment-load-to-parse-distribution-unavailable",
       appendRequestToAckSeconds: null, appendRequestToAckReason: "append-request-to-ack-distribution-unavailable",
-      appendSeconds: null, completionSeconds: null, ...observedBrowserWorkField };
+      browserProcessingSeconds: null, ...unmeasuredProcessing, completionSeconds: null, ...observedBrowserWorkField };
     const production = productions.find(item => item.trackIndex === trackIndex && item.segment.index === first.index);
     return { track: state.track.id ?? trackIndex, segment: first.index, alreadyBuffered: false,
       sourceArrivalSeconds: production?.sourceArrivalAt ?? 0,
@@ -870,9 +885,10 @@ export function predictPlaybackReadiness(input = {}) {
       browserLoadToParseReason: "fragment-load-to-parse-distribution-unavailable",
       appendRequestToAckSeconds: null,
       appendRequestToAckReason: "append-request-to-ack-distribution-unavailable",
-      appendSeconds: null,
-      appendReason: "append-request-to-ack-distribution-unavailable",
-      completionSeconds: null,
+      // Measured: delivery plus the page's processing of this fragment's bytes.
+      ...(Number.isFinite(state.browser.secondsPerByte)
+        ? { browserProcessingSeconds: completion.browserSeconds, completionSeconds: completion.at }
+        : { browserProcessingSeconds: null, ...unmeasuredProcessing, completionSeconds: null }),
       ...observedBrowserWorkField };
   });
   const firstRequiredTrackSeconds = firstRequiredStages.map(stage => stage.completionSeconds);
@@ -919,6 +935,11 @@ export function predictPlaybackReadiness(input = {}) {
     ...(cushionBytes === null ? {} : { cushionBytes }),
     firstRequiredSegmentsSeconds,
     firstRequiredStages,
+    // Each track's measured processing rate and the fragments it rests on, or
+    // why it is unmeasured: said in the readiness line.
+    browserProcessing: trackState.map(({ track, browser }, trackIndex) => Number.isFinite(browser.secondsPerByte)
+      ? { track: track.id ?? trackIndex, secondsPerByte: browser.secondsPerByte, fragments: browser.fragments }
+      : { track: track.id ?? trackIndex, reason: browser.reason }),
     // What the rest of the film weighs per source, at what rate it comes and
     // when, or why a source has none: said in the readiness line.
     tail: tailStock,
@@ -953,8 +974,14 @@ function isPiece(segment) {
  * Serve each stream's fragments in order on one shared link, starting the
  * earliest released fragment whenever the link becomes free.
  *
+ * hls.js 1.7.4 asks for a stream's next fragment only after the previous one
+ * is buffered (a stream controller leaves `PARSED` for `IDLE` in
+ * `onFragBuffered`), so a stream is free again when the page has processed
+ * its fragment. The link is free once the bytes are delivered: the other
+ * stream uses it meanwhile.
+ *
  * @param {Array<{ trackIndex: number, segment: object, sizeBits: number, readyAt: number,
- *   order: number, appendSeconds: number }>} jobs
+ *   order: number, browserSeconds: number }>} jobs
  * @param {{ finish: (bits: number, startAt: number) => number }} link
  */
 function scheduleTransfers(jobs, link) {
@@ -983,9 +1010,10 @@ function scheduleTransfers(jobs, link) {
     }
     if (!selected) break;
     const deliveryAt = link.finish(selected.sizeBits, Math.max(linkFreeAt, selectedReadyAt));
-    transfers.push({ ...selected, deliveryAt });
+    const completionAt = deliveryAt + selected.browserSeconds;
+    transfers.push({ ...selected, deliveryAt, completionAt });
     served.set(selected.trackIndex, (served.get(selected.trackIndex) ?? 0) + 1);
-    trackFreeAt.set(selected.trackIndex, deliveryAt);
+    trackFreeAt.set(selected.trackIndex, completionAt);
     linkFreeAt = deliveryAt;
   }
   return transfers;
@@ -1234,6 +1262,7 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArriv
   }
 
   let outputBits = 0;
+  const trackBits = [];
   let latestTrackFinish = 0;
   let earliestTrackStart = Number.POSITIVE_INFINITY;
   for (let trackIndex = 0; trackIndex < trackState.length; trackIndex += 1) {
@@ -1259,7 +1288,9 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArriv
     if (work > 0) earliestTrackStart = Math.min(earliestTrackStart, productionStart);
     latestTrackFinish = Math.max(latestTrackFinish, finishedAt);
     const deliveryStart = Math.max(tailStart, position + buffered);
-    outputBits += Math.max(0, state.bitsPerMediaSecond) * Math.max(0, end - deliveryStart);
+    const bits = Math.max(0, state.bitsPerMediaSecond) * Math.max(0, end - deliveryStart);
+    outputBits += bits;
+    trackBits.push({ state, bits });
     const ahead = Math.max(0, end - position);
     constrain(finishedAt - Math.max(0, ahead - reserve), "production", trackIndex, segment.index,
       finishedAt, ahead, sourceArrivalAt > 0, sourceArrivalAt, false);
@@ -1273,7 +1304,13 @@ function scheduleTail({ trackState, sourceState, sourceByteCoverage, sourceArriv
     // link queue beginning no earlier than the first produced output.
     const deliveryStart = Math.max(transferFinish, Number.isFinite(earliestTrackStart) ? earliestTrackStart : 0);
     const deliveryAt = link.finish(outputBits, deliveryStart);
-    const completedAt = Math.max(latestTrackFinish, deliveryAt);
+    // A stream's transfers and the page's processing of them alternate (the
+    // next fragment is asked for once the last is buffered), so a measured
+    // track is not in the page before its own bits at the full link rate plus
+    // its own processing.
+    const processedAt = trackBits.reduce((latest, { state, bits }) => Number.isFinite(state.browser.secondsPerByte)
+      ? Math.max(latest, link.finish(bits, deliveryStart) + bits / 8 * state.browser.secondsPerByte) : latest, 0);
+    const completedAt = Math.max(latestTrackFinish, deliveryAt, processedAt);
     const ahead = Math.max(0, end - position);
     constrain(completedAt - Math.max(0, ahead - reserve), "delivery", 0,
       trackState[0]?.segments.at(-1)?.index ?? 0, completedAt, ahead, false, sourceArrivalAt, false);

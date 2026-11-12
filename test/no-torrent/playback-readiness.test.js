@@ -102,8 +102,8 @@ test("keeps the first required segment incomplete while browser stages lack futu
     browserLoadToParseReason: "fragment-load-to-parse-distribution-unavailable",
     appendRequestToAckSeconds: null,
     appendRequestToAckReason: "append-request-to-ack-distribution-unavailable",
-    appendSeconds: null,
-    appendReason: "append-request-to-ack-distribution-unavailable",
+    browserProcessingSeconds: null,
+    browserProcessingReason: "browser-processing-unmeasured",
     completionSeconds: null
   }]);
 });
@@ -865,7 +865,7 @@ test("overlaps independent track processing and serves each released fragment on
   });
 
   assert.equal(forecast.firstRequiredSegmentsSeconds, null,
-    "the shared schedule reaches delivery, but append completion has no supported distribution");
+    "the shared schedule reaches delivery, but the page's processing of the fragments is unmeasured");
   assert.equal(forecast.firstRequiredStages[1].deliveryCompleteSeconds, 1.1,
     "the audio fragment is delivered during video processing; the shared link is work-conserving");
 });
@@ -1344,7 +1344,7 @@ function near(actual, expected, label) {
   assert.ok(Number.isFinite(actual) && Math.abs(actual - expected) < 1e-9, `${label}: ${actual}, expected ${expected}`);
 }
 
-test("a fragment is in the page at its delivery plus its processing, each counted once", { todo: "AC-4" }, () => {
+test("a fragment is in the page at its delivery plus its processing, each counted once", () => {
   // 2 bytes over 8 bit/s: delivered at 2 s; 0.5 s per byte measured: 1 s of processing.
   const film = readyFilm([readyTrack("video", 1, 2, browserSamples(2, 1000))]);
   film.tracks[0].segments[0].endSeconds = 4;
@@ -1357,7 +1357,7 @@ test("a fragment is in the page at its delivery plus its processing, each counte
   near(first.completionSeconds, 3, "completion");
 });
 
-test("the start waits for the processing of the first fragment", { todo: "AC-4" }, () => {
+test("the start waits for the processing of the first fragment", () => {
   const film = readyFilm([readyTrack("video", 1, 2, browserSamples(2, 1000))]);
   film.tracks[0].segments[0].endSeconds = 4;
   film.durationSeconds = 4;
@@ -1365,7 +1365,7 @@ test("the start waits for the processing of the first fragment", { todo: "AC-4" 
   near(predictPlaybackReadiness(film).delaySeconds, 3, "delay");
 });
 
-test("a track's next fragment is requested only after the previous one is processed", { todo: "AC-5" }, () => {
+test("a track's next fragment is requested only after the previous one is processed", () => {
   // Two one-second pieces of 1 byte: 1 s of transfer and 0.5 s of processing
   // each. The second is requested at 1.5 s, delivered at 2.5 s and in the page
   // at 3 s, against the 1 s of film before it.
@@ -1378,7 +1378,7 @@ test("a track's next fragment is requested only after the previous one is proces
   near(forecast.firstRequiredStages[0].completionSeconds, 1.5, "first completion");
 });
 
-test("the start delay counts each fragment's processing before the next request", { todo: "AC-5" }, () => {
+test("the start delay counts each fragment's processing before the next request", () => {
   const measured = predictPlaybackReadiness(readyFilm([readyTrack("video", 2, 1, browserSamples(2, 1000))]));
   const unmeasured = predictPlaybackReadiness(readyFilm([readyTrack("video", 2, 1)]));
 
@@ -1386,7 +1386,7 @@ test("the start delay counts each fragment's processing before the next request"
   near(measured.delaySeconds, 2, "with the term: 3 s against 1 s of film");
 });
 
-test("the other track uses the link while a fragment is processed", { todo: "AC-6" }, () => {
+test("the other track uses the link while a fragment is processed", () => {
   const samples = browserSamples(2, 1000);
   const picture = readyTrack("video", 1, 1, samples);
   const sound = readyTrack("audio", 1, 1, { fragmentService: { init: { samples: [] }, media: { samples: [] } },
@@ -1405,7 +1405,7 @@ function unmeasuredFilm(samples) {
 }
 
 test("without a usable sample the forecast charges nothing and names each track unmeasured",
-  { todo: "AC-7" }, () => {
+  () => {
     const unusable = predictPlaybackReadiness(unmeasuredFilm(browserSamples(2, 1000, { usable: false })));
     const absent = predictPlaybackReadiness(unmeasuredFilm({}));
 
@@ -1415,7 +1415,7 @@ test("without a usable sample the forecast charges nothing and names each track 
       { track: "video", reason: UNMEASURED_PROCESSING }, { track: "audio", reason: UNMEASURED_PROCESSING }]);
   });
 
-test("before the page has buffered a fragment every track is named unmeasured", { todo: "AC-7" }, () => {
+test("before the page has buffered a fragment every track is named unmeasured", () => {
   const forecast = predictPlaybackReadiness(unmeasuredFilm({}));
 
   assert.equal(forecast.reason, "minimum-safe-delay");
@@ -1423,7 +1423,7 @@ test("before the page has buffered a fragment every track is named unmeasured", 
     { track: "video", reason: UNMEASURED_PROCESSING }, { track: "audio", reason: UNMEASURED_PROCESSING }]);
 });
 
-test("an unmeasured first required fragment states no processing and no completion", { todo: "AC-7" }, () => {
+test("an unmeasured first required fragment states no processing and no completion", () => {
   const first = predictPlaybackReadiness(unmeasuredFilm(browserSamples(2, 1000, { usable: false })))
     .firstRequiredStages[0];
 
@@ -1432,7 +1432,7 @@ test("an unmeasured first required fragment states no processing and no completi
   assert.equal(first.completionSeconds, null);
 });
 
-test("a measured track names its rate and sample count in the result", { todo: "AC-7" }, () => {
+test("a measured track names its rate and sample count in the result", () => {
   const forecast = predictPlaybackReadiness(readyFilm([readyTrack("video", 2, 1, browserSamples(2, 1000))]));
 
   assert.equal(forecast.browserProcessing.length, 1);
@@ -1442,7 +1442,7 @@ test("a measured track names its rate and sample count in the result", { todo: "
 });
 
 test("the suffix finishes a measured track no earlier than its own transfer plus its processing",
-  { todo: "AC-8" }, () => {
+  () => {
     // Twelve seconds of film, the first four held by the page and the rest
     // made: 8 s of suffix at 16 bit/s is 128 bits, 8 s over a 16 bit/s link,
     // then 16 bytes at 1 s per byte. In the page at 24 s against 12 s of film:

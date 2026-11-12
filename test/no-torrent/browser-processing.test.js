@@ -50,7 +50,7 @@ function assertMeasured(actual, expected) {
     `secondsPerByte ${actual.secondsPerByte}`);
 }
 
-test("a parse that started during the load is clipped to the end of the load", { todo: "AC-1" }, async () => {
+test("a parse that started during the load is clipped to the end of the load", async () => {
   // Parse 1100 -> 900 ms before the snapshot, load ended at 1000: 100 ms of
   // parse, plus 50 ms of append execution, over 1500 bytes.
   const result = await browserProcessingOf(fragments([fragment()]), appends({ video: [append("main:0:1:3:12:", 50)] }));
@@ -58,7 +58,7 @@ test("a parse that started during the load is clipped to the end of the load", {
   assertMeasured(result, { secondsPerByte: 0.0001, fragments: 1, bytes: 1500, seconds: 0.15 });
 });
 
-test("a parse that ended before the load ended charges no parse time", { todo: "AC-1" }, async () => {
+test("a parse that ended before the load ended charges no parse time", async () => {
   const result = await browserProcessingOf(fragments([fragment({ loadEnd: 500, parseStart: 900, parseEnd: 600,
     bufferingEnd: 400 })]), appends({ video: [append("main:0:1:3:12:", 30)] }));
 
@@ -66,7 +66,7 @@ test("a parse that ended before the load ended charges no parse time", { todo: "
 });
 
 test("a fragment buffered at the snapshot with zero parse and execute spans is a measurement of zero work",
-  { todo: "AC-1" }, async () => {
+  async () => {
     const result = await browserProcessingOf(fragments([fragment({ loadEnd: 0, parseStart: 0, parseEnd: 0,
       bufferingEnd: 0 })]), appends({ video: [append("main:0:1:3:12:", 0)] }));
 
@@ -74,7 +74,7 @@ test("a fragment buffered at the snapshot with zero parse and execute spans is a
   });
 
 test("a muxed fragment's appends to separate buffers count as parallel: the larger buffer sum",
-  { todo: "AC-2" }, async () => {
+  async () => {
     const id = "main:0:1:7:28:";
     const result = await browserProcessingOf(
       fragments([fragment({ id, bytes: 6000, loadEnd: 100, parseStart: 90, parseEnd: 80, bufferingEnd: 10 })]),
@@ -84,7 +84,7 @@ test("a muxed fragment's appends to separate buffers count as parallel: the larg
     assertMeasured(result, { secondsPerByte: 0.06 / 6000, fragments: 1, bytes: 6000, seconds: 0.06 });
   });
 
-test("a fragment whose only appends went to the other buffer is measured by them", { todo: "AC-2" }, async () => {
+test("a fragment whose only appends went to the other buffer is measured by them", async () => {
   const id = "main:0:1:7:28:";
   const result = await browserProcessingOf(
     fragments([fragment({ id, bytes: 1000, loadEnd: 100, parseStart: 90, parseEnd: 80, bufferingEnd: 10 })]),
@@ -94,7 +94,7 @@ test("a fragment whose only appends went to the other buffer is measured by them
 });
 
 test("a track's rate is its total work over its total bytes, not a mean of per-fragment rates",
-  { todo: "AC-2" }, async () => {
+  async () => {
     // 1000 bytes in 10 ms and 3000 bytes in 50 ms: 60 ms over 4000 bytes
     // (a mean of the two ratios would be 1/75 ms per byte).
     const result = await browserProcessingOf(fragments([
@@ -114,13 +114,13 @@ async function withGood(other, otherAppends = {}) {
 
 const GOOD_ONLY = { secondsPerByte: 0.0001, fragments: 1, bytes: 1500, seconds: 0.15 };
 
-test("a fragment not yet buffered is skipped", { todo: "AC-3" }, async () => {
+test("a fragment not yet buffered is skipped", async () => {
   const result = await withGood(fragment({ id: "other", bufferingEnd: null }), { video: [append("other", 500)] });
 
   assertMeasured(result, GOOD_ONLY);
 });
 
-test("a fragment without its load end or parse marks is skipped", { todo: "AC-3" }, async () => {
+test("a fragment without its load end or parse marks is skipped", async () => {
   for (const mark of ["loadEnd", "parseStart", "parseEnd"]) {
     const result = await withGood(fragment({ id: "other", [mark]: null }), { video: [append("other", 500)] });
 
@@ -128,14 +128,14 @@ test("a fragment without its load end or parse marks is skipped", { todo: "AC-3"
   }
 });
 
-test("a fragment with no append sample of its identity is skipped", { todo: "AC-3" }, async () => {
+test("a fragment with no append sample of its identity is skipped", async () => {
   const result = await withGood(fragment({ id: "other" }), { video: [append("another", 500)] });
 
   assertMeasured(result, GOOD_ONLY);
 });
 
 test("a fragment with one append lacking a usable execute span is skipped whole, not counted in part",
-  { todo: "AC-3" }, async () => {
+  async () => {
     for (const executeMs of [null, undefined, -1, Number.NaN]) {
       const result = await withGood(fragment({ id: "other" }),
         { video: [append("other", 500)], audio: [append("other", executeMs)] });
@@ -147,7 +147,7 @@ test("a fragment with one append lacking a usable execute span is skipped whole,
     assertMeasured(await withGood(fragment({ id: "other" }), { video: [append("other", 500), absent] }), GOOD_ONLY);
   });
 
-test("a fragment whose bytes are not a positive integer is skipped", { todo: "AC-3" }, async () => {
+test("a fragment whose bytes are not a positive integer is skipped", async () => {
   for (const bytes of [0, -1500, 1.5, Number.NaN, "1500", null]) {
     const result = await withGood(fragment({ id: "other", bytes }), { video: [append("other", 500)] });
 
@@ -155,7 +155,7 @@ test("a fragment whose bytes are not a positive integer is skipped", { todo: "AC
   }
 });
 
-test("both samples of a fragment loaded twice are skipped", { todo: "AC-3" }, async () => {
+test("both samples of a fragment loaded twice are skipped", async () => {
   // The appends join by identity only, so which belong to which load is not shown.
   const good = fragment({ id: "good" });
   const result = await browserProcessingOf(fragments([good, fragment({ id: "twice" }), fragment({ id: "twice" })]),
@@ -164,7 +164,7 @@ test("both samples of a fragment loaded twice are skipped", { todo: "AC-3" }, as
   assertMeasured(result, GOOD_ONLY);
 });
 
-test("a fragment without an identity is skipped", { todo: "AC-3" }, async () => {
+test("a fragment without an identity is skipped", async () => {
   for (const id of ["", null]) {
     const result = await withGood(fragment({ id }), { video: [append(id, 500)] });
 
@@ -172,13 +172,13 @@ test("a fragment without an identity is skipped", { todo: "AC-3" }, async () => 
   }
 });
 
-test("with no usable fragment the track is unmeasured", { todo: "AC-3" }, async () => {
+test("with no usable fragment the track is unmeasured", async () => {
   assert.deepEqual(await browserProcessingOf(fragments([fragment({ bufferingEnd: null })]),
     appends({ video: [append("main:0:1:3:12:", 50)] })), UNMEASURED);
   assert.deepEqual(await browserProcessingOf(fragments([]), appends()), UNMEASURED, "no sample at all");
 });
 
-test("absent inputs leave the track unmeasured", { todo: "AC-3" }, async () => {
+test("absent inputs leave the track unmeasured", async () => {
   const usable = fragments([fragment()]);
   const usableAppends = appends({ video: [append("main:0:1:3:12:", 50)] });
 
@@ -187,7 +187,7 @@ test("absent inputs leave the track unmeasured", { todo: "AC-3" }, async () => {
   assert.deepEqual(await browserProcessingOf(null, null), UNMEASURED, "neither");
 });
 
-test("init samples never contribute", { todo: "AC-3" }, async () => {
+test("init samples never contribute", async () => {
   const init = fragment({ id: "init" });
   assert.deepEqual(await browserProcessingOf(fragments([], [init]),
     appends({ video: [append("init", 50)], videoInit: [append("init", 50)] })), UNMEASURED,

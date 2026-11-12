@@ -376,10 +376,16 @@ orchestration. The torrent runs in one worker thread
    W10 first, then the measured rate); the start of a new run and its open
    cost; per-track processing at the track's measured rate, tracks in
    parallel and each serial in itself, a segment starting only when its whole
-   input is held; and delivery on one link queue (`transferFinish`), plus
-   `appendSeconds` when supplied. `ViewerRequests` supplies no
-   `appendSeconds`. The single link queue is the calculation's assumption
-   about R5.m, not an established property of it. The delay is the largest
+   input is held; delivery on one link queue (`transferFinish`); and the
+   page's processing of each fragment (B8 after the fragment's load ended, and
+   the larger per-SourceBuffer sum of its B12 append execute spans), charged as
+   its bytes times the track's rate measured from the page's own samples
+   (`browserProcessingOf`, fed by `ViewerRequests` with the track's fragment
+   samples and the page's whole append report). A track's next transfer
+   starts only when the previous fragment is processed; the link serves the
+   other track meanwhile. A track without a usable sample is charged nothing
+   and named `browser-processing-unmeasured`. The single link queue is the
+   calculation's assumption about R5.m, not an established property of it. The delay is the largest
    lateness of a production or delivery against the media already ahead of
    it, over the near window and the tail to the end of the film.
 3. It returns a reason instead of a number while an input is missing:
@@ -409,18 +415,22 @@ orchestration. The torrent runs in one worker thread
    `firstRequiredSegmentsSeconds`: for each required track it takes the first
    segment after the viewer's position. If that segment is already in the
    client's ranges, the track contributes 0. Otherwise
-   `deliveryCompleteSeconds` reports the link schedule, but `appendSeconds`
-   and `completionSeconds` are null while the future fragment load-to-parse
-   and append-request-to-acknowledgement distributions and their shared-resource
-   schedule are unavailable. Therefore
-   `firstRequiredSegmentsSeconds` is null if any required segment is not yet
-   confirmed in the browser buffer. It is not the first-frame wait: it excludes
-   the rest of the continuity gate, the gate's poll latency, C3, B8–B12 and
+   `deliveryCompleteSeconds` reports the link schedule,
+   `browserProcessingSeconds` the page's processing of the fragment and
+   `completionSeconds` their sum when the track's processing is measured; when
+   it is not, both are null and `browserProcessingReason` is
+   `browser-processing-unmeasured`. `browserLoadToParseSeconds` and
+   `appendRequestToAckSeconds` stay null with their reasons: those separate
+   distributions are not used. Therefore `firstRequiredSegmentsSeconds` is
+   null while a required track whose first segment is not confirmed in the
+   browser buffer is unmeasured. It is not the first-frame wait: it excludes
+   the rest of the continuity gate, the gate's poll latency, C3, B9–B11 and
    C4–C7.
 5. Not represented as separate terms in the active calculation: A1–A17, B1–B5 and their
    retries, P5, P6, P7, P4 pass time, the R8 queue, X1, R2 queueing,
-   processor sharing beyond measured rates, memory admission, P13, B8–B12,
-   C4–C7.
+   processor sharing beyond measured rates, memory admission, P13, B9–B11,
+   C4–C7. B8 and B12 enter only as one measured processing term per media
+   fragment (item 2).
 
 ## 8. Observability
 
@@ -811,7 +821,7 @@ The `playback readiness` log now records `firstRequiredStages` for each required
 track. Its stage values are predicted event offsets in seconds from that
 forecast's `measuredAt` time, on one shared clock: source arrival, run
 admission, run opening, production start and completion, delivery completion,
-append allowance, and segment completion. These are event times, not durations
+the page's processing of the fragment, and segment completion. These are event times, not durations
 to add; different tracks can overlap. A `null` means the model has no predicted
 event time for that point. The details are removed before returning the
 readiness response to the browser. The current 8.4 and field28 observations
@@ -832,14 +842,14 @@ accurate.
 |---|---|---|---|---|---|
 | `transport` (`t1−t0`) | Browser input, proxy selection/connection, source registration and file-list wait | Historical median of the whole browser interval; no causal per-action ETA | Alien Romulus 341.7 ms; Frankenstein 1,293.4 ms; Below the Surface 749.1 ms | Not logged per stage | Stage time is measured in the three runs; stage accuracy is unverified. Replace the whole-interval fallback with measured action work and waits. |
 | `plan` (`t2−t1`) | Source registration after `t1`, container reads, plan construction and torrent-piece waits | Historical median of the whole interval; `predictPlaybackReadiness` does not forecast this plan phase | 51.1 ms; 5,694.2 ms; 3,682.1 ms | Not logged per stage | Stage time is measured; no stage forecast exists to compare. Add causal inputs/forecast output before claiming accuracy. |
-| `prepare` (`t3−t2`) | Output open, HLS requests, per-track run/input/production/publication and first-piece delivery | Historical median of the whole interval. The segment scheduler separately predicts source, per-track production, link delivery and optional append for selected segments; it does not produce a prediction for the whole `prepare` interval | 1,435.6 ms; 13,433.0 ms; 9,007.4 ms | No `prepare` prediction logged. Field28's first-required segment forecast: 3.675 s remaining at +0.911 s; actual remaining to audio segment arrival was 7.248 s, absolute error 3.573 s, relative error 49.3% | The first-required segment estimate is materially early in field28. Per-track output scheduling and shared proxy load need measurement and model correction. |
+| `prepare` (`t3−t2`) | Output open, HLS requests, per-track run/input/production/publication and first-piece delivery | Historical median of the whole interval. The segment scheduler separately predicts source, per-track production, link delivery and the page's measured processing for selected segments; it does not produce a prediction for the whole `prepare` interval | 1,435.6 ms; 13,433.0 ms; 9,007.4 ms | No `prepare` prediction logged. Field28's first-required segment forecast: 3.675 s remaining at +0.911 s; actual remaining to audio segment arrival was 7.248 s, absolute error 3.573 s, relative error 49.3% | The first-required segment estimate is materially early in field28. Per-track output scheduling and shared proxy load need measurement and model correction. |
 | `prebuffer` (`t4−t3`) | Continuity gate, additional production/delivery, polling, net reports and subtitle gate | Historical median of the whole interval. The segment scheduler computes a continuity constraint, but its `delaySeconds` is not a first-frame ETA | 549.2 ms; 1,053.6 ms; 4,059.5 ms | No `prebuffer` prediction logged | Actual stage varies by 3.51 s across these runs; there is no same-run stage prediction. Do not mark stable. |
 | `presentation` (`tFrame−t4`) | Readiness release through first presented frame callback | Historical median of the whole interval; no browser decode/presentation work formula | 1,326.0 ms; 103.1 ms; 101.2 ms | Not logged per stage | The first run differs from the other two by over 1.2 s. No stage formula or repeated matched forecast establishes stability. |
 | `first moving frame with audio` | Acceptance endpoint: advancing frame with required audio available | No current end-to-end causal formula; current segment value ends at first required segment completion and omits remaining browser/readiness work | Independent elapsed: 3,703.0 ms; 21,568.0 ms; 17,597.9 ms. Client phase sum differs by 0.6, 9.3 and 1.4 ms respectively | No complete same-run forecast snapshot available in 8.4 | Measurement boundary reconciles within the recorded 43.6 ms trace tolerance for these three runs. End-to-end forecast accuracy remains unproved. |
 | Source-piece service | Missing source ranges needed by a segment | `rate.finish(bytes, availableAt)` on one modeled source service, using explicit piece arrivals before a measured rate | Field28: GET for audio segment 115 waited 7,598 ms; send took 21 ms | The forecast's relevant segment arrival was included in the 3.675 s first-required value, but no per-piece completion snapshot was logged | The observable end-to-end source/output wait is measured; source piece arrival and input readiness are not separately joined to this segment. |
 | Encoder admission and production | Start the actual required run, hand it input, produce and publish the segment | Per-track run-start queue and rate curve; no allocation of CPU/encoder capacity across concurrent outputs/sessions | Field28: audio run 115 requested at +5.577 s and started at +5.691 s; audio segment response completed at +8.159 s from seek | The model treated the required segment as completing at +4.586 s from seek | The model omits shared proxy encoder contention and does not expose a same-segment admission/input/publication prediction chain. Correct this before rating the stage stable. |
 | Client-link delivery | Transfer required output bytes to the browser | One `link.finish(sizeBits, time)` queue shared by all modeled jobs | Field28 audio transfer: 21 ms; video segment: 2,217 ms send after 1,730 ms fetch | Link contribution is embedded in `firstRequiredSegmentsSeconds`; not logged separately in the per-stage forecast | Observed spans exist, but per-track forecast contribution is not saved. Link queue assumption and concurrent channel use remain unvalidated. |
-| Browser append, readiness, playback and presentation | Remux, append, metadata, readiness polling/release, `play()`, decoded audio and moving-frame confirmation | `appendSeconds` is optional and not supplied by `ViewerRequests`; B8–C7 are not represented in the numeric segment estimate | Field28: readiness `ready=true` at +10.760 s; `playing` at +11.006 s; advancing `timeupdate` at +11.220 s | No complete predicted completion for these actions | These actions are measured in browser/proxy traces but omitted from the end-to-end formula. Add them as causal dependencies; do not infer their time from segment delivery. |
+| Browser append, readiness, playback and presentation | Remux, append, metadata, readiness polling/release, `play()`, decoded audio and moving-frame confirmation | Each media fragment's B8 parse and B12 append execution enter as one processing term, the fragment's bytes times the track's rate measured from the page's samples (`browserProcessingOf`); B9–B11 and C1–C7 are not represented in the numeric segment estimate | Field28: readiness `ready=true` at +10.760 s; `playing` at +11.006 s; advancing `timeupdate` at +11.220 s | No complete predicted completion for these actions | These actions are measured in browser/proxy traces but omitted from the end-to-end formula. Add them as causal dependencies; do not infer their time from segment delivery. |
 
 The atomic inventory in 8.1 gives the row-level description, logging boundary,
 and a real-session example where one was captured. Later captures now measure

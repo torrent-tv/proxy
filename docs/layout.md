@@ -154,6 +154,9 @@ AUTO (`Viewer.askQuality`). The playback start forecast
 `wire-outputs.js`. `media-time.js` is exact media time and the rule by which
 Media Source engines join buffered ranges
 ([`playback-start-forecast.md`](playback-start-forecast.md)).
+`browser-processing.js` measures, for that forecast, the page's own processing
+of a track's fragments (parse and append execution over bytes) from the
+samples the page reports; it is pure and owned by the forecast.
 `PriorityMap` and `DownloadMaps` turn viewers into the download map;
 `watched-addresses.js` holds prepared and watched addresses.
 

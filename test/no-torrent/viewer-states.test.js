@@ -152,7 +152,7 @@ test("append service accepts advancing cumulative counters once and rejects stal
   viewer.report(report(200, 40, 2), AT);
   assert.deepEqual(viewer.netReport.appendService.video.media.samples,
     [{ bytes: 200, elapsedMs: 40, ageMs: 0, fragmentId: "main:0:1:2:0", fragmentSequence: 2, partIndex: null,
-      fragmentStartSeconds: 0 }]);
+      fragmentStartSeconds: 0, executeMs: null }]);
   assert.deepEqual(viewer.netReport.fragmentService.video.media.samples[0], {
     bytes: 200, elapsedMs: 40, ageMs: 0, fragmentId: "main:0:1:2:0", fragmentSequence: 2, partIndex: null,
     fragmentStartSeconds: 0,
@@ -170,7 +170,7 @@ test("append service accepts advancing cumulative counters once and rejects stal
   viewer.report(report(300, 60, 3, "page-one", AT, AT + 600), AT + 2000);
   assert.deepEqual(viewer.netReport.appendService.video.media.samples,
     [{ bytes: 300, elapsedMs: 60, ageMs: 300, fragmentId: "main:0:1:2:0", fragmentSequence: 2, partIndex: null,
-      fragmentStartSeconds: 0 }]);
+      fragmentStartSeconds: 0, executeMs: null }]);
   assert.deepEqual(viewer.netReport.fragmentService.video.media.samples[0], {
     bytes: 300, elapsedMs: 60, ageMs: 300, fragmentId: "main:0:1:2:0", fragmentSequence: 2, partIndex: null,
     fragmentStartSeconds: 0,
@@ -401,7 +401,7 @@ function appendSampleReport(executeMs) {
     bufferedAheadSec: 0 };
 }
 
-test("an append sample keeps the execute span the page measured", { todo: "AC-9" }, () => {
+test("an append sample keeps the execute span the page measured", () => {
   for (const executeMs of [12.5, 0]) {
     const viewer = new Viewer("one", AT);
     viewer.report(appendSampleReport(executeMs), AT);
@@ -410,7 +410,7 @@ test("an append sample keeps the execute span the page measured", { todo: "AC-9"
   }
 });
 
-test("an append sample from a page that measures no execute span keeps it as null", { todo: "AC-9" }, () => {
+test("an append sample from a page that measures no execute span keeps it as null", () => {
   for (const executeMs of [NO_EXECUTE_SPAN, null, undefined]) {
     const viewer = new Viewer("one", AT);
     viewer.report(appendSampleReport(executeMs), AT);
@@ -420,7 +420,7 @@ test("an append sample from a page that measures no execute span keeps it as nul
   }
 });
 
-test("a negative or non-finite execute span makes the append report invalid", { todo: "AC-9" }, () => {
+test("a negative or non-finite execute span makes the append report invalid", () => {
   for (const executeMs of [-1, Number.NaN, Number.POSITIVE_INFINITY, "12"]) {
     const viewer = new Viewer("one", AT);
     viewer.report(appendSampleReport(executeMs), AT);

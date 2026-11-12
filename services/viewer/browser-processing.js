@@ -12,8 +12,14 @@
  * hls.js streams while the fragment loads overlaps the transfer, which the
  * schedule already charges on the link. A gap between spans — an append's wait
  * in its buffer's queue, or behind the picture — is not work and is not
- * counted. A fragment is used only when every one of these facts is in its
- * samples; a partial value is never made.
+ * counted. An append that ended after the fragment was buffered belongs to a
+ * later load of the same fragment (hls.js records every append of a load before
+ * it marks the load buffered) and is left out. A fragment is used only when
+ * every one of these facts is in its samples; a partial value is never made.
+ *
+ * The page chooses how many samples it reports, so the append samples are
+ * indexed by `fragmentId` once per call and each fragment reads only its own:
+ * the cost is linear in the samples, never fragments × appends.
  *
  * Ages are milliseconds before the page's snapshot, so a later event has a
  * smaller age. An append's `ageMs` is the age of the end of its execution, so
@@ -42,6 +48,7 @@ export function browserProcessingOf(fragments, appends) {
   for (const sample of samples) {
     if (isIdentity(sample?.fragmentId)) loads.set(sample.fragmentId, (loads.get(sample.fragmentId) ?? 0) + 1);
   }
+  const appendsOf = appendsByFragment(appends);
   let workMs = 0;
   let bytes = 0;
   let used = 0;
@@ -51,7 +58,7 @@ export function browserProcessingOf(fragments, appends) {
     const ages = sample.eventAgesMs;
     // Buffered: every append of the fragment is done.
     if (![ages?.loadEnd, ages?.parseStart, ages?.parseEnd, ages?.bufferingEnd].every(isMilliseconds)) continue;
-    const spans = appendSpans(appends, sample.fragmentId, ages.loadEnd);
+    const spans = appendSpans(appendsOf.get(sample.fragmentId), ages);
     if (spans === null) continue;
     spans.push([ages.parseEnd, Math.min(ages.parseStart, ages.loadEnd)]);
     workMs += unionLength(spans);
@@ -64,20 +71,40 @@ export function browserProcessingOf(fragments, appends) {
 }
 
 /**
- * The execute spans `[later, earlier]` (ages) of the fragment's media appends
- * in either buffer, each clipped to the load end, or null when it has none or
- * one of them has no usable span.
+ * The media append samples of both buffers by `fragmentId`, reading each
+ * sample's `fragmentId` once.
  */
-function appendSpans(appends, fragmentId, loadEnd) {
-  const spans = [];
+function appendsByFragment(appends) {
+  const index = new Map();
   for (const buffer of BUFFERS) {
     const samples = appends[buffer]?.media?.samples;
     if (!Array.isArray(samples)) continue;
     for (const sample of samples) {
-      if (sample?.fragmentId !== fragmentId) continue;
-      if (!isMilliseconds(sample.executeMs) || !isMilliseconds(sample.ageMs)) return null;
-      spans.push([sample.ageMs, Math.min(sample.ageMs + sample.executeMs, loadEnd)]);
+      const fragmentId = sample?.fragmentId;
+      if (!isIdentity(fragmentId)) continue;
+      const own = index.get(fragmentId);
+      if (own === undefined) index.set(fragmentId, [sample]);
+      else own.push(sample);
     }
+  }
+  return index;
+}
+
+/**
+ * The execute spans `[later, earlier]` (ages) of the appends of this load of a
+ * fragment, each clipped to the load end, or null when it has none or one of
+ * them has no usable span. `own` is the fragment's append samples in either
+ * buffer; one that ended after `ages.bufferingEnd` (a smaller age) is a later
+ * load's and is left out, whatever its other fields.
+ */
+function appendSpans(own, ages) {
+  if (own === undefined) return null;
+  const spans = [];
+  for (const sample of own) {
+    if (!isMilliseconds(sample.ageMs)) return null;
+    if (sample.ageMs < ages.bufferingEnd) continue;
+    if (!isMilliseconds(sample.executeMs)) return null;
+    spans.push([sample.ageMs, Math.min(sample.ageMs + sample.executeMs, ages.loadEnd)]);
   }
   return spans.length > 0 ? spans : null;
 }

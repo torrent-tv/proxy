@@ -1295,3 +1295,170 @@ test("a forecast time already past does not make missing bytes held", () => {
   assert.equal(forecast.ready, false);
   assert.equal(forecast.reason, "download-rate-unavailable");
 });
+
+// THE BROWSER'S PROCESSING OF EACH FRAGMENT (torrent-tv/meta#260). The page
+// reports, per track, its fragment samples (`fragmentService[track]`) and, for
+// the whole page, its append samples (`appendService`); the forecast charges
+// each fragment its bytes times the track's measured seconds per byte after
+// its delivery, and the track's next request waits for it.
+
+const UNMEASURED_PROCESSING = "browser-processing-unmeasured";
+
+/**
+ * The page's samples of one buffered fragment of `bytes` whose parse and
+ * append took `workMs` together: `workMs / bytes` ms per byte. Its sequence
+ * is not one the forecasts below schedule.
+ */
+function browserSamples(bytes, workMs, { usable = true } = {}) {
+  const fragmentId = "main:0:0:99:396:";
+  const empty = { samples: [] };
+  return {
+    fragmentService: { init: empty, media: { samples: [{ bytes, elapsedMs: workMs, ageMs: 0, fragmentId,
+      fragmentSequence: 99, partIndex: null, fragmentStartSeconds: 396,
+      eventAgesMs: { loadEnd: workMs, parseStart: workMs, parseEnd: workMs / 2,
+        bufferingEnd: usable ? 0 : null } }] } },
+    browserAppends: { video: { init: empty, media: { samples: [{ bytes, elapsedMs: workMs, ageMs: 0, fragmentId,
+      fragmentSequence: 99, partIndex: null, fragmentStartSeconds: 396, executeMs: workMs / 2 }] } },
+    audio: { init: empty, media: empty } }
+  };
+}
+
+/** One track of ready one-second pieces of `bytes` each over a link of 8 bit/s: one second per byte. */
+function readyTrack(id, count, bytes, samples = {}) {
+  const segments = Array.from({ length: count }, (_, index) => ({ index, startSeconds: index,
+    endSeconds: index + 1 }));
+  return { id, sourceIds: ["source"], processedSeconds: count, bitsPerMediaSecond: bytes * 8,
+    readings: [{ at: 10_000, value: 1 }], segments, readySegmentIndices: segments.map(({ index }) => index),
+    segmentSizesBytes: new Map(segments.map(({ index }) => [index, bytes])), ...samples };
+}
+
+function readyFilm(tracks) {
+  const durationSeconds = tracks[0].segments.length;
+  return input({ durationSeconds, bufferLimitSeconds: durationSeconds, lookaheadSeconds: durationSeconds,
+    reserveSeconds: 0, requiredAudio: tracks.length === 2,
+    sources: [{ id: "source", complete: true }], tracks,
+    linkReadings: [{ at: 10_000, value: 8 }] });
+}
+
+function near(actual, expected, label) {
+  assert.ok(Number.isFinite(actual) && Math.abs(actual - expected) < 1e-9, `${label}: ${actual}, expected ${expected}`);
+}
+
+test("a fragment is in the page at its delivery plus its processing, each counted once", { todo: "AC-4" }, () => {
+  // 2 bytes over 8 bit/s: delivered at 2 s; 0.5 s per byte measured: 1 s of processing.
+  const film = readyFilm([readyTrack("video", 1, 2, browserSamples(2, 1000))]);
+  film.tracks[0].segments[0].endSeconds = 4;
+  film.durationSeconds = 4;
+
+  const first = predictPlaybackReadiness(film).firstRequiredStages[0];
+
+  near(first.deliveryCompleteSeconds, 2, "delivery");
+  near(first.browserProcessingSeconds, 1, "processing");
+  near(first.completionSeconds, 3, "completion");
+});
+
+test("the start waits for the processing of the first fragment", { todo: "AC-4" }, () => {
+  const film = readyFilm([readyTrack("video", 1, 2, browserSamples(2, 1000))]);
+  film.tracks[0].segments[0].endSeconds = 4;
+  film.durationSeconds = 4;
+
+  near(predictPlaybackReadiness(film).delaySeconds, 3, "delay");
+});
+
+test("a track's next fragment is requested only after the previous one is processed", { todo: "AC-5" }, () => {
+  // Two one-second pieces of 1 byte: 1 s of transfer and 0.5 s of processing
+  // each. The second is requested at 1.5 s, delivered at 2.5 s and in the page
+  // at 3 s, against the 1 s of film before it.
+  const forecast = predictPlaybackReadiness(readyFilm([readyTrack("video", 2, 1, browserSamples(2, 1000))]));
+
+  assert.equal(forecast.holdingBy.kind, "delivery");
+  assert.equal(forecast.holdingBy.segment, 1, "the second fragment holds the start");
+  near(forecast.holdingBy.atSeconds, 3, "second completion");
+  near(forecast.holdingBy.aheadSeconds, 1, "film before the second");
+  near(forecast.firstRequiredStages[0].completionSeconds, 1.5, "first completion");
+});
+
+test("the start delay counts each fragment's processing before the next request", { todo: "AC-5" }, () => {
+  const measured = predictPlaybackReadiness(readyFilm([readyTrack("video", 2, 1, browserSamples(2, 1000))]));
+  const unmeasured = predictPlaybackReadiness(readyFilm([readyTrack("video", 2, 1)]));
+
+  near(unmeasured.delaySeconds, 1, "without the term");
+  near(measured.delaySeconds, 2, "with the term: 3 s against 1 s of film");
+});
+
+test("the other track uses the link while a fragment is processed", { todo: "AC-6" }, () => {
+  const samples = browserSamples(2, 1000);
+  const picture = readyTrack("video", 1, 1, samples);
+  const sound = readyTrack("audio", 1, 1, { fragmentService: { init: { samples: [] }, media: { samples: [] } },
+    browserAppends: samples.browserAppends });
+
+  const [video, audio] = predictPlaybackReadiness(readyFilm([picture, sound])).firstRequiredStages;
+
+  near(video.completionSeconds, 1.5, "the picture is processed for 0.5 s after its delivery at 1 s");
+  near(audio.deliveryCompleteSeconds, 2, "the sound is delivered right after the picture, not after its processing");
+});
+
+function unmeasuredFilm(samples) {
+  const sound = { fragmentService: { init: { samples: [] }, media: { samples: [] } },
+    browserAppends: samples.browserAppends };
+  return readyFilm([readyTrack("video", 2, 1, samples), readyTrack("audio", 2, 1, samples.browserAppends ? sound : {})]);
+}
+
+test("without a usable sample the forecast charges nothing and names each track unmeasured",
+  { todo: "AC-7" }, () => {
+    const unusable = predictPlaybackReadiness(unmeasuredFilm(browserSamples(2, 1000, { usable: false })));
+    const absent = predictPlaybackReadiness(unmeasuredFilm({}));
+
+    assert.equal(unusable.delaySeconds, absent.delaySeconds);
+    assert.equal(unusable.reason, absent.reason);
+    assert.deepEqual(unusable.browserProcessing, [
+      { track: "video", reason: UNMEASURED_PROCESSING }, { track: "audio", reason: UNMEASURED_PROCESSING }]);
+  });
+
+test("before the page has buffered a fragment every track is named unmeasured", { todo: "AC-7" }, () => {
+  const forecast = predictPlaybackReadiness(unmeasuredFilm({}));
+
+  assert.equal(forecast.reason, "minimum-safe-delay");
+  assert.deepEqual(forecast.browserProcessing, [
+    { track: "video", reason: UNMEASURED_PROCESSING }, { track: "audio", reason: UNMEASURED_PROCESSING }]);
+});
+
+test("an unmeasured first required fragment states no processing and no completion", { todo: "AC-7" }, () => {
+  const first = predictPlaybackReadiness(unmeasuredFilm(browserSamples(2, 1000, { usable: false })))
+    .firstRequiredStages[0];
+
+  assert.equal(first.browserProcessingSeconds, null);
+  assert.equal(first.browserProcessingReason, UNMEASURED_PROCESSING);
+  assert.equal(first.completionSeconds, null);
+});
+
+test("a measured track names its rate and sample count in the result", { todo: "AC-7" }, () => {
+  const forecast = predictPlaybackReadiness(readyFilm([readyTrack("video", 2, 1, browserSamples(2, 1000))]));
+
+  assert.equal(forecast.browserProcessing.length, 1);
+  assert.equal(forecast.browserProcessing[0].track, "video");
+  assert.equal(forecast.browserProcessing[0].fragments, 1);
+  near(forecast.browserProcessing[0].secondsPerByte, 0.5, "seconds per byte");
+});
+
+test("the suffix finishes a measured track no earlier than its own transfer plus its processing",
+  { todo: "AC-8" }, () => {
+    // Twelve seconds of film, the first four held by the page and the rest
+    // made: 8 s of suffix at 16 bit/s is 128 bits, 8 s over a 16 bit/s link,
+    // then 16 bytes at 1 s per byte. In the page at 24 s against 12 s of film:
+    // a delay of 12 s. Unmeasured, the suffix is delivered at 8 s and the page
+    // can start now.
+    const now = 10_000;
+    const film = samples => ({
+      now, positionSeconds: 0, durationSeconds: 12, bufferedAheadSeconds: 4, bufferLimitSeconds: 12,
+      reserveSeconds: 0, lookaheadSeconds: 4, sources: [{ id: "source", complete: true }],
+      tracks: [{ id: "video", sourceIds: ["source"], processedSeconds: 12, bitsPerMediaSecond: 16,
+        readings: [{ at: now, value: 1 }], clientRanges: [{ start: 0, end: 4 }],
+        segments: [0, 1, 2].map(index => ({ index, startSeconds: index * 4, endSeconds: (index + 1) * 4 })),
+        readySegmentIndices: [0, 1, 2], segmentSizesBytes: new Map([[0, 8], [1, 8], [2, 8]]), ...samples }],
+      linkReadings: [{ at: now, value: 16 }]
+    });
+
+    assert.equal(predictPlaybackReadiness(film({})).delaySeconds, 0, "unmeasured: as before");
+    near(predictPlaybackReadiness(film(browserSamples(2, 2000))).delaySeconds, 12, "measured");
+  });

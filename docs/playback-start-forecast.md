@@ -82,7 +82,8 @@ the time during which the page was parsing it or executing one of its appends
 after its load ended (the length of the union of those spans). A moment when
 an append executes while the parse runs, or when appends to the picture and the
 sound buffer execute together, counts once. An append's wait in its buffer's
-queue or behind the picture is not counted. hls.js asks for a
+queue or behind the picture is not counted, nor is an append that ended after
+the fragment was buffered, which belongs to a later load of it. hls.js asks for a
 stream's next fragment only after the previous one is buffered, so a track's
 next transfer starts when that processing ends, while the link serves the other
 track. In the suffix a measured track finishes no earlier than its own bits at

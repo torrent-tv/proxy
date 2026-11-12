@@ -36,7 +36,7 @@ the existing fakes of `ViewerRequests` tests.
        overlap and the missing `ageMs`, marked `todo`, shown failing; fixtures
        of the existing tests given explicit append ages. Implementer (fresh):
        `browserProcessingOf` and the docs' formula sentences to design §2.
-4. [ ] Review findings (proxy#82, 2026-11-12 17:01): (1) cost O(fragments ×
+4. [x] Review findings (proxy#82, 2026-11-12 17:01): (1) cost O(fragments ×
        appends) on page-chosen sample counts; (2) an append of a later load of
        the same fragment was charged to this load. Design §2 items 3, 4 and
        "Cost". Test writer (fresh): AC-3 case below and a cost case, marked

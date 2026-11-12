@@ -152,9 +152,10 @@ async function withGood(other, otherAppends = {}) {
 
 /**
  * Age of a 500 ms append of a skipped fragment with the default ages: it ends
- * at the fragment's buffering end and would add 500 ms if the fragment were used.
+ * at the fragment's buffering end, so it is an append of this load, and the
+ * fragment would be counted if it were used.
  */
-const OTHER_AGE = 350;
+const OTHER_AGE = 850;
 
 const GOOD_ONLY = { secondsPerByte: 0.0001, fragments: 1, bytes: 1500, seconds: 0.15 };
 
@@ -201,6 +202,40 @@ test("a fragment with one append lacking a usable age is skipped whole", async (
 
     assertMeasured(result, GOOD_ONLY);
   }
+});
+
+test("an append of a later load of the same fragment is not charged to this load", { todo: "AC-3" },
+  async () => {
+    // Load ended at 1000, parse 1000 -> 990, buffered at 950; its own append
+    // 960 -> 950. An append under the same identity that ended at 10, after
+    // the fragment was buffered, belongs to a later load: 20 ms, not 50 ms.
+    const id = "main:0:1:9:36:";
+    const result = await browserProcessingOf(
+      fragments([fragment({ id, bytes: 1000, loadEnd: 1000, parseStart: 1000, parseEnd: 990, bufferingEnd: 950 })]),
+      appends({ video: [append(id, 10, 950), append(id, 30, 10)] }));
+
+    assertMeasured(result, { secondsPerByte: 0.02 / 1000, fragments: 1, bytes: 1000, seconds: 0.02 });
+  });
+
+test("a later load's append without an execute span does not void the fragment", { todo: "AC-3" },
+  async () => {
+    const id = "main:0:1:9:36:";
+    const result = await browserProcessingOf(
+      fragments([fragment({ id, bytes: 1000, loadEnd: 1000, parseStart: 1000, parseEnd: 990, bufferingEnd: 950 })]),
+      appends({ video: [append(id, 10, 950), append(id, null, 10)] }));
+
+    assertMeasured(result, { secondsPerByte: 0.02 / 1000, fragments: 1, bytes: 1000, seconds: 0.02 });
+  });
+
+test("an append that ended exactly when the fragment was buffered belongs to it", async () => {
+  // Buffered at 950: the append 960 -> 950 is this load's, beside one
+  // 980 -> 970; parse 1000 -> 990. 30 ms, not 20 ms.
+  const id = "main:0:1:9:36:";
+  const result = await browserProcessingOf(
+    fragments([fragment({ id, bytes: 1000, loadEnd: 1000, parseStart: 1000, parseEnd: 990, bufferingEnd: 950 })]),
+    appends({ video: [append(id, 10, 970), append(id, 10, 950)] }));
+
+  assertMeasured(result, { secondsPerByte: 0.03 / 1000, fragments: 1, bytes: 1000, seconds: 0.03 });
 });
 
 test("a fragment whose bytes are not a positive integer is skipped", async () => {
@@ -254,4 +289,34 @@ test("init samples never contribute", async () => {
     appends({ video: [append("main:0:1:3:12:", 50, 850)],
       videoInit: [append("main:0:1:3:12:", 900, 100)] }));
   assertMeasured(result, GOOD_ONLY);
+});
+
+test("the cost is linear in the samples, not fragments times appends", { todo: "AC-3" }, async () => {
+  // 200 fragments, each with its own one append, half on each buffer; each
+  // works 20 ms (parse 100 -> 90, append 90 -> 80) over 1000 bytes.
+  const count = 200;
+  let reads = 0;
+  /** The append sample, counting each read of its `fragmentId`. */
+  function counted(sample) {
+    const { fragmentId } = sample;
+    Object.defineProperty(sample, "fragmentId", { enumerable: true, configurable: true,
+      get() {
+        reads += 1;
+        return fragmentId;
+      } });
+    return sample;
+  }
+  const media = [];
+  const video = [];
+  const audio = [];
+  for (let index = 0; index < count; index += 1) {
+    const id = `main:0:1:${index}:${index * 4}:`;
+    media.push(fragment({ id, bytes: 1000, loadEnd: 100, parseStart: 100, parseEnd: 90, bufferingEnd: 80 }));
+    (index % 2 === 0 ? video : audio).push(counted(append(id, 10, 80)));
+  }
+
+  const result = await browserProcessingOf(fragments(media), appends({ video, audio }));
+
+  assertMeasured(result, { secondsPerByte: 4 / 200000, fragments: count, bytes: 200000, seconds: 4 });
+  assert.ok(reads <= 3 * count, `fragmentId of ${count} append samples read ${reads} times`);
 });

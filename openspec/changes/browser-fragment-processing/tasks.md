@@ -91,7 +91,7 @@ the Home Assistant host (skill `ha-field-check`), not part of this plan.
 | AC | level | command | tests |
 |---|---|---|---|
 | AC-1 | unit | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/browser-processing.test.js` | "a parse that started during the load is clipped to the end of the load"; "a parse that ended before the load ended charges no parse time"; "a fragment buffered at the snapshot with zero parse and execute spans is a measurement of zero work"; "an append that executes while the parse runs counts once"; "an append that began executing before the load ended counts from the load end" |
-| AC-2 | unit | same | "a muxed fragment's appends to separate buffers count as parallel: the union of their spans"; "a fragment whose only appends went to the other buffer is measured by them"; "a track's rate is its total work over its total bytes, not a mean of per-fragment rates" |
+| AC-2 | unit | same | "a muxed fragment's appends to separate buffers count as parallel: the union of their spans"; "appends to separate buffers that execute at the same time count that time once"; "a fragment whose only appends went to the other buffer is measured by them"; "a track's rate is its total work over its total bytes, not a mean of per-fragment rates" |
 | AC-3 | unit | same | "a fragment not yet buffered is skipped"; "a fragment without its load end or parse marks is skipped"; "a fragment with no append sample of its identity is skipped"; "a fragment with one append lacking a usable execute span is skipped whole, not counted in part"; "a fragment with one append lacking a usable age is skipped whole"; "a fragment whose bytes are not a positive integer is skipped"; "both samples of a fragment loaded twice are skipped"; "a fragment without an identity is skipped"; "with no usable fragment the track is unmeasured"; "absent inputs leave the track unmeasured"; "init samples never contribute" |
 | AC-4 | unit | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/playback-readiness.test.js` | "a fragment is in the page at its delivery plus its processing, each counted once"; "the start waits for the processing of the first fragment" |
 | AC-5 | unit | same | "a track's next fragment is requested only after the previous one is processed"; "the start delay counts each fragment's processing before the next request" |
@@ -111,7 +111,9 @@ the Home Assistant host (skill `ha-field-check`), not part of this plan.
       bytes: 1500, seconds: 0.15 }`; an append executing 70 → 20 ms while the
       parse runs 100 → 60 ms gives 80 ms, not 90 ms; a muxed fragment takes
       the union of its spans (parse 100 → 90, picture 90 → 70 and 70 → 40,
-      sound 90 → 75: 60 ms); an append executing 130 → 80 ms with the load
+      sound 90 → 75: 60 ms); after a parse 100 → 90, picture 80 → 60 and
+      sound 70 → 50 give 40 ms, not 50 (summed) and not 30 (one buffer);
+      an append executing 130 → 80 ms with the load
       ended at 100 counts 100 → 80; a fragment whose appends are all on the other
       buffer is measured by them; two fragments give total work over total
       bytes (60 ms / 4000 bytes, not the mean of 1/100 and 1/60).
@@ -208,6 +210,18 @@ edited here):
    `playback-readiness.test.js`: 72 tests, 62 pass, 10 todo, 0 fail.
    `viewer-states.test.js`: 24 tests, 21 pass, 3 todo, 0 fail.
    `readiness-browser-processing.test.js`: 4 tests, 4 todo, 0 fail.
+   9. Task 3 (union of spans), run 2026-11-12 on `ed89a29e` plus these
+      tests: `browser-processing.test.js` 20 tests, 16 pass, 4 todo, 0 fail.
+      The todo tests fail on the old sum: "an append that executes while the
+      parse runs counts once" (AC-1) `seconds 0.09`; "an append that began
+      executing before the load ended counts from the load end" (AC-1)
+      `seconds 0.05`; "appends to separate buffers that execute at the same
+      time count that time once" (AC-2) `seconds 0.03`; "a fragment with one
+      append lacking a usable age is skipped whole" (AC-3)
+      `fragments 2 !== 1`. The existing tests, given explicit append ages, pass on the old sum
+      and on the union; the fixtures of `playback-readiness.test.js` and
+      `readiness-browser-processing.test.js` keep their values (their parse
+      and append spans are disjoint) and are unchanged.
 2. Deterministic: every forecast takes `now` as input and link and encoder
    readings as values; the `ViewerRequests` tests give the source stats and
    the viewer's reading and wait for the progress promise; no timers, no

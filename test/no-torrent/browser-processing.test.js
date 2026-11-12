@@ -204,7 +204,7 @@ test("a fragment with one append lacking a usable age is skipped whole", async (
   }
 });
 
-test("an append of a later load of the same fragment is not charged to this load", { todo: "AC-3" },
+test("an append of a later load of the same fragment is not charged to this load",
   async () => {
     // Load ended at 1000, parse 1000 -> 990, buffered at 950; its own append
     // 960 -> 950. An append under the same identity that ended at 10, after
@@ -217,7 +217,7 @@ test("an append of a later load of the same fragment is not charged to this load
     assertMeasured(result, { secondsPerByte: 0.02 / 1000, fragments: 1, bytes: 1000, seconds: 0.02 });
   });
 
-test("a later load's append without an execute span does not void the fragment", { todo: "AC-3" },
+test("a later load's append without an execute span does not void the fragment",
   async () => {
     const id = "main:0:1:9:36:";
     const result = await browserProcessingOf(
@@ -291,7 +291,7 @@ test("init samples never contribute", async () => {
   assertMeasured(result, GOOD_ONLY);
 });
 
-test("the cost is linear in the samples, not fragments times appends", { todo: "AC-3" }, async () => {
+test("the cost is linear in the samples, not fragments times appends", async () => {
   // 200 fragments, each with its own one append, half on each buffer; each
   // works 20 ms (parse 100 -> 90, append 90 -> 80) over 1000 bytes.
   const count = 200;

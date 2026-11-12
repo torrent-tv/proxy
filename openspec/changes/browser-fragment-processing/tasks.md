@@ -30,7 +30,7 @@ the existing fakes of `ViewerRequests` tests.
        commit `test(readiness): AC-1 … AC-10 browser fragment processing #ttv-260`.
 2. [x] Implementer (fresh, from the test commit): design §2–§5, removing the
        `todo` markers of the tests it makes pass; AC-11; `npm test` exits 0.
-3. [ ] Review finding (proxy#81, 2026-11-12): parse and append spans overlap
+3. [x] Review finding (proxy#81, 2026-11-12): parse and append spans overlap
        (design §1 facts 4, 5). Design §2 now takes the union of intervals.
        Test writer (fresh): AC-1/AC-2/AC-3 cases below for the union, the
        overlap and the missing `ageMs`, marked `todo`, shown failing; fixtures

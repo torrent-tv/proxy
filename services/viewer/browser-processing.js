@@ -3,17 +3,21 @@
  * samples (torrent-tv/meta#260), and a track's rate as that work over the
  * fragments' bytes.
  *
- * One fragment's work is its parse after its load ended — a parse that hls.js
- * streams while the fragment loads overlaps the transfer, which the schedule
- * already charges on the link — plus the time its appends executed. Separate
- * SourceBuffers append in parallel, so of a muxed fragment's appends to the
- * picture and the sound buffer only the larger sum counts. An append's wait in
- * its buffer's queue, or behind the picture, is not work and is not in
- * `executeMs`. A fragment is used only when every one of these facts is in
- * its samples; a partial value is never made.
+ * One fragment's work is the time during which the page was parsing or
+ * appending it after its load ended: the length of the union of its parse span
+ * and the execute spans of its media appends in either SourceBuffer. A union,
+ * not a sum: hls.js can execute an append before the parse ends, and separate
+ * SourceBuffers append in parallel, so a moment of both counts once. Every
+ * span is clipped to start no earlier than the end of the load: a parse that
+ * hls.js streams while the fragment loads overlaps the transfer, which the
+ * schedule already charges on the link. A gap between spans — an append's wait
+ * in its buffer's queue, or behind the picture — is not work and is not
+ * counted. A fragment is used only when every one of these facts is in its
+ * samples; a partial value is never made.
  *
  * Ages are milliseconds before the page's snapshot, so a later event has a
- * smaller age.
+ * smaller age. An append's `ageMs` is the age of the end of its execution, so
+ * it executed over the ages `[ageMs, ageMs + executeMs]`.
  */
 
 export const BROWSER_PROCESSING_UNMEASURED = "browser-processing-unmeasured";
@@ -47,10 +51,10 @@ export function browserProcessingOf(fragments, appends) {
     const ages = sample.eventAgesMs;
     // Buffered: every append of the fragment is done.
     if (![ages?.loadEnd, ages?.parseStart, ages?.parseEnd, ages?.bufferingEnd].every(isMilliseconds)) continue;
-    const append = appendWorkMs(appends, sample.fragmentId);
-    if (append === null) continue;
-    const parse = Math.max(0, Math.min(ages.parseStart, ages.loadEnd) - ages.parseEnd);
-    workMs += parse + append;
+    const spans = appendSpans(appends, sample.fragmentId, ages.loadEnd);
+    if (spans === null) continue;
+    spans.push([ages.parseEnd, Math.min(ages.parseStart, ages.loadEnd)]);
+    workMs += unionLength(spans);
     bytes += sample.bytes;
     used += 1;
   }
@@ -60,25 +64,34 @@ export function browserProcessingOf(fragments, appends) {
 }
 
 /**
- * The largest per-buffer sum of the execute spans of the fragment's media
- * appends, or null when it has none or one of them has no usable span.
+ * The execute spans `[later, earlier]` (ages) of the fragment's media appends
+ * in either buffer, each clipped to the load end, or null when it has none or
+ * one of them has no usable span.
  */
-function appendWorkMs(appends, fragmentId) {
-  let found = false;
-  let largest = 0;
+function appendSpans(appends, fragmentId, loadEnd) {
+  const spans = [];
   for (const buffer of BUFFERS) {
     const samples = appends[buffer]?.media?.samples;
     if (!Array.isArray(samples)) continue;
-    let sum = 0;
     for (const sample of samples) {
       if (sample?.fragmentId !== fragmentId) continue;
-      if (!isMilliseconds(sample.executeMs)) return null;
-      found = true;
-      sum += sample.executeMs;
+      if (!isMilliseconds(sample.executeMs) || !isMilliseconds(sample.ageMs)) return null;
+      spans.push([sample.ageMs, Math.min(sample.ageMs + sample.executeMs, loadEnd)]);
     }
-    largest = Math.max(largest, sum);
   }
-  return found ? largest : null;
+  return spans.length > 0 ? spans : null;
+}
+
+/** The length of the union of age spans `[later, earlier]`; a span with later ≥ earlier is empty. */
+function unionLength(spans) {
+  const sorted = spans.filter(([later, earlier]) => later < earlier).sort((a, b) => a[0] - b[0]);
+  let length = 0;
+  let end = -Infinity;
+  for (const [later, earlier] of sorted) {
+    length += Math.max(0, earlier - Math.max(later, end));
+    end = Math.max(end, earlier);
+  }
+  return length;
 }
 
 function isIdentity(value) {

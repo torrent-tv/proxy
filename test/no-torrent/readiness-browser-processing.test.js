@@ -106,7 +106,7 @@ async function readinessFor(t, id, options) {
 }
 
 test("the page's whole append report measures the processing of the track it watches",
-  { todo: "AC-10", timeout: 10_000 }, async (t) => {
+  { timeout: 10_000 }, async (t) => {
     const readiness = await readinessFor(t, "aaaaaaaabbbbcccc");
 
     assert.equal(readiness.browserProcessing?.length, 1);
@@ -116,14 +116,14 @@ test("the page's whole append report measures the processing of the track it wat
       `${readiness.browserProcessing[0].secondsPerByte} seconds per byte`);
   });
 
-test("samples the page measured for another output measure nothing", { todo: "AC-10", timeout: 10_000 },
+test("samples the page measured for another output measure nothing", { timeout: 10_000 },
   async (t) => {
     const readiness = await readinessFor(t, "bbbbbbbbccccdddd", { appendSessionId: "another-output" });
 
     assert.deepEqual(readiness.browserProcessing?.map(entry => entry.reason), ["browser-processing-unmeasured"]);
   });
 
-test("samples of a report whose buffer capture is not valid measure nothing", { todo: "AC-10", timeout: 10_000 },
+test("samples of a report whose buffer capture is not valid measure nothing", { timeout: 10_000 },
   async (t) => {
     const readiness = await readinessFor(t, "ccccccccddddeeee", { bufferValidity: "unknown" });
 
@@ -131,7 +131,7 @@ test("samples of a report whose buffer capture is not valid measure nothing", { 
   });
 
 test("the readiness log line states each track's processing rate and sample count",
-  { todo: "AC-10", timeout: 10_000 }, async (t) => {
+  { timeout: 10_000 }, async (t) => {
     const lines = [];
     const originalInfo = logger.info;
     logger.info = message => { lines.push(String(message)); };

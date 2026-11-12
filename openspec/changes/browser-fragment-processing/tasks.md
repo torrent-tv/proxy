@@ -86,7 +86,7 @@ the Home Assistant host (skill `ha-field-check`), not part of this plan.
 |---|---|---|---|
 | AC-1 | unit | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/browser-processing.test.js` | "a parse that started during the load is clipped to the end of the load"; "a parse that ended before the load ended charges no parse time"; "a fragment buffered at the snapshot with zero parse and execute spans is a measurement of zero work" |
 | AC-2 | unit | same | "a muxed fragment's appends to separate buffers count as parallel: the larger buffer sum"; "a fragment whose only appends went to the other buffer is measured by them"; "a track's rate is its total work over its total bytes, not a mean of per-fragment rates" |
-| AC-3 | unit | same | "a fragment not yet buffered is skipped"; "a fragment without its load end or parse marks is skipped"; "a fragment with no append sample of its identity is skipped"; "a fragment with one append lacking a usable execute span is skipped whole, not counted in part"; "a fragment whose bytes are not a positive integer is skipped"; "a fragment without an identity is skipped"; "with no usable fragment the track is unmeasured"; "absent inputs leave the track unmeasured"; "init samples never contribute" |
+| AC-3 | unit | same | "a fragment not yet buffered is skipped"; "a fragment without its load end or parse marks is skipped"; "a fragment with no append sample of its identity is skipped"; "a fragment with one append lacking a usable execute span is skipped whole, not counted in part"; "a fragment whose bytes are not a positive integer is skipped"; "both samples of a fragment loaded twice are skipped"; "a fragment without an identity is skipped"; "with no usable fragment the track is unmeasured"; "absent inputs leave the track unmeasured"; "init samples never contribute" |
 | AC-4 | unit | `node --require ./test/no-torrent/support/refuse-torrent.cjs --test test/no-torrent/playback-readiness.test.js` | "a fragment is in the page at its delivery plus its processing, each counted once"; "the start waits for the processing of the first fragment" |
 | AC-5 | unit | same | "a track's next fragment is requested only after the previous one is processed"; "the start delay counts each fragment's processing before the next request" |
 | AC-6 | unit | same | "the other track uses the link while a fragment is processed" |
@@ -110,8 +110,9 @@ the Home Assistant host (skill `ha-field-check`), not part of this plan.
       no append with the fragment's identity; one of its appends with
       `executeMs` null, absent, -1 or `NaN` (the fragment is skipped whole,
       the other buffer's 500 ms is not counted); `bytes` 0, negative,
-      fractional, `NaN`, a string or null; `fragmentId` empty or null; `null`
-      inputs. Each skipped fragment sits beside one usable fragment, so the
+      fractional, `NaN`, a string or null; `fragmentId` empty or null; two
+      media samples sharing one `fragmentId` (a fragment loaded again: both
+      skipped); `null` inputs. Each skipped fragment sits beside one usable fragment, so the
       result shows it skipped and the usable one still measured.
    3. Boundary: every age 0 and `executeMs` 0 (buffered at the snapshot
       moment) is a measurement of zero work; a parse wholly before the load
@@ -148,13 +149,10 @@ the Home Assistant host (skill `ha-field-check`), not part of this plan.
    not valid measure nothing; the `playback readiness` log line carries
    `browserProcessing` with the sample count and rate.
 5. Not covered, with the reason:
-   1. A fragment loaded twice (two fragment samples with one `fragmentId`):
-      design §2 uses each, but both join the same append samples by identity,
-      so what each is charged is not settled by the specification.
-   2. The gate on `browserAppends` alone: `fragmentService` has the same gate
+   1. The gate on `browserAppends` alone: `fragmentService` has the same gate
       today, so with either refused the track is unmeasured; the two gate
       tests show the combined effect only.
-   3. A suffix bound on two tracks (one measured, one not): the per-track
+   2. A suffix bound on two tracks (one measured, one not): the per-track
       bound is shown on one track; the `max_t` over tracks is not separately
       exercised.
 
@@ -181,7 +179,7 @@ edited here):
    1. AC-1 to AC-3: `Cannot find module
       '.../services/viewer/browser-processing.js'` (the measurement does not
       exist; the module is loaded inside each test, so the file still runs).
-      15 tests, 15 todo, 0 fail.
+      16 tests, 16 todo, 0 fail.
    2. AC-4: `processing: undefined, expected 1` (no
       `browserProcessingSeconds`); `delay: 2, expected 3`.
    3. AC-5: `holdingBy.segment` 0, expected 1 (the second fragment is not

@@ -371,6 +371,11 @@ changesets_selftest() (
 )
 
 YQ_VERSION=4.54.1
+# SHA-256 of yq_linux_amd64 of that release (mikefarah/yq, MIT): the line for it in the release's
+# `checksums-bsd` file, equal to `shasum -a 256` of the downloaded file. `yq_install` refuses any
+# other file. The base is overridden only by the self-test, with a `file://` directory.
+YQ_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
+YQ_DOWNLOAD_BASE=${YQ_DOWNLOAD_BASE:-https://github.com/mikefarah/yq/releases/download}
 
 # The checks of the workflow files in .github/workflows, and the proof that they fail on bad input
 # (torrent-tv/meta#336, lessons meta#423, meta#424, meta#425 and the one on the token of a job that
@@ -378,9 +383,41 @@ YQ_VERSION=4.54.1
 # same in proxy, server, ha-addon and infra; only WORKFLOW_PUSHES, DEPENDENCY_TOKEN_STEPS and
 # DEPENDENCY_WORKDIR, set at the top of the file, differ.
 
+yq_install() {
+  # Installs yq $YQ_VERSION from its release into ${YQ_BIN_DIR:-$RUNNER_TEMP/yq-bin} and puts that
+  # directory on the PATH of the later steps ($GITHUB_PATH). GitHub owns the preinstalled copy and
+  # changed it (4.54.1 to 4.54.3 on 2026-11-13, torrent-tv/meta#472), so a pin compared with that
+  # copy breaks when GitHub changes it. The digest is committed here: a checksum file taken from the
+  # same release would also match a tampered release. A file with another digest is deleted and
+  # nothing is installed (Security rule 6).
+  local dir=${YQ_BIN_DIR:-$RUNNER_TEMP/yq-bin} tool have
+  for tool in curl sha256sum; do
+    command -v "$tool" > /dev/null || { echo "::error::yq cannot be installed: $tool is not installed"; return 1; }
+  done
+  mkdir -p "$dir"
+  rm -f "$dir/yq.part"
+  if ! curl --fail --silent --show-error --location --retry 3 --output "$dir/yq.part" "$YQ_DOWNLOAD_BASE/v$YQ_VERSION/yq_linux_amd64"; then
+    rm -f "$dir/yq.part"
+    echo "::error::yq_linux_amd64 v$YQ_VERSION cannot be downloaded"
+    return 1
+  fi
+  # The digest is compared as text: it is the first field on both GNU and BSD `sha256sum`.
+  have=$(sha256sum "$dir/yq.part") || have=
+  if [ "${have%% *}" != "$YQ_SHA256" ]; then
+    rm -f "$dir/yq.part"
+    echo "::error::yq_linux_amd64 v$YQ_VERSION does not match the pinned SHA-256"
+    return 1
+  fi
+  chmod +x "$dir/yq.part"
+  mv -f "$dir/yq.part" "$dir/yq"
+  if [ -n "${GITHUB_PATH:-}" ]; then echo "$dir" >> "$GITHUB_PATH"; fi
+  "$dir/yq" --version
+}
+
 yq_pinned() {
-  # The runner image provides yq; the version is the one server's `install` job checks. A different
-  # version fails here, before any file is read, and changes only in a commit (Security rule 6).
+  # yq_install installs yq at YQ_VERSION; this verifies the `yq` on the PATH before any file is
+  # read, which also guards a local run. A different version fails here and changes only in a
+  # commit (Security rule 6).
   local want="yq (https://github.com/mikefarah/yq/) version v$YQ_VERSION" have
   have=$(yq --version 2>/dev/null) || { echo "::error::yq $YQ_VERSION is not installed"; return 1; }
   if [ "$have" != "$want" ]; then
@@ -981,6 +1018,30 @@ workflow_selftest() (
   workflow_pins "$scratch/pins-escape" > "$scratch/escape.out" 2>&1 || true
   expect pass "workflow-pins writes a % of the file as %25 in its error line" grep -q '@100%25' "$scratch/escape.out"
 
+  # yq-install on a fake release in a scratch directory: no network, the digest of the fake binary
+  # is the pinned one in the good case and another in the bad ones.
+  mkdir -p "$scratch/yq-release/v$YQ_VERSION"
+  printf '#!/bin/sh\necho "yq (https://github.com/mikefarah/yq/) version v%s"\n' "$YQ_VERSION" > "$scratch/yq-release/v$YQ_VERSION/yq_linux_amd64"
+  yq_install_case() {
+    # yq_install_case <bin directory> <digest> [<release directory>]: yq_install against the fake release.
+    (YQ_DOWNLOAD_BASE="file://${3:-$scratch/yq-release}" YQ_BIN_DIR=$1 YQ_SHA256=$2 yq_install)
+  }
+  local yq_fake_digest
+  yq_fake_digest=$(sha256sum "$scratch/yq-release/v$YQ_VERSION/yq_linux_amd64" | cut -d' ' -f1)
+  expect fail "yq-install: a binary with another digest is refused" \
+    yq_install_case "$scratch/yq-bad" 0000000000000000000000000000000000000000000000000000000000000000
+  expect pass "yq-install: the refusal installs no yq" test -z "$(ls "$scratch/yq-bad")"
+  yq_install_case "$scratch/yq-bad" 0000000000000000000000000000000000000000000000000000000000000000 > "$scratch/yq-bad.out" 2>&1 || true
+  expect pass "yq-install: the refusal prints the error line" \
+    grep -qF -- "::error::yq_linux_amd64 v$YQ_VERSION does not match the pinned SHA-256" "$scratch/yq-bad.out"
+  expect fail "yq-install: a release without the binary fails" \
+    yq_install_case "$scratch/yq-missing" "$yq_fake_digest" "$scratch/no-release"
+  expect pass "yq-install: the failed download installs no yq" test -z "$(ls "$scratch/yq-missing")"
+  expect pass "yq-install: a binary with the pinned digest is installed and runs" \
+    yq_install_case "$scratch/yq-good" "$yq_fake_digest"
+  expect pass "yq-install: the installed yq is executable and prints the pinned version" \
+    test "$("$scratch/yq-good/yq" --version)" = "yq (https://github.com/mikefarah/yq/) version v$YQ_VERSION"
+
   # workflow-tokens on copies of this repository's own workflow files, changed one way each.
   mkdir "$scratch/tokens"
   cp .github/workflows/*.yml "$scratch/tokens/"
@@ -1133,11 +1194,12 @@ case "${1:-}" in
   copies) copies "${2:-origin/main}" "${3:-HEAD}" ;;
   changeset-format) changeset_format "${2:-origin/main}" "${3:-HEAD}" ;;
   changesets-selftest) changesets_selftest ;;
+  yq-install) yq_install ;;
   workflow-pins) workflow_pins "${2:-.github/workflows}" ;;
   workflow-tokens) workflow_tokens "${2:-.github/workflows}" ;;
   workflow-refs) workflow_refs "${2:-.github/workflows}" ;;
   commit-msg-bot) commit_msg_bot "${2:-.github/workflows/dependencies.yml}" ;;
   workflow-selftest) workflow_selftest ;;
   all) tools && pins && workflow_pins && workflow_tokens && workflow_refs && commit_msg_bot && install && guard && tests && image ;;
-  *) echo "usage: bash scripts/check.sh tools|pins|install|guard|test|image|copies [<base> [<head>]]|changeset-format [<base> [<head>]]|changesets-selftest|workflow-pins|workflow-tokens|workflow-refs|commit-msg-bot|workflow-selftest|all" >&2; exit 2 ;;
+  *) echo "usage: bash scripts/check.sh tools|pins|install|guard|test|image|copies [<base> [<head>]]|changeset-format [<base> [<head>]]|changesets-selftest|yq-install|workflow-pins|workflow-tokens|workflow-refs|commit-msg-bot|workflow-selftest|all" >&2; exit 2 ;;
 esac

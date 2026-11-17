@@ -288,8 +288,10 @@ jobs:
       - name: Dependencies are pinned exactly
         run: bash scripts/check.sh pins
       # The workflow files are checked like any other code: exact versions, the tokens each job holds,
-      # and the proof that each check fails on bad input (torrent-tv/meta#336). yq 4.54.1 is the version of
-      # the runner image, as in server's `install` job.
+      # and the proof that each check fails on bad input (torrent-tv/meta#336). yq is installed at the
+      # pinned version by `check.sh yq-install`.
+      - name: yq is the pinned version
+        run: bash scripts/check.sh yq-install
       - name: Workflow tools are pinned exactly
         run: bash scripts/check.sh workflow-pins
       - name: The dependency job gives no token to package code, and each pushing job holds its own

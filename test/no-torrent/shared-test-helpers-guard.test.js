@@ -60,6 +60,7 @@ const TESTS = path.join(PROXY, "test", "no-torrent");
  */
 const ABOUT_A_RUNTIME_DIRECTORY = new Set([
   "atomic-json.test.js", // the state directory: no temporary file left behind
+  "check-yq-install.test.js", // the directory yq-install installs into: no yq or yq.part left behind
   "client-log-file.test.js", // the client log directory: its files by name
   "even-grid-cut-by-list.test.js", // the encode directory: what a cut removes
   "segment-store.test.js" // the segment store's directory: what is written and swept

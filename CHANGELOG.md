@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.101
+
+### Patch Changes
+
+- The workflow checks install yq at the pinned version and verify its SHA-256 instead of reading the version the runner image ships.
+
 ## 2.107.100
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.102
+
+### Patch Changes
+
+- Opening a second file in the same page no longer plays the first file's video.
+
 ## 2.107.101
 
 ### Patch Changes

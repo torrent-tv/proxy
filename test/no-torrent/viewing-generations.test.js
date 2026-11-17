@@ -12,6 +12,8 @@
  * registry and the lifecycle are driven with plain values.
  */
 
+import { pictureKeyOf } from "../../services/encode/output/index.js";
+import { outputSpec } from "./helpers/output-spec.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -140,15 +142,15 @@ test("one viewer's seek does not touch another viewer's assignments on a shared 
   const shared = { id: OUTPUT_ID, outputKey: "key-shared" };
   viewers.of(shared, "viewer-a");
   viewers.of(shared, "viewer-b");
-  noteGivenOutput(viewers, "viewer-a", 0, 720, 5, "key-shared");
-  noteGivenOutput(viewers, "viewer-b", 0, 720, 5, "key-shared");
+  noteGivenOutput(viewers, "viewer-a", 0, "picture-a", 720, 5, "key-shared");
+  noteGivenOutput(viewers, "viewer-b", 0, "picture-a", 720, 5, "key-shared");
   const seekedAt = Date.now();
 
   viewers.get("viewer-a").assignments.statedGeneration(1, seekedAt);
 
   const longAfter = seekedAt + ACCEPT_WINDOW_MS + 1;
   assert.equal(acceptsGeneration(viewers, "viewer-b", 0, longAfter), true, "the other viewer did not seek");
-  assert.equal(givenOutputOf(viewers, "viewer-b", 0, 720, 5), "key-shared");
+  assert.equal(givenOutputOf(viewers, "viewer-b", 0, "picture-a", 720, 5), "key-shared");
 
   assert.equal(
     acceptsGeneration(viewers, "viewer-a", 0, seekedAt + 1_000),
@@ -156,7 +158,7 @@ test("one viewer's seek does not touch another viewer's assignments on a shared 
     "a request of the viewing just left, arriving late, is still taken within the window"
   );
   assert.equal(
-    givenOutputOf(viewers, "viewer-a", 0, 720, 5),
+    givenOutputOf(viewers, "viewer-a", 0, "picture-a", 720, 5),
     "key-shared",
     "and is answered by what answered it, not decided anew"
   );
@@ -237,7 +239,7 @@ test("the picture's own route records its answer under the height it is named af
   const picture = {
     id: OUTPUT_ID,
     outputKey: "key-picture",
-    spec: { video: {} },
+    spec: outputSpec({ sourceKey: "source-a", transcodeVideo: true, height: 1080, width: 1920 }),
     segmentFormat: fmp4Format
   };
   const soundtrack = {
@@ -259,8 +261,8 @@ test("the picture's own route records its answer under the height it is named af
   requests.noteAnsweredDirectly(OUTPUT_ID, "viewer-a", 0, "index.m3u8");
   requests.noteAnsweredDirectly(OTHER_ID, "viewer-a", 0, "segment-00012.mp4");
 
-  assert.equal(givenOutputOf(viewers, "viewer-a", 0, 1080, 12), "key-picture");
-  assert.equal(givenOutputOf(viewers, "viewer-a", 0, 1080, -1), "key-picture", "the init is segment -1");
+  assert.equal(givenOutputOf(viewers, "viewer-a", 0, pictureKeyOf(picture.spec), 1080, 12), "key-picture");
+  assert.equal(givenOutputOf(viewers, "viewer-a", 0, pictureKeyOf(picture.spec), 1080, -1), "key-picture", "the init is segment -1");
   const held = viewers.get("viewer-a").assignments.heldKeys();
   assert.equal(held.has("key-sound"), false, "a soundtrack is not a height and records nothing");
   assert.deepEqual([...held], ["key-picture"], "and a playlist records nothing either");
@@ -314,7 +316,7 @@ test("an output an assignment holds is kept when its last viewer leaves, and by 
   // Viewer B moved to another output a moment ago; a request of theirs made
   // against this one may still be repeated.
   viewers.of(elsewhere, "viewer-b");
-  noteGivenOutput(viewers, "viewer-b", 0, 720, 5, output.outputKey);
+  noteGivenOutput(viewers, "viewer-b", 0, "picture-a", 720, 5, output.outputKey);
   const { lifecycle, disposed } = lifecycleOver({ viewers, outputs: [output] });
 
   await lifecycle.releaseSessionConsumer(OUTPUT_ID, "viewer-a", "test");

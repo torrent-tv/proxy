@@ -81,7 +81,7 @@ function twoPictures(how = {}) {
   return { renditions, outputs, viewers, bases };
 }
 
-test("a segment given for one picture does not answer the same address of another picture", { todo: "AC1" }, async () => {
+test("a segment given for one picture does not answer the same address of another picture", async () => {
   const { renditions } = twoPictures({ storedPieceReady: true });
   const first = await renditions.resolveVariantFile(A.base, 720, "segment-00005.mp4", VIEWER, 0);
   assert.equal(first.sessionId, A.step);
@@ -92,7 +92,7 @@ test("a segment given for one picture does not answer the same address of anothe
   assert.equal(second.recover, undefined, "no stored piece of the first picture is served for it");
 });
 
-test("a segment given for one picture does not make the address of another picture lost", { todo: "AC1" }, async () => {
+test("a segment given for one picture does not make the address of another picture lost", async () => {
   const { renditions } = twoPictures({ storedPieceReady: false });
   await renditions.resolveVariantFile(A.base, 720, "segment-00005.mp4", VIEWER, 0);
 
@@ -102,7 +102,7 @@ test("a segment given for one picture does not make the address of another pictu
   assert.equal(second.sessionId, B.step);
 });
 
-test("a repeat of an address of the same picture is answered by the output that answered first", { todo: "AC2" }, async () => {
+test("a repeat of an address of the same picture is answered by the output that answered first", async () => {
   const { renditions } = twoPictures();
   const first = await renditions.resolveVariantFile(A.base, 720, "segment-00005.mp4", VIEWER, 0);
 
@@ -112,7 +112,7 @@ test("a repeat of an address of the same picture is answered by the output that 
   assert.equal(repeat.sessionId, A.step);
 });
 
-test("a repeat of an address of the same picture whose output has gone is served from the stored piece", { todo: "AC2" }, async () => {
+test("a repeat of an address of the same picture whose output has gone is served from the stored piece", async () => {
   const { renditions, outputs } = twoPictures({ storedPieceReady: true });
   await renditions.resolveVariantFile(A.base, 720, "segment-00005.mp4", VIEWER, 0);
   const givenKey = outputs.get(A.step).outputKey;
@@ -123,7 +123,7 @@ test("a repeat of an address of the same picture whose output has gone is served
   assert.deepEqual(repeat, { sessionId: null, recover: { key: givenKey, likeId: A.base } });
 });
 
-test("the picture's own route for one picture does not make a request for another picture resolve to the first", { todo: "AC3" }, async () => {
+test("the picture's own route for one picture does not make a request for another picture resolve to the first", async () => {
   const { renditions, viewers, outputs } = twoPictures({ storedPieceReady: true });
   const stepOfA = outputOf({ id: A.step, file: outputs.get(A.base).file, sourceKey: A.source, height: 720 });
   outputs.set(A.step, stepOfA);

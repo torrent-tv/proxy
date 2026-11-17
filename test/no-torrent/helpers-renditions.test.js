@@ -29,7 +29,7 @@ const VIEWER_RELATIONS = [
   "viewerCountOn", "outputStillNeeded", "consumersOn", "presentOn", "qualityModeOf", "linkMbpsOf", "audioChoiceOf",
   "chooseAudioTrack", "stepOnScreenOf", "noteStepOnScreen", "stepBeingWarmedOf", "stepBeingWarmedSinceOf",
   "noteStepBeingWarmed", "audioBeingWarmedOf", "noteAudioBeingWarmed", "watches", "placeOn", "generationOfRequest",
-  "givenOutputOf", "noteGivenOutput", "chosenOutputOf", "chooseOutput", "noteServingVerdict", "heightsChosenAs",
+  "givenOutputOf", "givenUnderOtherPictureOf", "noteGivenOutput", "chosenOutputOf", "chooseOutput", "noteServingVerdict", "heightsChosenAs",
   "highestGivenSegmentOf", "sameHeightSwitchOf", "noteSameHeightSwitch", "switchingOnto", "switchingFrom",
   "bufferedSecondsOf"
 ];
@@ -95,12 +95,12 @@ test("what a viewer was given and chose is the viewer's own record", () => {
   viewers.of(output, "viewer-1");
 
   relations.chooseOutput("viewer-1", 720, "k2");
-  relations.noteGivenOutput("viewer-1", 0, 720, 3, "k2");
+  relations.noteGivenOutput("viewer-1", 0, "picture-a", 720, 3, "k2");
 
   assert.equal(relations.chosenOutputOf("viewer-1", 720), "k2");
   assert.deepEqual(relations.heightsChosenAs("viewer-1", "k2"), [720]);
-  assert.equal(relations.givenOutputOf("viewer-1", 0, 720, 3), "k2");
-  assert.equal(relations.givenOutputOf("viewer-1", 0, 720, 4), "");
+  assert.equal(relations.givenOutputOf("viewer-1", 0, "picture-a", 720, 3), "k2");
+  assert.equal(relations.givenOutputOf("viewer-1", 0, "picture-a", 720, 4), "");
   assert.equal(relations.generationOfRequest("viewer-1", 4), 4);
   assert.equal(relations.generationOfRequest("viewer-1", undefined), 0);
 });

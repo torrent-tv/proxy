@@ -22,10 +22,10 @@ test("a choice stands until the rule moves it, and a request never moves it", ()
   const mine = make();
 
   mine.choose(720, "out-a");
-  mine.give(mine.generation, 720, 4, "out-a");
+  mine.give(mine.generation, "picture-a", 720, 4, "out-a");
 
   assert.equal(mine.chosenFor(720), "out-a");
-  mine.give(mine.generation, 720, 5, "out-b");
+  mine.give(mine.generation, "picture-a", 720, 5, "out-b");
   assert.equal(mine.chosenFor(720), "out-a", "being given something else does not re-choose");
   mine.choose(720, "out-b");
   assert.equal(mine.chosenFor(720), "out-b");
@@ -46,11 +46,11 @@ test("a repeat of a request is answered by whatever answered it, not decided aga
   const mine = make();
   const first = mine.generation;
 
-  mine.give(first, 720, 9, "out-a");
+  mine.give(first, "picture-a", 720, 9, "out-a");
 
-  assert.equal(mine.givenFor(first, 720, 9), "out-a");
-  assert.equal(mine.givenFor(first, 720, 10), "", "a segment nothing answered says so");
-  assert.equal(mine.givenFor(first + 1, 720, 9), "", "and a later generation is not the same question");
+  assert.equal(mine.givenFor(first, "picture-a", 720, 9), "out-a");
+  assert.equal(mine.givenFor(first, "picture-a", 720, 10), "", "a segment nothing answered says so");
+  assert.equal(mine.givenFor(first + 1, "picture-a", 720, 9), "", "and a later generation is not the same question");
 });
 
 test("a request carries its own generation, so a late one is not read against the current", () => {
@@ -69,7 +69,7 @@ test("a request carries its own generation, so a late one is not read against th
 test("an accepted response keeps its output past its own generation's window", () => {
   const mine = make();
   const made = mine.generation;
-  mine.give(made, 720, 3, "out-a");
+  mine.give(made, "picture-a", 720, 3, "out-a");
   const token = mine.accept("out-a");
 
   mine.statedGeneration(1, 1_000);
@@ -89,7 +89,7 @@ test("an accepted response keeps its output past its own generation's window", (
 test("what was given inside a live generation holds its output, and is forgotten past the window", () => {
   const mine = make();
   const made = mine.generation;
-  mine.give(made, 720, 3, "out-a");
+  mine.give(made, "picture-a", 720, 3, "out-a");
   mine.statedGeneration(1, 1_000);
 
   assert.ok(mine.heldKeys(1_000 + WINDOW_MS).has("out-a"));
@@ -99,7 +99,7 @@ test("what was given inside a live generation holds its output, and is forgotten
     "past the window nothing stands on it, so it may be let go"
   );
   assert.equal(
-    mine.givenFor(made, 720, 3),
+    mine.givenFor(made, "picture-a", 720, 3),
     "",
     "and the generation is pruned rather than kept for the life of the viewing"
   );
@@ -109,7 +109,7 @@ test("a viewer leaving holds nothing, response in flight included", () => {
   const mine = make();
   mine.choose(720, "out-a");
   mine.accept("out-b");
-  mine.give(mine.generation, 720, 1, "out-c");
+  mine.give(mine.generation, "picture-a", 720, 1, "out-c");
 
   mine.clear();
 

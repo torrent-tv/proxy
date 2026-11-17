@@ -27,7 +27,7 @@
  * No reading of disk or machine here: every figure arrives as a plain value.
  */
 
-import { OutputSpec } from "../output/OutputSpec.js";
+import { OutputSpec, pictureKeyOf } from "../output/OutputSpec.js";
 import { admissionRank } from "./link-budget.js";
 
 /**
@@ -140,15 +140,15 @@ export function isSameMaterial(spec, wanted) {
   if (!spec || !wanted || !spec.video || !wanted.video) {
     return false;
   }
-  return (
-    spec.sourceKey === wanted.sourceKey &&
-    spec.segmentFormatId === wanted.segmentFormatId &&
-    spec.grid.toKey() === wanted.grid.toKey() &&
-    spec.carries === wanted.carries &&
-    spec.video.fileIndex === wanted.video.fileIndex &&
-    (spec.audio?.toKey() ?? "") === (wanted.audio?.toKey() ?? "")
-  );
+  return pictureKeyOf(spec) === pictureKeyOf(wanted);
 }
+
+/**
+ * The picture key: the value `isSameMaterial` compares, the same for a base and
+ * every step of it. Defined with the output spec, where its fields live, and
+ * named here beside the rule that uses it.
+ */
+export { pictureKeyOf };
 
 export function servingCandidates({ wanted, keys, source, encoderName, readyAt }) {
   const found = new Map();

@@ -25,6 +25,7 @@
  * stood in for, and the store is nothing but which segments are closed.
  */
 
+import { pictureKeyOf } from "../../services/encode/output/index.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Renditions } from "../../services/encode/Renditions.js";
@@ -246,7 +247,7 @@ function pictureAtNominal(how = {}) {
   const given = (consumerId, upTo, output = base, { openLast = false } = {}) => {
     const generation = viewers.get(consumerId).assignments.generation;
     for (let index = 0; index <= upTo; index += 1) {
-      noteGivenOutput(viewers, consumerId, generation, HEIGHT, index, output.outputKey);
+      noteGivenOutput(viewers, consumerId, generation, pictureKeyOf(base.spec), HEIGHT, index, output.outputKey);
       if (!(openLast && index === upTo)) {
         closed.add(`${output.outputKey}#${index}`);
       }
@@ -775,7 +776,7 @@ test("a move waits for the segment given from the output on screen and not close
   close(base, 10);
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "moved on #10 closing there, with no report");
   const generation = viewers.get("viewer-a").assignments.generation;
-  assert.equal(givenOutputOf(viewers, "viewer-a", generation, HEIGHT, 10), base.outputKey, "the held request stays with the output it was given from");
+  assert.equal(givenOutputOf(viewers, "viewer-a", generation, pictureKeyOf(base.spec), HEIGHT, 10), base.outputKey, "the held request stays with the output it was given from");
 });
 
 test("a move to a faster setting waits for the segment given from the output on screen too", async () => {
@@ -806,7 +807,7 @@ test("a held segment the prepared output closes sooner is given from it, and the
   assert.notEqual(prepared, base);
   const generation = viewers.get("viewer-a").assignments.generation;
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "moved without #11 closed there");
-  assert.equal(givenOutputOf(viewers, "viewer-a", generation, HEIGHT, 10), prepared.outputKey, "#10 is given from the prepared output");
+  assert.equal(givenOutputOf(viewers, "viewer-a", generation, pictureKeyOf(base.spec), HEIGHT, 10), prepared.outputKey, "#10 is given from the prepared output");
   assert.ok(invalidated.includes(BASE_ID), "the request held on the output left is woken");
   assert.equal(renditions.stillGivenTo(BASE_ID, HEIGHT, "segment-00010.mp4", "viewer-a", Number.NaN, BASE_ID), false);
   assert.equal(renditions.stillGivenTo(BASE_ID, HEIGHT, "segment-00010.mp4", "viewer-a", Number.NaN, prepared.id), true);
@@ -823,7 +824,7 @@ test("a held segment the output on screen closes sooner stays given from it", as
   report("viewer-a", linkJustFor(LIMITS[1]));
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), base.outputKey);
   const generation = viewers.get("viewer-a").assignments.generation;
-  assert.equal(givenOutputOf(viewers, "viewer-a", generation, HEIGHT, 10), base.outputKey);
+  assert.equal(givenOutputOf(viewers, "viewer-a", generation, pictureKeyOf(base.spec), HEIGHT, 10), base.outputKey);
   close(prepared, 11);
   close(base, 10);
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), prepared.outputKey, "moved from #11 once #10 closed there");
@@ -841,7 +842,7 @@ test("a header not proven to decode where the player's does keeps the held segme
   report("viewer-a", linkJustFor(LIMITS[1]));
   assert.equal(chosenOutputOf(viewers, "viewer-a", HEIGHT), base.outputKey);
   const generation = viewers.get("viewer-a").assignments.generation;
-  assert.equal(givenOutputOf(viewers, "viewer-a", generation, HEIGHT, 10), base.outputKey);
+  assert.equal(givenOutputOf(viewers, "viewer-a", generation, pictureKeyOf(base.spec), HEIGHT, 10), base.outputKey);
 });
 
 test("an output on screen whose encoding failed for good is not waited for", async () => {

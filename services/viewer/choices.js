@@ -420,9 +420,26 @@ export function acceptsGeneration(viewers, consumerId, stated, now = Date.now())
  * @param {number} segmentIndex - −1 for the init.
  * @returns {string}
  */
-export function givenOutputOf(viewers, consumerId, generation, askedHeight, segmentIndex) {
+export function givenOutputOf(viewers, consumerId, generation, pictureKey, askedHeight, segmentIndex) {
   const viewer = consumerId ? viewers.get(consumerId) : null;
-  return viewer ? viewer.assignments.givenFor(generation, askedHeight, segmentIndex) : "";
+  return viewer ? viewer.assignments.givenFor(generation, pictureKey, askedHeight, segmentIndex) : "";
+}
+
+/**
+ * What answered this address in this generation under another picture, if
+ * anything did: the record that must not answer it.
+ *
+ * @param {object} viewers
+ * @param {string} consumerId
+ * @param {number} generation
+ * @param {string} pictureKey
+ * @param {number} askedHeight
+ * @param {number} segmentIndex
+ * @returns {{ pictureKey: string, outputKey: string } | null}
+ */
+function givenUnderOtherPictureOf(viewers, consumerId, generation, pictureKey, askedHeight, segmentIndex) {
+  const viewer = consumerId ? viewers.get(consumerId) : null;
+  return viewer ? viewer.assignments.givenUnderOtherPicture(generation, pictureKey, askedHeight, segmentIndex) : null;
 }
 
 /**
@@ -437,9 +454,9 @@ export function givenOutputOf(viewers, consumerId, generation, askedHeight, segm
  * @param {string} outputKey
  * @returns {void}
  */
-export function noteGivenOutput(viewers, consumerId, generation, askedHeight, segmentIndex, outputKey) {
+export function noteGivenOutput(viewers, consumerId, generation, pictureKey, askedHeight, segmentIndex, outputKey) {
   const viewer = consumerId ? viewers.get(consumerId) : null;
-  viewer?.assignments.give(generation, askedHeight, segmentIndex, outputKey);
+  viewer?.assignments.give(generation, pictureKey, askedHeight, segmentIndex, outputKey);
 }
 
 /**
@@ -528,9 +545,9 @@ export function heightsChosenAs(viewers, consumerId, outputKey) {
  * @param {number} askedHeight
  * @returns {number}
  */
-export function highestGivenSegmentOf(viewers, consumerId, askedHeight) {
+export function highestGivenSegmentOf(viewers, consumerId, pictureKey, askedHeight) {
   const viewer = consumerId ? viewers.get(consumerId) : null;
-  return viewer ? viewer.assignments.highestGiven(viewer.assignments.generation, askedHeight) : -1;
+  return viewer ? viewer.assignments.highestGiven(viewer.assignments.generation, pictureKey, askedHeight) : -1;
 }
 
 /**
@@ -709,17 +726,20 @@ export function viewerRelationsFor(viewers) {
     // A viewer's own assignments: which output answered a height and segment in
     // one generation of their viewing, so a repeat is answered the same way.
     generationOfRequest: (consumerId, stated) => generationOfRequest(viewers, consumerId, stated),
-    givenOutputOf: (consumerId, generation, askedHeight, segmentIndex) =>
-      givenOutputOf(viewers, consumerId, generation, askedHeight, segmentIndex),
-    noteGivenOutput: (consumerId, generation, askedHeight, segmentIndex, outputKey) =>
-      noteGivenOutput(viewers, consumerId, generation, askedHeight, segmentIndex, outputKey),
+    givenOutputOf: (consumerId, generation, pictureKey, askedHeight, segmentIndex) =>
+      givenOutputOf(viewers, consumerId, generation, pictureKey, askedHeight, segmentIndex),
+    givenUnderOtherPictureOf: (consumerId, generation, pictureKey, askedHeight, segmentIndex) =>
+      givenUnderOtherPictureOf(viewers, consumerId, generation, pictureKey, askedHeight, segmentIndex),
+    noteGivenOutput: (consumerId, generation, pictureKey, askedHeight, segmentIndex, outputKey) =>
+      noteGivenOutput(viewers, consumerId, generation, pictureKey, askedHeight, segmentIndex, outputKey),
     // The output this viewer was chosen at a height, and the rule's choice of
     // it — the viewer's own record, never one per file.
     chosenOutputOf: (consumerId, askedHeight) => chosenOutputOf(viewers, consumerId, askedHeight),
     chooseOutput: (consumerId, askedHeight, outputKey) => chooseOutput(viewers, consumerId, askedHeight, outputKey),
     noteServingVerdict: (consumerId, verdict) => noteServingVerdict(viewers, consumerId, verdict),
     heightsChosenAs: (consumerId, outputKey) => heightsChosenAs(viewers, consumerId, outputKey),
-    highestGivenSegmentOf: (consumerId, askedHeight) => highestGivenSegmentOf(viewers, consumerId, askedHeight),
+    highestGivenSegmentOf: (consumerId, pictureKey, askedHeight) =>
+      highestGivenSegmentOf(viewers, consumerId, pictureKey, askedHeight),
     // A move between two limits of the height on a viewer's screen: the segment
     // they were last given, the move being prepared, and the outputs it is
     // between.

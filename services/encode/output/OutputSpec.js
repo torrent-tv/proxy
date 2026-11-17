@@ -412,3 +412,28 @@ export class OutputSpec {
 export function isOutputName(value) {
   return typeof value === "string" && /^[a-f0-9]{16}$/.test(value);
 }
+
+/**
+ * The picture an output belongs to: the material identity every output of one
+ * film shares, a base and every step of it — the same source, segment format,
+ * cuts, carried tracks, video file and soundtrack, and not the picture SIZE.
+ * `isSameMaterial` (`encode/quality/serving-output.js`) compares exactly this
+ * value, so the two cannot disagree; the viewers' record of what was given
+ * (`viewer/Assignments.js`) puts it in every address.
+ *
+ * @param {OutputSpec | null | undefined} spec
+ * @returns {string} Empty when the output has no picture.
+ */
+export function pictureKeyOf(spec) {
+  if (!spec?.video) {
+    return "";
+  }
+  return [
+    spec.sourceKey,
+    spec.segmentFormatId,
+    spec.grid.toKey(),
+    spec.carries,
+    spec.video.fileIndex,
+    spec.audio?.toKey() ?? ""
+  ].join("|");
+}

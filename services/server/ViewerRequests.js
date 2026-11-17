@@ -9,7 +9,7 @@
 
 import { megabytesPerSecond } from "../../utils/units.js";
 import { logger } from "../../utils/logger.js";
-import { isOutputName, OutputSpec } from "../encode/output/index.js";
+import { isOutputName, OutputSpec, pictureKeyOf } from "../encode/output/index.js";
 import { withSubtitleReadiness } from "./subtitle-readiness.js";
 
 /** @param {{ spec: { sourceFileIndexes: number[] }, file: { fileIndex: number } }} output */
@@ -640,7 +640,7 @@ export class ViewerRequests {
     }
     const height = this.#host.outputs.variantHeightOf(output);
     const generation = this.#host.generationOfRequest(consumerId, statedGeneration);
-    this.#host.noteGivenOutput(consumerId, generation, height, segmentIndex, output.outputKey ?? "");
+    this.#host.noteGivenOutput(consumerId, generation, pictureKeyOf(output.spec), height, segmentIndex, output.outputKey ?? "");
   }
 
   /**

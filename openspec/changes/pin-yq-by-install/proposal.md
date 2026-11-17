@@ -15,7 +15,8 @@ compares the `yq` of the GitHub runner image with `YQ_VERSION=4.54.1`. The image
 
 - `scripts/check.sh` gets `YQ_SHA256` (digest of `yq_linux_amd64` v4.54.1, committed), the function
   `yq_install` and the subcommand `yq-install`: download the release binary of mikefarah/yq at
-  `YQ_VERSION`, verify the digest with `sha256sum --check`, refuse a mismatch with
+  `YQ_VERSION`, verify the digest by comparing the first field of the `sha256sum`
+  output with the committed one, refuse a mismatch with
   `::error::yq_linux_amd64 v4.54.1 does not match the pinned SHA-256`, install into
   `$YQ_BIN_DIR` (default `$RUNNER_TEMP/yq-bin`) and append that directory to `$GITHUB_PATH`.
   `yq_pinned()` stays and verifies the `yq` on `PATH`.

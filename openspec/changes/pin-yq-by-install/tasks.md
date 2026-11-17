@@ -25,6 +25,8 @@ Files in scope and their tests (`test/no-torrent/check-yq-install.test.js` cover
 2. `.github/workflows/main.yml`, `.github/workflows/dependencies.yml` (new step): medium risk;
    text checks of position, command and absence of a token or version.
 3. `AGENTS.md` and workflow comments (no "runner image" statement): low risk; one text check.
+4. `test/no-torrent/shared-test-helpers-guard.test.js` (one allow-list line naming
+   `check-yq-install.test.js`, which reads its bin directory): low risk; the guard test itself.
 
 Out of scope: the other repositories (their own plans); `yq_pinned()` semantics (unchanged, its
 existing cases stay in `workflow-selftest`); `jq`; `workflow-tokens` and `workflow-pins` (the
@@ -83,7 +85,7 @@ is a committed constant, shown by the first positive case).
 ### 2.4 Rules and exit
 
 1. Each test is marked `todo` with its AC id and fails before the code exists, in the way 2.3
-   states. Run with the command of 2.2.1: 18 tests; the 11 that run the subcommand fail with
+   states. Run with the command of 2.2.1: 18 tests; the 10 that run the subcommand fail with
    the `usage:` line of `check.sh` (the subcommand does not exist), the rest on the missing
    pin, step, usage word or the "runner image" lines.
 2. Tests are deterministic: a scratch directory per case, `file://` downloads, no sleep, no

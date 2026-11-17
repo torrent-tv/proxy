@@ -386,7 +386,7 @@ YQ_DOWNLOAD_BASE=${YQ_DOWNLOAD_BASE:-https://github.com/mikefarah/yq/releases/do
 yq_install() {
   # Installs yq $YQ_VERSION from its release into ${YQ_BIN_DIR:-$RUNNER_TEMP/yq-bin} and puts that
   # directory on the PATH of the later steps ($GITHUB_PATH). GitHub owns the preinstalled copy and
-  # changed it (4.54.1 to 4.54.3 on 2026-11-13, torrent-tv/meta#472), so a pin compared with that
+  # changed it (4.54.1 to 4.54.3; the first failed run is of 2026-11-13, torrent-tv/meta#472), so a pin compared with that
   # copy breaks when GitHub changes it. The digest is committed here: a checksum file taken from the
   # same release would also match a tampered release. A file with another digest is deleted and
   # nothing is installed (Security rule 6).
@@ -401,7 +401,8 @@ yq_install() {
     echo "::error::yq_linux_amd64 v$YQ_VERSION cannot be downloaded"
     return 1
   fi
-  # The digest is compared as text: it is the first field on both GNU and BSD `sha256sum`.
+  # The digest is compared as text: it is the first field of the output of `sha256sum` (measured with the
+  # `sha256sum` of macOS, which has no `--check`; the runner's is not measured here, CI shows it).
   have=$(sha256sum "$dir/yq.part") || have=
   if [ "${have%% *}" != "$YQ_SHA256" ]; then
     rm -f "$dir/yq.part"
@@ -1023,8 +1024,9 @@ workflow_selftest() (
   mkdir -p "$scratch/yq-release/v$YQ_VERSION"
   printf '#!/bin/sh\necho "yq (https://github.com/mikefarah/yq/) version v%s"\n' "$YQ_VERSION" > "$scratch/yq-release/v$YQ_VERSION/yq_linux_amd64"
   yq_install_case() {
-    # yq_install_case <bin directory> <digest> [<release directory>]: yq_install against the fake release.
-    (YQ_DOWNLOAD_BASE="file://${3:-$scratch/yq-release}" YQ_BIN_DIR=$1 YQ_SHA256=$2 yq_install)
+    # yq_install_case <bin directory> <digest> [<release directory>]: yq_install against the fake release,
+    # with no GITHUB_PATH so that a CI run does not put the scratch directory on its own PATH.
+    (unset GITHUB_PATH; YQ_DOWNLOAD_BASE="file://${3:-$scratch/yq-release}" YQ_BIN_DIR=$1 YQ_SHA256=$2 yq_install)
   }
   local yq_fake_digest
   yq_fake_digest=$(sha256sum "$scratch/yq-release/v$YQ_VERSION/yq_linux_amd64" | cut -d' ' -f1)

@@ -20,6 +20,7 @@
  * being the same material.
  */
 
+import { pictureKeyOf } from "../../services/encode/output/index.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Renditions } from "../../services/encode/Renditions.js";
@@ -367,8 +368,8 @@ test("nothing suiting the viewer is answered as unavailable, and is not recorded
 });
 
 test("an address given by an output that has gone is served from its stored piece", async () => {
-  const { renditions, viewers } = pictureWithSteps({ storedPieceReady: true });
-  noteGivenOutput(viewers, "viewer-a", 0, 720, 5, "gone-output-key");
+  const { renditions, viewers, base } = pictureWithSteps({ storedPieceReady: true });
+  noteGivenOutput(viewers, "viewer-a", 0, pictureKeyOf(base.spec), 720, 5, "gone-output-key");
 
   const resolved = await renditions.resolveVariantFile(BASE_ID, 720, "segment-00005.mp4", "viewer-a", 0);
 
@@ -376,10 +377,10 @@ test("an address given by an output that has gone is served from its stored piec
 });
 
 test("an address given by an output that has gone is lost when nothing proven compatible can stand in", async () => {
-  const { renditions, viewers } = pictureWithSteps({
+  const { renditions, viewers, base } = pictureWithSteps({
     hands: (source) => outputOf({ id: MADE_ID, file: source, height: 720 })
   });
-  noteGivenOutput(viewers, "viewer-a", 0, 720, 5, "gone-output-key");
+  noteGivenOutput(viewers, "viewer-a", 0, pictureKeyOf(base.spec), 720, 5, "gone-output-key");
 
   const resolved = await renditions.resolveVariantFile(BASE_ID, 720, "segment-00005.mp4", "viewer-a", 0);
 
@@ -388,11 +389,11 @@ test("an address given by an output that has gone is lost when nothing proven co
 });
 
 test("an address given by an output that has gone is served by one whose header is proven compatible", async () => {
-  const { renditions, viewers } = pictureWithSteps({
+  const { renditions, viewers, base } = pictureWithSteps({
     hands: (source) => outputOf({ id: MADE_ID, file: source, height: 720 }),
     headersCompatible: { compatible: true, differences: [] }
   });
-  noteGivenOutput(viewers, "viewer-a", 0, 720, 5, "gone-output-key");
+  noteGivenOutput(viewers, "viewer-a", 0, pictureKeyOf(base.spec), 720, 5, "gone-output-key");
 
   const resolved = await renditions.resolveVariantFile(BASE_ID, 720, "segment-00005.mp4", "viewer-a", 0);
 

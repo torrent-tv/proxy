@@ -2,12 +2,12 @@
 
 ## 1. Implementation (proxy)
 
-- [ ] 1.1 `services/encode/quality/serving-output.js`: export the picture key beside `isSameMaterial`, built from the same fields.
-- [ ] 1.2 `services/viewer/Assignments.js`: `addressOf(pictureKey, askedHeight, segmentIndex)`; `give`, `givenFor`, `highestGiven` take the picture key; update the LIMIT comment; state that `chosen` is unchanged because `servingOutputFor` already filters by `#interchangeableWith`.
-- [ ] 1.3 `services/viewer/choices.js`: `givenOutputOf`, `noteGivenOutput`, `highestGivenSegmentOf` and their `wire` entries pass the picture key.
-- [ ] 1.4 `services/encode/Renditions.js`: `#givenBefore`, `stillGivenTo`, `resolveVariantFile`, `#answerForLostAddress` and the `highestGivenSegmentOf` call pass the picture key of `base`; one debug line when a record exists under another picture for the same consumer, generation, height and segment.
-- [ ] 1.5 `services/server/ViewerRequests.js`: `noteAnsweredDirectly` passes the picture key of the output it answered with.
-- [ ] 1.6 Every other caller (`git grep -n -E 'givenOutputOf|noteGivenOutput|highestGivenSegmentOf|highestGiven|givenFor|\.give\('`), tests and docs included.
+- [x] 1.1 `services/encode/quality/serving-output.js`: export the picture key beside `isSameMaterial` (`pictureKeyOf`, defined in `encode/output/OutputSpec.js`, which `isSameMaterial` compares, so the two cannot disagree; the server component may import it only from `encode/output/index.js`).
+- [x] 1.2 `services/viewer/Assignments.js`: `addressOf(pictureKey, askedHeight, segmentIndex)`; `give`, `givenFor`, `highestGiven` take the picture key; update the LIMIT comment; state that `chosen` is unchanged because `servingOutputFor` already filters by `#interchangeableWith`.
+- [x] 1.3 `services/viewer/choices.js`: `givenOutputOf`, `noteGivenOutput`, `highestGivenSegmentOf` and their `wire` entries pass the picture key.
+- [x] 1.4 `services/encode/Renditions.js`: `#givenBefore`, `stillGivenTo`, `resolveVariantFile`, `#answerForLostAddress` and the `highestGivenSegmentOf` call pass the picture key of `base`; one debug line when a record exists under another picture for the same consumer, generation, height and segment.
+- [x] 1.5 `services/server/ViewerRequests.js`: `noteAnsweredDirectly` passes the picture key of the output it answered with.
+- [x] 1.6 Every other caller (`git grep -n -E 'givenOutputOf|noteGivenOutput|highestGivenSegmentOf|highestGiven|givenFor|\.give\('`), tests and docs included.
 
 ## 2. Test plan (torrent-tv/meta#470)
 

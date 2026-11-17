@@ -1,5 +1,5 @@
 export { OutputRetention, leastNeededSegments } from "./OutputRetention.js";
-export { OutputSpec, VideoOutput, AudioOutput, CutGrid, isOutputName } from "./OutputSpec.js";
+export { OutputSpec, VideoOutput, AudioOutput, CutGrid, isOutputName, pictureKeyOf } from "./OutputSpec.js";
 export { PLAYLIST_FILE_NAME } from "./playlists.js";
 export { cutsAtGivenTimes } from "./cut-grid.js";
 

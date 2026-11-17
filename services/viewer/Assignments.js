@@ -41,9 +41,21 @@
  * before an output is let go, rather than the assignments being discovered
  * afterwards.
  *
- * LIMIT, stated rather than left to be found: an assignment is keyed by the
- * HEIGHT asked for, so it speaks for the picture and its steps. A soundtrack is
- * not a height and records nothing in `given`; item 97 is about the picture.
+ * AN ADDRESS NAMES THE PICTURE. A viewer outlives the picture: a page that
+ * opens a second file keeps its consumer id and its generation. What `given`
+ * holds for the first picture must never answer a request that names the
+ * second, so the address of a given piece is the picture key
+ * (`pictureKeyOf`, the material identity `isSameMaterial` compares: the same
+ * for a base and every step of it), the height asked for and the segment. A
+ * request names the picture (`/transcode/<base>/…`), and so does the address.
+ * `chosen` is per height only and stays so: its reader, `servingOutputFor`,
+ * already filters by `#interchangeableWith`, so a chosen output of another
+ * picture is never served.
+ *
+ * LIMIT, stated rather than left to be found: within one picture an assignment
+ * is keyed by the HEIGHT asked for, so it speaks for the picture and its steps.
+ * A soundtrack is not a height and records nothing in `given`; item 97 is about
+ * the picture.
  * A soundtrack's response is still held by `accept` while it is being sent,
  * and a request for a soundtrack made in a viewing that was left is still
  * refused — neither of those is about heights.
@@ -77,14 +89,26 @@
  */
 
 /**
- * The address of one thing asked for: a height of the picture and a segment.
+ * The address of one thing asked for: a picture, a height of it and a segment.
  *
+ * @param {string} pictureKey
  * @param {number} askedHeight
  * @param {number} segmentIndex
  * @returns {string}
  */
-function addressOf(askedHeight, segmentIndex) {
-  return `${askedHeight}:${segmentIndex}`;
+function addressOf(pictureKey, askedHeight, segmentIndex) {
+  return `${addressPrefix(pictureKey, askedHeight)}${segmentIndex}`;
+}
+
+/**
+ * What every address of one picture and height begins with.
+ *
+ * @param {string} pictureKey
+ * @param {number} askedHeight
+ * @returns {string}
+ */
+function addressPrefix(pictureKey, askedHeight) {
+  return `${pictureKey}#${askedHeight}:`;
 }
 
 export class Assignments {
@@ -216,15 +240,16 @@ export class Assignments {
    * which only the caller can turn into a number.
    *
    * @param {number} generation
+   * @param {string} pictureKey
    * @param {number} askedHeight
    * @returns {number}
    */
-  highestGiven(generation, askedHeight) {
+  highestGiven(generation, pictureKey, askedHeight) {
     const byAddress = this.#given.get(generation);
     if (!byAddress) {
       return -1;
     }
-    const prefix = `${askedHeight}:`;
+    const prefix = addressPrefix(pictureKey, askedHeight);
     let highest = -1;
     for (const address of byAddress.keys()) {
       if (!address.startsWith(prefix)) {
@@ -242,12 +267,37 @@ export class Assignments {
    * What answered this segment in this generation, or an empty string.
    *
    * @param {number} generation
+   * @param {string} pictureKey
    * @param {number} askedHeight
    * @param {number} segmentIndex
    * @returns {string}
    */
-  givenFor(generation, askedHeight, segmentIndex) {
-    return this.#given.get(generation)?.get(addressOf(askedHeight, segmentIndex)) ?? "";
+  givenFor(generation, pictureKey, askedHeight, segmentIndex) {
+    return this.#given.get(generation)?.get(addressOf(pictureKey, askedHeight, segmentIndex)) ?? "";
+  }
+
+  /**
+   * What answered this height and segment in this generation under ANOTHER
+   * picture, if anything did. Asked only to say so in the log when an address
+   * of this picture found no record while one of another picture exists.
+   *
+   * @param {number} generation
+   * @param {string} pictureKey - The picture asked about; its own records are skipped.
+   * @param {number} askedHeight
+   * @param {number} segmentIndex
+   * @returns {{ pictureKey: string, outputKey: string } | null}
+   */
+  givenUnderOtherPicture(generation, pictureKey, askedHeight, segmentIndex) {
+    const suffix = `#${askedHeight}:${segmentIndex}`;
+    for (const [address, outputKey] of this.#given.get(generation) ?? []) {
+      if (address.endsWith(suffix)) {
+        const other = address.slice(0, -suffix.length);
+        if (other !== pictureKey) {
+          return { pictureKey: other, outputKey };
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -255,17 +305,18 @@ export class Assignments {
    * way rather than decided again.
    *
    * @param {number} generation
+   * @param {string} pictureKey
    * @param {number} askedHeight
    * @param {number} segmentIndex
    * @param {string} outputKey
    * @returns {void}
    */
-  give(generation, askedHeight, segmentIndex, outputKey) {
-    if (!outputKey || !(askedHeight > 0) || !Number.isInteger(segmentIndex)) {
+  give(generation, pictureKey, askedHeight, segmentIndex, outputKey) {
+    if (!outputKey || !pictureKey || !(askedHeight > 0) || !Number.isInteger(segmentIndex)) {
       return;
     }
     const byAddress = this.#given.get(generation) ?? new Map();
-    byAddress.set(addressOf(askedHeight, segmentIndex), outputKey);
+    byAddress.set(addressOf(pictureKey, askedHeight, segmentIndex), outputKey);
     this.#given.set(generation, byAddress);
   }
 

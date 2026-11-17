@@ -11,7 +11,7 @@
 import { isOutputName, OUTPUT_UNAVAILABLE } from "./output/index.js";
 import { masterPlaylistText, PLAYLIST_FILE_NAME } from "./output/playlists.js";
 import { variantHeightsFor } from "./output/ladder.js";
-import { isSameMaterial, outputSuits } from "./quality/serving-output.js";
+import { isSameMaterial, outputSuits, pictureKeyOf } from "./quality/serving-output.js";
 import { SOUNDTRACK_MODE_CAUSE, chooseSoundtrackMode, linkAnswerFigures, linkCouldCarry, loadOf, soundtrackLoadOf, videoLoadOfLimit, videoLoadOfSpec } from "./quality/link-budget.js";
 import { maxrateKbpsFor } from "./args.js";
 /**
@@ -47,7 +47,7 @@ export class Renditions {
   #presetSpeedWaitSaid = new Set();
 
   /**
-   * @param {object} host - `viewerSecondsOn`, `audioStartSecondsFor`, `activeOutputFor`, `viewersOf`, `audioRenditionName`, `logger`, `placeViewer`, `viewerLeaves`, `createOrGetSession`, `planEncodersSoon`, `disposeSession`, `viewerPositionOf`, `encodeRuns`, `fileStartTimeReads`, `getCachedAudioTracks`, `getCachedMediaInfo`, `getContainerMediaInfo`, `localBaseUrl`, `outputTimes`, `outputs`, `quality`, `qualityOffer`, `segmentDurationSec`, `sourceFiles`, `viewers`, `generationOfRequest`, `givenOutputOf`, `noteGivenOutput`, `chosenOutputOf`, `chooseOutput`, `storedPieceReady`, `headersCompatible`, `audioChoiceOf`, `linkMbpsOf`, `qualityModeOf`, `noteServingVerdict`, `limitsFor`, `heightsChosenAs`, `highestGivenSegmentOf`, `sameHeightSwitchOf`, `noteSameHeightSwitch`, `switchingOnto`, `switchingFrom`, `segmentClosed`, `secondsUntilClosed`, `invalidateWaits`, `bufferedSecondsOf`, `minimumBufferSecondsFor`, `processingSpeedOf`, `requiredSpeedOf`
+   * @param {object} host - `viewerSecondsOn`, `audioStartSecondsFor`, `activeOutputFor`, `viewersOf`, `audioRenditionName`, `logger`, `placeViewer`, `viewerLeaves`, `createOrGetSession`, `planEncodersSoon`, `disposeSession`, `viewerPositionOf`, `encodeRuns`, `fileStartTimeReads`, `getCachedAudioTracks`, `getCachedMediaInfo`, `getContainerMediaInfo`, `localBaseUrl`, `outputTimes`, `outputs`, `quality`, `qualityOffer`, `segmentDurationSec`, `sourceFiles`, `viewers`, `generationOfRequest`, `givenOutputOf`, `noteGivenOutput`, `chosenOutputOf`, `chooseOutput`, `storedPieceReady`, `headersCompatible`, `audioChoiceOf`, `linkMbpsOf`, `qualityModeOf`, `noteServingVerdict`, `limitsFor`, `heightsChosenAs`, `highestGivenSegmentOf`, `givenUnderOtherPictureOf`, `sameHeightSwitchOf`, `noteSameHeightSwitch`, `switchingOnto`, `switchingFrom`, `segmentClosed`, `secondsUntilClosed`, `invalidateWaits`, `bufferedSecondsOf`, `minimumBufferSecondsFor`, `processingSpeedOf`, `requiredSpeedOf`
    */
   constructor(host) {
     this.#host = host;
@@ -946,7 +946,7 @@ export class Renditions {
     }
     const generation = this.#host.generationOfRequest(consumerId, Number.NaN);
     const given = askedHeights.some((height) =>
-      this.#host.givenOutputOf(consumerId, generation, height, segment) === current.outputKey);
+      this.#host.givenOutputOf(consumerId, generation, pictureKeyOf(current.spec), height, segment) === current.outputKey);
     return given && !this.#host.segmentClosed(current.outputKey, segment) ? segment : null;
   }
 
@@ -966,7 +966,7 @@ export class Renditions {
    * @returns {number}
    */
   #nextSegmentOf(base, consumerId, askedHeights, prepared) {
-    const highest = Math.max(-1, ...askedHeights.map((height) => this.#host.highestGivenSegmentOf(consumerId, height)));
+    const highest = Math.max(-1, ...askedHeights.map((height) => this.#host.highestGivenSegmentOf(consumerId, pictureKeyOf(base.spec), height)));
     if (highest >= 0) {
       return highest + 1;
     }
@@ -1095,8 +1095,9 @@ export class Renditions {
       // given to the prepared output, and is answered from there.
       const generation = this.#host.generationOfRequest(consumerId, Number.NaN);
       for (const height of move.askedHeights) {
-        if (this.#host.givenOutputOf(consumerId, generation, height, from) === current.outputKey) {
-          this.#host.noteGivenOutput(consumerId, generation, height, from, prepared.outputKey ?? "");
+        const picture = pictureKeyOf(current.spec);
+        if (this.#host.givenOutputOf(consumerId, generation, picture, height, from) === current.outputKey) {
+          this.#host.noteGivenOutput(consumerId, generation, picture, height, from, prepared.outputKey ?? "");
         }
       }
     }
@@ -1327,8 +1328,15 @@ export class Renditions {
    * @returns {{ state: "none" } | { state: "live", output: HlsSession } | { state: "gone", key: string }}
    */
   #givenBefore(base, consumerId, generation, height, segmentIndex) {
-    const key = this.#host.givenOutputOf(consumerId, generation, height, segmentIndex);
+    const picture = pictureKeyOf(base.spec);
+    const key = this.#host.givenOutputOf(consumerId, generation, picture, height, segmentIndex);
     if (!key) {
+      const other = this.#host.givenUnderOtherPictureOf(consumerId, generation, picture, height, segmentIndex);
+      if (other) {
+        this.#host.logger.info(
+          `given: ${base.id} #${segmentIndex} not answered by ${other.pictureKey}'s record`
+        );
+      }
       return { state: "none" };
     }
     const output = this.#interchangeableWith(base, base.spec).find((other) => other.outputKey === key) ?? null;
@@ -1377,7 +1385,7 @@ export class Renditions {
     const verdict = current ? this.#host.headersCompatible(goneKey, current.outputKey ?? "") : null;
     if (current && verdict?.compatible) {
       this.#host.placeViewerOn(current, consumerId, this.#host.viewerPositionOf(base.id, consumerId));
-      this.#host.noteGivenOutput(consumerId, generation, height, segmentIndex, current.outputKey ?? "");
+      this.#host.noteGivenOutput(consumerId, generation, pictureKeyOf(base.spec), height, segmentIndex, current.outputKey ?? "");
       this.#host.logger.info(
         `transcode ${base.id} ${fileName} for ${consumerId}: ${goneKey} has gone; served by ` +
         `${current.outputKey}, whose header is compatible with it`
@@ -1470,7 +1478,7 @@ export class Renditions {
       return true;
     }
     const generation = this.#host.generationOfRequest(consumerId, statedGeneration);
-    const key = this.#host.givenOutputOf(consumerId, generation, height, index);
+    const key = this.#host.givenOutputOf(consumerId, generation, pictureKeyOf(base.spec), height, index);
     return !key || key === waitedOn.outputKey;
   }
 
@@ -1560,7 +1568,7 @@ export class Renditions {
       this.#host.placeViewerOn(variant, consumerId, this.#host.viewerPositionOf(baseSessionId, consumerId));
       // Recorded AFTER placing them: a viewer this request is the first sign of
       // exists only from that moment, and a record kept for nobody is lost.
-      this.#host.noteGivenOutput(consumerId, generation, height, segmentIndex, variant.outputKey ?? "");
+      this.#host.noteGivenOutput(consumerId, generation, pictureKeyOf(base.spec), height, segmentIndex, variant.outputKey ?? "");
     }
     // WHICH RUNG IS ON THE SCREEN IS NOT READ OFF THIS REQUEST. The page says
     // so itself (`viewerPlays`), the moment the player has switched: a request

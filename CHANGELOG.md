@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.103
+
+### Patch Changes
+
+- Update dependencies: @fastify/cors 11.4.1 -> 11.4.3, ws 8.22.2 -> 8.23.0, @biomejs/biome 2.6.7 -> 2.6.8; 22 package(s) changed in the lock file.
+
 ## 2.107.102
 
 ### Patch Changes

@@ -401,8 +401,7 @@ yq_install() {
     echo "::error::yq_linux_amd64 v$YQ_VERSION cannot be downloaded"
     return 1
   fi
-  # The digest is compared as text: it is the first field of the output of `sha256sum` (measured with the
-  # `sha256sum` of macOS, which has no `--check`; the runner's is not measured here, CI shows it).
+  # The digest is compared as text: it is the first field of the output of `sha256sum`.
   have=$(sha256sum "$dir/yq.part") || have=
   if [ "${have%% *}" != "$YQ_SHA256" ]; then
     rm -f "$dir/yq.part"

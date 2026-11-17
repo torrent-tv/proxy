@@ -103,6 +103,8 @@ jobs:
       # The helpers below need only the tools of the lock file; the install scripts that
       # build the native modules run when each prepared commit is checked.
       - run: npm ci --ignore-scripts
+      - name: yq is the pinned version
+        run: bash scripts/check.sh yq-install
       - name: Record the base and the helpers
         id: base
         run: |

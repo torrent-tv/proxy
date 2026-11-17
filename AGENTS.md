@@ -135,7 +135,8 @@ pull request carries no copy of a commit on `main` and adds a changeset of one s
 plain sentence or paragraph each), `changesets-selftest` (both on bad input), `workflow-pins` (every action, image, Node version and npm or docker install in a workflow is an exact
 version), `workflow-tokens` (the dependency job `update` gives no token to package code, and each job
 that pushes holds the App token with the permissions it needs, listed in `WORKFLOW_PUSHES`; it reads the
-workflows with yq 4.54.1), `commit-msg-bot` (the dependency job runs the commit-msg hook on each commit
+workflows with the yq that `yq-install` installs at `YQ_VERSION`, its SHA-256 checked against the digest in
+`check.sh`), `commit-msg-bot` (the dependency job runs the commit-msg hook on each commit
 it prepares), `workflow-refs` (the checkouts of the dependency job `update` are at `main`, so a run
 queued behind another starts from the tip of `main`), `workflow-selftest` (all four on bad input) and `all`, which
 `dependencies.yml` runs on every commit it prepares. `install`, `test` and

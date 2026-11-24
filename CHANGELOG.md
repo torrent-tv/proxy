@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.110
+
+### Patch Changes
+
+- Update dependencies: none directly; 4 package(s) changed in the lock file.
+
 ## 2.107.109
 
 ### Patch Changes

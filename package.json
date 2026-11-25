@@ -1,6 +1,6 @@
 {
   "name": "@torrent-tv/proxy",
-  "version": "2.107.110",
+  "version": "2.107.111",
   "description": "Torrent proxy client that exposes webseed-like HTTP stream endpoint.",
   "license": "GPL-3.0-or-later",
   "repository": {
@@ -55,7 +55,7 @@
     "ws": "8.23.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.6.8",
+    "@biomejs/biome": "2.6.9",
     "@changesets/cli": "3.0.3",
     "npm-check-updates": "23.1.1",
     "semver": "7.8.6"

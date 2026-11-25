@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.111
+
+### Patch Changes
+
+- Update dependencies: @biomejs/biome 2.6.8 -> 2.6.9; 13 package(s) changed in the lock file.
+
 ## 2.107.110
 
 ### Patch Changes

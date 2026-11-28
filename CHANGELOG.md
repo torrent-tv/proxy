@@ -1,5 +1,11 @@
 # @torrent-tv/proxy
 
+## 2.107.113
+
+### Patch Changes
+
+- Update dependencies: ws 8.23.0 -> 8.23.1, @changesets/cli 3.0.3 -> 3.1.0; 15 package(s) changed in the lock file.
+
 ## 2.107.112
 
 ### Patch Changes
